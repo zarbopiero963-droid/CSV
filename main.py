@@ -41,7 +41,7 @@ def db():
     c.commit(); return c
 
 def make_csv(row):
-    out=io.StringIO(newline=''); csv.writer(out,quoting=csv.QUOTE_ALL,lineterminator='\n').writerows([HEADERS,row]); return out.getvalue()
+    out=io.StringIO(newline=''); csv.writer(out,quoting=csv.QUOTE_ALL,lineterminator='\r\n').writerows([HEADERS,row]); return out.getvalue()
 
 def store_signal(c, csv_text, parser):
     # Un messaggio produce una sola riga. Il messaggio successivo sostituisce il precedente.
@@ -75,7 +75,7 @@ def health(): return {'status':'ok'}
 @app.get('/xtrader.csv')
 def xtrader_csv(token: str|None=Query(None)):
     auth(token); c=db(); c.execute('DELETE FROM signals WHERE expires_at IS NOT NULL AND expires_at <= strftime(\'%s\',\'now\')'); c.commit(); r=c.execute('SELECT csv FROM signals ORDER BY id DESC LIMIT 1').fetchone(); c.close()
-    empty=io.StringIO(newline=''); csv.writer(empty,quoting=csv.QUOTE_ALL,lineterminator='\n').writerow(HEADERS)
+    empty=io.StringIO(newline=''); csv.writer(empty,quoting=csv.QUOTE_ALL,lineterminator='\r\n').writerow(HEADERS)
     return Response(r[0] if r else empty.getvalue(),media_type='text/csv',headers={'Cache-Control':'no-store'})
 
 @app.get('/api/parsers')
