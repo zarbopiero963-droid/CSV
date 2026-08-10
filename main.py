@@ -33,13 +33,20 @@ class ParserIn(BaseModel):
 
 def db():
     c=sqlite3.connect(DB_PATH)
-    c.execute('CREATE TABLE IF NOT EXISTS signals (id INTEGER PRIMARY KEY AUTOINCREMENT, csv TEXT NOT NULL, parser TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)')
+    c.execute('CREATE TABLE IF NOT EXISTS signals (id INTEGER PRIMARY KEY AUTOINCREMENT, csv TEXT NOT NULL, parser TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, expires_at INTEGER)')
+    try: c.execute('ALTER TABLE signals ADD COLUMN expires_at INTEGER')
+    except sqlite3.OperationalError: pass
     c.execute('CREATE TABLE IF NOT EXISTS parsers (name TEXT PRIMARY KEY, header TEXT NOT NULL, market_name TEXT, market_type TEXT, selection_name TEXT, handicap TEXT, bet_type TEXT)')
     c.execute("INSERT OR IGNORE INTO parsers VALUES (?,?,?,?,?,?,?)", ('Parser_Telegram_XTrader_v1','P.Bet. PREMACHT 0,5HT','Over/Under 1,5 gol','OVER_UNDER_15','Over 1,5 goal','0','PUNTA'))
     c.commit(); return c
 
 def make_csv(row):
     out=io.StringIO(newline=''); csv.writer(out,quoting=csv.QUOTE_ALL,lineterminator='\n').writerows([HEADERS,row]); return out.getvalue()
+
+def store_signal(c, csv_text, parser):
+    # Un solo segnale attivo: ogni nuovo messaggio sovrascrive il precedente.
+    c.execute('DELETE FROM signals')
+    c.execute('INSERT INTO signals(csv,parser,expires_at) VALUES (?,?,?)',(csv_text,parser,int(__import__('time').time())+90))
 
 def parse_message(message, cfg):
     if cfg['header'].lower() not in message.lower(): return None
@@ -67,7 +74,7 @@ def root(): return {'service':'xtrader-signal-relay','status':'online','csv':'/x
 def health(): return {'status':'ok'}
 @app.get('/xtrader.csv')
 def xtrader_csv(token: str|None=Query(None)):
-    auth(token); c=db(); r=c.execute('SELECT csv FROM signals ORDER BY id DESC LIMIT 1').fetchone(); c.close()
+    auth(token); c=db(); c.execute('DELETE FROM signals WHERE expires_at IS NOT NULL AND expires_at <= strftime(\'%s\',\'now\')'); c.commit(); r=c.execute('SELECT csv FROM signals ORDER BY id DESC LIMIT 1').fetchone(); c.close()
     empty=io.StringIO(newline=''); csv.writer(empty,quoting=csv.QUOTE_ALL,lineterminator='\n').writerow(HEADERS)
     return Response(r[0] if r else empty.getvalue(),media_type='text/csv',headers={'Cache-Control':'no-store'})
 
@@ -88,7 +95,7 @@ def delete_parser(name:str,x_admin_token:str|None=Header(None)):
 def test_parser(name:str,data:MessageIn,x_admin_token:str|None=Header(None)):
     auth(x_admin_token); c=db(); cfg=get_parser(c,name); parsed=parse_message(data.message,cfg)
     if not parsed: raise HTTPException(422,'Messaggio non riconosciuto da questo parser')
-    c.execute('INSERT INTO signals(csv,parser) VALUES (?,?)',(parsed['csv'],name)); c.commit(); c.close(); return {'ok':True,'parser':name,'event':parsed['event'],'csv':parsed['csv']}
+    store_signal(c,parsed['csv'],name); c.commit(); c.close(); return {'ok':True,'parser':name,'event':parsed['event'],'csv':parsed['csv']}
 
 @app.post('/api/test-message')
 def test_message(data:MessageIn, x_admin_token:str|None=Header(None), parser: str=Query('Parser_Telegram_XTrader_v1')):
@@ -108,5 +115,5 @@ async def telegram_webhook(request: Request):
     c=db(); cfg=get_parser(c,'Parser_Telegram_XTrader_v1'); parsed=parse_message(text,cfg)
     if not parsed:
         c.close(); return {'ok': True, 'ignored': 'parser_no_match'}
-    c.execute('INSERT INTO signals(csv,parser) VALUES (?,?)',(parsed['csv'],'Parser_Telegram_XTrader_v1')); c.commit(); c.close()
+    store_signal(c,parsed['csv'],'Parser_Telegram_XTrader_v1'); c.commit(); c.close()
     return {'ok': True, 'event': parsed['event']}
