@@ -44,15 +44,9 @@ def make_csv(row):
     out=io.StringIO(newline=''); csv.writer(out,quoting=csv.QUOTE_ALL,lineterminator='\n').writerows([HEADERS,row]); return out.getvalue()
 
 def store_signal(c, csv_text, parser):
-    # Accumula i segnali validi; ogni nuovo messaggio riavvia la finestra di 90 secondi.
-    old=c.execute('SELECT csv FROM signals ORDER BY id DESC LIMIT 1').fetchone()
-    rows=[]
-    if old:
-        rows=old[0].splitlines()[1:]
-    rows += csv_text.splitlines()[1:]
-    combined='\n'.join([csv_text.splitlines()[0]]+rows)+'\n'
+    # Un messaggio produce una sola riga. Il messaggio successivo sostituisce il precedente.
     c.execute('DELETE FROM signals')
-    c.execute('INSERT INTO signals(csv,parser,expires_at) VALUES (?,?,?)',(combined,parser,int(__import__('time').time())+90))
+    c.execute('INSERT INTO signals(csv,parser,expires_at) VALUES (?,?,?)',(csv_text,parser,int(__import__('time').time())+90))
 
 def parse_message(message, cfg):
     if cfg['header'].lower() not in message.lower(): return None
