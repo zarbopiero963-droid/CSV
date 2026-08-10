@@ -1,5 +1,5 @@
 import csv, io, os, re, sqlite3
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -80,3 +80,20 @@ def test_parser(name:str,data:MessageIn,x_admin_token:str|None=Header(None)):
 @app.post('/api/test-message')
 def test_message(data:MessageIn, x_admin_token:str|None=Header(None), parser: str=Query('Parser_Telegram_XTrader_v1')):
     return test_parser(parser,data,x_admin_token)
+
+@app.post('/telegram/webhook')
+async def telegram_webhook(request: Request):
+    payload = await request.json()
+    msg = payload.get('message') or payload.get('channel_post') or {}
+    chat = msg.get('chat') or {}
+    allowed = {x.strip() for x in os.getenv('TELEGRAM_ALLOWED_CHAT_IDS','').split(',') if x.strip()}
+    if allowed and str(chat.get('id')) not in allowed:
+        return {'ok': True, 'ignored': 'chat_not_allowed'}
+    text = msg.get('text') or msg.get('caption') or ''
+    if not text:
+        return {'ok': True, 'ignored': 'no_text'}
+    c=db(); cfg=get_parser(c,'Parser_Telegram_XTrader_v1'); parsed=parse_message(text,cfg)
+    if not parsed:
+        c.close(); return {'ok': True, 'ignored': 'parser_no_match'}
+    c.execute('INSERT INTO signals(csv,parser) VALUES (?,?)',(parsed['csv'],'Parser_Telegram_XTrader_v1')); c.commit(); c.close()
+    return {'ok': True, 'event': parsed['event']}
