@@ -1,6 +1,8 @@
 import csv, io, os, re, sqlite3
+from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 app = FastAPI(title='XTrader Signal Relay')
@@ -242,3 +244,9 @@ async def telegram_webhook(request: Request):
     c.commit()
     c.close()
     return {'ok': True, 'profile': profile['name'], 'event': parsed['event']}
+
+# Prototipo della web app SaaS: file statici, nessuna dipendenza aggiuntiva.
+# Montato per ultimo per non intercettare gli endpoint del relay.
+WEB_DIR = Path(__file__).parent / 'web'
+if WEB_DIR.is_dir():
+    app.mount('/app', StaticFiles(directory=WEB_DIR, html=True), name='app')
