@@ -4,6 +4,18 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 app = FastAPI(title='XTrader Signal Relay')
+
+@app.on_event('startup')
+async def register_telegram_webhook():
+    token = os.getenv('TELEGRAM_BOT_TOKEN', '')
+    public_url = os.getenv('PUBLIC_URL', 'https://csv-production-b04e.up.railway.app')
+    if token:
+        import urllib.request
+        url = f'https://api.telegram.org/bot{token}/setWebhook?url={public_url}/telegram/webhook'
+        try:
+            urllib.request.urlopen(url, timeout=10).read()
+        except Exception:
+            pass
 DB_PATH = os.getenv('DB_PATH', '/tmp/signals.db')
 TOKEN = os.getenv('CSV_ACCESS_TOKEN', '')
 HEADERS = ['Provider','EventId','EventName','MarketId','MarketName','MarketType','SelectionId','SelectionName','Handicap','Price','MinPrice','MaxPrice','BetType','Points']
