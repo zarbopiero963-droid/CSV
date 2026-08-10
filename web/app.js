@@ -150,7 +150,6 @@ async function viewOverview() {
   shell(`
     <div class="head"><div>
       <h1>Dashboard</h1>
-      <p>Ogni parser ha configurazione, token, timer e feed CSV indipendenti.</p>
     </div><div class="spacer"></div>
     <button class="primary" data-act="new-parser">Crea nuovo parser</button></div>
 
@@ -193,7 +192,6 @@ async function viewParsers() {
   shell(`
     <div class="head"><div>
       <h1>Parser</h1>
-      <p>Ogni parser è un formato di messaggio diverso, con il proprio feed CSV.</p>
     </div><div class="spacer"></div>
     <button class="primary" data-act="new-parser">Crea nuovo parser</button></div>
     ${parsers.length ? parsers.map(parserRow).join('') :
@@ -722,7 +720,6 @@ async function viewChats() {
   shell(`
     <div class="head"><div>
       <h1>Chat Telegram</h1>
-      <p>Collega i gruppi e i canali da cui arrivano i segnali.</p>
     </div><div class="spacer"></div>
     <button class="primary" data-act="verify-chat">Collega una chat</button></div>
 
@@ -792,7 +789,6 @@ async function viewLogs() {
   shell(`
     <div class="head"><div>
       <h1>Log messaggi</h1>
-      <p>Ultimi messaggi ricevuti dai tuoi parser. I token non compaiono mai qui.</p>
     </div></div>
     ${logs.length ? `<div class="card"><div class="tbl-scroll"><table>
       <thead><tr><th>Quando</th><th>Parser</th><th>Chat</th><th>Esito</th><th>Messaggio</th></tr></thead>
@@ -815,8 +811,7 @@ function viewSettings() {
   const u = api.me();
   const s = api.settings();
   shell(`
-    <div class="head"><div><h1>Impostazioni</h1>
-      <p>Il tuo account e i parametri del servizio.</p></div></div>
+    <div class="head"><div><h1>Impostazioni</h1></div></div>
     <div class="stack">
       <div class="card stack">
         <strong class="small">Account Telegram</strong>
