@@ -1,0 +1,82 @@
+import csv, io, os, re, sqlite3
+from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi.responses import Response
+from pydantic import BaseModel
+
+app = FastAPI(title='XTrader Signal Relay')
+DB_PATH = os.getenv('DB_PATH', '/tmp/signals.db')
+TOKEN = os.getenv('CSV_ACCESS_TOKEN', '')
+HEADERS = ['Provider','EventId','EventName','MarketId','MarketName','MarketType','SelectionId','SelectionName','Handicap','Price','MinPrice','MaxPrice','BetType','Points']
+
+class MessageIn(BaseModel): message: str
+class ParserIn(BaseModel):
+    name: str
+    header: str
+    market_name: str = 'Over/Under 1,5 gol'
+    market_type: str = 'OVER_UNDER_15'
+    selection_name: str = 'Over 1,5 goal'
+    handicap: str = '0'
+    bet_type: str = 'PUNTA'
+
+
+def db():
+    c=sqlite3.connect(DB_PATH)
+    c.execute('CREATE TABLE IF NOT EXISTS signals (id INTEGER PRIMARY KEY AUTOINCREMENT, csv TEXT NOT NULL, parser TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)')
+    c.execute('CREATE TABLE IF NOT EXISTS parsers (name TEXT PRIMARY KEY, header TEXT NOT NULL, market_name TEXT, market_type TEXT, selection_name TEXT, handicap TEXT, bet_type TEXT)')
+    c.execute("INSERT OR IGNORE INTO parsers VALUES (?,?,?,?,?,?,?)", ('Parser_Telegram_XTrader_v1','P.Bet. PREMACHT 0,5HT','Over/Under 1,5 gol','OVER_UNDER_15','Over 1,5 goal','0','PUNTA'))
+    c.commit(); return c
+
+def make_csv(row):
+    out=io.StringIO(newline=''); csv.writer(out,quoting=csv.QUOTE_ALL,lineterminator='\n').writerows([HEADERS,row]); return out.getvalue()
+
+def parse_message(message, cfg):
+    if cfg['header'].lower() not in message.lower(): return None
+    line=next((x.strip() for x in message.splitlines() if '🆚' in x), '')
+    if not line: return None
+    event=line.split('🆚',1)[1].strip(); event=event.splitlines()[0].strip()
+    # L'ultimo " v " è il separatore; eventuali v precedenti restano nel nome squadra.
+    ms=list(re.finditer(r'\s+v\s+',event,flags=re.I))
+    if ms:
+        s=ms[-1]; event=event[:s.start()].strip()+' - '+event[s.end():].strip()
+    row=['XTrader','',event,'',cfg['market_name'],cfg['market_type'],'',cfg['selection_name'],cfg['handicap'],'','','',cfg['bet_type'],'']
+    return {'event':event,'csv':make_csv(row)}
+
+def auth(token):
+    if TOKEN and token != TOKEN: raise HTTPException(401,'Unauthorized')
+
+def get_parser(c,name):
+    r=c.execute('SELECT name,header,market_name,market_type,selection_name,handicap,bet_type FROM parsers WHERE name=?',(name,)).fetchone()
+    if not r: raise HTTPException(404,'Parser non trovato')
+    return dict(zip(['name','header','market_name','market_type','selection_name','handicap','bet_type'],r))
+
+@app.get('/')
+def root(): return {'service':'xtrader-signal-relay','status':'online','csv':'/xtrader.csv'}
+@app.get('/health')
+def health(): return {'status':'ok'}
+@app.get('/xtrader.csv')
+def xtrader_csv(token: str|None=Query(None)):
+    auth(token); c=db(); r=c.execute('SELECT csv FROM signals ORDER BY id DESC LIMIT 1').fetchone(); c.close()
+    return Response(r[0] if r else make_csv(HEADERS),media_type='text/csv',headers={'Cache-Control':'no-store'})
+
+@app.get('/api/parsers')
+def list_parsers(x_admin_token: str|None=Header(None)):
+    auth(x_admin_token); c=db(); rows=c.execute('SELECT name,header,market_name,market_type,selection_name,handicap,bet_type FROM parsers ORDER BY name').fetchall(); c.close()
+    keys=['name','header','market_name','market_type','selection_name','handicap','bet_type']; return [dict(zip(keys,r)) for r in rows]
+
+@app.post('/api/parsers')
+def save_parser(data: ParserIn, x_admin_token: str|None=Header(None)):
+    auth(x_admin_token); c=db(); c.execute('INSERT OR REPLACE INTO parsers VALUES (?,?,?,?,?,?,?)',tuple(data.model_dump().values())); c.commit(); c.close(); return {'ok':True,'parser':data.name}
+
+@app.delete('/api/parsers/{name}')
+def delete_parser(name:str,x_admin_token:str|None=Header(None)):
+    auth(x_admin_token); c=db(); c.execute('DELETE FROM parsers WHERE name=?',(name,)); c.commit(); c.close(); return {'ok':True}
+
+@app.post('/api/parsers/{name}/test')
+def test_parser(name:str,data:MessageIn,x_admin_token:str|None=Header(None)):
+    auth(x_admin_token); c=db(); cfg=get_parser(c,name); parsed=parse_message(data.message,cfg)
+    if not parsed: raise HTTPException(422,'Messaggio non riconosciuto da questo parser')
+    c.execute('INSERT INTO signals(csv,parser) VALUES (?,?)',(parsed['csv'],name)); c.commit(); c.close(); return {'ok':True,'parser':name,'event':parsed['event'],'csv':parsed['csv']}
+
+@app.post('/api/test-message')
+def test_message(data:MessageIn, x_admin_token:str|None=Header(None), parser: str=Query('Parser_Telegram_XTrader_v1')):
+    return test_parser(parser,data,x_admin_token)
