@@ -55,8 +55,8 @@ Usa queste regole per qualsiasi task che:
 - modifica la web app in `web/`;
 - modifica deploy Railway (`Procfile`, `railway.json`, `requirements.txt`);
 - richiede commit, push o PR;
-- corregge review comments, check rossi, Codacy, DeepSource, CodeRabbit, Sourcery, Gitar o
-  GitHub Actions.
+- corregge review comments, check rossi, Codacy, DeepSource, CodeRabbit, Codex, Sourcery,
+  Gitar o GitHub Actions.
 
 Per domande, spiegazioni o analisi read-only non serve aprire PR.
 
@@ -244,11 +244,15 @@ review/inline/thread triage · final hard verify.
 
 ## FINAL AI REVIEW BEFORE MERGE — CANCELLO LABEL
 
-> **Stato in questo repository:** `.github/workflows/` **non esiste ancora**. Le label da sole
-> non fanno partire nulla: sono un interruttore senza impianto. Finché i workflow non vengono
-> portati qui, l'agente deve dichiararlo apertamente invece di sostenere che le review finali
-> sono state fatte. Il proprietario ha annunciato che creerà le label: quando esisteranno anche
-> i workflow, valgono le regole qui sotto senza modifiche.
+> **Stato in questo repository:** `.github/workflows/` **non esiste ancora**, quindi le label da
+> sole non fanno partire nulla: sono un interruttore senza impianto. Finché i workflow non vengono
+> portati qui, l'agente deve dichiararlo apertamente invece di sostenere che le review finali sono
+> state fatte. Il proprietario ha annunciato che creerà le label: quando esisteranno anche i
+> workflow, valgono le regole qui sotto senza modifiche.
+>
+> Questo riguarda **solo** i quattro reviewer a API key. CodeRabbit, Codacy, DeepSource e Codex
+> sono GitHub App installate sull'account e compaiono comunque sulle PR di questo repository:
+> quelli vanno attesi e letti già adesso.
 
 Due reviewer AI forti e costosi (Claude Fable 5, Fugu Ultra) non girano a ogni push come
 GPT-5.5/GLM. Partono:
@@ -327,8 +331,8 @@ Non puoi fare final review, evidence resolve, resolve thread, READY o DONE final
 check ancora in corso.
 
 Devi controllare il current-head della PR e leggere: GitHub Actions · `statusCheckRollup` ·
-commit statuses · Codacy · DeepSource · CodeRabbit/Sourcery/Gitar se presenti · workflow di
-build/test.
+commit statuses · **Codacy · DeepSource · CodeRabbit · Codex** (installati sull'account, quindi
+attivi anche qui) · Sourcery/Gitar se presenti · workflow di build/test.
 
 Sono considerati **NON finiti** gli stati: `PENDING`, `QUEUED`, `IN_PROGRESS`, `WAITING`,
 `REQUESTED`, `EXPECTED`, `UNKNOWN`, `null`, vuoto.
@@ -349,10 +353,17 @@ Quando i check sono pending: non dichiarare DONE/READY/READY_TO_MERGE, non risol
 dire che i commenti sono coperti, non fare merge, non aprire un'altra PR, non fare patch casuali
 solo perché stai aspettando.
 
-**Zero check ≠ check verdi.** Oggi questo repository non ha workflow: una PR non mostrerà alcun
-check. Non è un PASS. In quel caso si scrive esplicitamente «nessun check configurato in questo
-repository: la verifica è solo locale», e i test locali eseguiti diventano l'unica evidenza — con
-il limite dichiarato. Non scrivere mai «GitHub checks: PASS» quando non è girato nulla.
+**Attenzione a cosa manca e cosa no.** Codacy, DeepSource, CodeRabbit e Codex sono GitHub App
+installate sull'account: **compaiono anche qui**, benché `.github/workflows/` non esista, e i loro
+check e commenti vanno attesi e letti come su qualunque altra PR. Quello che manca in questo
+repository sono i **quattro workflow di review a API key** (GPT-5.5, GLM 5.2, Claude Fable 5,
+OpenRouter Fugu Ultra), che vivono in `.github/workflows/` e usano i Secret del repo. La loro
+assenza va dichiarata, non taciuta: una PR qui è coperta da meno reviewer di una PR nel Bridge.
+
+**Zero check non è comunque un PASS.** Se una PR non mostra alcun check — app non ancora attive
+su questo repository, outage, PR draft — si scrive esplicitamente «nessun check è girato: la
+verifica è solo locale», e i test locali eseguiti diventano l'unica evidenza, con il limite
+dichiarato. Non scrivere mai «GitHub checks: PASS» quando non è girato nulla.
 
 Dopo ogni push ripeti il ciclo:
 push → aspetta fine check → leggi risultati → leggi review/commenti/inline → triage → eventuale
@@ -365,21 +376,31 @@ pubblicano commenti o annotation solo a check completato.
 
 ## REVIEWER DISPONIBILI — chi aspettare davvero
 
-> **Stato in questo repository:** nessun reviewer automatico è installato (né workflow di review,
-> né CodeRabbit, né Codacy/DeepSource). La sezione descrive il comportamento da tenere **quando**
-> ci saranno; finché non ci sono, va dichiarato che la copertura di review è assente e che
-> l'unica verifica è quella locale.
+> **Stato in questo repository.** Distingui due famiglie, perché si installano in posti diversi:
+>
+> - **GitHub App, installate sull'account e quindi attive anche qui**, benché
+>   `.github/workflows/` non esista: **CodeRabbit · Codacy · DeepSource · Codex** (e Sourcery,
+>   quando non è rate-limited). Aprendo una PR compaiono. I loro check vanno attesi e i loro
+>   commenti letti, esattamente come nel Bridge.
+> - **Workflow a API key, che qui NON esistono ancora:** GPT-5.5, GLM 5.2, Claude Fable 5,
+>   OpenRouter Fugu Ultra. Vivono in `.github/workflows/` e usano i Secret del repo. Finché non
+>   vengono portati qui, dichiaralo: una PR in questo repository è coperta da meno reviewer di
+>   una PR nel Bridge, e le due label finali non hanno nulla da far partire.
 
-Quando presenti, i reviewer che coprono davvero una PR sono i quattro workflow GitHub Actions con
+Quando c'è tutto, i reviewer che coprono davvero una PR sono i quattro workflow GitHub Actions con
 API key nei Secret del repo — GPT-5.5, GLM 5.2, Claude Fable 5, OpenRouter Fugu Ultra — più
 CodeRabbit. GPT-5.5/GLM girano a ogni push; Fable parte da solo sui push che toccano file core;
 Fugu solo con la label finale; entrambi partono con le label finali; CodeRabbit rivede l'intera
 PR dal suo base.
 
-**Codex e Sourcery NON sono un gate** — non aspettarli. Se Codex pubblica un messaggio di usage
-limit, trattalo come **assente**, non come pending: non contarlo nel check-completion gate, non
-bloccare il DONE su di lui, annota solo che non ha revisionato. Sourcery ha un rate limit
-settimanale: quando lo dichiara, stesso trattamento.
+**Codex NON è un gate** — non aspettarlo. È installato e comparirà sulle PR, ma l'abbonamento
+Codex del proprietario è scaduto: quando pubblica «You have reached your Codex usage limits» o
+simili, trattalo come **assente**, non come pending. Non contarlo nel check-completion gate, non
+bloccare il DONE su di lui, annota solo che non ha revisionato. Se invece pubblica una review
+reale, leggila e fai il triage come per qualunque altro reviewer.
+
+**Sourcery NON è un gate** per lo stesso motivo: ha un rate limit settimanale (500k caratteri di
+diff) e quando lo dichiara va trattato come assente.
 
 **Ogni push costa API.** Accorpa i fix di review in un solo push per giro invece di uno per
 finding; non pushare mai per cleanup puramente cosmetici o per rincorrere falsi positivi da
@@ -417,6 +438,12 @@ Flusso pre-merge:
    blocca il proprietario;
 5. solo con i quattro reviewer + la review reale di CodeRabbit acquisiti → dire al proprietario
    merge sì/no.
+
+**Oggi, in questo repository:** i passi 2 e 3 non hanno impianto — i quattro workflow a API key
+non ci sono ancora — e vanno dichiarati N/A con quel motivo, non spuntati. I passi 4 e 5 valgono
+già adesso, perché CodeRabbit è installato sull'account e commenta anche qui: l'attesa del suo
+completamento è in vigore, con il cap anti-stallo qui sotto. Lo stesso vale per i check di Codacy
+e DeepSource e per un'eventuale review di Codex.
 
 - **Codex** = assente per usage limit: non posta mai, non è un gate.
 - **CodeRabbit rate-limited → ASSENTE**, non si aspetta mai (decisione proprietario 2026-07-18):
@@ -744,8 +771,9 @@ test, o scrivi la nota tecnica precisa del perché non serviva.
 
 Quando lavori su una PR esistente, non limitarti ai check rossi. Devi leggere e valutare:
 commenti normali della PR · corpi delle review · inline review comments · review threads · thread
-unresolved · thread outdated · annotazioni dei check · Codacy · DeepSource ·
-CodeRabbit/Sourcery/Gitar se presenti · file modificati nella PR · current PR head SHA.
+unresolved · thread outdated · annotazioni dei check · **Codacy · DeepSource · CodeRabbit ·
+Codex** (attivi su questo repository) · Sourcery/Gitar se presenti · file modificati nella PR ·
+current PR head SHA.
 
 Non dire «nessun lavoro necessario» se esistono commenti review attivi, inline thread non
 risolti, check rossi o annotazioni current-head non analizzate.
@@ -1018,7 +1046,8 @@ Cinque regole anti-regressione rispettate:
 - Regola 5 contratto CSV, filtro chat e alias legacy non toccati: PASS / FAIL
 
 GitHub checks completed:
-- YES / NO / NONE CONFIGURED (in questo repo non ci sono ancora workflow: NONE non è un PASS)
+- YES / NO / NONE RAN (i check di Codacy e DeepSource compaiono anche qui; NONE RAN significa che
+  non è girato NULLA, e non è un PASS)
 
 GitHub checks result:
 - PASS / FAIL / PENDING / N/A con motivo
@@ -1035,9 +1064,15 @@ Inline comments checked:
 Unresolved threads checked:
 - YES / NO
 
-Label finali fatte partire + reviewer risposti + CodeRabbit COMPLETATO
-(o rate-limited/assente, o cap ~15 min scaduto, o workflow non ancora presenti in questo repo):
-- YES / NO / N/A con motivo
+Label finali fatte partire + i quattro reviewer a API key hanno risposto:
+- YES / NO / N/A perché i workflow non esistono ancora in questo repository
+
+CodeRabbit COMPLETATO (commenti azionabili o «No actionable comments»):
+- YES / NO / ASSENTE per rate-limit / cap ~15 min scaduto
+  (CodeRabbit è installato e commenta anche qui: questa riga non è mai N/A per assenza di workflow)
+
+Codacy / DeepSource / Codex letti:
+- YES / NO / Codex assente per usage limit
 
 Last-5 PR post-merge sweep:
 - YES / NO
@@ -1162,13 +1197,17 @@ Required owner action:
 
 ## COSA NON ESISTE ANCORA IN QUESTO REPOSITORY
 
-Elenco esplicito, perché un gate senza impianto non va dichiarato soddisfatto:
+Elenco esplicito, perché un gate senza impianto non va dichiarato soddisfatto.
+
+**Cosa c'è già, anche senza `.github/`:** CodeRabbit, Codacy, DeepSource e Codex sono GitHub App
+installate sull'account, quindi compaiono sulle PR di questo repository. Non dedurre la loro
+assenza dal fatto che manca `.github/workflows/`: sono due cose installate in posti diversi.
+Aspetta i loro check, leggi i loro commenti, fai il triage.
 
 | Manca | Conseguenza per l'agente |
 |---|---|
-| `.github/workflows/` | nessun check, nessun reviewer automatico. «Zero check» non è «check verdi»: dichiaralo. |
-| Label `final-fable-review`, `final-fugu-review` | il proprietario le creerà; finché i workflow non ci sono, aggiungerle non fa partire nulla. |
-| CodeRabbit, Codacy, DeepSource, Sourcery | nessuna review esterna: l'unica evidenza è quella locale, con il limite scritto. |
+| `.github/workflows/` | mancano i **quattro reviewer a API key** (GPT-5.5, GLM 5.2, Fable 5, Fugu Ultra) e ogni check di build/test proprio del repo. Le GitHub App restano attive. |
+| Label `final-fable-review`, `final-fugu-review` | il proprietario le creerà; finché i workflow non ci sono, aggiungerle non fa partire nulla: dichiaralo invece di spuntare il gate. |
 | `tests/` | il primo task che tocca codice lo crea. Non è una scusa per saltare i test. |
 | `docs/` | i documenti del Bridge citati sopra non esistono qui e non vanno inventati. |
 | `AGENTS.md` | questo file è autosufficiente; se AGENTS.md verrà aggiunto, ha precedenza. |
