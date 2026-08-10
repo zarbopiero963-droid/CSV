@@ -68,7 +68,8 @@ def health(): return {'status':'ok'}
 @app.get('/xtrader.csv')
 def xtrader_csv(token: str|None=Query(None)):
     auth(token); c=db(); r=c.execute('SELECT csv FROM signals ORDER BY id DESC LIMIT 1').fetchone(); c.close()
-    return Response(r[0] if r else make_csv(HEADERS),media_type='text/csv',headers={'Cache-Control':'no-store'})
+    empty=io.StringIO(newline=''); csv.writer(empty,quoting=csv.QUOTE_ALL,lineterminator='\n').writerow(HEADERS)
+    return Response(r[0] if r else empty.getvalue(),media_type='text/csv',headers={'Cache-Control':'no-store'})
 
 @app.get('/api/parsers')
 def list_parsers(x_admin_token: str|None=Header(None)):
