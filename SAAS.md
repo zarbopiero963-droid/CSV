@@ -67,7 +67,10 @@ chat_verifications
    della stessa chat.
 4. La rivendicazione di una chat si prova con un codice usa-e-getta che l'utente
    incolla nel gruppo. Il webhook accetta messaggi da chat sconosciute solo se
-   contengono un codice di verifica valido; tutto il resto viene scartato.
+   contengono un codice di verifica valido; tutto il resto viene scartato. Il
+   codice **scade** (10 minuti): è l'unica eccezione prevista al filtro delle
+   chat, e un'eccezione che non si chiude non è un'eccezione. Lo stato
+   `expired` fa parte del contratto, non è un dettaglio del prototipo.
 5. Un parser non può cancellare, modificare o sostituire il segnale di un altro
    parser. Il `DELETE` che precede l'inserimento di un nuovo segnale è sempre
    filtrato per `parser_id`.
@@ -110,6 +113,20 @@ Sorgenti supportate: `empty`, `constant`, `message`, `line` (con `part` `whole` 
 `after`), `regex`. Trasformazioni: `trim`, `replace_last`, `replace_all`, `upper`,
 `lower`, `comma_to_dot`, `dot_to_comma`, `digits_only`.
 
+Il confronto della riga e il taglio del marcatore ignorano entrambi maiuscole e
+minuscole. Le ancore vengono tagliate per **codepoint**, non per unità UTF-16:
+un emoji astrale a cavallo del taglio lascerebbe un surrogato spaiato, e
+un'ancora così non combacerebbe più con nessuna riga, in silenzio.
+
+`runParser` restituisce quattro campi: `matched` (la condizione combacia), `row`
+(le 14 colonne), `missing` (le colonne obbligatorie risultate vuote) e `complete`.
+**Chi scrive il feed deve guardare `complete`, non `matched`:** un messaggio
+riconosciuto ma privo dell'evento produrrebbe una riga formalmente valida e priva
+di senso per XTrader. Le colonne obbligatorie sono in `REQUIRED_COLUMNS` e oggi
+sono `Provider` ed `EventName`. **`Price` non è obbligatoria:** il parser in
+produzione (`main.py`) la lascia vuota perché la quota la mette XTrader dal
+proprio book, quindi pretenderla bloccherebbe i segnali reali.
+
 Il formato di uscita non cambia ed è il contratto con XTrader: 14 colonne, tutti
 i campi tra virgolette, separatore virgola, terminatore CRLF, UTF-8 senza BOM.
 
@@ -128,16 +145,18 @@ GET    /api/parsers                   solo i parser dell'utente autenticato
 POST   /api/parsers                   { name }
 GET    /api/parsers/:id
 PATCH  /api/parsers/:id               { name?, active?, config?, sample_message? }
+                                      solo queste chiavi: id, slug, token_prefix e
+                                      has_token non sono modificabili dal client
 DELETE /api/parsers/:id
 POST   /api/parsers/:id/token/rotate  → { token, url }  il token solo qui
 DELETE /api/parsers/:id/token
-POST   /api/parsers/:id/test          { message } → { matched, row, csv }
+POST   /api/parsers/:id/test          { message } → { matched, complete, missing, row, csv }
 POST   /api/parsers/:id/suggest       { message } → config proposta dal modello
 PUT    /api/parsers/:id/chats         { chat_ids }
 
 GET    /api/chats
 POST   /api/chats/verify/start        → { code, expires_at }
-GET    /api/chats/verify/status       polling finché il bot vede il codice
+GET    /api/chats/verify/status       polling: none | waiting | verified | expired
 DELETE /api/chats/:id
 
 GET    /api/logs?parser_id=
@@ -169,6 +188,7 @@ web app non lo riceve e non lo conserva mai.
 | | |
 |---|---|
 | Fatto | Prototipo web app in `web/`, servito su `/app`, con motore di parsing e contratto API |
+| Fatto | Test hard del motore e del contratto CSV (`tests/engine/`), guardia sui workflow di review (`tests/safety/`) |
 | M1 | Postgres, tabelle utenti/parser/chat, token hashati, verifica chat, feed per parser, compatibilità `/xtrader.csv` |
 | M2 | Motore di parsing generico in Python, endpoint di test, dispatch multi-parser nel webhook |
 | M3 | Login Telegram reale, sessioni, la web app collegata al backend |

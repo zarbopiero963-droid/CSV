@@ -30,13 +30,47 @@ FAVICON = (
 
 
 def strip_module_syntax(src):
-    """Rimuove gli import relativi e la parola chiave export."""
-    lines = []
-    for line in src.split('\n'):
-        if re.match(r"\s*import\s.*from\s+'\./", line):
+    """Rimuove gli import relativi e la parola chiave export.
+
+    Ragiona per ISTRUZIONI, non per righe: un `import { a, b }` spezzato su piu'
+    righe e' JavaScript legittimo, e togliendo solo la riga col `from` il bundle
+    resterebbe con un `import` mozzo. Il browser rifiuterebbe il modulo e la
+    pagina resterebbe bianca senza spiegazioni.
+
+    Un import NON relativo (una dipendenza esterna) e' un errore in questo
+    progetto: il prototipo non ha CDN ne' build step, quindi si ferma a voce alta.
+    """
+    righe = src.split('\n')
+    out = []
+    i = 0
+    while i < len(righe):
+        riga = righe[i]
+        if not re.match(r'\s*import[\s{*\'"]', riga):
+            out.append(re.sub(r'^export\s+', '', riga))
+            i += 1
             continue
-        lines.append(re.sub(r'^export\s+', '', line))
-    return '\n'.join(lines)
+
+        # Accumula finche' l'istruzione non contiene il proprio specificatore.
+        blocco = [riga]
+        while not re.search(r"""from\s+['"][^'"]+['"]|^\s*import\s+['"][^'"]+['"]""",
+                            '\n'.join(blocco)):
+            i += 1
+            if i >= len(righe):
+                raise SystemExit(
+                    'import non terminato nel file: %s' % blocco[0].strip())
+            blocco.append(righe[i])
+        i += 1
+
+        testo = '\n'.join(blocco)
+        m = re.search(r"""['"]([^'"]+)['"]""", testo)
+        spec = m.group(1) if m else ''
+        if not spec.startswith('.'):
+            raise SystemExit(
+                'import non relativo non gestito dal bundle a file unico '
+                '(nessuna dipendenza esterna e\' prevista): %s' % testo.strip())
+        # Import relativo: il modulo e' gia' concatenato nel bundle, si scarta.
+
+    return '\n'.join(out)
 
 
 def to_ascii(text):
@@ -56,6 +90,16 @@ def to_ascii(text):
 
 def build():
     css = (WEB / 'styles.css').read_text(encoding='utf-8')
+    # Il CSS finisce nel documento cosi' com'e': to_ascii protegge solo il
+    # JavaScript. Con un carattere non ASCII nel foglio di stile la scrittura in
+    # ASCII piu' sotto solleverebbe UnicodeEncodeError senza nominare la causa.
+    non_ascii = sorted({c for c in css if ord(c) > 127})
+    if non_ascii:
+        raise SystemExit(
+            'styles.css contiene caratteri non ASCII (%s): il file unico li '
+            'romperebbe. Usa un escape CSS \\XXXXXX oppure togli il carattere.'
+            % ' '.join('U+%04X' % ord(c) for c in non_ascii)
+        )
     engine = (WEB / 'engine.js').read_text(encoding='utf-8')
     api = (WEB / 'api.js').read_text(encoding='utf-8')
     app = (WEB / 'app.js').read_text(encoding='utf-8')

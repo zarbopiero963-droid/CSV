@@ -256,7 +256,9 @@ review/inline/thread triage · final hard verify.
 > Perché funzionino servono due cose, azione del proprietario una volta sola:
 >
 > 1. i Secret del repo — `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`. Senza, i job
->    partono e falliscono sulla chiave mancante. L'agente non li vede mai.
+>    partono, stampano un `::notice` «API key non configurata» ed escono **verdi senza chiamare il
+>    modello**: non falliscono. Il check verde non è quindi prova di review — va letto il log.
+>    L'agente non vede mai le chiavi.
 > 2. le label `final-fable-review` e `final-fugu-review`. Senza, aggiungerle via API dà 404 e il
 >    gate finale non si arma.
 >
@@ -364,11 +366,12 @@ dire che i commenti sono coperti, non fare merge, non aprire un'altra PR, non fa
 solo perché stai aspettando.
 
 **Attenzione a cosa manca e cosa no.** Codacy, DeepSource, CodeRabbit e Codex sono GitHub App
-installate sull'account: **compaiono anche qui**, benché `.github/workflows/` non esista, e i loro
-check e commenti vanno attesi e letti come su qualunque altra PR. Quello che manca in questo
-repository sono i **quattro workflow di review a API key** (GPT-5.5, GLM 5.2, Claude Fable 5,
-OpenRouter Fugu Ultra), che vivono in `.github/workflows/` e usano i Secret del repo. La loro
-assenza va dichiarata, non taciuta: una PR qui è coperta da meno reviewer di una PR nel Bridge.
+installate sull'account e compaiono su ogni PR: i loro check e commenti vanno attesi e letti come
+su qualunque altra PR. I workflow di review a API key **esistono** in `.github/workflows/` e sono
+**tre**: GPT-5.5, Claude Fable 5, OpenRouter Fugu Ultra. **GLM 5.2 non è importato.** Se mancano i
+Secret del repo o le due label finali, quei tre workflow **escono verdi senza chiamare il modello**
+(un `::notice` nei log, non un errore): in quel caso la PR ha tre spunte verdi e zero righe
+revisionate, e la condizione va dichiarata, non taciuta.
 
 **Zero check non è comunque un PASS.** Se una PR non mostra alcun check — app non ancora attive
 su questo repository, outage, PR draft — si scrive esplicitamente «nessun check è girato: la
@@ -1214,14 +1217,14 @@ Required owner action:
 
 Elenco esplicito, perché un gate senza impianto non va dichiarato soddisfatto.
 
-**Cosa c'è già, anche senza `.github/`:** CodeRabbit, Codacy, DeepSource e Codex sono GitHub App
-installate sull'account, quindi compaiono sulle PR di questo repository. Non dedurre la loro
-assenza dal fatto che manca `.github/workflows/`: sono due cose installate in posti diversi.
-Aspetta i loro check, leggi i loro commenti, fai il triage.
+**Cosa c'è già:** i tre workflow di review in `.github/workflows/`, più CodeRabbit, Codacy,
+DeepSource e Codex, che sono GitHub App installate sull'account e compaiono sulle PR di questo
+repository. Non dedurre l'assenza delle App dal contenuto di `.github/workflows/`: sono due cose
+installate in posti diversi. Aspetta i loro check, leggi i loro commenti, fai il triage.
 
 | Manca | Conseguenza per l'agente |
 |---|---|
-| Secret `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY` | i tre workflow di review esistono ma senza chiave falliscono. Azione del proprietario. |
+| Secret `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY` | senza chiave i tre workflow **escono verdi senza revisionare** (`::notice` nei log): verificato sulla PR #1. Un check verde non prova che un modello abbia letto il diff — leggi sempre i log. Azione del proprietario. |
 | Label `final-fable-review`, `final-fugu-review` | da creare una volta sola; senza, aggiungerle via API dà 404 e il gate finale non si arma. |
 | Workflow GLM 5.2 | non importato per scelta: i reviewer a API key qui sono tre. Non contarlo né aspettarlo. |
 | Workflow di build/test propri del repo | non esistono: `pytest` va eseguito localmente, nessun check CI lo esegue. |

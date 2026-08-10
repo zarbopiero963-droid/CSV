@@ -15,6 +15,7 @@ questo servizio.
 from __future__ import annotations
 
 import re
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -140,6 +141,105 @@ def test_niente_percorsi_del_bridge_nel_set_core():
     sorgente = _script(FABLE)
     for morto in ('xtrader_bridge/', 'license_manager/'):
         assert morto not in sorgente, f'percorso del Bridge rimasto: {morto}'
+
+
+# --------------------------------------------------- ESECUZIONE del gate
+
+def _funzione_gate(path: Path, nome: str = 'decisione_gate'):
+    """Estrae dal workflow reale la funzione pura del gate e la ESEGUE.
+
+    I test qui sotto non riscrivono la regola: la eseguono. Il gate decide se il
+    job spende, esce verde o esce rosso su un head stantio, ed e' il
+    comportamento safety-critical di questi workflow: verificarne solo la
+    struttura lascerebbe la decisione senza copertura.
+    """
+    blocco = re.search(
+        rf'^(\s*)def {re.escape(nome)}\(.*?(?=\n\1[A-Za-z_]|\Z)',
+        _script(path), re.S | re.M,
+    )
+    assert blocco, f'{path.name}: {nome} non trovata'
+    spazio: dict = {}
+    exec(textwrap.dedent(blocco.group(0)), spazio)  # noqa: S102 - sorgente del repo, non input esterno
+    assert nome in spazio, f'{path.name}: {nome} non definita dopo exec'
+    return spazio[nome]
+
+
+def test_fugu_la_label_finale_dell_evento_fa_revisionare():
+    gate = _funzione_gate(FUGU)
+    assert gate('labeled', [], 'final-fugu-review', 'final-fugu-review') == 'revisiona'
+
+
+def test_fugu_una_label_qualsiasi_non_arma_il_gate():
+    """Aggiungere manual-review-required a una PR gia' etichettata non deve
+    rieseguire la review su un head gia' revisionato."""
+    gate = _funzione_gate(FUGU)
+    assert gate('labeled', ['final-fugu-review'], 'final-fugu-review',
+                'manual-review-required') == 'salta'
+
+
+def test_fugu_pr_aperta_con_label_gia_presente_revisiona():
+    """GitHub non emette `labeled` per una PR aperta con la label applicata."""
+    gate = _funzione_gate(FUGU)
+    assert gate('opened', ['final-fugu-review'], 'final-fugu-review') == 'revisiona'
+
+
+def test_fugu_push_dopo_armamento_e_stantio():
+    """Il caso della #274: un verde su un head che nessuno ha letto."""
+    gate = _funzione_gate(FUGU)
+    assert gate('synchronize', ['final-fugu-review'], 'final-fugu-review') == 'stantio'
+
+
+def test_fugu_push_senza_label_non_spende():
+    gate = _funzione_gate(FUGU)
+    assert gate('synchronize', [], 'final-fugu-review') == 'salta'
+
+
+def test_fable_push_su_file_core_spende():
+    gate = _funzione_gate(FABLE)
+    assert gate('synchronize', [], 'final-fable-review', '', True, False) == 'core'
+
+
+def test_fable_push_senza_file_core_non_spende():
+    gate = _funzione_gate(FABLE)
+    assert gate('synchronize', [], 'final-fable-review', '', False, False) == 'salta'
+
+
+def test_fable_lista_file_troncata_non_fa_saltare_al_buio():
+    """Con la Compare API troncata non si puo' escludere un file core oltre il
+    limite: meglio spendere che perdere una PR core grande."""
+    gate = _funzione_gate(FABLE)
+    assert gate('synchronize', [], 'final-fable-review', '', False, True) == 'core'
+
+
+def test_fable_label_finale_revisiona_intera_pr():
+    gate = _funzione_gate(FABLE)
+    assert gate('labeled', [], 'final-fable-review', 'final-fable-review',
+                False, False) == 'revisiona'
+
+
+def test_fable_push_dopo_armamento_e_stantio():
+    gate = _funzione_gate(FABLE)
+    assert gate('synchronize', ['final-fable-review'], 'final-fable-review', '',
+                True, False) == 'stantio'
+
+
+def test_entrambi_i_gate_coprono_i_quattro_esiti():
+    """Nessun esito resta senza test: se un domani se ne aggiunge uno, qui si vede."""
+    fugu = _funzione_gate(FUGU)
+    fable = _funzione_gate(FABLE)
+    esiti_fugu = {
+        fugu('labeled', [], 'final-fugu-review', 'final-fugu-review'),
+        fugu('synchronize', ['final-fugu-review'], 'final-fugu-review'),
+        fugu('synchronize', [], 'final-fugu-review'),
+    }
+    assert esiti_fugu == {'revisiona', 'stantio', 'salta'}
+    esiti_fable = {
+        fable('labeled', [], 'final-fable-review', 'final-fable-review', False, False),
+        fable('synchronize', [], 'final-fable-review', '', True, False),
+        fable('synchronize', [], 'final-fable-review', '', False, False),
+        fable('synchronize', ['final-fable-review'], 'final-fable-review', '', True, False),
+    }
+    assert esiti_fable == {'revisiona', 'core', 'salta', 'stantio'}
 
 
 # ------------------------------------------------------------ gate label

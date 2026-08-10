@@ -156,12 +156,19 @@ export async function createParser(name) {
   return clone(p);
 }
 
+// Le sole chiavi che una PATCH puo' toccare. Un Object.assign copierebbe anche
+// id, slug, token_prefix e has_token: qui e' un prototipo, ma questo modulo e' il
+// contratto che il backend M1 ricopiera', e la' diventerebbe mass-assignment.
+const PARSER_PATCHABLE = ['name', 'active', 'config', 'sample_message'];
+
 // PATCH /api/parsers/:id  { name?, active?, config?, sample_message? }
 export async function updateParser(id, patch) {
   await wait(80);
   const p = db.parsers.find(x => x.id === id);
   if (!p) throw new Error('Parser non trovato.');
-  Object.assign(p, patch);
+  for (const k of PARSER_PATCHABLE) {
+    if (patch && Object.hasOwn(patch, k)) p[k] = patch[k];
+  }
   save();
   return clone(p);
 }
@@ -219,16 +226,19 @@ export async function testParser(id, message) {
   await wait(LAG);
   const p = db.parsers.find(x => x.id === id);
   if (!p) throw new Error('Parser non trovato.');
-  const { matched, row } = runParser(message, p.config);
-  if (matched) {
+  const { matched, row, missing, complete } = runParser(message, p.config);
+  if (complete) {
     // Il replace avviene solo dentro questo parser: gli altri feed non si toccano.
     db.signals[id] = { csv: toCsv(row), expires_at: Date.now() + 90_000 };
   }
   db.logs.unshift({ id: uid('log'), parser_id: id, chat_id: p.chat_ids[0] || null,
-                    matched, text: message, at: new Date().toISOString() });
+                    matched, complete, missing, text: message,
+                    at: new Date().toISOString() });
   db.logs = db.logs.slice(0, 100);
   save();
-  return { matched, row, csv: matched ? toCsv(row) : null };
+  // Riconosciuto ma incompleto NON scrive: una riga senza evento sarebbe
+  // formalmente valida e priva di senso per XTrader.
+  return { matched, complete, missing, row, csv: complete ? toCsv(row) : null };
 }
 
 // POST /api/parsers/:id/suggest  { message }  → mappatura proposta dal modello
@@ -266,6 +276,13 @@ export async function verificationStatus() {
   const pv = db.pending_verification;
   if (!pv) return { state: 'none' };
   if (pv.chat) return { state: 'verified', chat: clone(pv.chat) };
+  // Il codice e' l'unica eccezione prevista al filtro delle chat: se restasse
+  // valido per sempre, quell'eccezione non si chiuderebbe mai.
+  if (Date.now() > pv.expires_at) {
+    db.pending_verification = null;
+    save();
+    return { state: 'expired' };
+  }
   return { state: 'waiting' };
 }
 

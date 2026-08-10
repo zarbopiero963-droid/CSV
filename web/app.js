@@ -3,7 +3,8 @@
 // quello reale non richiede modifiche qui.
 
 import * as api from './api.js';
-import { COLUMNS, TRANSFORMS, describeRule, runParser, extractValue, toCsv, headerOnlyCsv } from './engine.js';
+import { COLUMNS, TRANSFORMS, describeRule, runParser, extractValue, toCsv,
+         headerOnlyCsv, cutByCodePoint } from './engine.js';
 
 const app = document.getElementById('app');
 
@@ -277,8 +278,10 @@ function mappedCount() {
 // Il CSV mostrato accanto al wizard: se la condizione non riconosce il messaggio
 // di esempio, XTrader riceverebbe solo l'intestazione.
 function livePreviewCsv() {
-  const { matched, row } = runParser(wiz.message, wiz.draft);
-  return matched ? toCsv(row) : headerOnlyCsv();
+  // `complete`, non `matched`: un segnale riconosciuto ma senza le colonne
+  // obbligatorie non viene scritto, e l'anteprima non deve promettere il contrario.
+  const { complete, row } = runParser(wiz.message, wiz.draft);
+  return complete ? toCsv(row) : headerOnlyCsv();
 }
 
 function fragments() {
@@ -303,7 +306,8 @@ function ruleFromFragment(line) {
     const anchor = line.slice(0, colon + 1);
     return { source: 'line', anchor, part: 'after', marker: anchor, transforms: [{ op: 'trim' }] };
   }
-  return { source: 'line', anchor: line.slice(0, 14), part: 'whole', transforms: [{ op: 'trim' }] };
+  return { source: 'line', anchor: cutByCodePoint(line, 14), part: 'whole',
+           transforms: [{ op: 'trim' }] };
 }
 
 function transformEditor(rule) {
@@ -524,8 +528,16 @@ function stepReview(p) {
         <button class="primary" data-act="wiz-save">Salva configurazione</button>
       </div>
       ${t ? `<div class="stack" style="gap:10px" id="test-result">
-        <div class="row"><span class="pill ${t.matched ? 'on' : 'no'}">
-          ${t.matched ? 'Riconosciuto' : 'Ignorato: la condizione non corrisponde'}</span></div>
+        <div class="row"><span class="pill ${t.complete ? 'on' : 'no'}">${
+          t.complete ? 'Riconosciuto'
+          : !t.matched ? 'Ignorato: la condizione non corrisponde'
+          : `Riconosciuto ma incompleto: manca ${(t.missing || []).join(', ')}`
+        }</span></div>
+        ${t.matched && !t.complete ? `<div class="banner warn">
+          Nessuna riga scritta nel feed: senza
+          <span class="mono">${esc((t.missing || []).join(', '))}</span>
+          la riga sarebbe formalmente valida e priva di senso per XTrader.
+        </div>` : ''}
         <div><label>CSV inviato a XTrader</label>
           <pre class="csv-out" id="test-csv">${esc(t.csv || headerOnlyCsv())}</pre></div>
       </div>` : ''}
@@ -692,7 +704,7 @@ async function paneLogs(p) {
         <td class="mono dim">${fmtDate(l.at)}</td>
         <td>${c ? esc(c.title) : '<span class="dim">prova manuale</span>'}</td>
         <td><span class="pill ${l.matched ? 'on' : 'off'}">${l.matched ? 'riconosciuto' : 'ignorato'}</span></td>
-        <td class="mono" style="white-space:pre-wrap">${esc(l.text.slice(0, 160))}</td>
+        <td class="mono" style="white-space:pre-wrap">${esc(cutByCodePoint(l.text, 160))}</td>
       </tr>`;
     }).join('')}</tbody></table></div></div>`;
 }
@@ -800,7 +812,7 @@ async function viewLogs() {
           <td>${p ? `<a href="#/parsers/${p.id}">${esc(p.name)}</a>` : '<span class="dim">eliminato</span>'}</td>
           <td>${c ? esc(c.title) : '<span class="dim">prova manuale</span>'}</td>
           <td><span class="pill ${l.matched ? 'on' : 'off'}">${l.matched ? 'riconosciuto' : 'ignorato'}</span></td>
-          <td class="mono" style="white-space:pre-wrap">${esc(l.text.slice(0, 140))}</td>
+          <td class="mono" style="white-space:pre-wrap">${esc(cutByCodePoint(l.text, 140))}</td>
         </tr>`;
       }).join('')}</tbody></table></div></div>` : '<div class="empty">Nessun messaggio ricevuto.</div>'}`);
 }
@@ -951,15 +963,18 @@ const actions = {
     render();
   },
   'toggle-part'() {
-    const rule = wiz.draft.columns[COLUMNS[wiz.step - 1]];
+    // readCurrentRule() puo' assegnare un OGGETTO NUOVO a wiz.draft.columns[col]
+    // (modalita' regex e valore fisso): la regola va riletta dopo, altrimenti si
+    // muta una copia orfana e la modifica si perde al render successivo.
     readCurrentRule();
+    const rule = wiz.draft.columns[COLUMNS[wiz.step - 1]];
     rule.part = rule.part === 'after' ? 'whole' : 'after';
     if (rule.part === 'after' && !rule.marker) rule.marker = rule.anchor;
     render();
   },
   'toggle-transform'(el) {
-    const rule = wiz.draft.columns[COLUMNS[wiz.step - 1]];
     readCurrentRule();
+    const rule = wiz.draft.columns[COLUMNS[wiz.step - 1]];
     rule.transforms = rule.transforms || [];
     const op = el.dataset.op;
     const i = rule.transforms.findIndex(t => t.op === op);
@@ -1142,8 +1157,13 @@ async function render() {
 }
 
 // Il contatore dei 90 secondi va aggiornato da solo nella pagina del feed.
+// Il contatore dei 90 secondi si aggiorna da solo, ma solo mentre c'e' davvero un
+// segnale vivo: senza questa guardia la shell veniva ridisegnata ogni secondo per
+// sempre, anche a feed vuoto.
 setInterval(() => {
-  if (route.name === 'parser' && route.tab === 'feed') render();
+  if (route.name !== 'parser' || route.tab !== 'feed') return;
+  if (!api.signalState(route.id).live) return;
+  render();
 }, 1000);
 
 render();

@@ -20,6 +20,14 @@ export const TRANSFORMS = {
   digits_only:   { label: 'Solo cifre e separatori',       fn: v => (v.match(/[0-9.,]+/) || [''])[0] },
 };
 
+// Taglia ai primi `n` CODEPOINT, non alle prime n unita' UTF-16: `slice` conta
+// unita', quindi un emoji astrale a cavallo del taglio lascerebbe un surrogato
+// spaiato. Un'ancora cosi' non combacia piu' con nessuna riga e la colonna resta
+// vuota in silenzio. Fonte unica: la usano sia il motore sia la web app.
+export function cutByCodePoint(text, n) {
+  return [...String(text ?? '')].slice(0, n).join('');
+}
+
 function replaceLast(text, from, to) {
   if (!from) return text;
   const i = text.lastIndexOf(from);
@@ -67,7 +75,10 @@ export function extractValue(message, rule) {
       const line = findLine(message, rule.anchor);
       if (line === undefined) return '';
       if (rule.part === 'after' && rule.marker) {
-        const i = line.indexOf(rule.marker);
+        // findLine trova la riga ignorando il caso: se il taglio fosse
+        // sensibile al caso, un marcatore che differisce solo per maiuscole
+        // darebbe indexOf === -1 e la colonna resterebbe vuota senza errore.
+        const i = line.toLowerCase().indexOf(rule.marker.toLowerCase());
         v = i < 0 ? '' : line.slice(i + rule.marker.length);
       } else {
         v = line;
@@ -108,11 +119,27 @@ export function matches(message, cond) {
   return message.toLowerCase().includes(cond.value.toLowerCase());
 }
 
-// Esegue il parser: restituisce la riga a 14 colonne, o matched=false se ignorato.
+// Colonne senza le quali la riga sarebbe pericolosamente incompleta per XTrader.
+// Price NON e' qui: il parser oggi in produzione (main.py) la lascia vuota perche'
+// la quota la mette XTrader dal proprio book, quindi pretenderla bloccherebbe i
+// segnali reali.
+export const REQUIRED_COLUMNS = ['Provider', 'EventName'];
+
+// Esegue il parser sul messaggio.
+//
+// Restituisce:
+//   matched  - il messaggio soddisfa la condizione di riconoscimento;
+//   row      - le 14 colonne, sempre presenti (vuote dove non mappate);
+//   missing  - le colonne obbligatorie risultate vuote;
+//   complete - matched e nessuna colonna obbligatoria mancante.
+//
+// Chi scrive il feed deve guardare `complete`, non `matched`: un messaggio
+// riconosciuto ma senza evento produrrebbe una riga quotata e priva di senso.
 export function runParser(message, config) {
   const matched = matches(message, config.match);
   const row = COLUMNS.map(c => extractValue(message, (config.columns || {})[c]));
-  return { matched, row };
+  const missing = REQUIRED_COLUMNS.filter(c => !row[COLUMNS.indexOf(c)]);
+  return { matched, row, missing, complete: matched && missing.length === 0 };
 }
 
 // Serializza come XTrader lo pretende: 14 colonne, tutti i campi tra virgolette,
@@ -143,7 +170,8 @@ export function suggestConfig(message) {
     columns.EventName = marker
       ? { source: 'line', anchor: '🆚', part: 'after', marker: '🆚',
           transforms: [{ op: 'replace_last', from: ' v ', to: ' - ' }, { op: 'trim' }] }
-      : { source: 'line', anchor: vsLine.slice(0, 12), part: 'whole', transforms: [{ op: 'trim' }] };
+      : { source: 'line', anchor: cutByCodePoint(vsLine, 12), part: 'whole',
+          transforms: [{ op: 'trim' }] };
   }
 
   // Quota tipo "@1.85" o "quota 1,85".
@@ -157,7 +185,10 @@ export function suggestConfig(message) {
 
   // La riga di intestazione del segnale è la firma del canale: usala come condizione.
   const headerLine = lines.find(l => /p\.?bet|segnale|signal|premacht|live/i.test(l)) || lines[0] || '';
-  const match = { type: 'contains', value: headerLine.replace(/[✅🔥⚽️📊🆚]/g, '').trim().slice(0, 40) };
+  const match = {
+    type: 'contains',
+    value: cutByCodePoint(headerLine.replace(/[✅🔥⚽️📊🆚]/g, '').trim(), 40),
+  };
 
   return { match, columns };
 }

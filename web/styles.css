@@ -299,7 +299,7 @@ tr:last-child td { border-bottom: none; }
   border: 1px solid var(--line);
   border-radius: 8px;
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: break-word;
   width: 100%;
 }
 .frag:hover { border-color: var(--accent); }
