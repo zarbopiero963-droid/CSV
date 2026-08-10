@@ -331,6 +331,60 @@ function transformEditor(rule) {
   </details>`;
 }
 
+// Spiegazione della modalità di confronto scelta, mostrata sotto il selettore.
+const MATCH_HELP = {
+  contains: 'Cerca il testo così come lo hai scritto, in qualunque punto del messaggio. '
+          + 'Maiuscole e minuscole non contano. È la scelta giusta quasi sempre: '
+          + 'incolla la riga di intestazione e hai finito.',
+  regex: 'Modello avanzato, per quando l\'intestazione cambia da un messaggio all\'altro. '
+       + 'Esempi: "0,5|1,5 HT" riconosce entrambe le varianti, "Quota\\s+\\d" una quota '
+       + 'con qualsiasi numero. Attenzione: caratteri come . ( ) [ ] hanno un significato '
+       + 'speciale. Se non ti serve, scegli l\'altra opzione.',
+};
+
+// Il motore JavaScript spiega gli errori di regex in inglese e tecnico: qui
+// diventano frasi utili, che dicono anche come rimediare.
+const REGEX_ERRORS = [
+  [/Unterminated group/i,           'manca una parentesi tonda di chiusura ")".'],
+  [/Unmatched '\)'/i,               'c\'è una parentesi tonda ")" di troppo.'],
+  [/Unterminated character class/i, 'manca una parentesi quadra di chiusura "]".'],
+  [/Nothing to repeat/i,            'un simbolo di ripetizione come * + ? non ha nulla da ripetere prima.'],
+  [/\\ at end of pattern/i,         'il modello finisce con una barra rovesciata "\\" incompleta.'],
+  [/Invalid escape/i,               'una barra rovesciata "\\" è seguita da un carattere non valido.'],
+  [/Invalid group/i,                'un gruppo tra parentesi è scritto male.'],
+  [/Invalid quantifier|numbers out of order/i, 'una ripetizione tra graffe {} è scritta male.'],
+];
+
+// Un'espressione regolare non valida non riconoscerebbe nulla, in silenzio: va detto.
+function regexError(pattern) {
+  if (!pattern) return null;
+  try {
+    new RegExp(pattern, 'i');
+    return null;
+  } catch (e) {
+    for (const [re, msg] of REGEX_ERRORS) if (re.test(e.message)) return msg;
+    return 'il modello non è scritto correttamente.';
+  }
+}
+
+function matchHelpHtml(cond) {
+  const err = cond.type === 'regex' ? regexError(cond.value) : null;
+  return `<p class="dim small" id="match-help" style="margin:8px 0 0">${esc(MATCH_HELP[cond.type])}</p>
+    <p class="small" id="match-err" style="margin:6px 0 0;color:var(--err)">${
+      err ? 'Espressione regolare non valida: ' + esc(err) : ''}</p>`;
+}
+
+function updateMatchHelp() {
+  const t = document.getElementById('match-type');
+  const v = document.getElementById('match-val');
+  const help = document.getElementById('match-help');
+  const errBox = document.getElementById('match-err');
+  if (!t || !v || !help || !errBox) return;
+  help.textContent = MATCH_HELP[t.value] || '';
+  const err = t.value === 'regex' ? regexError(v.value) : null;
+  errBox.textContent = err ? 'Espressione regolare non valida: ' + err : '';
+}
+
 function stepMatch() {
   const cond = wiz.draft.match;
   return `
@@ -351,6 +405,7 @@ function stepMatch() {
           <option value="contains" ${cond.type === 'contains' ? 'selected' : ''}>Il messaggio contiene questo testo</option>
           <option value="regex" ${cond.type === 'regex' ? 'selected' : ''}>Espressione regolare</option>
         </select>
+        ${matchHelpHtml(cond)}
       </div>
       <div class="row"><div class="spacer"></div>
         <button class="primary" data-act="save-match">Continua</button></div>
@@ -389,12 +444,25 @@ function stepColumn(idx) {
       <input id="rule-const" value="${esc(rule.source === 'constant' ? rule.value : '')}"
              placeholder="es. XTrader"></div>`;
   } else if (mode === 'regex') {
+    const err = rule.source === 'regex' ? regexError(rule.pattern) : null;
     body = `<div class="card stack">
       <div><label>Espressione regolare</label>
         <input id="rule-pattern" class="mono" value="${esc(rule.source === 'regex' ? rule.pattern : '')}"
-               placeholder="@\\s*([0-9.,]+)"></div>
+               placeholder="@\\s*([0-9.,]+)">
+        <p class="dim small" id="rule-regex-help" style="margin:8px 0 0">
+          Estrae un pezzo di testo che cambia a ogni messaggio. Le parentesi tonde
+          delimitano la parte da tenere: <span class="mono">@\\s*([0-9.,]+)</span>
+          prende il numero dopo la chiocciola, quindi da "@ 1.85" ricava 1.85.
+        </p>
+        <p class="small" id="rule-regex-err" style="margin:6px 0 0;color:var(--err)">${
+          err ? 'Espressione non valida: ' + esc(err) : ''}</p>
+      </div>
       <div><label>Gruppo di cattura</label>
-        <input id="rule-group" type="number" min="0" value="${rule.source === 'regex' ? (rule.group ?? 1) : 1}"></div>
+        <input id="rule-group" type="number" min="0" value="${rule.source === 'regex' ? (rule.group ?? 1) : 1}">
+        <p class="dim small" style="margin:8px 0 0">
+          Quale coppia di parentesi usare, contando da sinistra. Con una sola coppia lascia 1.
+        </p>
+      </div>
       ${transformEditor(rule)}
     </div>`;
   }
@@ -519,7 +587,7 @@ async function viewParser() {
             <div class="row" style="margin-bottom:10px">
               <strong class="small">Anteprima riga XTrader</strong>
               <div class="spacer"></div>
-              <span class="dim small">${mappedCount()}/14 colonne mappate</span>
+              <span class="dim small" id="mapped-count">${mappedCount()}/14 colonne mappate</span>
             </div>
             ${previewTable(focus)}
             <p class="dim small" style="margin:10px 0 0">
@@ -880,6 +948,7 @@ const actions = {
     const line = fragments()[i];
     if (wiz.step === 0) {
       document.getElementById('match-val').value = line;
+      updateMatchHelp();
       return;
     }
     wiz.draft.columns[COLUMNS[wiz.step - 1]] = ruleFromFragment(line);
@@ -1042,6 +1111,22 @@ document.addEventListener('input', e => {
   if (holder) holder.outerHTML = previewTable(COLUMNS[wiz.step - 1]);
   const live = document.getElementById('live-csv');
   if (live) live.textContent = livePreviewCsv();
+  const count = document.getElementById('mapped-count');
+  if (count) count.textContent = `${mappedCount()}/14 colonne mappate`;
+  const rxErr = document.getElementById('rule-regex-err');
+  if (rxErr) {
+    const err = regexError(document.getElementById('rule-pattern')?.value);
+    rxErr.textContent = err ? 'Espressione non valida: ' + err : '';
+  }
+});
+
+// La spiegazione del confronto e l'avviso sulla regex si aggiornano subito,
+// senza ridisegnare il passo (il campo di testo perderebbe il focus).
+document.addEventListener('input', e => {
+  if (e.target.matches('#match-val, #match-type')) updateMatchHelp();
+});
+document.addEventListener('change', e => {
+  if (e.target.matches('#match-type')) updateMatchHelp();
 });
 
 document.addEventListener('keydown', e => {
