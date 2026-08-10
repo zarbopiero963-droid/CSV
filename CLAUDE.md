@@ -30,6 +30,9 @@ Il merge resta sempre manuale del repository owner.
 | Architettura SaaS, modello dati, contratto API | `SAAS.md` |
 | Documentazione operativa endpoint e variabili | `README.txt` |
 | Deploy | `Procfile`, `railway.json`, `requirements.txt` |
+| Workflow di review AI (GPT-5.5, Fable 5, Fugu Ultra) | `.github/workflows/pr-review-*.yml` |
+| Guardia sui workflow di review | `tests/safety/test_ai_audit_workflows.py` |
+| Dipendenze dei soli test | `requirements-dev.txt` |
 
 **File core del bridge** (per i gate di review e per la soglia di attenzione):
 `main.py`, `web/**`, `requirements.txt`, `Procfile`, `railway.json`.
@@ -244,15 +247,21 @@ review/inline/thread triage · final hard verify.
 
 ## FINAL AI REVIEW BEFORE MERGE — CANCELLO LABEL
 
-> **Stato in questo repository:** `.github/workflows/` **non esiste ancora**, quindi le label da
-> sole non fanno partire nulla: sono un interruttore senza impianto. Finché i workflow non vengono
-> portati qui, l'agente deve dichiararlo apertamente invece di sostenere che le review finali sono
-> state fatte. Il proprietario ha annunciato che creerà le label: quando esisteranno anche i
-> workflow, valgono le regole qui sotto senza modifiche.
+> **Stato in questo repository.** I workflow di review sono stati importati dal Bridge e vivono in
+> `.github/workflows/`: **GPT-5.5** (`pr-review-gpt55.yml`), **Claude Fable 5**
+> (`pr-review-claude-fable5.yml`) e **OpenRouter Fugu Ultra**
+> (`pr-review-openrouter-fugu-ultra.yml`). **GLM 5.2 non è stato importato**, quindi qui i reviewer
+> a API key sono tre, non quattro.
 >
-> Questo riguarda **solo** i quattro reviewer a API key. CodeRabbit, Codacy, DeepSource e Codex
-> sono GitHub App installate sull'account e compaiono comunque sulle PR di questo repository:
-> quelli vanno attesi e letti già adesso.
+> Perché funzionino servono due cose, azione del proprietario una volta sola:
+>
+> 1. i Secret del repo — `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`. Senza, i job
+>    partono e falliscono sulla chiave mancante. L'agente non li vede mai.
+> 2. le label `final-fable-review` e `final-fugu-review`. Senza, aggiungerle via API dà 404 e il
+>    gate finale non si arma.
+>
+> Finché una delle due manca, l'agente lo dichiara invece di sostenere che le review finali sono
+> state fatte. Il set di file core è vincolato da `tests/safety/test_ai_audit_workflows.py`.
 
 Due reviewer AI forti e costosi (Claude Fable 5, Fugu Ultra) non girano a ogni push come
 GPT-5.5/GLM. Partono:
@@ -265,7 +274,8 @@ GPT-5.5/GLM. Partono:
   - `final-fugu-review` → PR Review OpenRouter Fugu Ultra
 
 Su push che toccano solo workflow/CI, docs o test, i due job partono ma escono senza chiamare il
-modello (costo zero). L'agente non vede mai le API key: aggiunge solo la label.
+modello (costo zero); quei cambiamenti restano coperti da GPT-5.5, che gira su ogni push.
+L'agente non vede mai le API key: aggiunge solo la label.
 
 **Il gate a label si arma solo con la SUA label.** Entrambi i workflow ricevono la label
 dell'evento oltre all'elenco di quelle presenti, e su un evento `labeled` si armano solo se la
@@ -382,16 +392,15 @@ pubblicano commenti o annotation solo a check completato.
 >   `.github/workflows/` non esista: **CodeRabbit · Codacy · DeepSource · Codex** (e Sourcery,
 >   quando non è rate-limited). Aprendo una PR compaiono. I loro check vanno attesi e i loro
 >   commenti letti, esattamente come nel Bridge.
-> - **Workflow a API key, che qui NON esistono ancora:** GPT-5.5, GLM 5.2, Claude Fable 5,
->   OpenRouter Fugu Ultra. Vivono in `.github/workflows/` e usano i Secret del repo. Finché non
->   vengono portati qui, dichiaralo: una PR in questo repository è coperta da meno reviewer di
->   una PR nel Bridge, e le due label finali non hanno nulla da far partire.
+> - **Workflow a API key, importati dal Bridge e presenti in `.github/workflows/`:** GPT-5.5,
+>   Claude Fable 5, OpenRouter Fugu Ultra. Usano i Secret del repo, che il proprietario deve
+>   aggiungere. **GLM 5.2 non è stato importato:** qui i reviewer a API key sono tre, e questa
+>   differenza rispetto al Bridge va detta, non taciuta.
 
-Quando c'è tutto, i reviewer che coprono davvero una PR sono i quattro workflow GitHub Actions con
-API key nei Secret del repo — GPT-5.5, GLM 5.2, Claude Fable 5, OpenRouter Fugu Ultra — più
-CodeRabbit. GPT-5.5/GLM girano a ogni push; Fable parte da solo sui push che toccano file core;
-Fugu solo con la label finale; entrambi partono con le label finali; CodeRabbit rivede l'intera
-PR dal suo base.
+I reviewer che coprono davvero una PR sono quindi i tre workflow GitHub Actions con API key nei
+Secret del repo — GPT-5.5, Claude Fable 5, OpenRouter Fugu Ultra — più CodeRabbit. GPT-5.5 gira a
+ogni push; Fable parte da solo sui push che toccano file core; Fugu solo con la label finale;
+entrambi partono con le label finali; CodeRabbit rivede l'intera PR dal suo base.
 
 **Codex NON è un gate** — non aspettarlo. È installato e comparirà sulle PR, ma l'abbonamento
 Codex del proprietario è scaduto: quando pubblica «You have reached your Codex usage limits» o
@@ -439,11 +448,12 @@ Flusso pre-merge:
 5. solo con i quattro reviewer + la review reale di CodeRabbit acquisiti → dire al proprietario
    merge sì/no.
 
-**Oggi, in questo repository:** i passi 2 e 3 non hanno impianto — i quattro workflow a API key
-non ci sono ancora — e vanno dichiarati N/A con quel motivo, non spuntati. I passi 4 e 5 valgono
-già adesso, perché CodeRabbit è installato sull'account e commenta anche qui: l'attesa del suo
-completamento è in vigore, con il cap anti-stallo qui sotto. Lo stesso vale per i check di Codacy
-e DeepSource e per un'eventuale review di Codex.
+**Oggi, in questo repository:** i passi 2 e 3 valgono, con tre reviewer sincroni invece di quattro
+(GPT-5.5, Fable 5, Fugu Ultra — GLM non è importato). Se mancano i Secret o le label, il passo 2 va
+dichiarato non eseguibile con quel motivo, non spuntato. I passi 4 e 5 valgono comunque, perché
+CodeRabbit è installato sull'account e commenta anche qui: l'attesa del suo completamento è in
+vigore, con il cap anti-stallo qui sotto. Lo stesso per i check di Codacy e DeepSource e per
+un'eventuale review di Codex.
 
 - **Codex** = assente per usage limit: non posta mai, non è un gate.
 - **CodeRabbit rate-limited → ASSENTE**, non si aspetta mai (decisione proprietario 2026-07-18):
@@ -656,8 +666,11 @@ Puoi continuare solo se `POST_FIX_AUDIT=PASS`.
 
 ## TEST HARD VERITIERI — OBBLIGATORIO
 
-> **Stato in questo repository:** `tests/` **non esiste ancora**. Il primo task che tocca codice
-> deve crearlo. Non è una scusa per saltare i test: è la prima cosa da fare.
+> **Stato in questo repository:** `tests/` esiste e contiene per ora
+> `tests/safety/test_ai_audit_workflows.py`, la guardia sui workflow di review. Le dipendenze dei
+> test stanno in `requirements-dev.txt`, separate da quelle del deploy:
+> `pip install -r requirements-dev.txt && python -m pytest -q`. Il relay e il motore di parsing non
+> hanno ancora test: il primo task che li tocca li crea.
 
 I test devono essere veri, mirati e verificabili. Non puoi dire che un test è passato se non hai
 realmente eseguito il comando e visto esito positivo.
@@ -870,6 +883,7 @@ Documenti che esistono oggi in questo repository:
 | `README.txt` | endpoint, variabili d'ambiente, comportamento operativo, flusso principale |
 | `SAAS.md` | modello dati, contratto API, regole di isolamento, note operative Telegram, stato dei lavori |
 | `README.MD` | solo il titolo del progetto |
+| `CLAUDE.md` | quando cambiano i file core, i reviewer attivi, i Secret o le label richieste |
 | docstring e commenti tecnici | funzioni pubbliche e moduli non banali |
 
 Documenti citati dal CLAUDE.md del Bridge che **non esistono qui** e che non vanno inventati:
@@ -1064,8 +1078,9 @@ Inline comments checked:
 Unresolved threads checked:
 - YES / NO
 
-Label finali fatte partire + i quattro reviewer a API key hanno risposto:
-- YES / NO / N/A perché i workflow non esistono ancora in questo repository
+Label finali fatte partire + i tre reviewer a API key hanno risposto
+(GPT-5.5, Fable 5, Fugu Ultra — GLM non è importato in questo repository):
+- YES / NO / bloccato perché mancano i Secret o le label, con quale
 
 CodeRabbit COMPLETATO (commenti azionabili o «No actionable comments»):
 - YES / NO / ASSENTE per rate-limit / cap ~15 min scaduto
@@ -1206,9 +1221,11 @@ Aspetta i loro check, leggi i loro commenti, fai il triage.
 
 | Manca | Conseguenza per l'agente |
 |---|---|
-| `.github/workflows/` | mancano i **quattro reviewer a API key** (GPT-5.5, GLM 5.2, Fable 5, Fugu Ultra) e ogni check di build/test proprio del repo. Le GitHub App restano attive. |
-| Label `final-fable-review`, `final-fugu-review` | il proprietario le creerà; finché i workflow non ci sono, aggiungerle non fa partire nulla: dichiaralo invece di spuntare il gate. |
-| `tests/` | il primo task che tocca codice lo crea. Non è una scusa per saltare i test. |
+| Secret `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY` | i tre workflow di review esistono ma senza chiave falliscono. Azione del proprietario. |
+| Label `final-fable-review`, `final-fugu-review` | da creare una volta sola; senza, aggiungerle via API dà 404 e il gate finale non si arma. |
+| Workflow GLM 5.2 | non importato per scelta: i reviewer a API key qui sono tre. Non contarlo né aspettarlo. |
+| Workflow di build/test propri del repo | non esistono: `pytest` va eseguito localmente, nessun check CI lo esegue. |
+| Test del relay e del motore di parsing | `tests/` contiene solo la guardia sui workflow. Il primo task che tocca `main.py` o `web/engine.js` crea i suoi. |
 | `docs/` | i documenti del Bridge citati sopra non esistono qui e non vanno inventati. |
 | `AGENTS.md` | questo file è autosufficiente; se AGENTS.md verrà aggiunto, ha precedenza. |
 | Motore di parsing Python | oggi il motore vive solo in `web/engine.js`. Quando nascerà quello Python, la regola 3 diventa vincolante su entrambi. |

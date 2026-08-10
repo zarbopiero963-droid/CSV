@@ -1,0 +1,9 @@
+# Dipendenze dei soli test locali: non finiscono nel deploy Railway,
+# che installa requirements.txt.
+#
+#   pip install -r requirements-dev.txt
+#   python -m pytest -q
+#
+-r requirements.txt
+pytest==8.3.4
+PyYAML==6.0.2
