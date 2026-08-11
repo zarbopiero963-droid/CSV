@@ -201,14 +201,32 @@ jobs:
               # escapate. Stesso pattern di `tools/secret_policy.py` (in str invece che bytes):
               # la condivisione per import e' impossibile qui, i workflow non fanno checkout.
               (re.compile(r'''(?i)\\?['"]?(?:signing[_-]?)?seed(?:[_-]?hex)?\\?['"]?\s*[:=]\s*\\?['"]?[0-9a-f]{64,}'''), "[REDACTED_ED25519_SEED]"),
-              # Il `(?!\s*\$\{\{)` esenta le espressioni GitHub Actions: `${{ secrets.X }}`
-              # e' un PUNTATORE a un segreto, non un segreto. Senza l'esenzione questa
-              # regola trasformava una riga `<NOME>_KEY: ${{ secrets.BETRELAY_FABLE }}` in
-              # `<NOME>_KEY=[REDACTED] secrets.BETRELAY_FABLE }}`: il reviewer vedeva
-              # YAML rotto e concludeva che il workflow era mal configurato. E' il
-              # meccanismo dei cinque bloccanti fantasma della PR #1 (~$0.9 per giro).
+              # Esenta le espressioni di GitHub Actions, cioe' la forma
+              # dollaro-graffa-graffa: un riferimento a un Secret e' un PUNTATORE al
+              # segreto, non il segreto. Senza l'esenzione questa regola trasformava una
+              # riga `<NOME>_KEY: <espressione>` in `<NOME>_KEY=[REDACTED] <resto>`, e il
+              # reviewer vedeva YAML rotto e concludeva che il workflow era mal
+              # configurato: e' il meccanismo dei cinque bloccanti fantasma della PR #1
+              # (~$0.9 per giro).
+              #
+              # In questo commento la forma NON si scrive per esteso, e non e' pedanteria:
+              # Actions interpola quelle espressioni in TUTTO il file, `run:` compreso.
+              # Scritte qui per illustrazione venivano sostituite prima che lo script
+              # partisse — una col valore di un Secret vero dentro il sorgente — e i tre
+              # workflow non caricavano piu' affatto. Misurato: tre run con `event: push`,
+              # zero job, e il nome mostrato come percorso del file invece del `name:`.
+              #
+              # L'esenzione copre anche la forma FRA VIRGOLETTE (`KEY: "<espressione>"`),
+              # che la prima versione lasciava passare al redattore: la virgoletta veniva
+              # prima del dollaro e il lookahead non scattava. Segnalato da Sourcery.
+              # L'esenzione vale solo se il valore e' INTERAMENTE una espressione: dopo la
+              # chiusura non deve restare altro che una virgoletta e fine riga. Esentare
+              # qualunque valore che COMINCI con un'espressione lascerebbe uscire cio' che
+              # le sta accanto — in `API_KEY: <espressione>coda-letterale` la coda non e' un
+              # puntatore, e' un segreto, e nessun altro pattern della tabella lo
+              # riconosce. Segnalato da CodeRabbit.
               # Il VALORE vero resta redatto: lo verifica un test dedicato.
-              (re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)\s*[:=]\s*(?!\s*\$\{\{)[\"']?[^\"'\s,;]+"), r"\1=[REDACTED]"),
+              (re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)\s*[:=]\s*(?![\"']?\s*\$\{\{[^{}]*\}\}[\"']?[ \t]*(?:\r?\n|\Z))[\"']?[^\"'\s,;]+"), r"\1=[REDACTED]"),
           ]
 
           def redact(text: str) -> str:
@@ -298,9 +316,19 @@ jobs:
           # strutturalmente garantito di essere il primo a cadere.
           PRIORITA_PAYLOAD = [
               # 0 — il codice che gira in produzione e la superficie multiutente.
-              re.compile(r"(^|/)main\.py$|(^|/)web/|(^|/)tools/|(^|/)Procfile$"
-                         r"|(^|/)railway\.json$|(^|/)requirements[^/]*\.(txt|in|lock)$"
-                         r"|(^|/)pyproject\.toml$|(^|/)\.github/workflows/"),
+              #
+              # Le cartelle sono ancorate alla RADICE (`^web/`, non `(^|/)web/`), e la
+              # differenza non e' cosmetica: con l'ancora larga `tests/web/prototype_flow.py`
+              # prendeva rango 0 perche' contiene `/web/`, e due file di test consumavano
+              # il budget riservato al codice. Misurato: spingevano fuori dal payload
+              # `poetry.lock`, e su una PR vera potevano spingere fuori il motore — cioe'
+              # ricreare il difetto che questa lista esiste per chiudere.
+              #
+              # CORE_TRIGGER_PATTERNS usa l'ancora larga e va bene la': far partire una
+              # review di troppo e' innocuo, mandare al modello i file sbagliati no.
+              re.compile(r"^main\.py$|^web/|^tools/|^Procfile$|^railway\.json$"
+                         r"|^requirements[^/]*\.(txt|in|lock)$|^pyproject\.toml$"
+                         r"|^poetry\.lock$|^\.github/workflows/"),
               # 1 — i test: dicono se il codice sopra e' vincolato, ma valgono meno del
               #     codice stesso quando il budget costringe a scegliere.
               re.compile(r"(^|/)tests?/|(^|/)test_[^/]*\.py$|[^/]*_test\.py$"),

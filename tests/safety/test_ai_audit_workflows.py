@@ -469,6 +469,9 @@ FILE_COME_LA_PR_8 = [
     'tests/engine/test_engine_contract.py', 'tests/relay/test_csv_contract.py',
     'tests/safety/test_ambiente_dei_test.py', 'tests/web/prototype_flow.py',
     'tests/web/test_prototype_flow.py', 'web/app.js', 'web/engine.js',
+    # File di dipendenze: la tabella CRITICAL_PATTERNS lo tratta come critico, quindi
+    # deve essere tier-0 anche nel payload. Segnalato da CodeRabbit.
+    'poetry.lock',
 ]
 
 
@@ -502,6 +505,19 @@ def test_i_file_core_entrano_nel_payload_anche_col_budget_stretto(path):
     assert 'FILE: web/engine.js' in testo, 'il motore non e- nel payload mandato al modello'
     assert 'main.py' not in saltati, f'il relay e- stato scartato: saltati={saltati}'
     assert 'FILE: main.py' in testo, 'il relay non e- nel payload'
+    assert 'poetry.lock' not in saltati, (
+        f'il lockfile delle dipendenze e- stato scartato: saltati={saltati}'
+    )
+
+    # E i test sotto `tests/web/` NON sono core: contengono `/web/` nel percorso, e con
+    # l'ancora larga prendevano rango 0 consumando il budget del codice. E- il difetto
+    # che ha spinto fuori `poetry.lock`, trovato grazie al rilievo di CodeRabbit.
+    inclusi = re.findall(r'FILE: (\S+)', testo)
+    for finto_core in ('tests/web/prototype_flow.py', 'tests/web/test_prototype_flow.py'):
+        assert finto_core not in inclusi[:4], (
+            f'{finto_core} e- entrato fra i primi file come se fosse core: il pattern '
+            f'delle cartelle non e- ancorato alla radice.\nordine: {inclusi}'
+        )
 
 
 @pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
@@ -537,6 +553,11 @@ YAML_CON_SEGRETO = (
     '          PROVIDER_API_KEY: ${{ secrets.BETRELAY_FABLE }}\n'
     '          ALTRO_API_KEY: ${{ secrets.BETRELAY_GPT }}\n'
     '          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n'
+    # Forma FRA VIRGOLETTE: la prima versione del lookahead la lasciava passare al
+    # redattore, perche' guardava subito dopo i due punti e trovava la virgoletta
+    # invece del dollaro. Segnalato da Sourcery, ed e' una forma YAML comunissima.
+    '          QUOTATO_API_KEY: "${{ secrets.BETRELAY_FUGU }}"\n'
+    "          APICE_API_KEY: '${{ secrets.BETRELAY_FUGU }}'\n"
 )
 
 
@@ -558,12 +579,46 @@ def test_un_riferimento_a_secrets_non_viene_maciullato(path):
     redact = _funzione_redact(path)
     ripulito = redact(YAML_CON_SEGRETO)
 
-    for nome_secret in ('BETRELAY_FABLE', 'BETRELAY_GPT'):
+    for nome_secret in ('BETRELAY_FABLE', 'BETRELAY_GPT', 'BETRELAY_FUGU'):
         assert nome_secret in ripulito, (
             f'il nome del Secret {nome_secret} e- stato cancellato dalla redazione: '
             f'il reviewer non puo- giudicare se e- quello giusto.\n{ripulito}'
         )
-    assert '${{' in ripulito, f'la sintassi delle espressioni e- stata distrutta:\n{ripulito}'
+    assert ripulito.count('${{') == YAML_CON_SEGRETO.count('${{'), (
+        f'{ripulito.count("${{")} espressioni sopravvissute su '
+        f'{YAML_CON_SEGRETO.count("${{")}: contarle e- l\'unico modo di accorgersi che '
+        f'una FORMA (fra virgolette, con apici) viene ancora maciullata mentre le '
+        f'altre passano.\n{ripulito}'
+    )
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_l_esenzione_copre_solo_l_espressione_COMPLETA(path):
+    """Segnalato da CodeRabbit, ed e- la direzione pericolosa dell'esenzione.
+
+    Esentare qualunque valore che COMINCI con un'espressione lascia uscire cio-
+    che le sta accanto: in `API_KEY: <espressione>segreto-letterale` il suffisso
+    non e- un puntatore, e- un segreto, e nessun altro pattern della tabella lo
+    riconosce. L'esenzione vale quindi solo se il valore e- INTERAMENTE una
+    espressione — dopo la chiusura non deve restare altro che una virgoletta.
+
+    Il test precedente (le forme fra virgolette) e questo tirano in direzioni
+    opposte, ed e- il punto: servono entrambi perche- l'esenzione stia esattamente
+    dove deve.
+    """
+    redact = _funzione_redact(path)
+    for riga, atteso in (
+        ('API_KEY: ${{ secrets.NOME }}suffisso-che-e-un-segreto\n', True),
+        ('TOKEN = ${{ secrets.NOME }}coda-letterale\n', True),
+        ('API_KEY: ${{ secrets.NOME }}\n', False),
+        ('API_KEY: "${{ secrets.NOME }}"\n', False),
+    ):
+        ripulito = redact(riga)
+        redatto = '[REDACTED]' in ripulito
+        assert redatto is atteso, (
+            f'{path.name}: {"atteso redatto" if atteso else "atteso esente"} ma '
+            f'ho ottenuto {ripulito.strip()!r} da {riga.strip()!r}'
+        )
 
 
 @pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
@@ -631,6 +686,24 @@ def test_ogni_workflow_ha_un_tier_di_escalation_del_budget(path):
     for chiave in ('MAX_TOTAL_PATCH_CHARS_ESCALATED', 'MAX_PATCH_PER_FILE_CHARS_ESCALATED'):
         assert chiave in sorgente, f'{path.name}: manca {chiave}'
 
+    # La presenza non basta: un tier dichiarato ma piu' basso del riferimento
+    # sarebbe un'escalation che non escala. Segnalato da Sourcery.
+    def budget(p: Path, chiave: str) -> int:
+        doc = _carica(p)
+        env = {**(doc.get('env') or {}), **(doc['jobs']['review'].get('env') or {})}
+        assert chiave in env, f'{p.name}: {chiave} non nel blocco env'
+        return int(str(env[chiave]))
+
+    for chiave in ('MAX_TOTAL_PATCH_CHARS_ESCALATED', 'MAX_PATCH_PER_FILE_CHARS_ESCALATED'):
+        assert budget(path, chiave) >= budget(FABLE, chiave), (
+            f'{path.name}: {chiave}={budget(path, chiave)} e- sotto il riferimento '
+            f'{FABLE.name}={budget(FABLE, chiave)}: l\'escalation non escala'
+        )
+        assert budget(path, chiave) > budget(path, chiave.replace('_ESCALATED', '')), (
+            f'{path.name}: {chiave} non e- maggiore del budget base: il tier alto '
+            f'non aggiunge niente e la ricostruzione e- solo una spesa in piu-'
+        )
+
 
 # ------------------------------------------- SINTASSI dello script incorporato
 
@@ -643,12 +716,21 @@ def _script_python(path: Path) -> tuple[str, str]:
     opzionale un job rosso somiglia molto a un reviewer che non ha niente da dire.
     """
     doc = _carica(path)
+    trovati = []
     for step in doc['jobs']['review']['steps']:
         run = step.get('run') or ''
-        m = re.search(r"python3?\s+(?:-\s+)?<<\s*'?(\w+)'?\n(.*?)\n\1\s*$", run, re.S | re.M)
-        if m:
-            return m.group(2), step.get('name', '?')
-    raise AssertionError(f'{path.name}: nessuno script Python trovato nello step di review')
+        for m in re.finditer(r"python3?\s+(?:-\s+)?<<\s*'?(\w+)'?\n(.*?)\n\1\s*$", run, re.S | re.M):
+            trovati.append((m.group(2), step.get('name', '?')))
+    assert trovati, f'{path.name}: nessuno script Python trovato nello step di review'
+    # Deterministico, non "il primo che capita": segnalato da Sourcery. Se un
+    # domani ne comparisse un secondo, prendere il primo in silenzio farebbe
+    # compilare il pezzo sbagliato e il test direbbe verde sul file non letto.
+    assert len(trovati) == 1, (
+        f'{path.name}: {len(trovati)} script Python nello step di review '
+        f'({", ".join(n for _, n in trovati)}): l\'estrattore non sa quale controllare, '
+        f'va reso esplicito prima di fidarsi di questo test'
+    )
+    return trovati[0]
 
 
 @pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
@@ -689,4 +771,34 @@ def test_la_lista_di_priorita_e_identica_nei_tre_workflow(path):
     assert estrai(path) == estrai(FABLE), (
         f'{path.name}: la lista di priorita\' del payload differisce da quella di '
         f'{FABLE.name}. Tre copie che divergono sono tre reviewer che leggono file diversi.'
+    )
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_lo_script_non_contiene_espressioni_di_actions_letterali(path):
+    """Dentro lo script non si scrive la forma dollaro-graffa-graffa, nemmeno nei commenti.
+
+    Actions interpola quelle espressioni in TUTTO il file di workflow, `run:`
+    compreso: non sono testo inerte. Misurato scrivendone tre in un commento di
+    questi stessi workflow — una puntava a un Secret vero, quindi il suo VALORE
+    sarebbe finito nel sorgente dello script — e i tre workflow hanno smesso di
+    caricare del tutto: tre run con `event: push`, zero job, e il nome mostrato
+    come percorso del file invece del `name:` del workflow.
+
+    Il modo giusto di parlarne in un commento e' descriverla, o scriverla nella
+    forma escapata che la regex usa comunque.
+
+    Nota sull'ambito: qui si guarda SOLO lo script incorporato. Nel resto del
+    workflow le espressioni sono legittime e necessarie — `env:`, `if:`,
+    `concurrency:` — e vietarle la' romperebbe tutto.
+    """
+    corpo, nome_step = _script_python(path)
+    colpevoli = [
+        (n, riga.strip()) for n, riga in enumerate(corpo.splitlines(), 1)
+        if '${{' in riga
+    ]
+    assert not colpevoli, (
+        f'{path.name}: espressione di Actions letterale nello script dello step '
+        f'"{nome_step}" — verra- interpolata prima dell\'esecuzione:\n  '
+        + '\n  '.join(f'riga {n}: {r[:100]}' for n, r in colpevoli)
     )
