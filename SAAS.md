@@ -183,6 +183,21 @@ distinguono senza conservare il segnale di un cliente in una variabile del
 processo. Il log segue la stessa regola, altrimenti 90 secondi di righe identiche
 renderebbero illeggibile proprio il log che serve a capire.
 
+La chiave della deduplica è la **coppia profilo + riga**, non la riga sola, e la
+distinzione è nata da un bloccante di Fable 5 confermato da GPT-5.5: con un digest
+unico per processo il contatore sbagliava in due modi opposti, entrambi misurati e
+ora fissati da test. Due profili con la **stessa** riga guasta contavano 1 invece
+di 2 — un guasto che colpisce due clienti si leggeva come se ne avesse colpito
+uno; due profili con righe guaste **diverse** contavano 12 richieste su 12, perché
+l'impronta globale cambiava a ogni hit essendo quella dell'altro profilo, cioè di
+nuovo la raffica che la deduplica doveva eliminare. In un servizio multiutente su
+una sola istanza è lo scenario normale, non un caso limite.
+
+Sul singolo profilo la voce è l'ultima riga scartata, non un insieme: due righe
+guaste alternate sullo stesso feed contano a ogni cambio, ed è voluto — un feed che
+oscilla fra due righe invalide è un guasto, non un evento unico. La mappa cresce di
+una voce per profilo con un feed guasto, quindi è limitata dal numero di profili.
+
 Il contatore **non** fa scattare `degraded`, di proposito: lo scarto atteso — la
 riga della versione precedente, subito dopo un deploy — è benigno e si risolve da
 sé col TTL, quindi marcarlo `degraded` terrebbe il processo «malato» per tutta la

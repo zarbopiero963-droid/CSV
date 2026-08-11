@@ -199,9 +199,21 @@ def empty_csv():
 # vero. Il riconoscimento passa da un digest: distingue due righe diverse senza
 # conservare il segnale di un cliente in una variabile globale.
 #
-# `impronta` e' il digest dell'ultima riga scartata, non un insieme: due righe
-# guaste alternate vengono contate a ogni cambio, ed e' voluto — un feed che
-# oscilla fra due righe invalide e' un guasto, non un evento unico.
+# La chiave della deduplica e' la COPPIA profilo+riga, non la riga sola. Con un
+# digest globale il contatore sbagliava in due modi opposti, entrambi misurati su
+# 32d00ae e segnalati da Fable 5 e GPT-5.5:
+#
+#   - due profili con la STESSA riga guasta contavano 1 invece di 2, perche' il
+#     secondo risultava «gia' visto»: un guasto che colpisce due clienti si
+#     leggeva come se ne avesse colpito uno;
+#   - due profili con righe guaste DIVERSE contavano 12 richieste su 12, perche'
+#     l'impronta globale cambiava a ogni hit essendo quella dell'altro profilo —
+#     cioe' di nuovo la raffica che la deduplica doveva eliminare, ricomparsa in
+#     scenario multiutente, che e' proprio quello verso cui va questo servizio.
+#
+# Per un singolo profilo la voce e' l'ultima riga scartata, non un insieme: due
+# righe guaste alternate sullo stesso feed contano a ogni cambio, ed e' voluto —
+# un feed che oscilla fra due righe invalide e' un guasto, non un evento unico.
 #
 # Vive in memoria di proposito: e' una spia di salute del processo, non un dato da
 # conservare, e non deve aggiungere una scrittura sul percorso di consegna. Ne
@@ -215,8 +227,14 @@ def _scarti_azzerati():
 
     Esiste perche' anche i test devono azzerarlo: una copia del dizionario
     scritta a mano la' divergerebbe da questa al primo campo aggiunto.
+
+    `impronte` e' una mappa profilo -> digest, non un digest solo: la chiave della
+    deduplica e' la COPPIA profilo+riga. Una impronta globale sbagliava in due
+    modi opposti, entrambi misurati e fissati da test — vedi il commento sotto.
+    Cresce di una voce per profilo con un feed guasto, quindi e' limitata dal
+    numero di profili e si azzera al riavvio.
     """
-    return {'n': 0, 'ultimo': '', 'impronta': ''}
+    return {'n': 0, 'ultimo': '', 'impronte': {}}
 
 
 _SCARTI_CONSEGNA = _scarti_azzerati()
@@ -226,6 +244,30 @@ _SCARTI_CONSEGNA = _scarti_azzerati()
 # senza di esso il contatore perderebbe proprio gli incrementi sotto il carico in
 # cui conta di piu'.
 _SCARTI_LOCK = threading.Lock()
+
+
+def _registra_scarto(profile, csv_scartato, motivo):
+    """Registra uno scarto di consegna. Restituisce True se la riga e' nuova.
+
+    Sta in una funzione propria per due ragioni. La prima e' che la sezione
+    critica diventa esercitabile da un test: chiamata attraverso `profile_csv()`
+    e' preceduta dall'apertura del database, che serializza i thread e rende la
+    race irriproducibile — misurato, il lock si puo' togliere e un test di
+    concorrenza sul percorso completo resta verde. La seconda e' che chi domani
+    aggiungera' un secondo punto di degradazione trova qui la logica, invece di
+    ricopiarla.
+
+    Non solleva: e' chiamata dal percorso di consegna, dove un errore
+    diventerebbe un 500 verso XTrader.
+    """
+    impronta = hashlib.sha256(csv_scartato.encode('utf-8', 'replace')).hexdigest()[:16]
+    with _SCARTI_LOCK:
+        riga_nuova = _SCARTI_CONSEGNA['impronte'].get(profile) != impronta
+        if riga_nuova:
+            _SCARTI_CONSEGNA['n'] += 1
+            _SCARTI_CONSEGNA['impronte'][profile] = impronta
+        _SCARTI_CONSEGNA['ultimo'] = str(motivo)
+    return riga_nuova
 
 
 def profile_csv(profile, token):
@@ -253,16 +295,11 @@ def profile_csv(profile, token):
             # strutturali (conteggi, posizioni, numeri di riga) e /health e' un
             # endpoint senza token. Il nome del profilo resta nel log del server,
             # dove serve per la diagnosi e dove non e' un segreto: e' gia' nell'URL.
-            impronta = hashlib.sha256(r[0].encode('utf-8', 'replace')).hexdigest()[:16]
-            with _SCARTI_LOCK:
-                riga_nuova = impronta != _SCARTI_CONSEGNA['impronta']
-                if riga_nuova:
-                    _SCARTI_CONSEGNA['n'] += 1
-                    _SCARTI_CONSEGNA['impronta'] = impronta
-                _SCARTI_CONSEGNA['ultimo'] = str(e)
             # Il log segue il contatore: righe identiche a ogni richiesta per 90
             # secondi renderebbero illeggibile proprio il log che serve a capire.
-            if riga_nuova:
+            # Il log sta fuori dal lock di proposito: non si tiene un lock durante
+            # l'I/O.
+            if _registra_scarto(profile, r[0], e):
                 logging.getLogger('xtrader.relay').warning(
                     'feed del profilo %s degradato a sola intestazione: %s', profile, e)
             body = empty_csv()

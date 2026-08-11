@@ -293,6 +293,219 @@ def test_la_stessa_riga_guasta_conta_UNO_non_uno_per_richiesta(tmp_path, monkeyp
     )
 
 
+def test_due_profili_guasti_non_fanno_salire_il_contatore_a_raffica(tmp_path, monkeypatch):
+    """Bloccante di Fable 5, confermato da GPT-5.5: la deduplica era GLOBALE.
+
+    Con una sola impronta per tutto il processo, due clienti che hanno ciascuno
+    una riga guasta — lo scenario normale del post-deploy su un'istanza con piu-
+    profili — bastano a rompere tutto: XTrader interroga i due feed alternandoli,
+    l-impronta cambia a ogni richiesta perche- e- quella dell-ALTRO profilo, e il
+    contatore sale a raffica. Cioe- esattamente il falso positivo che la deduplica
+    doveva eliminare, ricomparso dalla porta di servizio in scenario multiutente.
+
+    La chiave e- quindi la coppia profilo+riga: due profili guasti valgono due, e
+    restano due per quante volte li si interroghi.
+    """
+    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'test.db'))
+    monkeypatch.setattr(main, '_SCARTI_CONSEGNA', main._scarti_azzerati())
+    vecchia = main.make_csv(RIGA_VALIDA)[len(main.CSV_BOM):]
+
+    c = main.db()
+    try:
+        c.execute('INSERT OR IGNORE INTO profiles(name,chat_ids,parser) VALUES (?,?,?)',
+                  ('SECONDO', '', main.DEFAULT_PARSER))
+        for profilo in ('PIERO', 'SECONDO'):
+            c.execute('INSERT INTO signals(csv,parser,profile,expires_at) VALUES (?,?,?,?)',
+                      (vecchia, 'parser-finto', profilo, 2 ** 31 - 1))
+        c.commit()
+    finally:
+        c.close()
+
+    # XTrader alterna i due feed, come fa in produzione.
+    for _ in range(6):
+        for profilo in ('PIERO', 'SECONDO'):
+            main.profile_csv(profilo, None)
+
+    assert main._SCARTI_CONSEGNA['n'] == 2, (
+        f'due profili con una riga guasta IDENTICA hanno prodotto '
+        f'{main._SCARTI_CONSEGNA["n"]} scarti invece di 2: con una sola impronta '
+        f'globale il secondo profilo risulta «gia- visto», e un guasto che colpisce '
+        f'due clienti si legge come se ne avesse colpito uno'
+    )
+
+
+def test_due_profili_con_righe_guaste_DIVERSE_non_salgono_a_raffica(tmp_path, monkeypatch):
+    """L'altra faccia dello stesso bloccante, ed e- quella che Fable 5 descrive.
+
+    Con righe guaste DIVERSE su due profili, l-impronta globale cambiava a ogni
+    richiesta perche- era quella dell-altro profilo: ogni singola hit contava, e il
+    contatore saliva a raffica. Due difetti opposti — sottostima con righe uguali,
+    sovrastima con righe diverse — dalla stessa causa: la chiave senza il profilo.
+    """
+    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'test.db'))
+    monkeypatch.setattr(main, '_SCARTI_CONSEGNA', main._scarti_azzerati())
+
+    c = main.db()
+    try:
+        c.execute('INSERT OR IGNORE INTO profiles(name,chat_ids,parser) VALUES (?,?,?)',
+                  ('SECONDO', '', main.DEFAULT_PARSER))
+        # Due righe guaste diverse: una senza BOM, una con troppi pochi campi.
+        guaste = {
+            'PIERO': main.make_csv(RIGA_VALIDA)[len(main.CSV_BOM):],
+            'SECONDO': main.CSV_BOM + INTESTAZIONE + '\r\n' + ','.join('"z"' for _ in range(13)) + '\r\n',
+        }
+        for profilo, riga in guaste.items():
+            c.execute('INSERT INTO signals(csv,parser,profile,expires_at) VALUES (?,?,?,?)',
+                      (riga, 'parser-finto', profilo, 2 ** 31 - 1))
+        c.commit()
+    finally:
+        c.close()
+
+    for _ in range(6):
+        for profilo in ('PIERO', 'SECONDO'):
+            main.profile_csv(profilo, None)
+
+    assert main._SCARTI_CONSEGNA['n'] == 2, (
+        f'dodici richieste alternate su due profili con righe guaste diverse hanno '
+        f'prodotto {main._SCARTI_CONSEGNA["n"]} scarti invece di 2: il contatore sale '
+        f'a raffica ed e- il falso positivo che la deduplica doveva eliminare'
+    )
+
+
+def test_richieste_CONCORRENTI_sullo_stesso_feed_contano_una_volta(tmp_path, monkeypatch):
+    """Il lock esercitato davvero, non solo dichiarato.
+
+    Chiesto da GPT-5.5, e CLAUDE.md elenca «richieste concorrenti sullo stesso
+    parser» fra gli scenari di resilienza obbligatori. Gli handler di FastAPI sono
+    sincroni, quindi girano nel threadpool: senza lock la lettura dell-impronta e
+    l-incremento sono una race.
+
+    Questo test copre il percorso COMPLETO e prova che sotto 60 richieste
+    concorrenti nessuna solleva, nessun thread si blocca e la deduplica regge.
+    **Non** prova il lock, e va detto invece di lasciarlo credere: misurato, con il
+    lock sostituito da un `nullcontext` questo test resta verde 8 volte su 8,
+    perche- l-apertura del database precede la sezione critica e serializza i
+    thread molto prima che possano incrociarsi. Il lock e- esercitato dal test
+    accanto, che chiama `_registra_scarto()` direttamente.
+    """
+    import threading
+
+    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'test.db'))
+    monkeypatch.setattr(main, '_SCARTI_CONSEGNA', main._scarti_azzerati())
+    c = main.db()
+    try:
+        vecchia = main.make_csv(RIGA_VALIDA)[len(main.CSV_BOM):]
+        c.execute('INSERT INTO signals(csv,parser,profile,expires_at) VALUES (?,?,?,?)',
+                  (vecchia, 'parser-finto', 'PIERO', 2 ** 31 - 1))
+        c.commit()
+    finally:
+        c.close()
+
+    errori = []
+    pronti = threading.Barrier(12)
+
+    def tempesta():
+        try:
+            pronti.wait(timeout=10)  # tutti insieme, per massimizzare la race
+            for _ in range(5):
+                risposta = main.profile_csv('PIERO', None)
+                assert risposta.body.decode('utf-8').startswith('\ufeff')
+        except Exception as exc:  # noqa: BLE001 - va riportato, non ingoiato
+            errori.append(exc)
+
+    fili = [threading.Thread(target=tempesta) for _ in range(12)]
+    for f in fili:
+        f.start()
+    for f in fili:
+        f.join(timeout=30)
+
+    assert not errori, f'il percorso di consegna ha sollevato sotto concorrenza: {errori}'
+    assert all(not f.is_alive() for f in fili), 'un thread e- rimasto bloccato: sospetto deadlock'
+    assert main._SCARTI_CONSEGNA['n'] == 1, (
+        f'60 richieste concorrenti sulla stessa riga guasta hanno prodotto '
+        f'{main._SCARTI_CONSEGNA["n"]} scarti invece di 1'
+    )
+
+
+def test_il_lock_protegge_davvero_l_incremento(monkeypatch):
+    """Il lock, esercitato sulla sezione critica e non attraverso il database.
+
+    Sul percorso completo la race non e- riproducibile: l-apertura del database
+    serializza i thread prima che arrivino qui, e un test di concorrenza su
+    `profile_csv()` resta verde anche senza lock (misurato, 8 su 8). Chiamando
+    `_registra_scarto()` direttamente la sezione critica e- raggiungibile, e la
+    finestra fra la lettura dell-impronta e l-incremento si allarga sostituendo il
+    dizionario con uno che dorme dentro `get`.
+
+    Col lock i thread si serializzano: il primo registra, gli altri trovano
+    l-impronta gia- scritta, il totale resta 1. Senza lock leggono tutti `None`
+    insieme e incrementano tutti. Verificato in entrambe le direzioni.
+    """
+    import threading
+
+    class ImpronteLente(dict):
+        """Allarga la finestra fra lettura e scrittura dell'impronta.
+
+        L'ordine conta e la prima versione l'aveva sbagliato: dormendo PRIMA di
+        leggere, i thread in ritardo trovavano il valore che il primo aveva appena
+        scritto e il test restava verde anche senza lock. Il valore va catturato
+        per primo, poi si dorme: cosi- tutti tornano con lo stesso `None` che
+        avevano letto, che e- esattamente la race da riprodurre.
+        """
+
+        def get(self, chiave, default=None):
+            valore = super().get(chiave, default)
+            time.sleep(0.02)
+            return valore
+
+    stato = main._scarti_azzerati()
+    stato['impronte'] = ImpronteLente()
+    monkeypatch.setattr(main, '_SCARTI_CONSEGNA', stato)
+
+    guasto = main.make_csv(RIGA_VALIDA)[len(main.CSV_BOM):]
+    pronti = threading.Barrier(10)
+    errori = []
+
+    def registra():
+        try:
+            pronti.wait(timeout=10)
+            main._registra_scarto('PIERO', guasto, 'motivo finto')
+        except Exception as exc:  # noqa: BLE001 - va riportato, non ingoiato
+            errori.append(exc)
+
+    fili = [threading.Thread(target=registra) for _ in range(10)]
+    for f in fili:
+        f.start()
+    for f in fili:
+        f.join(timeout=30)
+
+    assert not errori, f'_registra_scarto ha sollevato sotto concorrenza: {errori}'
+    assert all(not f.is_alive() for f in fili), 'un thread e- rimasto bloccato: sospetto deadlock'
+    assert main._SCARTI_CONSEGNA['n'] == 1, (
+        f'dieci thread sulla stessa riga guasta hanno prodotto '
+        f'{main._SCARTI_CONSEGNA["n"]} scarti invece di 1: la sezione critica non e- '
+        f'protetta e la lettura dell-impronta corre con l-incremento'
+    )
+
+
+def test_registra_scarto_distingue_i_profili(monkeypatch):
+    """La chiave e- la coppia profilo+riga, verificata sulla funzione stessa.
+
+    Il test sul percorso completo lo prova end-to-end; questo lo fissa sull-unita-,
+    cosi- un fallimento dice subito se il difetto e- nella chiave o nel giro attorno.
+    """
+    monkeypatch.setattr(main, '_SCARTI_CONSEGNA', main._scarti_azzerati())
+    guasto = main.make_csv(RIGA_VALIDA)[len(main.CSV_BOM):]
+
+    assert main._registra_scarto('PIERO', guasto, 'x') is True, 'la prima riga e- nuova'
+    assert main._registra_scarto('PIERO', guasto, 'x') is False, 'la stessa riga non e- nuova'
+    # Stessa riga, profilo diverso: e- un secondo cliente colpito, va contato.
+    assert main._registra_scarto('SECONDO', guasto, 'x') is True, \
+        'la stessa riga su un altro profilo e- un altro cliente colpito'
+    assert main._SCARTI_CONSEGNA['n'] == 2
+    assert set(main._SCARTI_CONSEGNA['impronte']) == {'PIERO', 'SECONDO'}
+
+
 def test_l_impronta_non_conserva_il_contenuto_del_segnale(tmp_path, monkeypatch):
     """La deduplica ha bisogno di riconoscere la riga, non di conservarla.
 
