@@ -267,9 +267,19 @@ review/inline/thread triage · final hard verify.
 > 2. la **creazione** delle label `final-fable-review` e `final-fugu-review`. Senza, aggiungerle via
 >    API dà 404 e il gate finale non si arma.
 >
-> **Stato al 2026-08-11: fatte entrambe.** I tre Secret sono configurati e le due label esistono nel
-> repo, quindi i reviewer girano davvero e il gate finale è armabile. Il `::notice` «non configurato»
-> nei log delle PR precedenti alla #1 resta la prova di com'era prima, non di com'è.
+> **Stato al 2026-08-11.** Entrambe le azioni sono state fatte dal proprietario. Cosa è **misurato** e
+> cosa è **riferito**, perché la differenza è il motivo per cui questo file esiste:
+>
+> | Cosa | Come lo so |
+> |---|---|
+> | Label `final-fable-review`, `final-fugu-review` | **misurato**: `GET /labels/{name}` risponde 200, non più 404 |
+> | Secret `BETRELAY_GPT` | **misurato**: il job GPT-5.5 su `7e86517` ha chiamato il modello e riportato 4572 token di uso |
+> | Secret `BETRELAY_FABLE`, `BETRELAY_FUGU` | **riferito dal proprietario**, non ancora provato da un log: su un push non-core i due job escono senza spendere, quindi il primo log che lo dimostrerà è quello del gate finale a label |
+>
+> Regola che ne segue, e vale per chiunque legga: **un check verde non è prova di review.** Va letto il
+> log e cercata la riga d'uso token. Se compare un `::notice` «non configurato», quel reviewer non ha
+> letto niente. E non scrivere qui che un Secret esiste prima di aver visto il log che lo usa: è lo
+> stesso errore per cui il contratto CSV è rimasto per mesi «verificato byte per byte» senza esserlo.
 >
 > **Non confondere queste due con il riarmo, che invece è ricorrente e spetta all'agente.** I Secret
 > si configurano una volta e valgono per sempre; le label si creano una volta e restano nel repo. Ma
