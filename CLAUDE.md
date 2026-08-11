@@ -32,6 +32,8 @@ Il merge resta sempre manuale del repository owner.
 | Deploy | `Procfile`, `railway.json`, `requirements.txt` |
 | Workflow di review AI (GPT-5.5, Fable 5, Fugu Ultra) | `.github/workflows/pr-review-*.yml` |
 | Guardia sui workflow di review | `tests/safety/test_ai_audit_workflows.py` |
+| Test del motore e del contratto CSV (casi eseguiti in node) | `tests/engine/engine_cases.mjs`, `tests/engine/test_engine_contract.py` |
+| Test del prototipo in browser (Playwright/Chromium) | `tests/web/prototype_flow.py`, `tests/web/mobile_layout.py`, `tests/web/test_prototype_flow.py` |
 | Dipendenze dei soli test | `requirements-dev.txt` |
 
 **File core del bridge** (per i gate di review e per la soglia di attenzione):
@@ -253,16 +255,23 @@ review/inline/thread triage · final hard verify.
 > (`pr-review-openrouter-fugu-ultra.yml`). **GLM 5.2 non è stato importato**, quindi qui i reviewer
 > a API key sono tre, non quattro.
 >
-> Perché funzionino servono due cose, azione del proprietario una volta sola:
+> Perché funzionino servono due cose, **azione del proprietario una volta sola**:
 >
 > 1. i Secret del repo — `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`. Senza, i job
 >    partono, stampano un `::notice` «API key non configurata» ed escono **verdi senza chiamare il
 >    modello**: non falliscono. Il check verde non è quindi prova di review — va letto il log.
 >    L'agente non vede mai le chiavi.
-> 2. le label `final-fable-review` e `final-fugu-review`. Senza, aggiungerle via API dà 404 e il
->    gate finale non si arma.
+> 2. la **creazione** delle label `final-fable-review` e `final-fugu-review`. Senza, aggiungerle via
+>    API dà 404 e il gate finale non si arma.
 >
-> Finché una delle due manca, l'agente lo dichiara invece di sostenere che le review finali sono
+> **Non confondere queste due con il riarmo, che invece è ricorrente e spetta all'agente.** I Secret
+> si configurano una volta e valgono per sempre; le label si creano una volta e restano nel repo. Ma
+> *applicarle* va rifatto a ogni head stabile: rimuovere e riaggiungere `final-fable-review` e
+> `final-fugu-review` dopo ogni push (vedi «Un push dopo l'armamento rende il gate STANTIO»). Il
+> riarmo gata **solo** le due review finali Fable/Fugu — GPT-5.5 gira comunque a ogni push, e i
+> reviewer GitHub App non dipendono dalle label.
+>
+> Finché Secret o label mancano, l'agente lo dichiara invece di sostenere che le review finali sono
 > state fatte. Il set di file core è vincolato da `tests/safety/test_ai_audit_workflows.py`.
 
 Due reviewer AI forti e costosi (Claude Fable 5, Fugu Ultra) non girano a ogni push come
@@ -669,11 +678,17 @@ Puoi continuare solo se `POST_FIX_AUDIT=PASS`.
 
 ## TEST HARD VERITIERI — OBBLIGATORIO
 
-> **Stato in questo repository:** `tests/` esiste e contiene per ora
-> `tests/safety/test_ai_audit_workflows.py`, la guardia sui workflow di review. Le dipendenze dei
-> test stanno in `requirements-dev.txt`, separate da quelle del deploy:
-> `pip install -r requirements-dev.txt && python -m pytest -q`. Il relay e il motore di parsing non
-> hanno ancora test: il primo task che li tocca li crea.
+> **Stato in questo repository:** `tests/` contiene tre cartelle —
+> `tests/safety/` (guardia sui workflow di review), `tests/engine/` (contratto CSV e motore di
+> parsing, casi eseguiti in node sul vero `web/engine.js`) e `tests/web/` (flusso del prototipo e
+> layout mobile, pilotati da Playwright su Chromium). Le dipendenze dei test stanno in
+> `requirements-dev.txt`, separate da quelle del deploy:
+> `pip install -r requirements-dev.txt && python -m pytest -q`.
+>
+> **Nessun workflow CI esegue questi test:** girano solo in locale. Un check verde su una PR non
+> dice niente sul loro esito, e i casi che richiedono `node` o Chromium si **saltano** dove quei
+> runtime mancano. Chi dichiara i test passati deve aver eseguito il comando e riportato l'output.
+> Il relay (`main.py`) resta senza test propri: il primo task che ne cambia il comportamento li crea.
 
 I test devono essere veri, mirati e verificabili. Non puoi dire che un test è passato se non hai
 realmente eseguito il comando e visto esito positivo.
@@ -1225,10 +1240,10 @@ installate in posti diversi. Aspetta i loro check, leggi i loro commenti, fai il
 | Manca | Conseguenza per l'agente |
 |---|---|
 | Secret `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY` | senza chiave i tre workflow **escono verdi senza revisionare** (`::notice` nei log): verificato sulla PR #1. Un check verde non prova che un modello abbia letto il diff — leggi sempre i log. Azione del proprietario. |
-| Label `final-fable-review`, `final-fugu-review` | da creare una volta sola; senza, aggiungerle via API dà 404 e il gate finale non si arma. |
+| Label `final-fable-review`, `final-fugu-review` | da **creare** una volta sola (azione del proprietario); senza, aggiungerle via API dà 404 e il gate finale non si arma. **Applicarle** è invece ricorrente e spetta all'agente: rimuovere e riaggiungere a ogni head stabile. |
 | Workflow GLM 5.2 | non importato per scelta: i reviewer a API key qui sono tre. Non contarlo né aspettarlo. |
 | Workflow di build/test propri del repo | non esistono: `pytest` va eseguito localmente, nessun check CI lo esegue. |
-| Test del relay e del motore di parsing | `tests/` contiene solo la guardia sui workflow. Il primo task che tocca `main.py` o `web/engine.js` crea i suoi. |
+| Test del relay (`main.py`) | `tests/` copre i workflow (`tests/safety/`), il motore e il contratto CSV (`tests/engine/`) e il prototipo in browser (`tests/web/`), ma **non** il relay: il primo task che cambia il comportamento di `main.py` crea i suoi. |
 | `docs/` | i documenti del Bridge citati sopra non esistono qui e non vanno inventati. |
 | `AGENTS.md` | questo file è autosufficiente; se AGENTS.md verrà aggiunto, ha precedenza. |
 | Motore di parsing Python | oggi il motore vive solo in `web/engine.js`. Quando nascerà quello Python, la regola 3 diventa vincolante su entrambi. |

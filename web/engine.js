@@ -138,7 +138,13 @@ export const REQUIRED_COLUMNS = ['Provider', 'EventName'];
 export function runParser(message, config) {
   const matched = matches(message, config.match);
   const row = COLUMNS.map(c => extractValue(message, (config.columns || {})[c]));
-  const missing = REQUIRED_COLUMNS.filter(c => !row[COLUMNS.indexOf(c)]);
+  // Il valore va normalizzato prima del confronto: " " e' truthy, quindi senza
+  // trim una colonna obbligatoria fatta di soli spazi passerebbe per valorizzata
+  // e il feed riceverebbe una riga quotata e priva di senso. Non basta il `trim`
+  // fra le trasformazioni della regola: quello e' opzionale e lo decide l'utente
+  // nel wizard, mentre questo controllo e' il pavimento che non deve dipendere
+  // dalla configurazione.
+  const missing = REQUIRED_COLUMNS.filter(c => !String(row[COLUMNS.indexOf(c)] ?? '').trim());
   return { matched, row, missing, complete: matched && missing.length === 0 };
 }
 

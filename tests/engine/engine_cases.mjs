@@ -169,6 +169,44 @@ caso('parser: segnale valido e- completo', () => {
   return 'ok';
 });
 
+caso('parser: EventName di soli spazi vale come mancante (regola SENZA trim)', () => {
+  const cfg = configProduzione();
+  // La riga esiste, il marcatore combacia, ma dopo il marcatore c-e- solo spazio.
+  //
+  // La regola di produzione ha una trasformazione `trim` che azzera il valore e
+  // maschera il difetto: il controllo delle colonne obbligatorie risulterebbe
+  // corretto solo per merito della configurazione. Qui il `trim` viene TOLTO,
+  // perche- l-utente che costruisce un parser dal wizard non e- obbligato ad
+  // aggiungerlo, e senza normalizzazione " " e- truthy: `complete` diventa true e
+  // api.js scrive una riga quotata con l-evento vuoto.
+  cfg.columns.EventName = { source: 'line', anchor: VS, part: 'after', marker: VS };
+  const r = runParser(`P.Bet. PREMACHT 0,5HT\n${VS}    `, cfg);
+  eq(r.matched, true, 'la condizione combacia');
+  eq(r.missing.includes('EventName'), true, 'EventName di soli spazi va elencato come mancante');
+  eq(r.complete, false, 'una riga con evento di soli spazi non va scritta');
+  return r.missing;
+});
+
+caso('parser: il trim della config non e- l-unica difesa (EventName con trim)', () => {
+  // Il gemello del caso sopra: con la regola di produzione, che il `trim` ci sia
+  // o no, l-esito deve essere lo stesso. Se un giorno il controllo tornasse a
+  // fidarsi della trasformazione, questo caso resta verde e l-altro diventa rosso.
+  const r = runParser(`P.Bet. PREMACHT 0,5HT\n${VS}    `, configProduzione());
+  eq(r.complete, false, 'evento vuoto dopo il trim: nessuna riga');
+  return r.missing;
+});
+
+caso('parser: Provider di soli spazi vale come mancante', () => {
+  const cfg = configProduzione();
+  // Stessa classe di difetto su una colonna alimentata da una costante: una
+  // costante fatta di spazi e- una configurazione vuota, non un valore.
+  cfg.columns.Provider = { source: 'constant', value: '   ' };
+  const r = runParser(MSG_VALIDO, cfg);
+  eq(r.missing.includes('Provider'), true, 'Provider di soli spazi va elencato come mancante');
+  eq(r.complete, false, 'nessuna riga con Provider di soli spazi');
+  return r.missing;
+});
+
 caso('parser: Price NON e- obbligatoria (main.py la lascia vuota)', () => {
   if (!Array.isArray(REQUIRED_COLUMNS)) throw new Error('engine.js non esporta REQUIRED_COLUMNS');
   eq(REQUIRED_COLUMNS.includes('Price'), false,

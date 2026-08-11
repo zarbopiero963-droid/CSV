@@ -127,6 +127,15 @@ sono `Provider` ed `EventName`. **`Price` non è obbligatoria:** il parser in
 produzione (`main.py`) la lascia vuota perché la quota la mette XTrader dal
 proprio book, quindi pretenderla bloccherebbe i segnali reali.
 
+Il valore di una colonna obbligatoria viene **normalizzato** prima del controllo:
+uno spazio è un carattere, quindi `" "` senza `trim` risulterebbe valorizzato e
+`complete` diverrebbe vero su una riga priva di evento. La normalizzazione sta
+nel motore e non fra le trasformazioni della regola, perché il `trim` della
+regola è opzionale e lo decide l'utente nel wizard: se il pavimento dipendesse
+dalla configurazione, sarebbe corretto solo per i parser configurati bene. **Il
+motore Python deve normalizzare allo stesso modo**, o le due implementazioni
+divergono sul caso limite invece che sul caso normale, cioè dove nessuno guarda.
+
 Il formato di uscita non cambia ed è il contratto con XTrader: 14 colonne, tutti
 i campi tra virgolette, separatore virgola, terminatore CRLF, UTF-8 senza BOM.
 
