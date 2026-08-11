@@ -476,6 +476,36 @@ diff-per-push (un reviewer che ha visto solo l'ultimo commit e crede «mancante�
 che sta in un commit precedente della stessa PR) — a quelli rispondi nel thread con l'evidenza,
 mai con un commit.
 
+**Prima di trattare un bloccante come reale, leggi «File non inviati al modello».** Ogni review
+stampa in fondo l'elenco dei file che il workflow **non** gli ha mandato. Se il file citato dal
+bloccante è in quell'elenco, il bloccante è sullo strumento, non sul codice: il modello segnala
+correttamente di non poter verificare, ma la cosa va risolta con l'evidenza nel thread, non con una
+patch. Sulla PR #8 sono stati tre bloccanti su tre, tutti su `web/engine.js`.
+
+Quell'elenco è ora molto più corto, ma non è vuoto per definizione. I tre workflow ordinano il
+payload per **priorità** prima di consumare il budget — `PRIORITA_PAYLOAD`: prima il codice
+(`main.py`, `web/`, `tools/`, deploy, workflow), poi i test, poi la documentazione. Prima non
+ordinavano niente e consumavano il budget nell'ordine dell'API GitHub, cioè **alfabetico**: `web/` è
+ultimo, quindi il motore di parsing era strutturalmente garantito di essere il primo file scartato,
+mentre `CLAUDE.md` entrava per intero. La lista vive in tre copie identiche perché i workflow non
+fanno checkout e non possono importare un modulo comune; `tests/safety/test_ai_audit_workflows.py` ne
+verifica la parità ed **esegue** il costruttore del payload su una lista di file finti, invece di
+controllarne la forma.
+
+**Quanto costano davvero.** Misurato sulla PR #8, sette head, 15 review addebitate: **$2,62** in
+totale. La distribuzione conta più del totale, perché decide dove risparmiare:
+
+| Reviewer | Review | Costo | Note |
+|---|---:|---:|---|
+| Claude Fable 5 | 7 | $1,65 | ~$0,36 per review finale sull'intera PR |
+| OpenRouter Fugu Ultra | 1 | $0,70 | **25× GPT-5.5 per review**, e quella era troncata |
+| GPT-5.5 | 7 | $0,28 | ~$0,04 per giro |
+
+Ne seguono due regole pratiche. **Il gate a label è la voce grossa** — un armamento completo costa
+~$1,06 (Fable finale + Fugu) — quindi si arma **una volta sola**, quando il lavoro è davvero finito:
+ogni push successivo lo rende stantio e il riarmo ripaga tutto. E **Fugu si tiene per l'ultimo head
+stabile**, non per i giri intermedi.
+
 **CI minutes.** Ogni push e ogni re-run consumano minuti GitHub Actions. Questo repository non ha
 runner Windows (nessuna build EXE qui), quindi il costo è inferiore a quello del Bridge, ma vale
 lo stesso: accorpa i fix in un solo push; niente commit vuoti o re-trigger a raffica; niente churn

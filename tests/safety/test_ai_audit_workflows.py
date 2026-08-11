@@ -420,3 +420,273 @@ def test_nessun_auto_merge():
         testo = path.read_text(encoding='utf-8').lower()
         for vietato in ('enable-pull-request-automerge', 'gh pr merge', 'automerge'):
             assert vietato not in testo, f'{path.name}: contiene {vietato}'
+
+
+# ---------------------------------------------- BLOCCANTI FANTASMA (Issue #6)
+#
+# Le review forti hanno alzato bloccanti su cose che il codice fa correttamente,
+# e la causa non era il modello: era l'input che il workflow gli manda. Due
+# meccanismi distinti, misurati sulla PR #8, che questi test vincolano.
+
+
+def _funzione_payload(path: Path):
+    """Estrae ed ESEGUE `build_patch_payload` dal workflow reale.
+
+    Stessa tecnica di `_funzione_redact`: il test non riscrive la logica di
+    budget, la esegue. Verificare per struttura («esiste un sort») passerebbe
+    anche con un ordinamento che non mette i file core davanti.
+    """
+    sorgente = _script(path)
+    nome = 'build_patch_payload' if 'build_patch_payload' in sorgente else 'costruisci_patch'
+    pezzi = []
+    for f in ('CRITICAL_PATTERNS = [', 'REDACTIONS = [', 'PRIORITA_PAYLOAD = ['):
+        blocco = re.search(r'^(\s*)' + re.escape(f) + r'.*?^\1\]', sorgente, re.S | re.M)
+        assert blocco, f'{path.name}: {f} non trovata'
+        pezzi.append(blocco.group(0))
+    for f in ('def redact(', 'def safe_display(', 'def is_critical(',
+              'def priorita_payload(', f'def {nome}('):
+        blocco = re.search(r'^(\s*)' + re.escape(f) + r'.*?(?=\n\1[A-Za-z_@]|\Z)', sorgente, re.S | re.M)
+        assert blocco, f'{path.name}: {f} non trovata'
+        pezzi.append(blocco.group(0))
+    spazio: dict = {'re': re}
+    for pezzo in pezzi:
+        exec(textwrap.dedent(pezzo), spazio)  # noqa: S102 - sorgente del repo
+    return spazio[nome]
+
+
+def _file_finto(nome: str, righe: int = 60):
+    """Un elemento della lista file come la restituisce l'API GitHub."""
+    patch = '\n'.join(f'+riga {i} di {nome}' for i in range(righe))
+    return {'filename': nome, 'status': 'modified', 'additions': righe,
+            'deletions': 0, 'changes': righe, 'patch': patch}
+
+
+# I 13 file della PR #8, nell'ordine in cui l'API GitHub li restituisce
+# (alfabetico). `web/` e' ULTIMO, ed e' il punto di tutto questo blocco.
+FILE_COME_LA_PR_8 = [
+    'CLAUDE.md', 'README.txt', 'SAAS.md', 'main.py',
+    'tests/ambiente.py', 'tests/engine/engine_cases.mjs',
+    'tests/engine/test_engine_contract.py', 'tests/relay/test_csv_contract.py',
+    'tests/safety/test_ambiente_dei_test.py', 'tests/web/prototype_flow.py',
+    'tests/web/test_prototype_flow.py', 'web/app.js', 'web/engine.js',
+]
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_i_file_core_entrano_nel_payload_anche_col_budget_stretto(path):
+    """Il motore non deve mai finire fra i file saltati per budget.
+
+    Misurato sulla PR #8: `web/engine.js` e `web/app.js` sono stati saltati da
+    TUTTE E QUATTRO le review finali, e i modelli hanno alzato tre bloccanti
+    «parita' JS/Python non verificabile». Non era sfortuna: il budget viene
+    consumato nell'ordine in cui l'API restituisce i file, cioe- ALFABETICO, e
+    `web/` e- ultimo. Su qualsiasi PR abbastanza grande il motore e-
+    strutturalmente garantito di essere il primo scartato, mentre `CLAUDE.md` —
+    1300 righe di documentazione — viene mandato per intero.
+
+    Il costo non e- solo il rumore: quei bloccanti fantasma sono arrivati da
+    review finali da ~$0.36 e ~$0.70 l'una.
+    """
+    build = _funzione_payload(path)
+    files = [_file_finto(n) for n in FILE_COME_LA_PR_8]
+
+    # Budget deliberatamente insufficiente per tutti e 13: qualcosa DEVE essere
+    # scartato. Il test non chiede di non scartare — chiede di scartare i file
+    # giusti.
+    testo, saltati, critici, troncato = build(files, 2000, 9000)
+
+    assert 'web/engine.js' not in saltati, (
+        'il motore e- stato scartato per budget mentre la documentazione entrava: '
+        f'saltati={saltati}'
+    )
+    assert 'FILE: web/engine.js' in testo, 'il motore non e- nel payload mandato al modello'
+    assert 'main.py' not in saltati, f'il relay e- stato scartato: saltati={saltati}'
+    assert 'FILE: main.py' in testo, 'il relay non e- nel payload'
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_i_file_core_precedono_i_documenti_nel_payload(path):
+    """L'ordine, non solo la presenza: il core va letto prima.
+
+    Con un budget appena sufficiente per pochi file, quelli che entrano devono
+    essere il codice. Un test che guardasse solo la presenza passerebbe anche con
+    un budget cosi- generoso da non scartare niente, cioe- senza esercitare la
+    priorita-.
+    """
+    build = _funzione_payload(path)
+    files = [_file_finto(n) for n in FILE_COME_LA_PR_8]
+    testo, saltati, _, _ = build(files, 2000, 5000)
+
+    posizione = {n: testo.find(f'FILE: {n}') for n in FILE_COME_LA_PR_8}
+    core = {n: p for n, p in posizione.items() if p >= 0 and (n == 'main.py' or n.startswith('web/'))}
+    docs = {n: p for n, p in posizione.items() if p >= 0 and n.endswith(('.md', '.txt'))}
+
+    assert core, f'nessun file core nel payload: saltati={saltati}'
+    if docs:
+        assert max(core.values()) < min(docs.values()), (
+            f'un documento precede un file core nel payload: core={core} docs={docs}'
+        )
+
+
+# Riga reale di un workflow di questo repository: il nome del Secret e- proprio
+# l'informazione che serve al reviewer per giudicare, e la #6 nasce dal fatto che
+# veniva cancellata.
+YAML_CON_SEGRETO = (
+    '      - name: Review\n'
+    '        env:\n'
+    '          PROVIDER_API_KEY: ${{ secrets.BETRELAY_FABLE }}\n'
+    '          ALTRO_API_KEY: ${{ secrets.BETRELAY_GPT }}\n'
+    '          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n'
+)
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_un_riferimento_a_secrets_non_viene_maciullato(path):
+    """`${{ secrets.X }}` e- un PUNTATORE a un segreto, non un segreto.
+
+    La regola contestuale della tabella cattura `api_key: <valore>` e sostituisce
+    tutto con `[REDACTED]`. Su un YAML di workflow questo cancella il NOME del
+    Secret, che e- esattamente cio- che il reviewer deve leggere per dire se e-
+    quello giusto — e in questo repository i nomi giusti (`BETRELAY_*`) sono
+    diversi da quelli del Bridge, quindi il rilievo e- reale e frequente.
+
+    Misurato: e- il meccanismo con cui la PR #1 ha raccolto cinque bloccanti
+    fantasma, ~$0.9 per giro, tutti refutabili leggendo il file.
+
+    Il valore vero resta redatto — lo verifica il test accanto.
+    """
+    redact = _funzione_redact(path)
+    ripulito = redact(YAML_CON_SEGRETO)
+
+    for nome_secret in ('BETRELAY_FABLE', 'BETRELAY_GPT'):
+        assert nome_secret in ripulito, (
+            f'il nome del Secret {nome_secret} e- stato cancellato dalla redazione: '
+            f'il reviewer non puo- giudicare se e- quello giusto.\n{ripulito}'
+        )
+    assert '${{' in ripulito, f'la sintassi delle espressioni e- stata distrutta:\n{ripulito}'
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_un_valore_di_segreto_VERO_resta_redatto(path):
+    """L'altra faccia: esentare `${{ … }}` non deve aprire un varco.
+
+    Senza questo, la correzione del test sopra potrebbe essere fatta allentando
+    la regola contestuale, e un segreto scritto a mano in un file uscirebbe verso
+    tre modelli esterni.
+    """
+    redact = _funzione_redact(path)
+    for riga in (
+        'PROVIDER_API_KEY: sk-ant-api03-VALOREFINTOCHENONDEVEUSCIRE00',
+        'api_key = "chiave-scritta-a-mano-per-errore"',
+        'CSV_ACCESS_TOKEN: token-di-produzione-vero-12345',
+    ):
+        ripulito = redact(riga)
+        assert '[REDACTED' in ripulito, f'{path.name}: valore NON redatto: {riga} -> {ripulito}'
+
+
+def test_gpt55_ha_un_budget_di_output_sufficiente():
+    """`MAX_OUTPUT_TOKENS: 1000` su un modello reasoning tronca e ripaga ogni giro.
+
+    Segnalato da CodeRabbit sulla PR #1 (thread rimasto non risolto) e confermato
+    sul campo: su PR #8 GPT-5.5 ha scritto «il diff dei test e- troncato» su due
+    head diversi. I token di reasoning contano nel budget di output, quindi 1000
+    e- il motivo del troncamento, non la protezione dal costo — il costo vero e-
+    pagare piu- volte la stessa review incompleta.
+
+    Gli altri due workflow usano 3000.
+    """
+    # Il valore che il job usa davvero, dal blocco `env:` dello step, non da una
+    # regex sul testo grezzo: `_script()` restituisce solo i corpi `run:`.
+    doc = _carica(GPT)
+    env = {**(doc.get('env') or {}), **(doc['jobs']['review'].get('env') or {})}
+    assert 'MAX_OUTPUT_TOKENS' in env, 'MAX_OUTPUT_TOKENS non dichiarato nel blocco env'
+    dichiarato = int(str(env['MAX_OUTPUT_TOKENS']))
+    assert dichiarato >= 3000, (
+        f'MAX_OUTPUT_TOKENS={dichiarato} su un modello reasoning: tronca la review e la '
+        f'fa ripagare a ogni giro. Gli altri due workflow usano 3000.'
+    )
+
+    # E il default DENTRO lo script deve concordare: se divergesse, togliere la riga
+    # dall'`env:` farebbe regredire il budget senza che niente diventi rosso — la
+    # stessa classe di difetto dei Secret col nome sbagliato.
+    m = re.search(r'MAX_OUTPUT_TOKENS = int\(os\.environ\.get\("MAX_OUTPUT_TOKENS", "(\d+)"\)\)',
+                  _script(GPT))
+    assert m, 'default di MAX_OUTPUT_TOKENS non trovato nello script'
+    assert int(m.group(1)) >= 3000, (
+        f'il default nello script e- {m.group(1)} mentre env dichiara {dichiarato}: '
+        f'togliere la riga da env farebbe tornare il troncamento in silenzio'
+    )
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_ogni_workflow_ha_un_tier_di_escalation_del_budget(path):
+    """Se il diff risulta troncato, il job deve poter ricostruire piu- largo.
+
+    Fable e Fugu lo fanno; GPT-5.5 non aveva nessun tier, quindi un diff grande
+    restava tagliato senza rimedio. Tre implementazioni dello stesso contratto:
+    la regola 3 vale anche qui, e non possono condividere codice perche- i
+    workflow non fanno checkout.
+    """
+    sorgente = _script(path)
+    for chiave in ('MAX_TOTAL_PATCH_CHARS_ESCALATED', 'MAX_PATCH_PER_FILE_CHARS_ESCALATED'):
+        assert chiave in sorgente, f'{path.name}: manca {chiave}'
+
+
+# ------------------------------------------- SINTASSI dello script incorporato
+
+def _script_python(path: Path) -> tuple[str, str]:
+    """Estrae il corpo Python dall'heredoc dentro lo shell script dello step.
+
+    I workflow non fanno checkout e non hanno un file .py: lo script vive in un
+    `python3 <<'PY' … PY` dentro un `run:` bash. Nessuno lo compila mai, quindi un
+    errore di sintassi si scoprirebbe solo a job rosso — e su un reviewer
+    opzionale un job rosso somiglia molto a un reviewer che non ha niente da dire.
+    """
+    doc = _carica(path)
+    for step in doc['jobs']['review']['steps']:
+        run = step.get('run') or ''
+        m = re.search(r"python3?\s+(?:-\s+)?<<\s*'?(\w+)'?\n(.*?)\n\1\s*$", run, re.S | re.M)
+        if m:
+            return m.group(2), step.get('name', '?')
+    raise AssertionError(f'{path.name}: nessuno script Python trovato nello step di review')
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_lo_script_del_workflow_ha_sintassi_valida(path):
+    """Il Python incorporato deve compilare, e va compilato qui perche' non lo fa nessuno."""
+    import ast
+    corpo, nome_step = _script_python(path)
+    assert len(corpo.splitlines()) > 200, (
+        f'{path.name}: estratte solo {len(corpo.splitlines())} righe dallo step '
+        f'"{nome_step}": l\'estrattore ha preso il pezzo sbagliato e il test non '
+        f'starebbe controllando niente'
+    )
+    try:
+        ast.parse(corpo)
+    except SyntaxError as e:
+        righe = corpo.splitlines()
+        contesto = righe[e.lineno - 1].strip() if e.lineno and e.lineno <= len(righe) else '?'
+        raise AssertionError(
+            f'{path.name}: SyntaxError nello script dello step "{nome_step}" '
+            f'alla riga {e.lineno}: {e.msg}\n    >>> {contesto}'
+        ) from e
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_la_lista_di_priorita_e_identica_nei_tre_workflow(path):
+    """Regola 3 dove una fonte unica non e' possibile.
+
+    I workflow non fanno checkout, quindi non possono importare un modulo comune:
+    la lista di priorita' e' per forza in tre copie. Tre copie corrette oggi sono
+    tre copie divergenti domani, e la divergenza qui e' invisibile — un reviewer
+    che legge i file sbagliati esce verde. Questo test le tiene allineate.
+    """
+    def estrai(p: Path) -> str:
+        m = re.search(r'^(\s*)PRIORITA_PAYLOAD = \[.*?^\1\]', _script(p), re.S | re.M)
+        assert m, f'{p.name}: PRIORITA_PAYLOAD non trovata'
+        return textwrap.dedent(m.group(0))
+
+    assert estrai(path) == estrai(FABLE), (
+        f'{path.name}: la lista di priorita\' del payload differisce da quella di '
+        f'{FABLE.name}. Tre copie che divergono sono tre reviewer che leggono file diversi.'
+    )

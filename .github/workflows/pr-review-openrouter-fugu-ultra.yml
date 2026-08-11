@@ -201,7 +201,14 @@ jobs:
               # escapate. Stesso pattern di `tools/secret_policy.py` (in str invece che bytes):
               # la condivisione per import e' impossibile qui, i workflow non fanno checkout.
               (re.compile(r'''(?i)\\?['"]?(?:signing[_-]?)?seed(?:[_-]?hex)?\\?['"]?\s*[:=]\s*\\?['"]?[0-9a-f]{64,}'''), "[REDACTED_ED25519_SEED]"),
-              (re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)\s*[:=]\s*[\"']?[^\"'\s,;]+"), r"\1=[REDACTED]"),
+              # Il `(?!\s*\$\{\{)` esenta le espressioni GitHub Actions: `${{ secrets.X }}`
+              # e' un PUNTATORE a un segreto, non un segreto. Senza l'esenzione questa
+              # regola trasformava una riga `<NOME>_KEY: ${{ secrets.BETRELAY_FABLE }}` in
+              # `<NOME>_KEY=[REDACTED] secrets.BETRELAY_FABLE }}`: il reviewer vedeva
+              # YAML rotto e concludeva che il workflow era mal configurato. E' il
+              # meccanismo dei cinque bloccanti fantasma della PR #1 (~$0.9 per giro).
+              # Il VALORE vero resta redatto: lo verifica un test dedicato.
+              (re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)\s*[:=]\s*(?!\s*\$\{\{)[\"']?[^\"'\s,;]+"), r"\1=[REDACTED]"),
           ]
 
           def redact(text: str) -> str:
@@ -276,7 +283,41 @@ jobs:
           def is_critical(filename: str) -> bool:
               return any(re.search(pattern, filename) for pattern in CRITICAL_PATTERNS)
 
+          # Ordine con cui il budget del payload viene consumato.
+          #
+          # Il budget si esaurisce quasi sempre, quindi QUALCOSA verra' scartato: questa
+          # lista decide cosa. Prima non c'era, e i file venivano consumati nell'ordine
+          # in cui li restituisce l'API GitHub, cioe' ALFABETICO. Conseguenza misurata
+          # sulla PR #8: `web/` e' ultimo in ordine alfabetico, quindi il motore di
+          # parsing e' stato scartato da tutte e quattro le review finali mentre
+          # CLAUDE.md — 1300 righe di documentazione — entrava per intero. I modelli
+          # hanno poi alzato tre bloccanti «parita' JS/Python non verificabile», che sono
+          # costati due review finali da ~$0.36 e ~$0.70 e zero difetti reali.
+          #
+          # Non era sfortuna: su qualunque PR grande abbastanza il core e'
+          # strutturalmente garantito di essere il primo a cadere.
+          PRIORITA_PAYLOAD = [
+              # 0 — il codice che gira in produzione e la superficie multiutente.
+              re.compile(r"(^|/)main\.py$|(^|/)web/|(^|/)tools/|(^|/)Procfile$"
+                         r"|(^|/)railway\.json$|(^|/)requirements[^/]*\.(txt|in|lock)$"
+                         r"|(^|/)pyproject\.toml$|(^|/)\.github/workflows/"),
+              # 1 — i test: dicono se il codice sopra e' vincolato, ma valgono meno del
+              #     codice stesso quando il budget costringe a scegliere.
+              re.compile(r"(^|/)tests?/|(^|/)test_[^/]*\.py$|[^/]*_test\.py$"),
+          ]
+
+          def priorita_payload(filename: str) -> int:
+              """Rango di priorita' del file: 0 core, 1 test, 2 il resto (docs)."""
+              for rango, pattern in enumerate(PRIORITA_PAYLOAD):
+                  if pattern.search(filename):
+                      return rango
+              return len(PRIORITA_PAYLOAD)
+
           def build_patch_payload(files, max_per_file, max_total):
+              # Ordinamento STABILE per priorita': a pari rango resta l'ordine
+              # dell'API, quindi il payload e' riproducibile fra due esecuzioni.
+              files = sorted(files, key=lambda f: priorita_payload(
+                  safe_display(f.get("filename", ""))))
               # Ritorna anche `budget_truncated`: True se ALMENO un file è stato tagliato
               # a causa del BUDGET (patch troncata per-file, o file intero saltato per
               # tetto totale). NON conta il salto di un file binario/senza-patch (quello
