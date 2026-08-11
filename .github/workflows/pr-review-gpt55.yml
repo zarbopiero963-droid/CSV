@@ -33,7 +33,7 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository
 
     env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      BETRELAY_GPT: ${{ secrets.BETRELAY_GPT }}
       OPENAI_MODEL: gpt-5.5
 
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -67,12 +67,12 @@ jobs:
           set -euo pipefail
 
           # Reviewer OPZIONALE: senza secret il job non deve far fallire la PR.
-          if [ -z "${OPENAI_API_KEY:-}" ]; then
-            echo "::notice::OPENAI_API_KEY non configurato: reviewer GPT-5.5 saltato (nessun check rosso)."
+          if [ -z "${BETRELAY_GPT:-}" ]; then
+            echo "::notice::BETRELAY_GPT non configurato: reviewer GPT-5.5 saltato (nessun check rosso)."
             exit 0
           fi
 
-          echo "::add-mask::$OPENAI_API_KEY"
+          echo "::add-mask::$BETRELAY_GPT"
 
           python3 <<'PY'
           import json
@@ -94,7 +94,7 @@ jobs:
 
           # .strip(): un segreto incollato con newline/spazio finale renderebbe
           # invalido l'header Authorization (Bearer ...\n) -> request fallita.
-          OPENAI_API_KEY = os.environ["OPENAI_API_KEY"].strip()
+          BETRELAY_GPT = os.environ["BETRELAY_GPT"].strip()
           OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.5")
           REVIEW_ID = os.environ.get("REVIEW_ID", "gpt55")
           MODEL_LABEL = os.environ.get("MODEL_LABEL", OPENAI_MODEL)
@@ -326,7 +326,7 @@ jobs:
                       data=data,
                       method="POST",
                       headers={
-                          "Authorization": f"Bearer {OPENAI_API_KEY}",
+                          "Authorization": f"Bearer {BETRELAY_GPT}",
                           "Content-Type": "application/json",
                           "User-Agent": f"{REVIEW_ID}-push-range-review",
                       },

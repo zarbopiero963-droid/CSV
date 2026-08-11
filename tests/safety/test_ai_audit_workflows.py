@@ -297,13 +297,37 @@ def test_nessuna_api_key_in_chiaro():
 
 
 def test_le_chiavi_vengono_dai_secret():
+    """I nomi sono quelli dei Secret di QUESTO repository, non quelli del Bridge.
+
+    Il proprietario ha creato `BETRELAY_GPT`, `BETRELAY_FABLE` e `BETRELAY_FUGU`.
+    Un workflow che leggesse `secrets.OPENAI_API_KEY` troverebbe una stringa
+    vuota e uscirebbe verde senza revisionare: nessun errore, nessun check
+    rosso, e una PR con tre spunte e zero righe lette.
+    """
     coppie = {
-        GPT: 'secrets.OPENAI_API_KEY',
-        FABLE: 'secrets.ANTHROPIC_API_KEY',
-        FUGU: 'secrets.OPENROUTER_API_KEY',
+        GPT: 'secrets.BETRELAY_GPT',
+        FABLE: 'secrets.BETRELAY_FABLE',
+        FUGU: 'secrets.BETRELAY_FUGU',
     }
     for path, atteso in coppie.items():
         assert atteso in path.read_text(encoding='utf-8'), f'{path.name}: manca {atteso}'
+
+
+def test_nessun_riferimento_ai_secret_del_bridge():
+    """Nessun residuo dei nomi vecchi, in nessuno dei tre workflow.
+
+    Serve perche' un riferimento dimenticato non fallisce: legge vuoto e salta
+    la review in silenzio. E' la stessa classe di difetto del punto sopra, per
+    questo va cercata su tutto il file e non solo sulla riga `env:`.
+    """
+    vecchi = ('OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'OPENROUTER_API_KEY')
+    for path in (GPT, FABLE, FUGU):
+        testo = path.read_text(encoding='utf-8')
+        for nome in vecchi:
+            assert nome not in testo, (
+                f'{path.name}: contiene ancora {nome}, nome di Secret del Bridge '
+                f'non configurato in questo repository'
+            )
 
 
 # ------------------------------------------------------------- permessi

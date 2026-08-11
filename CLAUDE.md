@@ -257,12 +257,19 @@ review/inline/thread triage · final hard verify.
 >
 > Perché funzionino servono due cose, **azione del proprietario una volta sola**:
 >
-> 1. i Secret del repo — `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`. Senza, i job
->    partono, stampano un `::notice` «API key non configurata» ed escono **verdi senza chiamare il
->    modello**: non falliscono. Il check verde non è quindi prova di review — va letto il log.
->    L'agente non vede mai le chiavi.
+> 1. i Secret del repo — **`BETRELAY_GPT`, `BETRELAY_FABLE`, `BETRELAY_FUGU`**. Sono i nomi scelti dal
+>    proprietario per questo repository: **non** `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` /
+>    `OPENROUTER_API_KEY`, che sono i nomi del Bridge. Un workflow che leggesse i nomi del Bridge
+>    troverebbe una stringa vuota e uscirebbe **verde senza chiamare il modello** — nessun errore,
+>    nessun check rosso, una PR con tre spunte e zero righe lette. Per questo
+>    `tests/safety/test_ai_audit_workflows.py` vincola i nomi nuovi **e** vieta i vecchi come
+>    residui. L'agente non vede mai le chiavi.
 > 2. la **creazione** delle label `final-fable-review` e `final-fugu-review`. Senza, aggiungerle via
 >    API dà 404 e il gate finale non si arma.
+>
+> **Stato al 2026-08-11: fatte entrambe.** I tre Secret sono configurati e le due label esistono nel
+> repo, quindi i reviewer girano davvero e il gate finale è armabile. Il `::notice` «non configurato»
+> nei log delle PR precedenti alla #1 resta la prova di com'era prima, non di com'è.
 >
 > **Non confondere queste due con il riarmo, che invece è ricorrente e spetta all'agente.** I Secret
 > si configurano una volta e valgono per sempre; le label si creano una volta e restano nel repo. Ma
@@ -1239,8 +1246,8 @@ installate in posti diversi. Aspetta i loro check, leggi i loro commenti, fai il
 
 | Manca | Conseguenza per l'agente |
 |---|---|
-| Secret `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY` | senza chiave i tre workflow **escono verdi senza revisionare** (`::notice` nei log): verificato sulla PR #1. Un check verde non prova che un modello abbia letto il diff — leggi sempre i log. Azione del proprietario. |
-| Label `final-fable-review`, `final-fugu-review` | da **creare** una volta sola (azione del proprietario); senza, aggiungerle via API dà 404 e il gate finale non si arma. **Applicarle** è invece ricorrente e spetta all'agente: rimuovere e riaggiungere a ogni head stabile. |
+| ~~Secret delle API key~~ | **Configurati il 2026-08-11** come `BETRELAY_GPT`, `BETRELAY_FABLE`, `BETRELAY_FUGU`. Non erano configurati fino a quel giorno, e i tre workflow uscivano **verdi senza revisionare** (`::notice` nei log della PR #1): un check verde non prova che un modello abbia letto il diff. Adesso girano davvero. Attenzione ai nomi: sono quelli di questo repository, non quelli del Bridge. |
+| ~~Label `final-fable-review`, `final-fugu-review`~~ | **Create il 2026-08-11.** La creazione era azione del proprietario, una volta sola. **Applicarle** è invece ricorrente e spetta all'agente: rimuovere e riaggiungere a ogni head stabile. |
 | Workflow GLM 5.2 | non importato per scelta: i reviewer a API key qui sono tre. Non contarlo né aspettarlo. |
 | Workflow di build/test propri del repo | non esistono: `pytest` va eseguito localmente, nessun check CI lo esegue. |
 | Test del relay (`main.py`) | `tests/` copre i workflow (`tests/safety/`), il motore e il contratto CSV (`tests/engine/`) e il prototipo in browser (`tests/web/`), ma **non** il relay: il primo task che cambia il comportamento di `main.py` crea i suoi. |

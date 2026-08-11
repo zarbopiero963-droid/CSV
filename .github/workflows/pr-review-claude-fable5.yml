@@ -44,7 +44,7 @@ jobs:
         github.event.label.name == 'final-fable-review' )
 
     env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      BETRELAY_FABLE: ${{ secrets.BETRELAY_FABLE }}
       ANTHROPIC_MODEL: claude-fable-5
       ANTHROPIC_VERSION: "2023-06-01"
 
@@ -109,16 +109,16 @@ jobs:
           # fallire la PR. MA sul gate finale via LABEL (obbligatorio pre-merge)
           # una review non eseguibile per key mancante NON deve risultare verde:
           # fallisci il job (coerente col fail-closed sul fallimento modello, GPT-5.5).
-          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+          if [ -z "${BETRELAY_FABLE:-}" ]; then
             if [ "${EVENT_ACTION:-}" = "labeled" ]; then
-              echo "::error::Gate finale a label ma ANTHROPIC_API_KEY assente: review non eseguibile → job fallito (il gate non deve risultare verde)."
+              echo "::error::Gate finale a label ma BETRELAY_FABLE assente: review non eseguibile → job fallito (il gate non deve risultare verde)."
               exit 1
             fi
-            echo "::notice::ANTHROPIC_API_KEY non configurato: reviewer Claude Fable 5 saltato (push automatico, nessun check rosso)."
+            echo "::notice::BETRELAY_FABLE non configurato: reviewer Claude Fable 5 saltato (push automatico, nessun check rosso)."
             exit 0
           fi
 
-          echo "::add-mask::$ANTHROPIC_API_KEY"
+          echo "::add-mask::$BETRELAY_FABLE"
 
           python3 <<'PY'
           import json
@@ -139,7 +139,7 @@ jobs:
 
           # .strip(): un segreto incollato con newline/spazio finale renderebbe
           # invalido l'header x-api-key (...\n) -> request fallita.
-          ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"].strip()
+          BETRELAY_FABLE = os.environ["BETRELAY_FABLE"].strip()
           ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-fable-5")
           ANTHROPIC_VERSION = os.environ.get("ANTHROPIC_VERSION", "2023-06-01")
           REVIEW_ID = os.environ.get("REVIEW_ID", "claude-fable5")
@@ -384,7 +384,7 @@ jobs:
                       data=data,
                       method="POST",
                       headers={
-                          "x-api-key": ANTHROPIC_API_KEY,
+                          "x-api-key": BETRELAY_FABLE,
                           "anthropic-version": ANTHROPIC_VERSION,
                           "content-type": "application/json",
                           "User-Agent": f"{REVIEW_ID}-push-range-review",

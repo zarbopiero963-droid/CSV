@@ -49,7 +49,7 @@ jobs:
         github.event.label.name == 'final-fugu-review' )
 
     env:
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      BETRELAY_FUGU: ${{ secrets.BETRELAY_FUGU }}
       OPENROUTER_MODEL: sakana/fugu-ultra
 
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -112,16 +112,16 @@ jobs:
           # fallire la PR. MA sul gate finale via LABEL (obbligatorio pre-merge)
           # una review non eseguibile per key mancante NON deve risultare verde:
           # fallisci il job (coerente col fail-closed sul fallimento modello, GPT-5.5).
-          if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+          if [ -z "${BETRELAY_FUGU:-}" ]; then
             if [ "${EVENT_ACTION:-}" = "labeled" ]; then
-              echo "::error::Gate finale a label ma OPENROUTER_API_KEY assente: review non eseguibile → job fallito (il gate non deve risultare verde)."
+              echo "::error::Gate finale a label ma BETRELAY_FUGU assente: review non eseguibile → job fallito (il gate non deve risultare verde)."
               exit 1
             fi
-            echo "::notice::OPENROUTER_API_KEY non configurato: reviewer Fugu Ultra saltato (push automatico, nessun check rosso)."
+            echo "::notice::BETRELAY_FUGU non configurato: reviewer Fugu Ultra saltato (push automatico, nessun check rosso)."
             exit 0
           fi
 
-          echo "::add-mask::$OPENROUTER_API_KEY"
+          echo "::add-mask::$BETRELAY_FUGU"
 
           python3 <<'PY'
           import json
@@ -142,7 +142,7 @@ jobs:
 
           # .strip(): un segreto incollato con newline/spazio finale renderebbe
           # invalido l'header Authorization (Bearer ...\n) -> request fallita.
-          OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"].strip()
+          BETRELAY_FUGU = os.environ["BETRELAY_FUGU"].strip()
           OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "sakana/fugu-ultra")
           REVIEW_ID = os.environ.get("REVIEW_ID", "fugu-ultra")
           MODEL_LABEL = os.environ.get("MODEL_LABEL", OPENROUTER_MODEL)
@@ -398,7 +398,7 @@ jobs:
                       data=data,
                       method="POST",
                       headers={
-                          "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                          "Authorization": f"Bearer {BETRELAY_FUGU}",
                           "Content-Type": "application/json",
                           "HTTP-Referer": f"https://github.com/{REPO}",
                           "X-Title": "XTrader Relay Fugu Ultra PR Review",
