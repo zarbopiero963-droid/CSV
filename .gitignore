@@ -1,5 +1,5 @@
 .env
 *.db
 __pycache__/
-web/dist/
+dist/
 .pytest_cache/

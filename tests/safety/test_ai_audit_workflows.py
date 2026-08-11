@@ -38,7 +38,12 @@ ATTESI_CORE = [
     'web/engine.js',
     'web/index.html',
     'web/styles.css',
-    'web/build_single_file.py',
+    # Il generatore del bundle: sta in tools/ e non in web/ perche- web/ e- servita
+    # pubblicamente, ma resta CORE. E- lui che emette il JavaScript in ASCII puro,
+    # e un difetto li- fa fallire in silenzio il confronto sul marcatore emoji —
+    # l-incidente documentato nella REGOLA CODIFICA. Spostarlo fuori da web/ senza
+    # aggiungere tools/ ai pattern core gli avrebbe tolto la review forte.
+    'tools/build_single_file.py',
     'Procfile',
     'railway.json',
     'requirements.txt',
@@ -141,6 +146,64 @@ def test_niente_percorsi_del_bridge_nel_set_core():
     sorgente = _script(FABLE)
     for morto in ('xtrader_bridge/', 'license_manager/'):
         assert morto not in sorgente, f'percorso del Bridge rimasto: {morto}'
+
+
+# ------------------------------------------------ ESECUZIONE della redazione
+
+def _funzione_redact(path: Path):
+    """Estrae dal workflow reale la tabella REDACTIONS e la funzione `redact`.
+
+    Come per il gate, il test non riscrive i pattern: li ESEGUE sul testo. Una
+    tabella di redazione verificata solo per struttura ("esiste un pattern che
+    contiene xt_") passerebbe anche con una regex che non combacia con niente.
+    """
+    sorgente = _script(path)
+    tabella = re.search(r'^(\s*)REDACTIONS = \[.*?^\1\]', sorgente, re.S | re.M)
+    assert tabella, f'{path.name}: tabella REDACTIONS non trovata'
+    funzione = re.search(r'^(\s*)def redact\(.*?(?=\n\1[A-Za-z_]|\Z)', sorgente, re.S | re.M)
+    assert funzione, f'{path.name}: funzione redact non trovata'
+    spazio: dict = {'re': re}
+    exec(textwrap.dedent(tabella.group(0)), spazio)  # noqa: S102 - sorgente del repo
+    exec(textwrap.dedent(funzione.group(0)), spazio)  # noqa: S102 - sorgente del repo
+    return spazio['redact']
+
+
+# Forma reale di un token di feed: prefisso `xt_` piu' almeno 18 byte casuali
+# (SAAS.md). Qui 36 caratteri esadecimali, come li genera web/api.js.
+TOKEN_FEED = 'xt_' + '7f3a91' * 6
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_il_token_di_feed_nudo_viene_redatto(path):
+    """Un token di feed senza la keyword `token=` accanto non deve uscire.
+
+    La regola contestuale della tabella pretende `token`/`api_key`/`secret`
+    vicino al valore. Un token NUDO dentro un diff — un test, un fixture, un
+    URL spezzato su due righe — non la attiva, e finirebbe in chiaro verso tre
+    modelli esterni. E' la stessa classe del seed Ed25519 documentata nella
+    tabella: un segreto senza pattern proprio esce e nessuno se ne accorge.
+
+    Segnalato da Fugu Ultra sulla PR #1 come bloccante, ed e' fondato.
+    """
+    redact = _funzione_redact(path)
+    ripulito = redact(f'il feed risponde su /feed/piero.csv con {TOKEN_FEED} attivo')
+    assert TOKEN_FEED not in ripulito, (
+        f'{path.name}: il token di feed nudo NON viene redatto e uscirebbe in chiaro'
+    )
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_il_prefisso_di_9_caratteri_sopravvive_alla_redazione(path):
+    """`token_prefix` e' fatto per essere mostrato: redigerlo renderebbe muta la UI.
+
+    Il gemello del test sopra. Serve a impedire che il pattern venga allargato
+    fino a mangiare anche il prefisso di 9 caratteri che il contratto conserva
+    proprio per identificare un token senza rivelarlo.
+    """
+    redact = _funzione_redact(path)
+    assert 'xt_7f3a91' in redact('token_prefix mostrato in tabella: xt_7f3a91'), (
+        f'{path.name}: il prefisso di 9 caratteri viene redatto, ma non e- un segreto'
+    )
 
 
 # --------------------------------------------------- ESECUZIONE del gate

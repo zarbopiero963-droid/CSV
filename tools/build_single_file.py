@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Genera una versione a file unico del prototipo, comoda da condividere.
 
-    python3 web/build_single_file.py            # scrive web/dist/prototipo.html
-    python3 web/build_single_file.py /tmp/x.html
+    python3 tools/build_single_file.py          # scrive dist/prototipo.html
+    python3 tools/build_single_file.py /tmp/x.html
+
+Sta in tools/ e non in web/, e scrive fuori da web/, perche' `main.py` monta web/
+con StaticFiles: qualunque file la- dentro e- scaricabile pubblicamente su /app
+senza token. Un generatore lato server e il suo output non hanno motivo di essere
+serviti a un browser. La guardia e- in tests/safety/test_static_mount.py.
 
 Concatena engine.js, api.js e app.js in un solo modulo, ricostruendo l'oggetto
 `api` che le viste usano come namespace, e incorpora il CSS.
@@ -18,7 +23,8 @@ import re
 import sys
 from pathlib import Path
 
-WEB = Path(__file__).parent
+RADICE = Path(__file__).resolve().parents[1]
+WEB = RADICE / 'web'
 
 # Stessa favicon di index.html, incorporata come data URI.
 FAVICON = (
@@ -128,7 +134,8 @@ def build():
 
 
 if __name__ == '__main__':
-    dest = Path(sys.argv[1]) if len(sys.argv) > 1 else WEB / 'dist' / 'prototipo.html'
+    # Fuori da web/: l'output sotto il mount sarebbe servito su /app/dist/.
+    dest = Path(sys.argv[1]) if len(sys.argv) > 1 else RADICE / 'dist' / 'prototipo.html'
     dest.parent.mkdir(parents=True, exist_ok=True)
     html = build()
     dest.write_text(html, encoding='ascii')

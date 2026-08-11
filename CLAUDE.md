@@ -26,7 +26,7 @@ Il merge resta sempre manuale del repository owner.
 | Servizio FastAPI (relay, API, webhook Telegram, feed CSV) | `main.py` |
 | Prototipo web app multiutente (moduli ES, nessun build step) | `web/index.html`, `web/app.js`, `web/api.js`, `web/engine.js`, `web/styles.css` |
 | Motore di parsing configurabile — specifica eseguibile | `web/engine.js` |
-| Generatore della copia a file unico del prototipo | `web/build_single_file.py` |
+| Generatore della copia a file unico del prototipo | `tools/build_single_file.py` |
 | Architettura SaaS, modello dati, contratto API | `SAAS.md` |
 | Documentazione operativa endpoint e variabili | `README.txt` |
 | Deploy | `Procfile`, `railway.json`, `requirements.txt` |
@@ -37,7 +37,15 @@ Il merge resta sempre manuale del repository owner.
 | Dipendenze dei soli test | `requirements-dev.txt` |
 
 **File core del bridge** (per i gate di review e per la soglia di attenzione):
-`main.py`, `web/**`, `requirements.txt`, `Procfile`, `railway.json`.
+`main.py`, `web/**`, `tools/**`, `requirements.txt`, `Procfile`, `railway.json`.
+
+`tools/` è core benché non sia servito: ci vive il generatore del file unico, cioè la copia del
+prototipo che si condivide con i clienti, e con esso la conversione del JavaScript in ASCII puro.
+Un difetto lì non solleva un errore: fa fallire in silenzio il confronto sul marcatore emoji e il
+segnale non arriva mai a XTrader (vedi «REGOLA CODIFICA»). **`web/` invece è servita
+pubblicamente** da `StaticFiles` su `/app`: qualunque file in quella cartella è scaricabile senza
+token, per questo il generatore sta in `tools/` e scrive in `dist/`, e per questo esiste la guardia
+`tests/safety/test_static_mount.py`.
 
 **Non esistono in questo repository** (e nessun task deve fingere il contrario):
 GUI Tkinter, build Windows/EXE/PyInstaller, `xtrader_bridge/`, `license_manager/`,
@@ -76,7 +84,7 @@ Per domande, spiegazioni o analisi read-only non serve aprire PR.
 - Non allargare lo scope.
 - Non fare refactor generale se il task chiede una correzione specifica.
 - Non committare token Telegram, `CSV_ACCESS_TOKEN`, chat ID reali, `.env`, `*.db`,
-  CSV generati, log, cache, `web/dist/` o artifact.
+  CSV generati, log, cache, `dist/` o artifact.
 - Non stampare token Telegram né token di feed nei log, nelle risposte API o nei messaggi
   d'errore. Nei log dei messaggi non deve comparire alcun token.
 - Non trasformare il relay in bot di puntata diretta, Betfair API client o browser automation,
@@ -163,7 +171,7 @@ divergenti domani.
 Attenzione particolare in questo repository: il motore di parsing esiste in JavaScript
 (`web/engine.js`) e presto esisterà in Python lato server. **Sono due implementazioni dello
 stesso contratto**: ogni modifica al comportamento va fatta su entrambe nello stesso PR, con un
-test che confronta gli output. Il file unico generato da `web/build_single_file.py` non è una
+test che confronta gli output. Il file unico generato da `tools/build_single_file.py` non è una
 terza copia: è derivato, e va rigenerato, mai modificato a mano.
 
 ### 4. Una PR aperta alla volta
@@ -204,7 +212,7 @@ Regole:
 - I file sorgente sono UTF-8. `web/index.html` dichiara `<meta charset="utf-8">`; i moduli ES
   sono UTF-8 per specifica, quindi `web/*.js` è al sicuro.
 - Un file unico generato **non** è al sicuro: eredita la codifica del documento. Per questo
-  `web/build_single_file.py` emette il JavaScript in ASCII puro con escape `\uXXXX`. Non
+  `tools/build_single_file.py` emette il JavaScript in ASCII puro con escape `\uXXXX`. Non
   rimuovere quella conversione, e non aggiungere al bundle testo non ASCII fuori dal `<script>`
   senza passare da entità HTML.
 - Lato Python, il CSV va scritto UTF-8 **senza BOM**: un BOM davanti a `"Provider"` rompe la
@@ -590,7 +598,7 @@ Il micro-audit deve verificare:
 - non hai toccato file fuori scope;
 - non hai aggiunto token Telegram, token di feed o `CSV_ACCESS_TOKEN` reali;
 - non hai aggiunto chat ID reali;
-- non hai aggiunto `.env`, `*.db`, CSV generati, log, cache, `web/dist/` o artifact;
+- non hai aggiunto `.env`, `*.db`, CSV generati, log, cache, `dist/` o artifact;
 - non hai abilitato auto-merge;
 - non hai introdotto betting diretto, Betfair API o automazione browser verso XTrader;
 - non hai indebolito il filtro delle chat;
@@ -1029,7 +1037,7 @@ Devi verificare:
   contenitore (attenzione al `min-width: 0` sui figli di flex e grid — vedi regola 2);
 - il layout tiene su schermo stretto (≈390 px) oltre che su desktop;
 - i token non compaiono mai nei log, nelle tabelle o negli screenshot;
-- il file unico generato da `web/build_single_file.py` continua a comportarsi come la versione
+- il file unico generato da `tools/build_single_file.py` continua a comportarsi come la versione
   modulare, ed è **rigenerato**, non modificato a mano;
 - nessuna dipendenza esterna, nessun CDN, nessun build step introdotto senza task esplicito.
 
