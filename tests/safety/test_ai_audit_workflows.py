@@ -624,6 +624,19 @@ def test_l_esenzione_copre_solo_l_espressione_COMPLETA(path):
         # regola sull'ASSEGNAZIONE, che consuma fino a fine riga.
         ('API_KEY: ${{ secrets.NOME }} CODA-SEPARATA-DA-SPAZIO\n', 'CODA-SEPARATA-DA-SPAZIO'),
         ('TOKEN = ${{ secrets.NOME }} uno DUE tre\n', 'DUE'),
+        # Le varianti restanti della STESSA forma, enumerate invece di aspettare che il
+        # prossimo reviewer trovi la successiva. Due volte di fila ho corretto un'ISTANZA
+        # (coda incollata, poi coda con spazio) e due reviewer diversi hanno trovato quella
+        # dopo: e- la regola 2 mancata sullo stesso pattern. La forma e- «assegnazione
+        # sensibile il cui valore contiene un'espressione PIU' qualcos'altro», e qui c-e-
+        # tutta.
+        ('API_KEY:\t${{ secrets.NOME }}\tCODA-TAB\n', 'CODA-TAB'),
+        ('API_KEY: PREFISSO-SPAZIO ${{ secrets.NOME }}\n', 'PREFISSO-SPAZIO'),
+        ('API_KEY: ${{ secrets.A }}${{ secrets.B }}DUE-ESPRESSIONI\n', 'DUE-ESPRESSIONI'),
+        ('API_KEY: "${{ secrets.NOME }} DENTRO-VIRGOLETTE"\n', 'DENTRO-VIRGOLETTE'),
+        ("API_KEY: '${{ secrets.NOME }} DENTRO-APICI'\n", 'DENTRO-APICI'),
+        ('API_KEY: "${{ secrets.NOME }}"DOPO-VIRGOLETTA\n', 'DOPO-VIRGOLETTA'),
+        ('Authorization: Bearer ${{ secrets.NOME }}DOPO-BEARER\n', 'DOPO-BEARER'),
         ('API_KEY: chiave-vera-scritta-a-mano\n', 'chiave-vera-scritta-a-mano'),
     ):
         ripulito = redact(riga)
