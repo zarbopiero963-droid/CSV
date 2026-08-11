@@ -617,6 +617,13 @@ def test_l_esenzione_copre_solo_l_espressione_COMPLETA(path):
         ('API_KEY: ${{ secrets.NOME }}CODA-SEGRETA-INCOLLATA\n', 'CODA-SEGRETA-INCOLLATA'),
         ('TOKEN = ${{ secrets.NOME }}coda-sensibile\n', 'coda-sensibile'),
         ('API_KEY: PREFISSO-SEGRETO${{ secrets.NOME }}\n', 'PREFISSO-SEGRETO'),
+        # Coda separata da uno SPAZIO: la regola del letterale incollato pretende un
+        # carattere adiacente a `}}`, quella contestuale si ferma al primo spazio, e in
+        # mezzo passava il segreto. Bloccante di Fable 5 sul gate finale — la stessa
+        # classe che aveva trovato Fugu, a un separatore di distanza. Serviva una terza
+        # regola sull'ASSEGNAZIONE, che consuma fino a fine riga.
+        ('API_KEY: ${{ secrets.NOME }} CODA-SEPARATA-DA-SPAZIO\n', 'CODA-SEPARATA-DA-SPAZIO'),
+        ('TOKEN = ${{ secrets.NOME }} uno DUE tre\n', 'DUE'),
         ('API_KEY: chiave-vera-scritta-a-mano\n', 'chiave-vera-scritta-a-mano'),
     ):
         ripulito = redact(riga)
@@ -625,6 +632,14 @@ def test_l_esenzione_copre_solo_l_espressione_COMPLETA(path):
             f'redazione ed uscirebbe verso un modello esterno.\n'
             f'  in : {riga.strip()}\n  out: {ripulito.strip()}'
         )
+
+    # La prosa senza una chiave sensibile non viene toccata dalla regola
+    # sull'assegnazione: quella pretende `<chiave>: <espressione>`, quindi una frase che
+    # cita un'espressione resta leggibile per il reviewer.
+    prosa = 'usa ${{ secrets.NOME }} per autenticarti'
+    assert redact(prosa) == prosa, (
+        f'{path.name}: la regola sull-assegnazione ha mangiato della prosa: {redact(prosa)!r}'
+    )
 
     # E le espressioni COMPLETE restano intatte, col nome del Secret leggibile: e- il
     # motivo per cui l'esenzione esiste, e va verificato nella stessa funzione perche-

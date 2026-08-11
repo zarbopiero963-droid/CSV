@@ -215,6 +215,24 @@ jobs:
               # reviewer chieda di allinearlo a un modulo che non c'e' (chiesto da GPT-5.5):
               # la condivisione per import e' impossibile qui, i workflow non fanno checkout.
               (re.compile(r'''(?i)\\?['"]?(?:signing[_-]?)?seed(?:[_-]?hex)?\\?['"]?\s*[:=]\s*\\?['"]?[0-9a-f]{64,}'''), "[REDACTED_ED25519_SEED]"),
+              # Assegnazione sensibile il cui valore COMINCIA con un'espressione ma non e'
+              # soltanto quella: si redige fino a FINE RIGA, cosi' nessuna coda sopravvive,
+              # separata da spazio o no.
+              #
+              # Serve perche' le altre due regole lasciavano un varco esattamente in mezzo:
+              # quella del letterale incollato pretende un carattere adiacente a `}}`, e
+              # quella contestuale si ferma al primo spazio. Misurato:
+              #   in  `API_KEY: <espressione> CODA-SPAZIO`
+              #   out `API_KEY=[REDACTED] secrets.X }} CODA-SPAZIO`
+              # Bloccante di Fable 5 sul gate finale, ed e' la stessa classe che aveva
+              # trovato Fugu Ultra: un separatore di distanza.
+              #
+              # Pretende l'ASSEGNAZIONE (`<chiave sensibile>: <espressione>`), quindi la
+              # prosa che cita un'espressione — `usa <espressione> per autenticarti` —
+              # resta leggibile per il reviewer. Verificato da un test.
+              (re.compile(r"""(?i)(api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)"""
+                          r"""\s*[:=]\s*(?!["']?\s*\$\{\{[^{}]*\}\}["']?[ \t]*(?:\r?\n|\Z))"""
+                          r"""["']?\$\{\{[^\r\n]*"""), r"\1=[REDACTED]"),
               # Un'espressione con un letterale INCOLLATO: qui il letterale e' un segreto,
               # non un puntatore, e va redatto insieme all'espressione. Deve stare PRIMA
               # della regola contestuale piu' sotto, che si ferma al primo spazio e
