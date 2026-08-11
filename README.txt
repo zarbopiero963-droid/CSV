@@ -36,11 +36,16 @@ CONTROLLO
 GET /health
 Risponde {"status","csv","feed_scartati"} e, se feed_scartati non e' zero,
 anche "ultimo_scarto" col motivo. "csv" e' l'esito del verificatore di formato;
-"feed_scartati" conta quante volte una riga salvata non ha passato la verifica ed
-e' stata servita come feed vuoto. Uno scarto subito dopo un deploy e' atteso (riga
-scritta dalla versione precedente, scade col TTL); un numero che continua a salire
-e' un guasto. Il motivo non contiene mai il contenuto del segnale: /health e' un
-endpoint senza token.
+"feed_scartati" conta le RIGHE DISTINTE salvate che non hanno passato la verifica
+e sono state servite come feed vuoto - non le richieste che le incontrano, perche'
+XTrader interroga il feed a raffica e una sola riga guasta resterebbe tale per
+tutti i 90 secondi del TTL.
+Uno scarto subito dopo un deploy e' atteso (riga scritta dalla versione
+precedente, scade col TTL); un numero che continua a salire e' un guasto.
+Il valore e' PER PROCESSO e si azzera al riavvio: con piu' worker o piu' istanze
+ogni risposta riporta solo la propria quota, non un totale globale.
+Il motivo non contiene mai il contenuto del segnale, e nemmeno lo stato in memoria
+lo conserva (la riga si riconosce da un digest): /health e' un endpoint senza token.
 
 Il parser attuale riconosce un messaggio contenente "P.Bet. PREMACHT 0,5HT", cerca la riga con 🆚, prende il testo successivo e converte " v " in " - ".
 

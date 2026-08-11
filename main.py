@@ -1,4 +1,4 @@
-import csv, io, logging, os, re, sqlite3
+import csv, hashlib, io, logging, os, re, sqlite3, threading
 from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import Response
@@ -182,8 +182,8 @@ def empty_csv():
     return csv_text(HEADERS)
 
 
-# Quante volte il percorso di consegna ha degradato una riga salvata a feed
-# vuoto, e per quale motivo l'ultima volta.
+# Quante RIGHE guaste distinte il percorso di consegna ha degradato a feed vuoto,
+# e per quale motivo l'ultima volta.
 #
 # Serve perche' quel fallback non puo' sollevare — un raise verso XTrader
 # diventerebbe un 500 — ma degradare in silenzio ha il difetto opposto: un bug in
@@ -191,9 +191,41 @@ def empty_csv():
 # solo «nessun segnale», indistinguibile da un giorno senza partite. Il contatore
 # rende visibile la differenza.
 #
-# Vive in memoria di proposito: e' una spia di salute del processo, non un dato
-# da conservare, e non deve aggiungere una scrittura sul percorso di consegna.
-_SCARTI_CONSEGNA = {'n': 0, 'ultimo': ''}
+# Conta le RIGHE, non le richieste, e la distinzione e' tutta la sua utilita':
+# XTrader interroga il feed a raffica e la risposta e' `no-store`, quindi una sola
+# riga vecchia resterebbe guasta per tutti i 90 secondi del TTL e produrrebbe
+# decine di «scarti» per un unico evento benigno — cioe' un contatore che sale in
+# fretta, che e' esattamente il segnale con cui si dovrebbe riconoscere il guasto
+# vero. Il riconoscimento passa da un digest: distingue due righe diverse senza
+# conservare il segnale di un cliente in una variabile globale.
+#
+# `impronta` e' il digest dell'ultima riga scartata, non un insieme: due righe
+# guaste alternate vengono contate a ogni cambio, ed e' voluto — un feed che
+# oscilla fra due righe invalide e' un guasto, non un evento unico.
+#
+# Vive in memoria di proposito: e' una spia di salute del processo, non un dato da
+# conservare, e non deve aggiungere una scrittura sul percorso di consegna. Ne
+# seguono due limiti da tenere presenti leggendo `/health`, segnalati da GPT-5.5:
+# il valore e' PER PROCESSO, quindi con piu' worker o piu' istanze su Railway ogni
+# risposta riporta solo la propria quota e non un totale; e si azzera a ogni
+# riavvio. Il pannello Salute dell'admin non deve presentarlo come un totale
+# globale.
+def _scarti_azzerati():
+    """Lo stato iniziale del contatore, in un posto solo.
+
+    Esiste perche' anche i test devono azzerarlo: una copia del dizionario
+    scritta a mano la' divergerebbe da questa al primo campo aggiunto.
+    """
+    return {'n': 0, 'ultimo': '', 'impronta': ''}
+
+
+_SCARTI_CONSEGNA = _scarti_azzerati()
+# Gli handler di FastAPI sono sincroni, quindi girano nel threadpool: due
+# richieste possono incrementare insieme e `+= 1` non e' atomico. Segnalato da
+# Fable 5. Il lock costa nulla su un percorso che tocca comunque il database, e
+# senza di esso il contatore perderebbe proprio gli incrementi sotto il carico in
+# cui conta di piu'.
+_SCARTI_LOCK = threading.Lock()
 
 
 def profile_csv(profile, token):
@@ -221,10 +253,18 @@ def profile_csv(profile, token):
             # strutturali (conteggi, posizioni, numeri di riga) e /health e' un
             # endpoint senza token. Il nome del profilo resta nel log del server,
             # dove serve per la diagnosi e dove non e' un segreto: e' gia' nell'URL.
-            _SCARTI_CONSEGNA['n'] += 1
-            _SCARTI_CONSEGNA['ultimo'] = str(e)
-            logging.getLogger('xtrader.relay').warning(
-                'feed del profilo %s degradato a sola intestazione: %s', profile, e)
+            impronta = hashlib.sha256(r[0].encode('utf-8', 'replace')).hexdigest()[:16]
+            with _SCARTI_LOCK:
+                riga_nuova = impronta != _SCARTI_CONSEGNA['impronta']
+                if riga_nuova:
+                    _SCARTI_CONSEGNA['n'] += 1
+                    _SCARTI_CONSEGNA['impronta'] = impronta
+                _SCARTI_CONSEGNA['ultimo'] = str(e)
+            # Il log segue il contatore: righe identiche a ogni richiesta per 90
+            # secondi renderebbero illeggibile proprio il log che serve a capire.
+            if riga_nuova:
+                logging.getLogger('xtrader.relay').warning(
+                    'feed del profilo %s degradato a sola intestazione: %s', profile, e)
             body = empty_csv()
     return Response(body, media_type='text/csv', headers={'Cache-Control': 'no-store'})
 
@@ -268,10 +308,14 @@ def health():
     #
     # `status` resta la risposta a «il formato che produco e' valido?», che e'
     # esattamente quello che misura `csv`.
+    # Una lettura sola sotto lock: senza, `n` e `ultimo_scarto` potrebbero venire
+    # da due momenti diversi e la risposta descriverebbe uno stato mai esistito.
+    with _SCARTI_LOCK:
+        scarti, motivo = _SCARTI_CONSEGNA['n'], _SCARTI_CONSEGNA['ultimo']
     stato = {'status': 'ok' if csv_state == 'ok' else 'degraded',
-             'csv': csv_state, 'feed_scartati': _SCARTI_CONSEGNA['n']}
-    if _SCARTI_CONSEGNA['n']:
-        stato['ultimo_scarto'] = _SCARTI_CONSEGNA['ultimo']
+             'csv': csv_state, 'feed_scartati': scarti}
+    if scarti:
+        stato['ultimo_scarto'] = motivo
     return stato
 
 @app.get('/xtrader.csv')

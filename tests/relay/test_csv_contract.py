@@ -205,7 +205,7 @@ def test_il_feed_degradato_lascia_una_traccia(tmp_path, monkeypatch):
     che si scopre dal cliente che non punta piu-.
     """
     monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'test.db'))
-    monkeypatch.setattr(main, '_SCARTI_CONSEGNA', {'n': 0, 'ultimo': ''})
+    monkeypatch.setattr(main, '_SCARTI_CONSEGNA', main._scarti_azzerati())
     c = main.db()
     try:
         vecchia = main.make_csv(RIGA_VALIDA)[len(main.CSV_BOM):]
@@ -241,6 +241,82 @@ def test_il_feed_degradato_lascia_una_traccia(tmp_path, monkeypatch):
     assert salute['csv'] == 'ok', 'il formato prodotto da questo processo e- valido'
 
 
+def test_la_stessa_riga_guasta_conta_UNO_non_uno_per_richiesta(tmp_path, monkeypatch):
+    """Segnalato da GPT-5.5 su c90eb63, ed e- un difetto della semantica.
+
+    XTrader interroga il feed a raffica e la risposta e- `no-store`, quindi una
+    sola riga vecchia resta guasta per tutti i 90 secondi del TTL e verrebbe
+    contata a ogni richiesta: decine di «scarti» per un unico evento benigno.
+
+    Cio- distruggerebbe esattamente la lettura che il contatore promette. Il
+    criterio dichiarato e- «un contatore che sale in fretta e- il bug che azzera i
+    feed»: se la riga benigna del post-deploy produce da sola venti scarti, quel
+    criterio indica un guasto dove non c-e-. Il contatore conta quindi le RIGHE
+    guaste distinte, non le richieste che le incontrano.
+    """
+    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'test.db'))
+    monkeypatch.setattr(main, '_SCARTI_CONSEGNA', main._scarti_azzerati())
+    c = main.db()
+    try:
+        vecchia = main.make_csv(RIGA_VALIDA)[len(main.CSV_BOM):]
+        c.execute('INSERT INTO signals(csv,parser,profile,expires_at) VALUES (?,?,?,?)',
+                  (vecchia, 'parser-finto', 'PIERO', 2 ** 31 - 1))
+        c.commit()
+    finally:
+        c.close()
+
+    for _ in range(5):
+        risposta = main.profile_csv('PIERO', None)
+        assert risposta.body.decode('utf-8').startswith('\ufeff')
+
+    assert main._SCARTI_CONSEGNA['n'] == 1, (
+        f'cinque richieste sulla STESSA riga guasta hanno prodotto '
+        f'{main._SCARTI_CONSEGNA["n"]} scarti: il contatore misura le richieste '
+        f'invece delle righe, e un singolo segnale vecchio sembrerebbe un guasto'
+    )
+
+    # Una riga guasta DIVERSA invece e- un evento nuovo e va contata.
+    c = main.db()
+    try:
+        c.execute('DELETE FROM signals WHERE profile=?', ('PIERO',))
+        altra = main.CSV_BOM + INTESTAZIONE + '\r\n' + ','.join('"z"' for _ in range(13)) + '\r\n'
+        c.execute('INSERT INTO signals(csv,parser,profile,expires_at) VALUES (?,?,?,?)',
+                  (altra, 'parser-finto', 'PIERO', 2 ** 31 - 1))
+        c.commit()
+    finally:
+        c.close()
+
+    main.profile_csv('PIERO', None)
+    assert main._SCARTI_CONSEGNA['n'] == 2, (
+        'una riga guasta diversa e- un evento nuovo: se non viene contata, il bug '
+        'che azzera i feed resterebbe invisibile'
+    )
+
+
+def test_l_impronta_non_conserva_il_contenuto_del_segnale(tmp_path, monkeypatch):
+    """La deduplica ha bisogno di riconoscere la riga, non di conservarla.
+
+    Il criterio e- un digest: due righe diverse si distinguono, ma dallo stato in
+    memoria non si risale al segnale. Conservare il CSV per confronto avrebbe
+    messo il contenuto di un cliente in una variabile globale del processo.
+    """
+    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'test.db'))
+    monkeypatch.setattr(main, '_SCARTI_CONSEGNA', main._scarti_azzerati())
+    c = main.db()
+    try:
+        sporca = main.CSV_BOM + INTESTAZIONE + '\r\n"XTrader","Juventus Segreta"\r\n'
+        c.execute('INSERT INTO signals(csv,parser,profile,expires_at) VALUES (?,?,?,?)',
+                  (sporca, 'parser-finto', 'PIERO', 2 ** 31 - 1))
+        c.commit()
+    finally:
+        c.close()
+
+    main.profile_csv('PIERO', None)
+    stato = str(main._SCARTI_CONSEGNA)
+    assert 'Juventus' not in stato, f'il contenuto del segnale e- rimasto in memoria: {stato}'
+    assert 'Segreta' not in stato, f'il contenuto del segnale e- rimasto in memoria: {stato}'
+
+
 def test_il_motivo_dello_scarto_non_contiene_il_segnale(tmp_path, monkeypatch):
     """`/health` e- pubblico: il motivo puo- dire COSA e- rotto, non cosa diceva.
 
@@ -250,7 +326,7 @@ def test_il_motivo_dello_scarto_non_contiene_il_segnale(tmp_path, monkeypatch):
     esporrebbe il segnale di un cliente su un endpoint senza token.
     """
     monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'test.db'))
-    monkeypatch.setattr(main, '_SCARTI_CONSEGNA', {'n': 0, 'ultimo': ''})
+    monkeypatch.setattr(main, '_SCARTI_CONSEGNA', main._scarti_azzerati())
     c = main.db()
     try:
         # Una riga che contiene un nome squadra riconoscibile E che e- invalida.

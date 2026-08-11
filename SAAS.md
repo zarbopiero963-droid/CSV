@@ -173,12 +173,29 @@ Quindi ogni scarto incrementa un contatore in memoria e scrive una riga di log c
 nome del profilo e il motivo, **mai** il contenuto del CSV; `/health` espone
 `feed_scartati` e, se diverso da zero, `ultimo_scarto`.
 
+Conta le **righe distinte**, non le richieste. La differenza è tutta l'utilità del
+contatore: XTrader interroga il feed a raffica e la risposta è `no-store`, quindi
+una sola riga vecchia resterebbe guasta per tutti i 90 secondi del TTL e
+produrrebbe decine di scarti per un unico evento benigno — cioè un contatore che
+sale in fretta, che è esattamente il segnale con cui si dovrebbe riconoscere il
+guasto vero. La riga si riconosce da un **digest**, così due righe diverse si
+distinguono senza conservare il segnale di un cliente in una variabile del
+processo. Il log segue la stessa regola, altrimenti 90 secondi di righe identiche
+renderebbero illeggibile proprio il log che serve a capire.
+
 Il contatore **non** fa scattare `degraded`, di proposito: lo scarto atteso — la
 riga della versione precedente, subito dopo un deploy — è benigno e si risolve da
 sé col TTL, quindi marcarlo `degraded` terrebbe il processo «malato» per tutta la
 sua vita dopo ogni deploy normale, cioè un allarme sempre acceso. Il segnale utile
 è il **ritmo**: un contatore che continua a salire è il bug che azzera i feed, e
 si vede confrontando due letture. È il pannello Salute dell'admin a leggerlo.
+
+Due limiti da tenere presenti quando il pannello lo mostrerà: il valore è **per
+processo** e si azzera al riavvio, quindi con più worker o più istanze su Railway
+ogni risposta riporta solo la propria quota e **non** un totale globale; e
+l'incremento è protetto da un lock perché gli handler sono sincroni e girano nel
+threadpool, dove `+= 1` non è atomico e si perderebbero proprio gli incrementi
+sotto il carico in cui contano di più.
 
 Il terzo punto è la lezione del Bridge. Là la funzione equivalente esisteva già
 ed era usata altrove, ma nessun semaforo del pannello la consultava: l'unico
