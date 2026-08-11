@@ -148,15 +148,58 @@ export function runParser(message, config) {
   return { matched, row, missing, complete: matched && missing.length === 0 };
 }
 
-// Serializza come XTrader lo pretende: 14 colonne, tutti i campi tra virgolette,
-// separatore virgola, terminatore CRLF, UTF-8 senza BOM.
+// XTrader legge il feed come UTF-8 CON BOM. Provato su x1.csv, il file che il
+// Bridge scrive e XTrader consuma. Il repository affermava il contrario, e il
+// feed usciva senza BOM: nessun errore da nessuna parte, il segnale semplicemente
+// non arrivava. Il motore Python (main.py) usa la stessa costante: sono due
+// implementazioni dello stesso contratto e devono coincidere byte per byte.
+export const CSV_BOM = '\ufeff';
+
+const quote = f => '"' + String(f ?? '').replace(/"/g, '""') + '"';
+
+// Fonte unica del formato: 14 colonne, tutti i campi tra virgolette, separatore
+// virgola, terminatore CRLF, UTF-8 con BOM. Intestazione e riga passano da qui,
+// perche' due costruzioni separate sono due formati che divergono al primo
+// cambiamento — ed e' esattamente cosi' che il BOM sarebbe finito in uno e non
+// nell'altro.
+function csvText(...rows) {
+  return CSV_BOM + rows.map(r => r.map(quote).join(',')).join('\r\n') + '\r\n';
+}
+
 export function toCsv(row) {
-  const q = f => '"' + String(f ?? '').replace(/"/g, '""') + '"';
-  return [COLUMNS.map(q).join(','), row.map(q).join(',')].join('\r\n') + '\r\n';
+  return csvText(COLUMNS, row);
 }
 
 export function headerOnlyCsv() {
-  return COLUMNS.map(f => '"' + f + '"').join(',') + '\r\n';
+  return csvText(COLUMNS);
+}
+
+// Intestazione attesa, derivata dalle colonne e non ricopiata: una copia a mano
+// si allineerebbe da sola a un ordine sbagliato.
+const HEADER_LINE = COLUMNS.map(quote).join(',');
+const FIELD = '"(?:[^"]|"")*"';
+const ROW_RE = new RegExp('^' + FIELD + '(?:,' + FIELD + '){' + (COLUMNS.length - 1) + '}$');
+
+// Gemello di verify_csv() in main.py. Restituisce null se il CSV e' nella forma
+// che XTrader legge, altrimenti il motivo, in italiano, da mostrare all'utente.
+//
+// Serve perche' il controllo stia DOVE SI GUARDA. Nel Bridge la funzione
+// equivalente esisteva ed era usata altrove, ma nessun semaforo del pannello la
+// consultava: l'unico avviso era una riga di log all'avvio, e un CSV inservibile
+// e' rimasto tale per mesi.
+export function verifyCsv(text) {
+  const s = String(text ?? '');
+  if (!s.startsWith(CSV_BOM)) return 'manca il BOM: XTrader non leggerebbe la prima colonna';
+  const body = s.slice(CSV_BOM.length);
+  if (body.replace(/\r\n/g, '').includes('\n')) return 'c’e’ un LF non preceduto da CR';
+  const lines = body.split('\r\n').filter(Boolean);
+  if (!lines.length) return 'CSV vuoto: manca anche l’intestazione';
+  if (lines[0] !== HEADER_LINE) return `intestazione diversa dal contratto (${lines[0].split(',').length} colonne)`;
+  if (lines.length > 2) return `${lines.length} righe: attesa intestazione piu’ al massimo un segnale`;
+  for (let i = 1; i < lines.length; i++) {
+    if (!ROW_RE.test(lines[i])) return `la riga ${i + 1} non ha ${COLUMNS.length} campi tutti fra virgolette`;
+  }
+  return null;
 }
 
 // Suggeritore euristico: è il segnaposto locale del pulsante "suggerisci mappatura".

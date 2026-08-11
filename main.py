@@ -65,16 +65,70 @@ def db():
     return c
 
 
-def make_csv(row):
+# XTrader reads the feed as UTF-8 with a BOM. Proven on x1.csv, the file the
+# Bridge writes and XTrader consumes: Notepad reports "UTF-8 con BOM" and the
+# header is fully quoted. The repository used to claim the opposite, and the
+# feed went out without a BOM: no error was raised anywhere, the signal simply
+# never arrived.
+CSV_BOM = '\ufeff'
+
+# One quoted field, allowing the doubled quote that escapes a quote inside it.
+_FIELD = r'"(?:[^"]|"")*"'
+_ROW = re.compile('^%s(?:,%s){%d}$' % (_FIELD, _FIELD, len(HEADERS) - 1))
+HEADER_LINE = ','.join('"%s"' % h for h in HEADERS)
+
+
+def csv_text(*rows):
+    """Serialise rows the way XTrader expects them. Single source of the format.
+
+    14 quoted fields, comma separated, CRLF terminated, UTF-8 with a BOM. Both
+    make_csv() and empty_csv() go through here so the format is defined once:
+    the two used to configure the writer separately, which is how a BOM added
+    to one and forgotten in the other would have gone unnoticed.
+    """
     out = io.StringIO(newline='')
-    csv.writer(out, quoting=csv.QUOTE_ALL, lineterminator='\r\n').writerows([HEADERS, row])
-    return out.getvalue()
+    csv.writer(out, quoting=csv.QUOTE_ALL, lineterminator='\r\n').writerows(rows)
+    return CSV_BOM + out.getvalue()
 
 
-def store_signal(c, csv_text, parser, profile=PIERO_PROFILE):
+def verify_csv(text):
+    """Return the text if it is a CSV XTrader can read, raise ValueError if not.
+
+    Checked at the point the data is produced rather than the point it is
+    served: a malformed row must not exist even for the 90 seconds of the TTL.
+    The feed path deliberately does not call this — a defect in the verifier
+    must not turn into a 500 towards XTrader.
+    """
+    if not text.startswith(CSV_BOM):
+        raise ValueError('CSV senza BOM: XTrader non leggerebbe la prima colonna')
+    body = text[len(CSV_BOM):]
+    if '\n' in body.replace('\r\n', ''):
+        raise ValueError('CSV con un LF non preceduto da CR')
+    lines = [l for l in body.split('\r\n') if l]
+    if not lines:
+        raise ValueError('CSV vuoto: manca anche l\'intestazione')
+    if lines[0] != HEADER_LINE:
+        raise ValueError('intestazione diversa dal contratto (%d colonne rilevate)'
+                         % len(lines[0].split(',')))
+    if len(lines) > 2:
+        raise ValueError('CSV con %d righe: atteso intestazione piu al massimo un segnale'
+                         % len(lines))
+    for n, line in enumerate(lines[1:], start=2):
+        if not _ROW.match(line):
+            raise ValueError('riga %d non ha %d campi tutti fra virgolette' % (n, len(HEADERS)))
+    return text
+
+
+def make_csv(row):
+    return csv_text(HEADERS, row)
+
+
+def store_signal(c, csv_text_value, parser, profile=PIERO_PROFILE):
     # One message produces one row; the next message only replaces this profile's row.
+    # Fail closed: a CSV that does not pass verification is never stored.
+    verify_csv(csv_text_value)
     c.execute('DELETE FROM signals WHERE profile=?', (profile,))
-    c.execute('INSERT INTO signals(csv,parser,profile,expires_at) VALUES (?,?,?,?)', (csv_text, parser, profile, int(__import__('time').time()) + 90))
+    c.execute('INSERT INTO signals(csv,parser,profile,expires_at) VALUES (?,?,?,?)', (csv_text_value, parser, profile, int(__import__('time').time()) + 90))
 
 
 def parse_message(message, cfg):
@@ -114,9 +168,7 @@ def get_profile(c, name):
 
 
 def empty_csv():
-    out = io.StringIO(newline='')
-    csv.writer(out, quoting=csv.QUOTE_ALL, lineterminator='\r\n').writerow(HEADERS)
-    return out.getvalue()
+    return csv_text(HEADERS)
 
 
 def profile_csv(profile, token):
@@ -136,7 +188,22 @@ def root():
 
 @app.get('/health')
 def health():
-    return {'status': 'ok'}
+    """Liveness plus the CSV format self-check.
+
+    The check is wired here on purpose. In the Bridge the equivalent function
+    existed and was used elsewhere, but nothing on the health panel looked at
+    it: the only warning was a single log line at startup, and a CSV the program
+    could not use sat there for months. A check nobody reads is not a check.
+    """
+    sample = ['XTrader', '', 'Squadra A - Squadra B', '', 'Over/Under 1,5 gol',
+              'OVER_UNDER_15', '', 'Over 1,5 goal', '0', '', '', '', 'PUNTA', '']
+    try:
+        verify_csv(empty_csv())
+        verify_csv(make_csv(sample))
+        csv_state = 'ok'
+    except ValueError as e:
+        csv_state = 'fault: %s' % e
+    return {'status': 'ok' if csv_state == 'ok' else 'degraded', 'csv': csv_state}
 
 @app.get('/xtrader.csv')
 def xtrader_csv(token: str | None = Query(None)):
@@ -240,7 +307,14 @@ async def telegram_webhook(request: Request):
     if not parsed:
         c.close()
         return {'ok': True, 'ignored': 'parser_no_match'}
-    store_signal(c, parsed['csv'], profile['parser'], profile['name'])
+    try:
+        store_signal(c, parsed['csv'], profile['parser'], profile['name'])
+    except ValueError as e:
+        # Deterministic failure: the same message would produce the same broken
+        # CSV, so answer 200 and let Telegram stop retrying. The condition stays
+        # visible on /health, which verifies the format on every call.
+        c.close()
+        return {'ok': True, 'ignored': 'csv_non_valido', 'reason': str(e)}
     c.commit()
     c.close()
     return {'ok': True, 'profile': profile['name'], 'event': parsed['event']}

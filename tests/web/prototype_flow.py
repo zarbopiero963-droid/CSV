@@ -170,6 +170,15 @@ with sync_playwright() as pw:
     pg.wait_for_selector('.csv-out')
     shot(pg, '13-feed-attivo')
 
+    # Terzo punto di aggancio del verificatore: quello che il cliente vede.
+    # Il pallino verde deve dirlo, non solo il codice deve saperlo.
+    pg.wait_for_selector('#csv-format')
+    stato = pg.inner_text('#csv-format')
+    assert stato == 'formato valido per XTrader', f'indicatore di formato: {stato!r}'
+    # E il CSV mostrato deve avere davvero il BOM, non solo il pallino verde.
+    primo = pg.evaluate("document.querySelector('.csv-out').textContent.codePointAt(0)")
+    assert primo == 0xfeff, f'il CSV mostrato non comincia col BOM: {primo:#x}'
+
     # verifica chat
     pg.click('nav a[href="#/chats"]')
     pg.wait_for_selector('[data-act="verify-chat"]')

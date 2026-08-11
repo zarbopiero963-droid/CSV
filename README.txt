@@ -37,7 +37,7 @@ GET /health
 
 Il parser attuale riconosce un messaggio contenente "P.Bet. PREMACHT 0,5HT", cerca la riga con 🆚, prende il testo successivo e converte " v " in " - ".
 
-CSV: 14 colonne, virgola, campi tra virgolette, UTF-8 senza BOM, colonna finale Points.
+CSV: 14 colonne, virgola, campi tra virgolette, UTF-8 CON BOM, colonna finale Points.
 
 PROTOTIPO WEB APP
 Il prototipo dell'interfaccia multiutente e' servito su /app (file statici in web/).

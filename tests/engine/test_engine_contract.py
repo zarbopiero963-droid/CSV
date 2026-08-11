@@ -59,3 +59,31 @@ def test_nessun_caso_fallito(casi):
 def test_ogni_caso_singolarmente(casi, subtests=None):
     for c in casi:
         assert c['ok'], f'{c["nome"]}: {c.get("errore")}'
+
+
+def test_il_motore_js_e_il_relay_producono_lo_STESSO_formato(casi):
+    """Guardiano della regola 3: due implementazioni, un contratto.
+
+    Il motore vive in JavaScript e il relay in Python. Finche' sono due, il
+    rischio non e' che una sia sbagliata — e' che divergano, e che la divergenza
+    resti invisibile perche' ciascuna passa i propri test. Qui l'intestazione e
+    il BOM prodotti da `web/engine.js` vengono confrontati con quelli di
+    `main.py`: se qualcuno cambia il formato in un posto solo, questo diventa
+    rosso.
+    """
+    import importlib
+    import sys
+    sys.path.insert(0, str(RADICE))
+    main = importlib.import_module('main')
+
+    esportato = next((c for c in casi if 'confronto col motore Python' in c['nome']), None)
+    assert esportato and esportato['ok'], 'il caso che esporta l\'intestazione non e\' passato'
+    dal_js = esportato['dettaglio']
+
+    assert dal_js['bom'] == 0xfeff, f'il BOM del motore JS non e\' U+FEFF: {dal_js["bom"]:#x}'
+    assert ord(main.CSV_BOM) == 0xfeff, f'il BOM del relay non e\' U+FEFF: {ord(main.CSV_BOM):#x}'
+    assert dal_js['intestazione'] == main.HEADER_LINE, (
+        'le due implementazioni scrivono intestazioni diverse:\n'
+        f'  JS     : {dal_js["intestazione"]}\n'
+        f'  Python : {main.HEADER_LINE}'
+    )

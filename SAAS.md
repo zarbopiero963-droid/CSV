@@ -137,7 +137,31 @@ motore Python deve normalizzare allo stesso modo**, o le due implementazioni
 divergono sul caso limite invece che sul caso normale, cioè dove nessuno guarda.
 
 Il formato di uscita non cambia ed è il contratto con XTrader: 14 colonne, tutti
-i campi tra virgolette, separatore virgola, terminatore CRLF, UTF-8 senza BOM.
+i campi tra virgolette, separatore virgola, terminatore CRLF, **UTF-8 con BOM**.
+
+## Verifica del formato
+
+Il contratto non è affidato a una convenzione: c'è una funzione che lo controlla,
+in entrambe le implementazioni. `verify_csv()` in `main.py` e `verifyCsv()` in
+`web/engine.js` verificano BOM, intestazione esatta nell'ordine, CRLF senza LF
+nudi, tutti i campi fra virgolette, 14 campi per riga, e al massimo due righe.
+
+È agganciata in **tre** punti, e il numero conta più della funzione:
+
+1. **`store_signal()`**, fail-closed: un CSV che non passa non viene memorizzato,
+   quindi una riga malformata non esiste nemmeno per i 90 secondi del TTL.
+2. **`GET /health`**, che restituisce `{"status": …, "csv": "ok"}` e diventa
+   `degraded` con il motivo quando il controllo fallisce.
+3. **La vista Feed CSV del prototipo**, con l'indicatore «formato valido per
+   XTrader» / «formato non valido» e il motivo scritto sotto.
+
+Non è agganciata sul percorso di consegna del feed, di proposito: un difetto del
+verificatore non deve trasformarsi in un `500` verso XTrader.
+
+Il terzo punto è la lezione del Bridge. Là la funzione equivalente esisteva già
+ed era usata altrove, ma nessun semaforo del pannello la consultava: l'unico
+avviso era una riga di log all'avvio, e un CSV inservibile è rimasto tale per
+mesi. **Un controllo che nessuno legge non è un controllo.**
 
 ## Contratto API
 
@@ -210,4 +234,26 @@ uvicorn main:app --reload
 ```
 
 Poi `http://127.0.0.1:8000/app/`. I dati vivono in `localStorage`, si azzerano da
-Impostazioni. Gli endpoint del relay esistente non sono stati modificati.
+Impostazioni.
+
+### Vista «Feed CSV»
+
+Accanto al titolo «Contenuto attuale del feed» c'è l'indicatore del formato, con
+due soli stati:
+
+| Etichetta | Quando |
+|---|---|
+| `formato valido per XTrader` | `verifyCsv()` non trova niente da segnalare |
+| `formato non valido` | qualunque violazione del contratto |
+
+Nel secondo caso, sotto il CSV compare il motivo in chiaro — «manca il BOM:
+XTrader non leggerebbe la prima colonna», «intestazione diversa dal contratto
+(11 colonne)» — perché un indicatore rosso senza spiegazione trasforma un difetto
+diagnosticabile in una telefonata.
+
+La nota sotto il CSV dice, verbatim: «Un segnale resta nel feed 90 secondi, poi il
+CSV torna alla sola intestazione. Il timer di questo parser è indipendente da
+tutti gli altri. Il feed è UTF-8 con BOM, come XTrader lo pretende.»
+
+Il BOM è un carattere a larghezza zero: nel blocco del CSV non si vede, ed è
+corretto che non si veda. Chi vuole verificarlo guarda l'indicatore, non il testo.
