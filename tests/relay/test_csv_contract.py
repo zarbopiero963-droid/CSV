@@ -571,7 +571,7 @@ def test_il_motivo_dello_scarto_non_contiene_il_segnale(tmp_path, monkeypatch):
     assert 'Juventus' not in str(main.health()), 'il segnale e- uscito da /health'
 
 
-def test_lo_startup_in_processo_non_puo_chiamare_telegram():
+def test_lo_startup_in_processo_non_puo_chiamare_telegram(monkeypatch):
     """Bloccante di Fugu Ultra: la fixture deve coprire anche `os.environ`.
 
     `register_telegram_webhook()` legge `os.environ` direttamente, non
@@ -585,18 +585,16 @@ def test_lo_startup_in_processo_non_puo_chiamare_telegram():
     """
     chiamate = []
 
-    import urllib.request
-
     def spia(url, *a, **k):
         chiamate.append(url)
         raise AssertionError('nessuna chiamata di rete attesa dai test')
 
-    originale = urllib.request.urlopen
-    urllib.request.urlopen = spia
-    try:
-        asyncio.run(main.register_telegram_webhook())
-    finally:
-        urllib.request.urlopen = originale
+    # Via monkeypatch e non con un salvataggio a mano: segnalato da GPT-5.5.
+    # Sostituire `urlopen` sul modulo e ripristinarlo nel `finally` funziona in
+    # sequenza, ma resta una mutazione globale che con i test in parallelo
+    # toccherebbe anche gli altri. monkeypatch la annulla per test.
+    monkeypatch.setattr(urllib.request, 'urlopen', spia)
+    asyncio.run(main.register_telegram_webhook())
 
     assert not chiamate, f'lo startup ha tentato una chiamata di rete: {chiamate}'
     # E la ragione per cui non l'ha tentata: l'ambiente e' stato ripulito.
@@ -617,18 +615,12 @@ def test_l_handler_di_startup_INGOIA_gli_errori(monkeypatch):
     monkeypatch.setenv('PUBLIC_URL', 'https://esempio-non-esiste.invalid')
     tentativi = []
 
-    import urllib.request
-
     def esplode(url, *a, **k):
         tentativi.append(url)
         raise OSError('rete non disponibile nei test')
 
-    originale = urllib.request.urlopen
-    urllib.request.urlopen = esplode
-    try:
-        asyncio.run(main.register_telegram_webhook())  # non deve sollevare
-    finally:
-        urllib.request.urlopen = originale
+    monkeypatch.setattr(urllib.request, 'urlopen', esplode)
+    asyncio.run(main.register_telegram_webhook())  # non deve sollevare
 
     assert tentativi, 'con un token nell-ambiente lo startup DEVE tentare la chiamata'
     assert 'setWebhook' in tentativi[0]
