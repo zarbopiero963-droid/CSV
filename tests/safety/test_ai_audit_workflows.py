@@ -1022,5 +1022,11 @@ def test_le_helper_compongono_esattamente_le_forme_attese():
 
     # E ogni riga della lista deve finire davvero nel testo del fixture, altrimenti
     # la lista e- una decorazione e il YAML mandato al redattore e- un altro.
-    for riga in ASSEGNAZIONI_CON_SEGRETO:
-        assert riga.strip() in YAML_CON_SEGRETO, f'riga composta assente dal fixture: {riga!r}'
+    for indice, riga in enumerate(ASSEGNAZIONI_CON_SEGRETO):
+        # Nel messaggio l'INDICE e la chiave, non la riga: e- la stessa ragione per cui
+        # l'assert sopra non stampa il fixture, e questa riga l'avevo scritta nello
+        # stesso commit dimenticandola. Segnalato da GPT-5.5.
+        assert riga.strip() in YAML_CON_SEGRETO, (
+            f'assegnazione {indice} ({riga.split(":", 1)[0].strip()}) assente dal fixture: '
+            f'la lista e- scollegata dal testo mandato al redattore'
+        )
