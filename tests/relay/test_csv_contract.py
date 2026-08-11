@@ -17,6 +17,8 @@ diversi, perché servono a cose diverse:
 
 from __future__ import annotations
 
+import asyncio
+import os
 import socket
 import subprocess
 import sys
@@ -31,7 +33,7 @@ RADICE = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(RADICE))
 
 import main  # noqa: E402 - dopo l'inserimento del percorso
-from tests.ambiente import ambiente_di_servizio  # noqa: E402
+from tests.ambiente import CHIAVI_PERICOLOSE, ambiente_di_servizio  # noqa: E402
 
 
 # Intestazione attesa, costruita dalle colonne reali e non ricopiata a mano:
@@ -56,8 +58,19 @@ def _senza_token_ambientale(monkeypatch):
     Autouse di proposito: e' la classe del difetto, non i tre siti di oggi. Un
     test che voglia invece verificare il rifiuto per token errato imposta
     `main.TOKEN` da se', e il suo monkeypatch vince perche' arriva dopo.
+
+    E non basta `main.TOKEN`: segnalato da Fugu Ultra nella review finale.
+    L'handler di startup legge `os.environ` DIRETTAMENTE, non le costanti del
+    modulo, quindi qualunque test che un domani faccia partire l'app in processo
+    (`TestClient`, un lifespan manager, o una chiamata diretta alla coroutine)
+    chiamerebbe `setWebhook` verso il `PUBLIC_URL` di produzione con il token
+    vero. Le variabili pericolose vengono quindi rimosse dall'ambiente di questo
+    processo, con lo stesso elenco che protegge i sottoprocessi: una seconda
+    lista divergerebbe.
     """
     monkeypatch.setattr(main, 'TOKEN', '')
+    for chiave in CHIAVI_PERICOLOSE:
+        monkeypatch.delenv(chiave, raising=False)
 
 
 # ------------------------------------------------------------ funzioni pure
@@ -556,6 +569,71 @@ def test_il_motivo_dello_scarto_non_contiene_il_segnale(tmp_path, monkeypatch):
     assert 'Juventus' not in motivo, f'il motivo espone il contenuto del segnale: {motivo!r}'
     assert 'Segreta' not in motivo, f'il motivo espone il contenuto del segnale: {motivo!r}'
     assert 'Juventus' not in str(main.health()), 'il segnale e- uscito da /health'
+
+
+def test_lo_startup_in_processo_non_puo_chiamare_telegram():
+    """Bloccante di Fugu Ultra: la fixture deve coprire anche `os.environ`.
+
+    `register_telegram_webhook()` legge `os.environ` direttamente, non
+    `main.TOKEN`: neutralizzare la costante del modulo non basta. Se un test fa
+    partire l-app in processo con un `TELEGRAM_BOT_TOKEN` vero nell-ambiente,
+    `setWebhook` parte verso il `PUBLIC_URL` di produzione e ripunta il bot reale
+    — e non fallisce niente, perche- l-handler ingoia ogni eccezione.
+
+    Qui la coroutine di startup viene chiamata davvero, con `urlopen` sostituito
+    da una spia: se qualcosa tentasse la rete, il test lo direbbe.
+    """
+    chiamate = []
+
+    import urllib.request
+
+    def spia(url, *a, **k):
+        chiamate.append(url)
+        raise AssertionError('nessuna chiamata di rete attesa dai test')
+
+    originale = urllib.request.urlopen
+    urllib.request.urlopen = spia
+    try:
+        asyncio.run(main.register_telegram_webhook())
+    finally:
+        urllib.request.urlopen = originale
+
+    assert not chiamate, f'lo startup ha tentato una chiamata di rete: {chiamate}'
+    # E la ragione per cui non l'ha tentata: l'ambiente e' stato ripulito.
+    for chiave in CHIAVI_PERICOLOSE:
+        assert not os.getenv(chiave), \
+            f'{chiave} e- ancora nell-ambiente del processo di test'
+
+
+def test_l_handler_di_startup_INGOIA_gli_errori(monkeypatch):
+    """Il presupposto del test sopra, verificato invece che assunto.
+
+    L'handler cattura ogni eccezione: e- per questo che un webhook ripuntato per
+    sbaglio non fa fallire nulla, ed e- per questo che la spia del test sopra deve
+    guardare le CHIAMATE e non aspettarsi un errore. Se un domani l-handler
+    smettesse di ingoiare, quel test andrebbe riscritto e questo lo segnala.
+    """
+    monkeypatch.setenv('TELEGRAM_BOT_TOKEN', '000000:FINTO-NON-ESISTE')
+    monkeypatch.setenv('PUBLIC_URL', 'https://esempio-non-esiste.invalid')
+    tentativi = []
+
+    import urllib.request
+
+    def esplode(url, *a, **k):
+        tentativi.append(url)
+        raise OSError('rete non disponibile nei test')
+
+    originale = urllib.request.urlopen
+    urllib.request.urlopen = esplode
+    try:
+        asyncio.run(main.register_telegram_webhook())  # non deve sollevare
+    finally:
+        urllib.request.urlopen = originale
+
+    assert tentativi, 'con un token nell-ambiente lo startup DEVE tentare la chiamata'
+    assert 'setWebhook' in tentativi[0]
+    # Il token non deve comparire in un posto diverso dall'URL di Telegram.
+    assert tentativi[0].startswith('https://api.telegram.org/bot')
 
 
 # ------------------------------------------------------------------- HTTP

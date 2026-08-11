@@ -748,7 +748,13 @@ Puoi continuare solo se `POST_FIX_AUDIT=PASS`.
 > richieste senza token e renderebbe l'esito dipendente dalla macchina. La whitelist è in
 > `tests/ambiente.py` — fonte unica per entrambe le fixture che avviano `main:app` — ed è vincolata da
 > `tests/safety/test_ambiente_dei_test.py`. La whitelist protegge il sottoprocesso, **non** `import
-> main`: per le chiamate in processo `tests/relay/` neutralizza `main.TOKEN` con una fixture autouse.
+> main`: per le chiamate in processo `tests/relay/` ha una fixture autouse che azzera `main.TOKEN`
+> **e** rimuove le variabili pericolose da `os.environ`. Servono entrambe le cose, e la seconda l'ha
+> segnalata Fugu Ultra: l'handler di startup legge `os.environ` **direttamente**, non le costanti del
+> modulo, quindi azzerare `main.TOKEN` non fermerebbe un test che facesse partire l'app in processo.
+> Misurato senza la ripulitura: lo startup costruisce e tenta davvero
+> `https://api.telegram.org/bot<token>/setWebhook?url=<PUBLIC_URL>/telegram/webhook`, e non fallisce
+> niente perché l'handler ingoia ogni eccezione.
 
 I test devono essere veri, mirati e verificabili. Non puoi dire che un test è passato se non hai
 realmente eseguito il comando e visto esito positivo.
