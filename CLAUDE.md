@@ -476,6 +476,46 @@ diff-per-push (un reviewer che ha visto solo l'ultimo commit e crede «mancante�
 che sta in un commit precedente della stessa PR) — a quelli rispondi nel thread con l'evidenza,
 mai con un commit.
 
+**Prima di giudicare un bloccante, leggi «File non inviati al modello».** Ogni review stampa in
+fondo l'elenco dei file che il workflow **non** gli ha mandato. Se il file citato dal bloccante è in
+quell'elenco, quella review **non poteva verificarlo** — e questo è tutto ciò che l'omissione
+dimostra. Non dimostra che il difetto non esista: segnalato da CodeRabbit, e la distinzione è
+esattamente quella fra un dubbio e una prova.
+
+Quindi non si patcha e non si archivia sulla fiducia: si **verifica**, con i mezzi che ci sono —
+ispezione diretta del file, i test che lo vincolano, i suoi chiamanti. Se la verifica conferma il
+difetto è reale e va corretto, indipendentemente da chi l'ha visto. Se la verifica lo smentisce, si
+risponde nel thread con quell'evidenza (comando eseguito, righe lette, esito), non con un commit. Solo
+quando la verifica è **impossibile** si dichiara il limite e si lascia decidere al proprietario.
+
+Sulla PR #8 sono stati tre bloccanti su tre, tutti su `web/engine.js`, e tutti smentiti — ma dal test
+che confronta le due implementazioni byte per byte, non dal fatto che il file fosse nell'elenco.
+
+Quell'elenco è ora molto più corto, ma non è vuoto per definizione. I tre workflow ordinano il
+payload per **priorità** prima di consumare il budget — `PRIORITA_PAYLOAD`: prima il codice
+(`main.py`, `web/`, `tools/`, deploy, workflow), poi i test, poi la documentazione. Prima non
+ordinavano niente e consumavano il budget nell'ordine dell'API GitHub, cioè **alfabetico**: `web/` è
+ultimo, quindi il motore di parsing era strutturalmente garantito di essere il primo file scartato,
+mentre `CLAUDE.md` entrava per intero. La lista vive in tre copie identiche perché i workflow non
+fanno checkout e non possono importare un modulo comune; `tests/safety/test_ai_audit_workflows.py` ne
+verifica la parità ed **esegue** il costruttore del payload su una lista di file finti, invece di
+controllarne la forma.
+
+**Quanto costano davvero.** Misurato sulla PR #8, sette head, 15 review addebitate: **$2,6247** in
+totale. La distribuzione conta più del totale, perché decide dove risparmiare:
+
+| Reviewer | Review | Costo | Note |
+|---|---:|---:|---|
+| Claude Fable 5 | 7 | $1,6477 | ~$0,36 per review finale sull'intera PR |
+| OpenRouter Fugu Ultra | 1 | $0,7013 | **17,8× la media di GPT-5.5 per review**, e quella era troncata |
+| GPT-5.5 | 7 | $0,2757 | media $0,0394 per giro |
+| **totale** | **15** | **$2,6247** | |
+
+Ne seguono due regole pratiche. **Il gate a label è la voce grossa** — un armamento completo costa
+~$1,06 (Fable finale + Fugu) — quindi si arma **una volta sola**, quando il lavoro è davvero finito:
+ogni push successivo lo rende stantio e il riarmo ripaga tutto. E **Fugu si tiene per l'ultimo head
+stabile**, non per i giri intermedi.
+
 **CI minutes.** Ogni push e ogni re-run consumano minuti GitHub Actions. Questo repository non ha
 runner Windows (nessuna build EXE qui), quindi il costo è inferiore a quello del Bridge, ma vale
 lo stesso: accorpa i fix in un solo push; niente commit vuoti o re-trigger a raffica; niente churn

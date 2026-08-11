@@ -85,14 +85,26 @@ jobs:
       # l'output resta capato dal prompt ultra-corto.
       MAX_PATCH_PER_FILE_CHARS_ESCALATED: "15000"
       MAX_TOTAL_PATCH_CHARS_ESCALATED: "60000"
-      # Tetto di output. NB: è un CEILING, non il costo — si pagano solo i token
-      # EFFETTIVAMENTE generati, e il prompt ultra-corto (2 sezioni, 150 parole) tiene
-      # l'output reale corto. A 1000 una review appena più lunga sbatteva contro il
-      # tetto → finish_reason=length → gate a label ROSSO per troncamento (falso-negativo,
-      # come Fable su #322). Alzarlo a 3000 elimina il cutoff a costo ~invariato: il
-      # PROMPT controlla la lunghezza reale, il tetto previene solo il taglio. (Il vecchio
-      # rischio ~0,70$/19k token era del prompt LUNGO, ora sostituito dall'ultra-corto.)
-      MAX_OUTPUT_TOKENS: "3000"
+      # Tetto di output. È un CEILING, non il costo: si pagano solo i token
+      # EFFETTIVAMENTE generati, quindi tenerlo basso non risparmia — fa pagare review
+      # incomplete e le fa ripagare al giro dopo.
+      #
+      # Qui c'era scritto che 3000 «elimina il cutoff» perché «il PROMPT controlla la
+      # lunghezza reale». Vero per il TESTO, falso per il REASONING, e questo è un
+      # modello reasoning: i token di ragionamento sono fatturati come output e contano
+      # nel tetto, ma il prompt non li governa.
+      #
+      # Misurato sulla PR #9, gate finale su 5f6ead8: con il tetto a 3000 il modello ha
+      # generato 3000 token di completion **di cui 3000 di reasoning (100%)** e ZERO
+      # righe di review, a ~$0.168. Il ragionamento si è mangiato il tetto intero prima
+      # di arrivare a scrivere. E l'effort non si può abbassare: `low` non è fra i
+      # supported_efforts di questo modello (`max`/`xhigh`/`high`), quindi `high` è già
+      # il minimo — l'unica leva è il tetto.
+      #
+      # 10000 lascia spazio al testo dopo un ragionamento come quello osservato (1552
+      # token su un head, 3000 tagliati su un altro). Il tetto minimo per workflow è
+      # vincolato da tests/safety/test_ai_audit_workflows.py, con le misure scritte.
+      MAX_OUTPUT_TOKENS: "10000"
 
       PRICE_INPUT_PER_MILLION: "5.00"
       PRICE_OUTPUT_PER_MILLION: "30.00"
@@ -198,10 +210,69 @@ jobs:
               # nudi sono anche uno SHA-256: i lockfile del repo ne contengono 291 righe, e
               # redigerle svuoterebbe il diff mandato al reviewer. Copre anche la forma del
               # BACKUP, dove il file-chiave e' annidato come stringa JSON e le virgolette sono
-              # escapate. Stesso pattern di `tools/secret_policy.py` (in str invece che bytes):
+              # escapate. Stesso pattern di `tools/secret_policy.py` DEL BRIDGE (in str invece
+              # che bytes) — quel file NON esiste in questo repository, e dirlo qui evita che un
+              # reviewer chieda di allinearlo a un modulo che non c'e' (chiesto da GPT-5.5):
               # la condivisione per import e' impossibile qui, i workflow non fanno checkout.
               (re.compile(r'''(?i)\\?['"]?(?:signing[_-]?)?seed(?:[_-]?hex)?\\?['"]?\s*[:=]\s*\\?['"]?[0-9a-f]{64,}'''), "[REDACTED_ED25519_SEED]"),
-              (re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)\s*[:=]\s*[\"']?[^\"'\s,;]+"), r"\1=[REDACTED]"),
+              # Assegnazione sensibile il cui valore COMINCIA con un'espressione ma non e'
+              # soltanto quella: si redige fino a FINE RIGA, cosi' nessuna coda sopravvive,
+              # separata da spazio o no.
+              #
+              # Serve perche' le altre due regole lasciavano un varco esattamente in mezzo:
+              # quella del letterale incollato pretende un carattere adiacente a `}}`, e
+              # quella contestuale si ferma al primo spazio. Misurato:
+              #   in  `API_KEY: <espressione> CODA-SPAZIO`
+              #   out `API_KEY=[REDACTED] secrets.X }} CODA-SPAZIO`
+              # Bloccante di Fable 5 sul gate finale, ed e' la stessa classe che aveva
+              # trovato Fugu Ultra: un separatore di distanza.
+              #
+              # Pretende l'ASSEGNAZIONE (`<chiave sensibile>: <espressione>`), quindi la
+              # prosa che cita un'espressione — `usa <espressione> per autenticarti` —
+              # resta leggibile per il reviewer. Verificato da un test.
+              (re.compile(r"""(?i)(api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)"""
+                          r"""\s*[:=]\s*(?!["']?\s*\$\{\{[^{}]*\}\}["']?[ \t]*(?:\r?\n|\Z))"""
+                          r"""["']?\$\{\{[^\r\n]*"""), r"\1=[REDACTED]"),
+              # Un'espressione con un letterale INCOLLATO: qui il letterale e' un segreto,
+              # non un puntatore, e va redatto insieme all'espressione. Deve stare PRIMA
+              # della regola contestuale piu' sotto, che si ferma al primo spazio e
+              # lascerebbe la coda nel payload — misurato:
+              #   in  `API_KEY: <espressione>CODA-SEGRETA`
+              #   out `API_KEY=[REDACTED] secrets.X }}CODA-SEGRETA`
+              # Bloccante di Fugu Ultra, e il test che doveva coprirlo cercava solo la
+              # presenza di `[REDACTED]`: passava con la coda ancora fuori. Ora il test
+              # nomina il valore sensibile e ne verifica l'ASSENZA.
+              #
+              # Le virgolette sono escluse dal riconoscimento del letterale, altrimenti
+              # questa regola mangerebbe la forma fra virgolette che l'esenzione qui
+              # sotto esiste per preservare.
+              (re.compile(r"""\$\{\{[^{}]*\}\}(?=[^\s"'])[^\s"',;]*"""), "[REDACTED_VALORE_INCOLLATO]"),
+              # Esenta le espressioni di GitHub Actions, cioe' la forma
+              # dollaro-graffa-graffa: un riferimento a un Secret e' un PUNTATORE al
+              # segreto, non il segreto. Senza l'esenzione questa regola trasformava una
+              # riga `<NOME>_KEY: <espressione>` in `<NOME>_KEY=[REDACTED] <resto>`, e il
+              # reviewer vedeva YAML rotto e concludeva che il workflow era mal
+              # configurato: e' il meccanismo dei cinque bloccanti fantasma della PR #1
+              # (~$0.9 per giro).
+              #
+              # In questo commento la forma NON si scrive per esteso, e non e' pedanteria:
+              # Actions interpola quelle espressioni in TUTTO il file, `run:` compreso.
+              # Scritte qui per illustrazione venivano sostituite prima che lo script
+              # partisse — una col valore di un Secret vero dentro il sorgente — e i tre
+              # workflow non caricavano piu' affatto. Misurato: tre run con `event: push`,
+              # zero job, e il nome mostrato come percorso del file invece del `name:`.
+              #
+              # L'esenzione copre anche la forma FRA VIRGOLETTE (`KEY: "<espressione>"`),
+              # che la prima versione lasciava passare al redattore: la virgoletta veniva
+              # prima del dollaro e il lookahead non scattava. Segnalato da Sourcery.
+              # L'esenzione vale solo se il valore e' INTERAMENTE una espressione: dopo la
+              # chiusura non deve restare altro che una virgoletta e fine riga. Esentare
+              # qualunque valore che COMINCI con un'espressione lascerebbe uscire cio' che
+              # le sta accanto — in `API_KEY: <espressione>coda-letterale` la coda non e' un
+              # puntatore, e' un segreto, e nessun altro pattern della tabella lo
+              # riconosce. Segnalato da CodeRabbit.
+              # Il VALORE vero resta redatto: lo verifica un test dedicato.
+              (re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)\s*[:=]\s*(?![\"']?\s*\$\{\{[^{}]*\}\}[\"']?[ \t]*(?:\r?\n|\Z))[\"']?[^\"'\s,;]+"), r"\1=[REDACTED]"),
           ]
 
           def redact(text: str) -> str:
@@ -276,7 +347,74 @@ jobs:
           def is_critical(filename: str) -> bool:
               return any(re.search(pattern, filename) for pattern in CRITICAL_PATTERNS)
 
+          # Ordine con cui il budget del payload viene consumato.
+          #
+          # Il budget si esaurisce quasi sempre, quindi QUALCOSA verra' scartato: questa
+          # lista decide cosa. Prima non c'era, e i file venivano consumati nell'ordine
+          # in cui li restituisce l'API GitHub, cioe' ALFABETICO. Conseguenza misurata
+          # sulla PR #8: `web/` e' ultimo in ordine alfabetico, quindi il motore di
+          # parsing e' stato scartato da tutte e quattro le review finali mentre
+          # CLAUDE.md — 1300 righe di documentazione — entrava per intero. I modelli
+          # hanno poi alzato tre bloccanti «parita' JS/Python non verificabile», che sono
+          # costati due review finali da ~$0.36 e ~$0.70 e zero difetti reali.
+          #
+          # Non era sfortuna: su qualunque PR grande abbastanza il core e'
+          # strutturalmente garantito di essere il primo a cadere.
+          PRIORITA_PAYLOAD = [
+              # 0 — il codice che gira in produzione e la superficie multiutente.
+              #
+              # Le cartelle sono ancorate alla RADICE (`^web/`, non `(^|/)web/`), e la
+              # differenza non e' cosmetica: con l'ancora larga `tests/web/prototype_flow.py`
+              # prendeva rango 0 perche' contiene `/web/`, e due file di test consumavano
+              # il budget riservato al codice. Misurato: spingevano fuori dal payload
+              # `poetry.lock`, e su una PR vera potevano spingere fuori il motore — cioe'
+              # ricreare il difetto che questa lista esiste per chiudere.
+              #
+              # CORE_TRIGGER_PATTERNS usa l'ancora larga e va bene la': far partire una
+              # review di troppo e' innocuo, mandare al modello i file sbagliati no.
+              re.compile(r"^main\.py$|^web/|^tools/|^Procfile$|^railway\.json$"
+                         r"|^requirements[^/]*\.(txt|in|lock)$|^pyproject\.toml$"
+                         r"|^poetry\.lock$"),
+              # 1 — l'impianto di review. E' safety-critical (un errore qui esce VERDE),
+              #     ma sta DOPO il codice che serve i clienti, e la ragione e' la
+              #     dimensione: questi tre file sono ~48.000 caratteri l'uno. Finche'
+              #     stavano nel tier-0 l'ordine alfabetico li metteva davanti a
+              #     `main.py` e `web/`, e su una PR che toccava insieme un workflow e il
+              #     relay si mangiavano il budget del core: misurato, `web/engine.js`
+              #     veniva scartato. Segnalato da Fugu Ultra sul gate finale, ed e' la
+              #     stessa classe del difetto che questa lista esiste per chiudere.
+              re.compile(r"^\.github/"),
+              # 2 — i test: dicono se il codice sopra e' vincolato, ma valgono meno del
+              #     codice stesso quando il budget costringe a scegliere.
+              re.compile(r"(^|/)tests?/|(^|/)test_[^/]*\.py$|[^/]*_test\.py$"),
+          ]
+
+          def priorita_payload(filename: str) -> int:
+              """Rango di priorita' del file, dal piu' importante al meno.
+
+              0 = il codice che gira in produzione (relay, motore, tools, deploy, deps)
+              1 = l'impianto di review in `.github/` — safety-critical, ma dopo il codice
+                  che serve i clienti, perche' quei file sono enormi e ne mangerebbero
+                  il budget
+              2 = i test, che dicono se il codice sopra e' vincolato
+              3 = tutto il resto (documentazione)
+
+              Il numero di ranghi segue PRIORITA_PAYLOAD e non e' scritto a mano: la
+              versione precedente diceva «0 core, 1 test, 2 il resto» ed e' rimasta
+              indietro quando `.github/` ha avuto un tier proprio, cioe' la
+              documentazione ha iniziato a mentire sul codice a due righe di distanza.
+              Segnalato da Fable 5.
+              """
+              for rango, pattern in enumerate(PRIORITA_PAYLOAD):
+                  if pattern.search(filename):
+                      return rango
+              return len(PRIORITA_PAYLOAD)
+
           def build_patch_payload(files, max_per_file, max_total):
+              # Ordinamento STABILE per priorita': a pari rango resta l'ordine
+              # dell'API, quindi il payload e' riproducibile fra due esecuzioni.
+              files = sorted(files, key=lambda f: priorita_payload(
+                  safe_display(f.get("filename", ""))))
               # Ritorna anche `budget_truncated`: True se ALMENO un file è stato tagliato
               # a causa del BUDGET (patch troncata per-file, o file intero saltato per
               # tetto totale). NON conta il salto di un file binario/senza-patch (quello

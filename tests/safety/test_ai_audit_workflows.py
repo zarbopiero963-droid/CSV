@@ -420,3 +420,736 @@ def test_nessun_auto_merge():
         testo = path.read_text(encoding='utf-8').lower()
         for vietato in ('enable-pull-request-automerge', 'gh pr merge', 'automerge'):
             assert vietato not in testo, f'{path.name}: contiene {vietato}'
+
+
+# ---------------------------------------------- BLOCCANTI FANTASMA (Issue #6)
+#
+# Le review forti hanno alzato bloccanti su cose che il codice fa correttamente,
+# e la causa non era il modello: era l'input che il workflow gli manda. Due
+# meccanismi distinti, misurati sulla PR #8, che questi test vincolano.
+
+
+def _funzione_payload(path: Path):
+    """Estrae ed ESEGUE `build_patch_payload` dal workflow reale.
+
+    Stessa tecnica di `_funzione_redact`: il test non riscrive la logica di
+    budget, la esegue. Verificare per struttura («esiste un sort») passerebbe
+    anche con un ordinamento che non mette i file core davanti.
+    """
+    sorgente = _script(path)
+    nome = 'build_patch_payload' if 'build_patch_payload' in sorgente else 'costruisci_patch'
+    pezzi = []
+    for f in ('CRITICAL_PATTERNS = [', 'REDACTIONS = [', 'PRIORITA_PAYLOAD = ['):
+        blocco = re.search(r'^(\s*)' + re.escape(f) + r'.*?^\1\]', sorgente, re.S | re.M)
+        assert blocco, f'{path.name}: {f} non trovata'
+        pezzi.append(blocco.group(0))
+    for f in ('def redact(', 'def safe_display(', 'def is_critical(',
+              'def priorita_payload(', f'def {nome}('):
+        blocco = re.search(r'^(\s*)' + re.escape(f) + r'.*?(?=\n\1[A-Za-z_@]|\Z)', sorgente, re.S | re.M)
+        assert blocco, f'{path.name}: {f} non trovata'
+        pezzi.append(blocco.group(0))
+    spazio: dict = {'re': re}
+    for pezzo in pezzi:
+        exec(textwrap.dedent(pezzo), spazio)  # noqa: S102 - sorgente del repo
+    return spazio[nome]
+
+
+def _file_finto(nome: str, righe: int = 60):
+    """Un elemento della lista file come la restituisce l'API GitHub."""
+    patch = '\n'.join(f'+riga {i} di {nome}' for i in range(righe))
+    return {'filename': nome, 'status': 'modified', 'additions': righe,
+            'deletions': 0, 'changes': righe, 'patch': patch}
+
+
+# I 13 file della PR #8, nell'ordine in cui l'API GitHub li restituisce
+# (alfabetico). `web/` e' ULTIMO, ed e' il punto di tutto questo blocco.
+FILE_COME_LA_PR_8 = [
+    'CLAUDE.md', 'README.txt', 'SAAS.md', 'main.py',
+    'tests/ambiente.py', 'tests/engine/engine_cases.mjs',
+    'tests/engine/test_engine_contract.py', 'tests/relay/test_csv_contract.py',
+    'tests/safety/test_ambiente_dei_test.py', 'tests/web/prototype_flow.py',
+    'tests/web/test_prototype_flow.py', 'web/app.js', 'web/engine.js',
+    # File di dipendenze: la tabella CRITICAL_PATTERNS lo tratta come critico, quindi
+    # deve essere tier-0 anche nel payload. Segnalato da CodeRabbit.
+    'poetry.lock',
+]
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_i_file_core_entrano_nel_payload_anche_col_budget_stretto(path):
+    """Il motore non deve mai finire fra i file saltati per budget.
+
+    Misurato sulla PR #8: `web/engine.js` e `web/app.js` sono stati saltati da
+    TUTTE E QUATTRO le review finali, e i modelli hanno alzato tre bloccanti
+    «parita' JS/Python non verificabile». Non era sfortuna: il budget viene
+    consumato nell'ordine in cui l'API restituisce i file, cioe- ALFABETICO, e
+    `web/` e- ultimo. Su qualsiasi PR abbastanza grande il motore e-
+    strutturalmente garantito di essere il primo scartato, mentre `CLAUDE.md` —
+    1300 righe di documentazione — viene mandato per intero.
+
+    Il costo non e- solo il rumore: quei bloccanti fantasma sono arrivati da
+    review finali da ~$0.36 e ~$0.70 l'una.
+    """
+    build = _funzione_payload(path)
+    files = [_file_finto(n) for n in FILE_COME_LA_PR_8]
+
+    # Budget deliberatamente insufficiente per tutti e 13: qualcosa DEVE essere
+    # scartato. Il test non chiede di non scartare — chiede di scartare i file
+    # giusti.
+    testo, saltati, critici, troncato = build(files, 2000, 9000)
+
+    assert 'web/engine.js' not in saltati, (
+        'il motore e- stato scartato per budget mentre la documentazione entrava: '
+        f'saltati={saltati}'
+    )
+    assert 'FILE: web/engine.js' in testo, 'il motore non e- nel payload mandato al modello'
+    assert 'main.py' not in saltati, f'il relay e- stato scartato: saltati={saltati}'
+    assert 'FILE: main.py' in testo, 'il relay non e- nel payload'
+    assert 'poetry.lock' not in saltati, (
+        f'il lockfile delle dipendenze e- stato scartato: saltati={saltati}'
+    )
+
+    # E i test sotto `tests/web/` NON sono core: contengono `/web/` nel percorso, e con
+    # l'ancora larga prendevano rango 0 consumando il budget del codice. E- il difetto
+    # che ha spinto fuori `poetry.lock`, trovato grazie al rilievo di CodeRabbit.
+    inclusi = re.findall(r'FILE: (\S+)', testo)
+    for finto_core in ('tests/web/prototype_flow.py', 'tests/web/test_prototype_flow.py'):
+        assert finto_core not in inclusi[:4], (
+            f'{finto_core} e- entrato fra i primi file come se fosse core: il pattern '
+            f'delle cartelle non e- ancorato alla radice.\nordine: {inclusi}'
+        )
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_i_file_core_precedono_i_documenti_nel_payload(path):
+    """L'ordine, non solo la presenza: il core va letto prima.
+
+    Due budget, perche- le due proprieta- non sono verificabili con lo stesso.
+
+    Col budget STRETTO si verifica CHI viene scartato: il codice entra, i documenti no.
+    Col budget LARGO, dove non si scarta niente, si verifica l'ORDINE — ed e- l-unico
+    modo di verificarlo davvero, perche- col budget stretto i documenti non arrivano
+    mai nel payload e il confronto non ha operandi.
+
+    Questa e- la correzione di un difetto vero, trovato cercando la CLASSE del rilievo
+    di CodeRabbit sul test della PR mista invece del solo sito: qui l'ordine era dietro
+    un `if docs:` e MISURATO come ramo morto — `docs` risultava vuoto su tutti e tre i
+    workflow, quindi il test dichiarava nel docstring di verificare l'ordine e in
+    realta- verificava solo la presenza del core. Un `if` che protegge un-asserzione
+    dalla mancanza dei suoi operandi la spegne in silenzio proprio quando servirebbe.
+    """
+    build = _funzione_payload(path)
+    files = [_file_finto(n) for n in FILE_COME_LA_PR_8]
+
+    # 1. Budget stretto: si scarta, e si scartano i documenti.
+    testo, saltati, _, _ = build(files, 2000, 5000)
+    posizione = {n: testo.find(f'FILE: {n}') for n in FILE_COME_LA_PR_8}
+    core = {n: p for n, p in posizione.items() if p >= 0 and (n == 'main.py' or n.startswith('web/'))}
+    docs = {n: p for n, p in posizione.items() if p >= 0 and n.endswith(('.md', '.txt'))}
+
+    assert core, f'nessun file core nel payload col budget stretto: saltati={saltati}'
+    assert not docs, (
+        f'col budget stretto un documento e- entrato mentre si scartava: docs={docs}, '
+        f'saltati={saltati}'
+    )
+
+    # 2. Budget largo: entra tutto, e l'ordine si verifica senza condizioni.
+    testo, saltati, _, _ = build(files, 2000, 40000)
+    posizione = {n: testo.find(f'FILE: {n}') for n in FILE_COME_LA_PR_8}
+    core = {n: p for n, p in posizione.items() if p >= 0 and (n == 'main.py' or n.startswith('web/'))}
+    docs = {n: p for n, p in posizione.items() if p >= 0 and n.endswith(('.md', '.txt'))}
+
+    assert not saltati, f'col budget largo non si deve scartare niente: saltati={saltati}'
+    assert core and docs, (
+        f'operandi mancanti per il confronto d-ordine: core={core}, docs={docs}'
+    )
+    assert max(core.values()) < min(docs.values()), (
+        f'un documento precede un file core nel payload: core={core} docs={docs}'
+    )
+
+
+# ------------------------- comporre le stringhe di prova, invece di scriverle
+#
+# Un file che testa un REDATTORE non puo' contenere le stringhe che il redattore
+# riconosce: quando questo file finisce nel payload di una review viene redatto
+# come qualunque altro diff, e il reviewer riceve Python con literal non terminati.
+#
+# Misurato su 988bb6e: 32 righe di questo file arrivavano maciullate, e GPT-5.5 ne
+# ha dedotto un bloccante per errore di sintassi. Non allucinava — descriveva
+# accuratamente il testo rotto che gli era arrivato. Il file piu' critico della PR
+# era diventato l'unico irrevisionabile.
+#
+# Quindi le parti sensibili si assemblano a runtime: nel SORGENTE non compare mai
+# `<chiave>: <espressione>` contiguo, mentre il valore passato a `redact()` e'
+# esattamente quello.
+_D = '$'
+_ESPR = _D + '{{ secrets.%s }' + '}'
+_CHIAVE = 'API' '_KEY'
+_CHIAVE_SECONDA = 'TOK' + 'EN'
+
+
+def _espressione(nome: str = 'NOME') -> str:
+    """L'espressione di GitHub Actions, composta e non scritta."""
+    return _ESPR % nome
+
+
+def _assegnazione(chiave: str, valore: str, sep: str = ': ') -> str:
+    """Una riga `chiave<sep>valore`, con la chiave sensibile passata a pezzi."""
+    return f'{chiave}{sep}{valore}\n'
+
+# Riga reale di un workflow di questo repository: il nome del Secret e- proprio
+# l'informazione che serve al reviewer per giudicare, e la #6 nasce dal fatto che
+# veniva cancellata.
+# Le assegnazioni del fixture, come LISTA: il test le itera invece di ritrovarle
+# dentro una stringa con un filtro a sottostringhe. Un filtro del genere andava
+# allungato a ogni chiave nuova (`SECRET`, `PASSWORD`, minuscole...) e ogni volta che
+# qualcuno se ne dimenticava il fixture perdeva copertura in silenzio. Segnalato da
+# GPT-5.5, e la lista rimuove la classe invece della singola omissione.
+ASSEGNAZIONI_CON_SEGRETO = [
+    _assegnazione('PROVIDER_' + _CHIAVE, _espressione('BETRELAY_FABLE')),
+    _assegnazione('ALTRO_' + _CHIAVE, _espressione('BETRELAY_GPT')),
+    _assegnazione('GITHUB_' + _CHIAVE_SECONDA, _espressione('GITHUB_TOKEN')),
+    # Forma FRA VIRGOLETTE: la prima versione del lookahead la lasciava passare al
+    # redattore, perche' guardava subito dopo i due punti e trovava la virgoletta
+    # invece del dollaro. Segnalato da Sourcery, ed e' una forma YAML comunissima.
+    _assegnazione('QUOTATO_' + _CHIAVE, '"' + _espressione('BETRELAY_FUGU') + '"'),
+    _assegnazione('APICE_' + _CHIAVE, "'" + _espressione('BETRELAY_FUGU') + "'"),
+]
+
+YAML_CON_SEGRETO = (
+    '      - name: Review\n'
+    '        env:\n'
+    + ''.join('          ' + r for r in ASSEGNAZIONI_CON_SEGRETO)
+)
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_un_riferimento_a_secrets_non_viene_maciullato(path):
+    """`${{ secrets.X }}` e- un PUNTATORE a un segreto, non un segreto.
+
+    La regola contestuale della tabella cattura `api_key: <valore>` e sostituisce
+    tutto con `[REDACTED]`. Su un YAML di workflow questo cancella il NOME del
+    Secret, che e- esattamente cio- che il reviewer deve leggere per dire se e-
+    quello giusto — e in questo repository i nomi giusti (`BETRELAY_*`) sono
+    diversi da quelli del Bridge, quindi il rilievo e- reale e frequente.
+
+    Misurato: e- il meccanismo con cui la PR #1 ha raccolto cinque bloccanti
+    fantasma, ~$0.9 per giro, tutti refutabili leggendo il file.
+
+    Il valore vero resta redatto — lo verifica il test accanto.
+    """
+    redact = _funzione_redact(path)
+    ripulito = redact(YAML_CON_SEGRETO)
+
+    for nome_secret in ('BETRELAY_FABLE', 'BETRELAY_GPT', 'BETRELAY_FUGU'):
+        assert nome_secret in ripulito, (
+            f'il nome del Secret {nome_secret} e- stato cancellato dalla redazione: '
+            f'il reviewer non puo- giudicare se e- quello giusto.\n{ripulito}'
+        )
+    assert ripulito.count('${{') == YAML_CON_SEGRETO.count('${{'), (
+        f'{ripulito.count("${{")} espressioni sopravvissute su '
+        f'{YAML_CON_SEGRETO.count("${{")}: contarle e- l\'unico modo di accorgersi che '
+        f'una FORMA (fra virgolette, con apici) viene ancora maciullata mentre le '
+        f'altre passano.\n{ripulito}'
+    )
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_l_esenzione_copre_solo_l_espressione_COMPLETA(path):
+    """Segnalato da CodeRabbit, ed e- la direzione pericolosa dell'esenzione.
+
+    Esentare qualunque valore che COMINCI con un'espressione lascia uscire cio-
+    che le sta accanto: in `API_KEY: <espressione>segreto-letterale` il suffisso
+    non e- un puntatore, e- un segreto, e nessun altro pattern della tabella lo
+    riconosce. L'esenzione vale quindi solo se il valore e- INTERAMENTE una
+    espressione — dopo la chiusura non deve restare altro che una virgoletta.
+
+    Il test precedente (le forme fra virgolette) e questo tirano in direzioni
+    opposte, ed e- il punto: servono entrambi perche- l'esenzione stia esattamente
+    dove deve.
+    """
+    redact = _funzione_redact(path)
+
+    # Il valore sensibile viene NOMINATO e cercato nell'output: la prima versione di
+    # questo test si accontentava di trovare `[REDACTED]` da qualche parte, e passava
+    # mentre la coda del segreto restava nel payload. Bloccante di Fugu Ultra, ed era
+    # un test decorativo — quelli che CLAUDE.md vieta — scritto da me nella patch che
+    # doveva chiudere proprio questa classe di falla.
+    for riga, sensibile in (
+        (_assegnazione(_CHIAVE, _espressione() + 'CODA-INCOLLATA'), 'CODA-INCOLLATA'),
+        (_assegnazione(_CHIAVE_SECONDA, _espressione() + 'coda-sensibile', ' = '), 'coda-sensibile'),
+        (_assegnazione(_CHIAVE, 'PREFISSO-SEGRETO' + _espressione()), 'PREFISSO-SEGRETO'),
+        (_assegnazione(_CHIAVE, 'chiave-vera-scritta-a-mano'), 'chiave-vera-scritta-a-mano'),
+        # Coda separata da uno SPAZIO: la regola del letterale incollato pretende un
+        # carattere adiacente alle graffe di chiusura, quella contestuale si ferma al
+        # primo spazio, e in mezzo passava il segreto. Bloccante di Fable 5 sul gate
+        # finale, e la stessa classe che aveva trovato Fugu: un separatore di distanza.
+        (_assegnazione(_CHIAVE, _espressione() + ' CODA-SPAZIO'), 'CODA-SPAZIO'),
+        (_assegnazione(_CHIAVE_SECONDA, _espressione() + ' uno DUE tre', ' = '), 'DUE'),
+        # Le varianti restanti della STESSA forma, enumerate invece di aspettare che il
+        # prossimo reviewer trovi la successiva. Due volte di fila ho corretto
+        # un'ISTANZA e due reviewer diversi hanno trovato quella dopo: e' la regola 2
+        # mancata sullo stesso pattern.
+        (_assegnazione(_CHIAVE, _espressione() + '\tCODA-TAB', ':\t'), 'CODA-TAB'),
+        (_assegnazione(_CHIAVE, 'PREFISSO-SPAZIO ' + _espressione()), 'PREFISSO-SPAZIO'),
+        (_assegnazione(_CHIAVE, _espressione('A') + _espressione('B') + 'DUE-ESPR'), 'DUE-ESPR'),
+        (_assegnazione(_CHIAVE, '"' + _espressione() + ' IN-VIRGOLETTE"'), 'IN-VIRGOLETTE'),
+        (_assegnazione(_CHIAVE, "'" + _espressione() + " IN-APICI'"), 'IN-APICI'),
+        (_assegnazione(_CHIAVE, '"' + _espressione() + '"DOPO-VIRGOLETTA'), 'DOPO-VIRGOLETTA'),
+        (_assegnazione('Authorization', 'Bearer ' + _espressione() + 'DOPO-BEARER'), 'DOPO-BEARER'),
+    ):
+        ripulito = redact(riga)
+        assert sensibile not in ripulito, (
+            f'{path.name}: il valore sensibile {sensibile!r} e- SOPRAVVISSUTO alla '
+            f'redazione ed uscirebbe verso un modello esterno.\n'
+            f'  in : {riga.strip()}\n  out: {ripulito.strip()}'
+        )
+
+    # La prosa senza una chiave sensibile non viene toccata dalla regola
+    # sull'assegnazione: quella pretende `<chiave>: <espressione>`, quindi una frase che
+    # cita un'espressione resta leggibile per il reviewer.
+    prosa = 'usa ' + _espressione() + ' per autenticarti'
+    assert redact(prosa) == prosa, (
+        f'{path.name}: la regola sull-assegnazione ha mangiato della prosa: {redact(prosa)!r}'
+    )
+
+    # E le espressioni COMPLETE restano intatte, col nome del Secret leggibile: e- il
+    # motivo per cui l'esenzione esiste, e va verificato nella stessa funzione perche-
+    # le due proprieta- tirano in direzioni opposte.
+    #
+    # L'asserzione e- l'UGUAGLIANZA con l'ingresso, non la presenza del nome e di
+    # `${{`. Segnalato da CodeRabbit su questa PR, e misurato con una regola di
+    # sabotaggio che normalizza `<chiave>: ` in `<chiave>=` — un carattere di distanza
+    # dalla regola vera, che sostituisce proprio con `\1=[REDACTED]`:
+    #   in  `API_KEY: <espressione>`      out `API_KEY=<espressione>`
+    # Il nome del Secret c'e-, `${{` c'e-, e lo YAML e- rotto: il reviewer vede un
+    # workflow mal configurato ed e- ESATTAMENTE il meccanismo dei bloccanti fantasma
+    # che l'esenzione esiste per chiudere. Col vecchio assert: 1 passed.
+    for riga in (
+        _assegnazione(_CHIAVE, _espressione('BETRELAY_FABLE')),
+        _assegnazione(_CHIAVE, '"' + _espressione('BETRELAY_FABLE') + '"'),
+        _assegnazione(_CHIAVE, "'" + _espressione('BETRELAY_FABLE') + "'"),
+    ):
+        ripulito = redact(riga)
+        assert ripulito == riga, (
+            f'{path.name}: espressione completa alterata dal redattore.\n'
+            f'  in : {riga!r}\n  out: {ripulito!r}'
+        )
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_un_valore_di_segreto_VERO_resta_redatto(path):
+    """L'altra faccia: esentare `${{ … }}` non deve aprire un varco.
+
+    Senza questo, la correzione del test sopra potrebbe essere fatta allentando
+    la regola contestuale, e un segreto scritto a mano in un file uscirebbe verso
+    tre modelli esterni.
+
+    Ogni riga e- accoppiata al FRAMMENTO sensibile che non deve uscire, e si verificano
+    entrambe le cose: il marcatore c'e- **e** il frammento no. Segnalato da CodeRabbit
+    su questa PR: cercare solo `[REDACTED]` passa anche quando il marcatore compare
+    ACCANTO al valore invece che al suo posto. Misurato togliendo il `+` dalla coda
+    della regola contestuale — un typo di quantificatore:
+      out `api_key=[REDACTED]hiave-scritta-a-mano-per-errore`
+    Col vecchio assert: 1 passed.
+
+    Il frammento non comprende il primo carattere del valore, perche- quel sabotaggio
+    lo mangia: vietare la stringa intera lo lascerebbe passare di nuovo. Una perdita
+    parziale resta una perdita.
+    """
+    redact = _funzione_redact(path)
+    for riga, frammento in (
+        (_assegnazione('PROVIDER_' + _CHIAVE, 'sk-ant-api03-VALOREFINTOCHENONDEVEUSCIRE00'),
+         'ALOREFINTOCHENONDEVEUSCIRE00'),
+        (_assegnazione('api' '_key', '"chiave-scritta-a-mano-per-errore"', ' = '),
+         'hiave-scritta-a-mano-per-errore'),
+        (_assegnazione('CSV_ACCESS_' + _CHIAVE_SECONDA, 'FINTO-non-un-token-0000000000'),
+         'INTO-non-un-token-0000000000'),
+    ):
+        ripulito = redact(riga)
+        assert '[REDACTED' in ripulito, f'{path.name}: valore NON redatto: {riga} -> {ripulito}'
+        assert frammento not in ripulito, (
+            f'{path.name}: il marcatore c-e- ma il valore e- USCITO accanto: '
+            f'{frammento!r} sopravvive.\n  in : {riga!r}\n  out: {ripulito!r}'
+        )
+
+
+def test_gpt55_ha_un_budget_di_output_sufficiente():
+    """`MAX_OUTPUT_TOKENS: 1000` su un modello reasoning tronca e ripaga ogni giro.
+
+    Segnalato da CodeRabbit sulla PR #1 (thread rimasto non risolto) e confermato
+    sul campo: su PR #8 GPT-5.5 ha scritto «il diff dei test e- troncato» su due
+    head diversi. I token di reasoning contano nel budget di output, quindi 1000
+    e- il motivo del troncamento, non la protezione dal costo — il costo vero e-
+    pagare piu- volte la stessa review incompleta.
+
+    Gli altri due workflow usano 3000.
+    """
+    # Il valore che il job usa davvero, dal blocco `env:` dello step, non da una
+    # regex sul testo grezzo: `_script()` restituisce solo i corpi `run:`.
+    doc = _carica(GPT)
+    env = {**(doc.get('env') or {}), **(doc['jobs']['review'].get('env') or {})}
+    assert 'MAX_OUTPUT_TOKENS' in env, 'MAX_OUTPUT_TOKENS non dichiarato nel blocco env'
+    dichiarato = int(str(env['MAX_OUTPUT_TOKENS']))
+    assert dichiarato >= 3000, (
+        f'MAX_OUTPUT_TOKENS={dichiarato} su un modello reasoning: tronca la review e la '
+        f'fa ripagare a ogni giro. Gli altri due workflow usano 3000.'
+    )
+
+    # E il default DENTRO lo script deve concordare: se divergesse, togliere la riga
+    # dall'`env:` farebbe regredire il budget senza che niente diventi rosso — la
+    # stessa classe di difetto dei Secret col nome sbagliato.
+    m = re.search(r'MAX_OUTPUT_TOKENS = int\(os\.environ\.get\("MAX_OUTPUT_TOKENS", "(\d+)"\)\)',
+                  _script(GPT))
+    assert m, 'default di MAX_OUTPUT_TOKENS non trovato nello script'
+    assert int(m.group(1)) >= 3000, (
+        f'il default nello script e- {m.group(1)} mentre env dichiara {dichiarato}: '
+        f'togliere la riga da env farebbe tornare il troncamento in silenzio'
+    )
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_ogni_workflow_ha_un_tier_di_escalation_del_budget(path):
+    """Se il diff risulta troncato, il job deve poter ricostruire piu- largo.
+
+    Fable e Fugu lo fanno; GPT-5.5 non aveva nessun tier, quindi un diff grande
+    restava tagliato senza rimedio. Tre implementazioni dello stesso contratto:
+    la regola 3 vale anche qui, e non possono condividere codice perche- i
+    workflow non fanno checkout.
+    """
+    sorgente = _script(path)
+    for chiave in ('MAX_TOTAL_PATCH_CHARS_ESCALATED', 'MAX_PATCH_PER_FILE_CHARS_ESCALATED'):
+        assert chiave in sorgente, f'{path.name}: manca {chiave}'
+
+    # La presenza non basta: un tier dichiarato ma piu' basso del riferimento
+    # sarebbe un'escalation che non escala. Segnalato da Sourcery.
+    def budget(p: Path, chiave: str) -> int:
+        doc = _carica(p)
+        env = {**(doc.get('env') or {}), **(doc['jobs']['review'].get('env') or {})}
+        assert chiave in env, f'{p.name}: {chiave} non nel blocco env'
+        return int(str(env[chiave]))
+
+    for chiave in ('MAX_TOTAL_PATCH_CHARS_ESCALATED', 'MAX_PATCH_PER_FILE_CHARS_ESCALATED'):
+        assert budget(path, chiave) >= budget(FABLE, chiave), (
+            f'{path.name}: {chiave}={budget(path, chiave)} e- sotto il riferimento '
+            f'{FABLE.name}={budget(FABLE, chiave)}: l\'escalation non escala'
+        )
+        assert budget(path, chiave) > budget(path, chiave.replace('_ESCALATED', '')), (
+            f'{path.name}: {chiave} non e- maggiore del budget base: il tier alto '
+            f'non aggiunge niente e la ricostruzione e- solo una spesa in piu-'
+        )
+
+
+# ------------------------------------------- SINTASSI dello script incorporato
+
+def _script_python(path: Path) -> tuple[str, str]:
+    """Estrae il corpo Python dall'heredoc dentro lo shell script dello step.
+
+    I workflow non fanno checkout e non hanno un file .py: lo script vive in un
+    `python3 <<'PY' … PY` dentro un `run:` bash. Nessuno lo compila mai, quindi un
+    errore di sintassi si scoprirebbe solo a job rosso — e su un reviewer
+    opzionale un job rosso somiglia molto a un reviewer che non ha niente da dire.
+    """
+    doc = _carica(path)
+    trovati = []
+    for step in doc['jobs']['review']['steps']:
+        run = step.get('run') or ''
+        for m in re.finditer(r"python3?\s+(?:-\s+)?<<\s*'?(\w+)'?\n(.*?)\n\1\s*$", run, re.S | re.M):
+            trovati.append((m.group(2), step.get('name', '?')))
+    assert trovati, f'{path.name}: nessuno script Python trovato nello step di review'
+    # Deterministico, non "il primo che capita": segnalato da Sourcery. Se un
+    # domani ne comparisse un secondo, prendere il primo in silenzio farebbe
+    # compilare il pezzo sbagliato e il test direbbe verde sul file non letto.
+    assert len(trovati) == 1, (
+        f'{path.name}: {len(trovati)} script Python nello step di review '
+        f'({", ".join(n for _, n in trovati)}): l\'estrattore non sa quale controllare, '
+        f'va reso esplicito prima di fidarsi di questo test'
+    )
+    return trovati[0]
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_lo_script_del_workflow_ha_sintassi_valida(path):
+    """Il Python incorporato deve compilare, e va compilato qui perche' non lo fa nessuno."""
+    import ast
+    corpo, nome_step = _script_python(path)
+    assert len(corpo.splitlines()) > 200, (
+        f'{path.name}: estratte solo {len(corpo.splitlines())} righe dallo step '
+        f'"{nome_step}": l\'estrattore ha preso il pezzo sbagliato e il test non '
+        f'starebbe controllando niente'
+    )
+    try:
+        ast.parse(corpo)
+    except SyntaxError as e:
+        righe = corpo.splitlines()
+        contesto = righe[e.lineno - 1].strip() if e.lineno and e.lineno <= len(righe) else '?'
+        raise AssertionError(
+            f'{path.name}: SyntaxError nello script dello step "{nome_step}" '
+            f'alla riga {e.lineno}: {e.msg}\n    >>> {contesto}'
+        ) from e
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_la_lista_di_priorita_e_identica_nei_tre_workflow(path):
+    """Regola 3 dove una fonte unica non e' possibile.
+
+    I workflow non fanno checkout, quindi non possono importare un modulo comune:
+    la lista di priorita' e' per forza in tre copie. Tre copie corrette oggi sono
+    tre copie divergenti domani, e la divergenza qui e' invisibile — un reviewer
+    che legge i file sbagliati esce verde. Questo test le tiene allineate.
+    """
+    def estrai(p: Path) -> str:
+        m = re.search(r'^(\s*)PRIORITA_PAYLOAD = \[.*?^\1\]', _script(p), re.S | re.M)
+        assert m, f'{p.name}: PRIORITA_PAYLOAD non trovata'
+        return textwrap.dedent(m.group(0))
+
+    assert estrai(path) == estrai(FABLE), (
+        f'{path.name}: la lista di priorita\' del payload differisce da quella di '
+        f'{FABLE.name}. Tre copie che divergono sono tre reviewer che leggono file diversi.'
+    )
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_lo_script_non_contiene_espressioni_di_actions_letterali(path):
+    """Dentro lo script non si scrive la forma dollaro-graffa-graffa, nemmeno nei commenti.
+
+    Actions interpola quelle espressioni in TUTTO il file di workflow, `run:`
+    compreso: non sono testo inerte. Misurato scrivendone tre in un commento di
+    questi stessi workflow — una puntava a un Secret vero, quindi il suo VALORE
+    sarebbe finito nel sorgente dello script — e i tre workflow hanno smesso di
+    caricare del tutto: tre run con `event: push`, zero job, e il nome mostrato
+    come percorso del file invece del `name:` del workflow.
+
+    Il modo giusto di parlarne in un commento e' descriverla, o scriverla nella
+    forma escapata che la regex usa comunque.
+
+    Nota sull'ambito: qui si guarda SOLO lo script incorporato. Nel resto del
+    workflow le espressioni sono legittime e necessarie — `env:`, `if:`,
+    `concurrency:` — e vietarle la' romperebbe tutto.
+    """
+    corpo, nome_step = _script_python(path)
+    colpevoli = [
+        (n, riga.strip()) for n, riga in enumerate(corpo.splitlines(), 1)
+        if '${{' in riga
+    ]
+    assert not colpevoli, (
+        f'{path.name}: espressione di Actions letterale nello script dello step '
+        f'"{nome_step}" — verra- interpolata prima dell\'esecuzione:\n  '
+        + '\n  '.join(f'riga {n}: {r[:100]}' for n, r in colpevoli)
+    )
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_la_redazione_sovra_redige_la_punteggiatura_ed_e_una_SCELTA(path):
+    """Documenta un compromesso, invece di lasciarlo scoprire a un futuro rilievo.
+
+    Segnalato da GPT-5.5: un'espressione seguita da punteggiatura in prosa —
+    `vedi <espressione>) nel testo` — viene redatta insieme alla punteggiatura.
+    Non e' una fuga di segreti, e' payload di review alterato, e in un progetto che
+    sta cercando di far leggere ai reviewer il file giusto e' un costo reale.
+
+    Non viene corretto, e la ragione va scritta perche' non e' ovvia. Il rimedio
+    naturale sarebbe far scattare la regola solo su caratteri plausibili come
+    inizio di un segreto (`[A-Za-z0-9_+/=-]`), escludendo `)`, `,`, `.`, backtick.
+    Ma quella esclusione riapre la falla: con `API_KEY: <espressione>.coda-segreta`
+    la regola del letterale incollato non scatterebbe, quella contestuale si
+    fermerebbe allo spazio, e `.coda-segreta` uscirebbe. Misurato.
+
+    Fra sovra-redigere della prosa e lasciare uscire un segreto, un redattore
+    sceglie il primo. Questo test fissa quella scelta: se un domani qualcuno
+    restringesse il trigger, il test accanto sulla coda incollata diventa rosso, e
+    questo diventa rosso al contrario — cioe' la coppia rende visibile il baratto.
+    """
+    redact = _funzione_redact(path)
+
+    # Il comportamento attuale, dichiarato: la punteggiatura attaccata viene inghiottita.
+    assert '[REDACTED_VALORE_INCOLLATO]' in redact('vedi ' + _espressione() + ') nel testo'), (
+        f'{path.name}: comportamento cambiato. Se e- stato ristretto il trigger, '
+        f'verificare che `<espressione>.coda-segreta` non esca piu- in chiaro.'
+    )
+    # E cio- che NON e' attaccato resta leggibile: la prosa attorno non si perde.
+    prosa_punt = 'vedi ' + _espressione() + ') nel testo'
+    ripulito = redact(prosa_punt)
+    assert 'nel testo' in ripulito and ripulito.startswith('vedi ')
+
+
+def test_la_tabella_di_redazione_e_identica_nei_tre_workflow():
+    """Regola 3 sulla redazione, non solo sulle priorita'.
+
+    Chiesto da GPT-5.5, e il rischio e' concreto: tre reviewer con policy di
+    sanitizzazione diverse significa che un segreto redatto verso uno esce verso un
+    altro, e nulla lo segnala. I workflow non fanno checkout, quindi le tre copie
+    sono inevitabili — questo test le tiene allineate.
+    """
+    def tabella(p: Path) -> str:
+        m = re.search(r'^(\s*)REDACTIONS = \[.*?^\1\]', _script(p), re.S | re.M)
+        assert m, f'{p.name}: tabella REDACTIONS non trovata'
+        return textwrap.dedent(m.group(0))
+
+    riferimento = tabella(FABLE)
+    for p in (GPT, FUGU):
+        assert tabella(p) == riferimento, (
+            f'{p.name}: la tabella di redazione differisce da {FABLE.name}. Tre policy '
+            f'diverse sono un segreto redatto verso un modello e in chiaro verso un altro.'
+        )
+
+
+# Tetto minimo di output per workflow. Non uno solo per tutti, perche' i tre modelli
+# consumano il budget in modo diverso e il numero deve seguire la MISURA, non la
+# simmetria.
+TETTO_MINIMO_OUTPUT = {
+    'pr-review-gpt55.yml': 3000,
+    'pr-review-claude-fable5.yml': 3000,
+    # Fugu ragiona molto e non si puo' abbassare: `low` non e' fra i suoi
+    # supported_efforts (`max`/`xhigh`/`high`), quindi `high` e- il minimo. Misurato
+    # sulla PR #9: con il tetto a 3000 ha speso 3000 token di completion di cui
+    # **3000 di reasoning (100%)** e ha prodotto ZERO righe di review, a $0.168.
+    # Un tetto che non lascia spazio al testo dopo il ragionamento fa pagare una
+    # review che non esiste — che e' peggio di una review piu' cara.
+    #
+    # La soglia e- 10000, cioe- ESATTAMENTE il valore spedito, non un numero piu-
+    # basso «con margine». Segnalato da CodeRabbit su questa PR: con la soglia a 8000
+    # un ritorno del workflow a 8000 passava verde e rimetteva in piedi il guasto che
+    # questo test esiste per impedire — misurato, 3 passed. Una soglia sotto il valore
+    # spedito e- spazio per la regressione, non tolleranza.
+    # Il 10000 e- confermato dalla misura successiva sullo stesso head: 7308 token di
+    # completion di cui 2588 di reasoning (35%) e una review vera, a $0.5065. Con 8000
+    # ci sarebbe stato ancora spazio, con 3000 no: il margine utile e- sopra 8000, e
+    # abbassare la soglia sotto il valore misurato non compra niente.
+    'pr-review-openrouter-fugu-ultra.yml': 10000,
+}
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_il_tetto_di_output_lascia_spazio_al_testo_dopo_il_reasoning(path):
+    """I token di reasoning sono fatturati come output E contano nel tetto.
+
+    E- la stessa classe di difetto in due posti diversi, misurata due volte su questa
+    PR: GPT-5.5 a 1000 troncava a ogni giro, e Fugu a 3000 ha consumato il tetto
+    INTERO in ragionamento senza scrivere niente. In entrambi i casi il commento nel
+    file sosteneva che il tetto non fosse un problema perche- «il prompt controlla la
+    lunghezza reale»: vero per il testo, falso per il reasoning.
+
+    Il tetto non e- il costo — si pagano i token generati — quindi tenerlo basso non
+    risparmia: fa pagare review incomplete e le fa ripagare al giro dopo.
+    """
+    doc = _carica(path)
+    env = {**(doc.get('env') or {}), **(doc['jobs']['review'].get('env') or {})}
+    assert 'MAX_OUTPUT_TOKENS' in env, f'{path.name}: MAX_OUTPUT_TOKENS non dichiarato'
+    dichiarato = int(str(env['MAX_OUTPUT_TOKENS']))
+    minimo = TETTO_MINIMO_OUTPUT[path.name]
+    assert dichiarato >= minimo, (
+        f'{path.name}: MAX_OUTPUT_TOKENS={dichiarato}, minimo {minimo}. '
+        f'Un tetto che il reasoning esaurisce da solo produce una review vuota a '
+        f'pagamento.'
+    )
+
+
+def test_le_helper_compongono_esattamente_le_forme_attese():
+    """La guardia delle guardie: se una helper si rompe, i test passano a VUOTO.
+
+    Le stringhe di prova sono assemblate a runtime per non farsi redigere (vedi
+    sopra), e il prezzo di quella scelta e- che una helper sbagliata — un dollaro
+    perso, una graffa in meno — produrrebbe vettori che il redattore non riconosce.
+    Ogni test sulla redazione diventerebbe verde senza esercitare niente, ed e- il
+    modo piu- silenzioso di perdere una suite.
+
+    Chiesto da GPT-5.5, ed e- il rilievo giusto: la composizione e- codice, e il
+    codice non testato si rompe.
+    """
+    assert _espressione() == '${' + '{ secrets.NOME }' + '}', repr(_espressione())
+    assert _espressione('X').startswith('$'), 'manca il dollaro: il redattore non combacia'
+    assert _espressione('X').count('{') == 2 and _espressione('X').count('}') == 2
+
+    # La chiave deve essere riconosciuta dalla tabella come sensibile, altrimenti la
+    # regola contestuale non scatta e i casi non provano niente.
+    assert _CHIAVE == 'API_KEY' and _CHIAVE_SECONDA == 'TOKEN'
+
+    # E la riga composta deve essere IDENTICA alla forma letterale che sostituisce.
+    atteso = 'API_KEY: ${' + '{ secrets.NOME }' + '}CODA\n'
+    assert _assegnazione(_CHIAVE, _espressione() + 'CODA') == atteso
+
+    # Ogni assegnazione composta deve portare un'espressione. Si itera la LISTA, non
+    # si cercano le righe dentro il testo: cosi- non c'e- nessun elenco di chiavi
+    # sensibili da tenere aggiornato, e una riga aggiunta al fixture e- coperta subito.
+    assert ASSEGNAZIONI_CON_SEGRETO, 'il fixture non contiene nessuna assegnazione'
+    senza_espressione = [r.split(':', 1)[0].strip() for r in ASSEGNAZIONI_CON_SEGRETO
+                         if '${' + '{' not in r]
+    # Nel messaggio finiscono solo i NOMI delle chiavi, non le righe: un dump del
+    # fixture nel log CI e- un'abitudine sbagliata in un file che parla di non far
+    # uscire i segreti, e domani il fixture potrebbe contenerne uno vero.
+    assert not senza_espressione, (
+        f'{len(senza_espressione)} assegnazioni del fixture senza espressione: '
+        f'{senza_espressione}'
+    )
+
+    # E ogni riga della lista deve finire davvero nel testo del fixture, altrimenti
+    # la lista e- una decorazione e il YAML mandato al redattore e- un altro.
+    for indice, riga in enumerate(ASSEGNAZIONI_CON_SEGRETO):
+        # Nel messaggio l'INDICE e la chiave, non la riga: e- la stessa ragione per cui
+        # l'assert sopra non stampa il fixture, e questa riga l'avevo scritta nello
+        # stesso commit dimenticandola. Segnalato da GPT-5.5.
+        assert riga.strip() in YAML_CON_SEGRETO, (
+            f'assegnazione {indice} ({riga.split(":", 1)[0].strip()}) assente dal fixture: '
+            f'la lista e- scollegata dal testo mandato al redattore'
+        )
+
+
+# PR MISTA: tocca insieme il codice che gira in produzione e il proprio impianto di
+# review. E- il caso che Fugu Ultra ha isolato, e non era esercitato da nessun test
+# perche- questa PR tocca solo workflow.
+FILE_PR_MISTA = [
+    '.github/workflows/pr-review-claude-fable5.yml',
+    '.github/workflows/pr-review-gpt55.yml',
+    'main.py',
+    'web/engine.js',
+    'tests/relay/test_csv_contract.py',
+    'CLAUDE.md',
+]
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_su_una_PR_mista_il_relay_precede_i_workflow(path):
+    """Il codice che serve i clienti prima dell'impianto che lo revisiona.
+
+    Segnalato da Fugu Ultra sul gate finale, ed e- la stessa classe del difetto che
+    questa PR chiude, un livello dentro: dentro il tier-0 l'ordine resta quello
+    dell-API, cioe- alfabetico, e `.github/workflows/` viene prima di `main.py` e di
+    `web/`. I tre workflow sono file da ~48.000 caratteri l-uno: su una PR che tocca
+    insieme un workflow e il relay si mangerebbero il budget del core prima che il
+    motore arrivi al modello.
+
+    Non era esercitato da nessun test perche- questa PR tocca solo workflow — cioe-
+    esattamente il caso in cui il difetto non si vede.
+    """
+    build = _funzione_payload(path)
+    files = [_file_finto(n) for n in FILE_PR_MISTA]
+    testo, saltati, _, _ = build(files, 2000, 6000)
+
+    posizione = {n: testo.find(f'FILE: {n}') for n in FILE_PR_MISTA}
+    relay = {n: p for n, p in posizione.items() if p >= 0 and (n == 'main.py' or n.startswith('web/'))}
+    workflow = {n: p for n, p in posizione.items() if p >= 0 and n.startswith('.github/')}
+
+    assert 'main.py' not in saltati and 'web/engine.js' not in saltati, (
+        f'il relay o il motore sono stati scartati per far posto ai workflow: '
+        f'saltati={saltati}'
+    )
+    # L'ordinamento NON e- condizionato alla presenza dei workflow nel payload.
+    # Segnalato da CodeRabbit su questa PR: con `if workflow:` una regressione di
+    # priorita- che li scarta TUTTI rendeva il dizionario vuoto e il confronto veniva
+    # saltato, cioe- il test passava proprio nel caso peggiore — il reviewer non vede
+    # l'impianto che revisiona il codice. Misurato togliendo il tier `^\.github/`:
+    # saltati=[fable5, gpt55, CLAUDE.md], 1 passed.
+    #
+    # Un workflow in coda al payload e- una scelta di priorita- legittima; sparire dal
+    # payload no: sono file safety-critical, e restano dentro perche- i due tier di
+    # budget bastano per tutti e sei i file di questa PR finta.
+    assert workflow, (
+        f'nessun workflow e- arrivato nel payload: l-ordine non e- verificabile e i file '
+        f'safety-critical dell-impianto di review non sono stati inviati.\n'
+        f'  saltati = {saltati}'
+    )
+    assert max(relay.values()) < min(workflow.values()), (
+        f'un workflow precede il codice di produzione nel payload:\n'
+        f'  relay    = {relay}\n  workflow = {workflow}'
+    )
