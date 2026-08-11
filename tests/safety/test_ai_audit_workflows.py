@@ -524,24 +524,48 @@ def test_i_file_core_entrano_nel_payload_anche_col_budget_stretto(path):
 def test_i_file_core_precedono_i_documenti_nel_payload(path):
     """L'ordine, non solo la presenza: il core va letto prima.
 
-    Con un budget appena sufficiente per pochi file, quelli che entrano devono
-    essere il codice. Un test che guardasse solo la presenza passerebbe anche con
-    un budget cosi- generoso da non scartare niente, cioe- senza esercitare la
-    priorita-.
+    Due budget, perche- le due proprieta- non sono verificabili con lo stesso.
+
+    Col budget STRETTO si verifica CHI viene scartato: il codice entra, i documenti no.
+    Col budget LARGO, dove non si scarta niente, si verifica l'ORDINE — ed e- l-unico
+    modo di verificarlo davvero, perche- col budget stretto i documenti non arrivano
+    mai nel payload e il confronto non ha operandi.
+
+    Questa e- la correzione di un difetto vero, trovato cercando la CLASSE del rilievo
+    di CodeRabbit sul test della PR mista invece del solo sito: qui l'ordine era dietro
+    un `if docs:` e MISURATO come ramo morto — `docs` risultava vuoto su tutti e tre i
+    workflow, quindi il test dichiarava nel docstring di verificare l'ordine e in
+    realta- verificava solo la presenza del core. Un `if` che protegge un-asserzione
+    dalla mancanza dei suoi operandi la spegne in silenzio proprio quando servirebbe.
     """
     build = _funzione_payload(path)
     files = [_file_finto(n) for n in FILE_COME_LA_PR_8]
-    testo, saltati, _, _ = build(files, 2000, 5000)
 
+    # 1. Budget stretto: si scarta, e si scartano i documenti.
+    testo, saltati, _, _ = build(files, 2000, 5000)
     posizione = {n: testo.find(f'FILE: {n}') for n in FILE_COME_LA_PR_8}
     core = {n: p for n, p in posizione.items() if p >= 0 and (n == 'main.py' or n.startswith('web/'))}
     docs = {n: p for n, p in posizione.items() if p >= 0 and n.endswith(('.md', '.txt'))}
 
-    assert core, f'nessun file core nel payload: saltati={saltati}'
-    if docs:
-        assert max(core.values()) < min(docs.values()), (
-            f'un documento precede un file core nel payload: core={core} docs={docs}'
-        )
+    assert core, f'nessun file core nel payload col budget stretto: saltati={saltati}'
+    assert not docs, (
+        f'col budget stretto un documento e- entrato mentre si scartava: docs={docs}, '
+        f'saltati={saltati}'
+    )
+
+    # 2. Budget largo: entra tutto, e l'ordine si verifica senza condizioni.
+    testo, saltati, _, _ = build(files, 2000, 40000)
+    posizione = {n: testo.find(f'FILE: {n}') for n in FILE_COME_LA_PR_8}
+    core = {n: p for n, p in posizione.items() if p >= 0 and (n == 'main.py' or n.startswith('web/'))}
+    docs = {n: p for n, p in posizione.items() if p >= 0 and n.endswith(('.md', '.txt'))}
+
+    assert not saltati, f'col budget largo non si deve scartare niente: saltati={saltati}'
+    assert core and docs, (
+        f'operandi mancanti per il confronto d-ordine: core={core}, docs={docs}'
+    )
+    assert max(core.values()) < min(docs.values()), (
+        f'un documento precede un file core nel payload: core={core} docs={docs}'
+    )
 
 
 # ------------------------- comporre le stringhe di prova, invece di scriverle
@@ -692,14 +716,24 @@ def test_l_esenzione_copre_solo_l_espressione_COMPLETA(path):
     # E le espressioni COMPLETE restano intatte, col nome del Secret leggibile: e- il
     # motivo per cui l'esenzione esiste, e va verificato nella stessa funzione perche-
     # le due proprieta- tirano in direzioni opposte.
+    #
+    # L'asserzione e- l'UGUAGLIANZA con l'ingresso, non la presenza del nome e di
+    # `${{`. Segnalato da CodeRabbit su questa PR, e misurato con una regola di
+    # sabotaggio che normalizza `<chiave>: ` in `<chiave>=` — un carattere di distanza
+    # dalla regola vera, che sostituisce proprio con `\1=[REDACTED]`:
+    #   in  `API_KEY: <espressione>`      out `API_KEY=<espressione>`
+    # Il nome del Secret c'e-, `${{` c'e-, e lo YAML e- rotto: il reviewer vede un
+    # workflow mal configurato ed e- ESATTAMENTE il meccanismo dei bloccanti fantasma
+    # che l'esenzione esiste per chiudere. Col vecchio assert: 1 passed.
     for riga in (
         _assegnazione(_CHIAVE, _espressione('BETRELAY_FABLE')),
         _assegnazione(_CHIAVE, '"' + _espressione('BETRELAY_FABLE') + '"'),
         _assegnazione(_CHIAVE, "'" + _espressione('BETRELAY_FABLE') + "'"),
     ):
         ripulito = redact(riga)
-        assert 'BETRELAY_FABLE' in ripulito and '${{' in ripulito, (
-            f'{path.name}: espressione completa maciullata: {ripulito.strip()!r}'
+        assert ripulito == riga, (
+            f'{path.name}: espressione completa alterata dal redattore.\n'
+            f'  in : {riga!r}\n  out: {ripulito!r}'
         )
 
 
@@ -710,15 +744,34 @@ def test_un_valore_di_segreto_VERO_resta_redatto(path):
     Senza questo, la correzione del test sopra potrebbe essere fatta allentando
     la regola contestuale, e un segreto scritto a mano in un file uscirebbe verso
     tre modelli esterni.
+
+    Ogni riga e- accoppiata al FRAMMENTO sensibile che non deve uscire, e si verificano
+    entrambe le cose: il marcatore c'e- **e** il frammento no. Segnalato da CodeRabbit
+    su questa PR: cercare solo `[REDACTED]` passa anche quando il marcatore compare
+    ACCANTO al valore invece che al suo posto. Misurato togliendo il `+` dalla coda
+    della regola contestuale — un typo di quantificatore:
+      out `api_key=[REDACTED]hiave-scritta-a-mano-per-errore`
+    Col vecchio assert: 1 passed.
+
+    Il frammento non comprende il primo carattere del valore, perche- quel sabotaggio
+    lo mangia: vietare la stringa intera lo lascerebbe passare di nuovo. Una perdita
+    parziale resta una perdita.
     """
     redact = _funzione_redact(path)
-    for riga in (
-        _assegnazione('PROVIDER_' + _CHIAVE, 'sk-ant-api03-VALOREFINTOCHENONDEVEUSCIRE00'),
-        _assegnazione('api' '_key', '"chiave-scritta-a-mano-per-errore"', ' = '),
-        _assegnazione('CSV_ACCESS_' + _CHIAVE_SECONDA, 'FINTO-non-un-token-0000000000'),
+    for riga, frammento in (
+        (_assegnazione('PROVIDER_' + _CHIAVE, 'sk-ant-api03-VALOREFINTOCHENONDEVEUSCIRE00'),
+         'ALOREFINTOCHENONDEVEUSCIRE00'),
+        (_assegnazione('api' '_key', '"chiave-scritta-a-mano-per-errore"', ' = '),
+         'hiave-scritta-a-mano-per-errore'),
+        (_assegnazione('CSV_ACCESS_' + _CHIAVE_SECONDA, 'FINTO-non-un-token-0000000000'),
+         'INTO-non-un-token-0000000000'),
     ):
         ripulito = redact(riga)
         assert '[REDACTED' in ripulito, f'{path.name}: valore NON redatto: {riga} -> {ripulito}'
+        assert frammento not in ripulito, (
+            f'{path.name}: il marcatore c-e- ma il valore e- USCITO accanto: '
+            f'{frammento!r} sopravvive.\n  in : {riga!r}\n  out: {ripulito!r}'
+        )
 
 
 def test_gpt55_ha_un_budget_di_output_sufficiente():
@@ -953,7 +1006,17 @@ TETTO_MINIMO_OUTPUT = {
     # **3000 di reasoning (100%)** e ha prodotto ZERO righe di review, a $0.168.
     # Un tetto che non lascia spazio al testo dopo il ragionamento fa pagare una
     # review che non esiste — che e' peggio di una review piu' cara.
-    'pr-review-openrouter-fugu-ultra.yml': 8000,
+    #
+    # La soglia e- 10000, cioe- ESATTAMENTE il valore spedito, non un numero piu-
+    # basso «con margine». Segnalato da CodeRabbit su questa PR: con la soglia a 8000
+    # un ritorno del workflow a 8000 passava verde e rimetteva in piedi il guasto che
+    # questo test esiste per impedire — misurato, 3 passed. Una soglia sotto il valore
+    # spedito e- spazio per la regressione, non tolleranza.
+    # Il 10000 e- confermato dalla misura successiva sullo stesso head: 7308 token di
+    # completion di cui 2588 di reasoning (35%) e una review vera, a $0.5065. Con 8000
+    # ci sarebbe stato ancora spazio, con 3000 no: il margine utile e- sopra 8000, e
+    # abbassare la soglia sotto il valore misurato non compra niente.
+    'pr-review-openrouter-fugu-ultra.yml': 10000,
 }
 
 
@@ -1071,8 +1134,22 @@ def test_su_una_PR_mista_il_relay_precede_i_workflow(path):
         f'il relay o il motore sono stati scartati per far posto ai workflow: '
         f'saltati={saltati}'
     )
-    if workflow:
-        assert max(relay.values()) < min(workflow.values()), (
-            f'un workflow precede il codice di produzione nel payload:\n'
-            f'  relay    = {relay}\n  workflow = {workflow}'
-        )
+    # L'ordinamento NON e- condizionato alla presenza dei workflow nel payload.
+    # Segnalato da CodeRabbit su questa PR: con `if workflow:` una regressione di
+    # priorita- che li scarta TUTTI rendeva il dizionario vuoto e il confronto veniva
+    # saltato, cioe- il test passava proprio nel caso peggiore — il reviewer non vede
+    # l'impianto che revisiona il codice. Misurato togliendo il tier `^\.github/`:
+    # saltati=[fable5, gpt55, CLAUDE.md], 1 passed.
+    #
+    # Un workflow in coda al payload e- una scelta di priorita- legittima; sparire dal
+    # payload no: sono file safety-critical, e restano dentro perche- i due tier di
+    # budget bastano per tutti e sei i file di questa PR finta.
+    assert workflow, (
+        f'nessun workflow e- arrivato nel payload: l-ordine non e- verificabile e i file '
+        f'safety-critical dell-impianto di review non sono stati inviati.\n'
+        f'  saltati = {saltati}'
+    )
+    assert max(relay.values()) < min(workflow.values()), (
+        f'un workflow precede il codice di produzione nel payload:\n'
+        f'  relay    = {relay}\n  workflow = {workflow}'
+    )
