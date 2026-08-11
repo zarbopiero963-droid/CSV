@@ -706,7 +706,7 @@ def test_un_valore_di_segreto_VERO_resta_redatto(path):
     for riga in (
         _assegnazione('PROVIDER_' + _CHIAVE, 'sk-ant-api03-VALOREFINTOCHENONDEVEUSCIRE00'),
         _assegnazione('api' '_key', '"chiave-scritta-a-mano-per-errore"', ' = '),
-        _assegnazione('CSV_ACCESS_' + _CHIAVE_SECONDA, 'token-di-produzione-vero-12345'),
+        _assegnazione('CSV_ACCESS_' + _CHIAVE_SECONDA, 'FINTO-non-un-token-0000000000'),
     ):
         ripulito = redact(riga)
         assert '[REDACTED' in ripulito, f'{path.name}: valore NON redatto: {riga} -> {ripulito}'
@@ -970,4 +970,35 @@ def test_il_tetto_di_output_lascia_spazio_al_testo_dopo_il_reasoning(path):
         f'{path.name}: MAX_OUTPUT_TOKENS={dichiarato}, minimo {minimo}. '
         f'Un tetto che il reasoning esaurisce da solo produce una review vuota a '
         f'pagamento.'
+    )
+
+
+def test_le_helper_compongono_esattamente_le_forme_attese():
+    """La guardia delle guardie: se una helper si rompe, i test passano a VUOTO.
+
+    Le stringhe di prova sono assemblate a runtime per non farsi redigere (vedi
+    sopra), e il prezzo di quella scelta e- che una helper sbagliata — un dollaro
+    perso, una graffa in meno — produrrebbe vettori che il redattore non riconosce.
+    Ogni test sulla redazione diventerebbe verde senza esercitare niente, ed e- il
+    modo piu- silenzioso di perdere una suite.
+
+    Chiesto da GPT-5.5, ed e- il rilievo giusto: la composizione e- codice, e il
+    codice non testato si rompe.
+    """
+    assert _espressione() == '${' + '{ secrets.NOME }' + '}', repr(_espressione())
+    assert _espressione('X').startswith('$'), 'manca il dollaro: il redattore non combacia'
+    assert _espressione('X').count('{') == 2 and _espressione('X').count('}') == 2
+
+    # La chiave deve essere riconosciuta dalla tabella come sensibile, altrimenti la
+    # regola contestuale non scatta e i casi non provano niente.
+    assert _CHIAVE == 'API_KEY' and _CHIAVE_SECONDA == 'TOKEN'
+
+    # E la riga composta deve essere IDENTICA alla forma letterale che sostituisce.
+    atteso = 'API_KEY: ${' + '{ secrets.NOME }' + '}CODA\n'
+    assert _assegnazione(_CHIAVE, _espressione() + 'CODA') == atteso
+
+    # Il fixture YAML deve contenere tutte e cinque le assegnazioni, non meno.
+    assert YAML_CON_SEGRETO.count('${' + '{') == 5, (
+        f'attese 5 espressioni nel fixture, trovate '
+        f'{YAML_CON_SEGRETO.count("${" + "{")}:\n{YAML_CON_SEGRETO}'
     )
