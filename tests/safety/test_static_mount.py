@@ -142,8 +142,19 @@ CHAT_ID_FINTI_DICHIARATI = {'-1001987654321'}
 FORMA_CHAT_ID = re.compile(r'-100\d{7,}')
 
 
+# Le estensioni che si leggono come testo. Il controllo sul contenuto gira solo su
+# queste: leggere un font o un PNG come UTF-8 con `errors='replace'` e' lento e —
+# peggio — produce sequenze casuali in cui una forma puo' combaciare per caso,
+# rendendo rumorosa proprio la guardia che deve restare credibile. Segnalato da
+# GPT-5.5. I binari restano comunque vincolati da `ESTENSIONI_STATICHE`: un `.env`
+# o un `.db` sotto il mount non passa il test sui tipi, e questo e' il limite
+# dichiarato — un token nascosto nei metadati di un'immagine non verrebbe visto.
+ESTENSIONI_TESTUALI = {'.html', '.css', '.js', '.json', '.svg', '.map'}
+
+
 def _file_serviti():
-    return [p for p in sorted(WEB.rglob('*')) if p.is_file()]
+    return [p for p in sorted(WEB.rglob('*'))
+            if p.is_file() and p.suffix.lower() in ESTENSIONI_TESTUALI]
 
 
 def test_nessun_valore_dalla_forma_di_un_segreto_sotto_il_mount():
@@ -175,11 +186,18 @@ def test_i_chat_id_sotto_il_mount_sono_dichiarati_finti():
         for m in FORMA_CHAT_ID.finditer(testo):
             if m.group(0) not in CHAT_ID_FINTI_DICHIARATI:
                 riga = testo[:m.start()].count('\n') + 1
-                non_dichiarati.append(
-                    f'{percorso.relative_to(RADICE).as_posix()}:{riga}: {m.group(0)}')
+                # Si riporta la POSIZIONE, non il valore. Questa guardia scatta
+                # proprio quando il chat_id e' probabilmente VERO, e stamparlo lo
+                # copierebbe nel log della CI — cioe- in un secondo posto
+                # consultabile. Il messaggio dice dove guardare; il valore lo si
+                # legge nel proprio file. Segnalato da GPT-5.5, che ha notato
+                # l'incoerenza: per i token il valore non veniva stampato, per i
+                # chat_id si-.
+                non_dichiarati.append(f'{percorso.relative_to(RADICE).as_posix()}:{riga}')
     assert not non_dichiarati, (
-        'chat_id non dichiarati sotto il mount pubblico /app — se sono finti '
-        'aggiungerli a CHAT_ID_FINTI_DICHIARATI, se sono veri togliere il valore:\n  '
+        'chat_id non dichiarati sotto il mount pubblico /app (posizione riportata, '
+        'valore no: se e- vero non va copiato nei log). Se e- finto aggiungerlo a '
+        'CHAT_ID_FINTI_DICHIARATI, se e- vero togliere il valore dal file:\n  '
         + '\n  '.join(non_dichiarati)
     )
 
