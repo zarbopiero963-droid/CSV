@@ -607,17 +607,36 @@ def test_l_esenzione_copre_solo_l_espressione_COMPLETA(path):
     dove deve.
     """
     redact = _funzione_redact(path)
-    for riga, atteso in (
-        ('API_KEY: ${{ secrets.NOME }}suffisso-che-e-un-segreto\n', True),
-        ('TOKEN = ${{ secrets.NOME }}coda-letterale\n', True),
-        ('API_KEY: ${{ secrets.NOME }}\n', False),
-        ('API_KEY: "${{ secrets.NOME }}"\n', False),
+
+    # Il valore sensibile viene NOMINATO e cercato nell'output: la prima versione di
+    # questo test si accontentava di trovare `[REDACTED]` da qualche parte, e passava
+    # mentre la coda del segreto restava nel payload. Bloccante di Fugu Ultra, ed era
+    # un test decorativo — quelli che CLAUDE.md vieta — scritto da me nella patch che
+    # doveva chiudere proprio questa classe di falla.
+    for riga, sensibile in (
+        ('API_KEY: ${{ secrets.NOME }}CODA-SEGRETA-INCOLLATA\n', 'CODA-SEGRETA-INCOLLATA'),
+        ('TOKEN = ${{ secrets.NOME }}coda-sensibile\n', 'coda-sensibile'),
+        ('API_KEY: PREFISSO-SEGRETO${{ secrets.NOME }}\n', 'PREFISSO-SEGRETO'),
+        ('API_KEY: chiave-vera-scritta-a-mano\n', 'chiave-vera-scritta-a-mano'),
     ):
         ripulito = redact(riga)
-        redatto = '[REDACTED]' in ripulito
-        assert redatto is atteso, (
-            f'{path.name}: {"atteso redatto" if atteso else "atteso esente"} ma '
-            f'ho ottenuto {ripulito.strip()!r} da {riga.strip()!r}'
+        assert sensibile not in ripulito, (
+            f'{path.name}: il valore sensibile {sensibile!r} e- SOPRAVVISSUTO alla '
+            f'redazione ed uscirebbe verso un modello esterno.\n'
+            f'  in : {riga.strip()}\n  out: {ripulito.strip()}'
+        )
+
+    # E le espressioni COMPLETE restano intatte, col nome del Secret leggibile: e- il
+    # motivo per cui l'esenzione esiste, e va verificato nella stessa funzione perche-
+    # le due proprieta- tirano in direzioni opposte.
+    for riga in (
+        'API_KEY: ${{ secrets.BETRELAY_FABLE }}\n',
+        'API_KEY: "${{ secrets.BETRELAY_FABLE }}"\n',
+        "API_KEY: '${{ secrets.BETRELAY_FABLE }}'\n",
+    ):
+        ripulito = redact(riga)
+        assert 'BETRELAY_FABLE' in ripulito and '${{' in ripulito, (
+            f'{path.name}: espressione completa maciullata: {ripulito.strip()!r}'
         )
 
 

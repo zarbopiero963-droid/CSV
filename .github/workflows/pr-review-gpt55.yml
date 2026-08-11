@@ -161,6 +161,20 @@ jobs:
               # escapate. Stesso pattern di `tools/secret_policy.py` (in str invece che bytes):
               # la condivisione per import e' impossibile qui, i workflow non fanno checkout.
               (re.compile(r'''(?i)\\?['"]?(?:signing[_-]?)?seed(?:[_-]?hex)?\\?['"]?\s*[:=]\s*\\?['"]?[0-9a-f]{64,}'''), "[REDACTED_ED25519_SEED]"),
+              # Un'espressione con un letterale INCOLLATO: qui il letterale e' un segreto,
+              # non un puntatore, e va redatto insieme all'espressione. Deve stare PRIMA
+              # della regola contestuale piu' sotto, che si ferma al primo spazio e
+              # lascerebbe la coda nel payload — misurato:
+              #   in  `API_KEY: <espressione>CODA-SEGRETA`
+              #   out `API_KEY=[REDACTED] secrets.X }}CODA-SEGRETA`
+              # Bloccante di Fugu Ultra, e il test che doveva coprirlo cercava solo la
+              # presenza di `[REDACTED]`: passava con la coda ancora fuori. Ora il test
+              # nomina il valore sensibile e ne verifica l'ASSENZA.
+              #
+              # Le virgolette sono escluse dal riconoscimento del letterale, altrimenti
+              # questa regola mangerebbe la forma fra virgolette che l'esenzione qui
+              # sotto esiste per preservare.
+              (re.compile(r"""\$\{\{[^{}]*\}\}(?=[^\s"'])[^\s"',;]*"""), "[REDACTED_VALORE_INCOLLATO]"),
               # Esenta le espressioni di GitHub Actions, cioe' la forma
               # dollaro-graffa-graffa: un riferimento a un Secret e' un PUNTATORE al
               # segreto, non il segreto. Senza l'esenzione questa regola trasformava una
