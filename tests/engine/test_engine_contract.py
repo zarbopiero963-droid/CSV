@@ -59,3 +59,45 @@ def test_nessun_caso_fallito(casi):
 def test_ogni_caso_singolarmente(casi, subtests=None):
     for c in casi:
         assert c['ok'], f'{c["nome"]}: {c.get("errore")}'
+
+
+def test_il_motore_js_e_il_relay_producono_lo_STESSO_formato(casi):
+    """Guardiano della regola 3: due implementazioni, un contratto.
+
+    Il motore vive in JavaScript e il relay in Python. Finche' sono due, il
+    rischio non e' che una sia sbagliata — e' che divergano, e che la divergenza
+    resti invisibile perche' ciascuna passa i propri test. Qui l'intestazione e
+    il BOM prodotti da `web/engine.js` vengono confrontati con quelli di
+    `main.py`: se qualcuno cambia il formato in un posto solo, questo diventa
+    rosso.
+    """
+    import importlib
+    import sys
+    sys.path.insert(0, str(RADICE))
+    main = importlib.import_module('main')
+
+    esportato = next((c for c in casi if 'confronto col motore Python' in c['nome']), None)
+    assert esportato and esportato['ok'], 'il caso che esporta il CSV non e\' passato'
+    dal_js = esportato['dettaglio']
+
+    assert dal_js['bom'] == 0xfeff, f'il BOM del motore JS non e\' U+FEFF: {dal_js["bom"]:#x}'
+    assert ord(main.CSV_BOM) == 0xfeff, f'il BOM del relay non e\' U+FEFF: {ord(main.CSV_BOM):#x}'
+
+    # La stessa riga costruita in Python: campi vuoti, una virgola e una
+    # virgoletta da raddoppiare. Confrontare solo l'intestazione non vedrebbe
+    # una divergenza nel quoting — segnalato da CodeRabbit.
+    riga = [''] * len(main.HEADERS)
+    riga[main.HEADERS.index('Provider')] = 'XTrader'
+    riga[main.HEADERS.index('EventName')] = 'Squadra "A", Citta - Altra'
+    riga[main.HEADERS.index('BetType')] = 'PUNTA'
+
+    assert dal_js['soloIntestazione'] == main.empty_csv(), (
+        'feed vuoto diverso fra le due implementazioni:\n'
+        f'  JS     : {dal_js["soloIntestazione"]!r}\n'
+        f'  Python : {main.empty_csv()!r}'
+    )
+    assert dal_js['csvCompleto'] == main.make_csv(riga), (
+        'CSV completo diverso fra le due implementazioni:\n'
+        f'  JS     : {dal_js["csvCompleto"]!r}\n'
+        f'  Python : {main.make_csv(riga)!r}'
+    )

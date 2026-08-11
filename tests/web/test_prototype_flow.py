@@ -10,7 +10,6 @@ test che finge di passare senza browser sarebbe esattamente quello.
 
 from __future__ import annotations
 
-import os
 import socket
 import subprocess
 import sys
@@ -22,6 +21,10 @@ from pathlib import Path
 import pytest
 
 RADICE = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(RADICE))
+
+from tests.ambiente import ambiente_di_servizio, ambiente_di_supporto  # noqa: E402
+
 CHROMIUM = Path('/opt/pw-browsers/chromium-1194/chrome-linux/chrome')
 
 playwright = pytest.importorskip('playwright', reason='playwright non installato')
@@ -39,12 +42,17 @@ def _porta_libera() -> int:
 
 
 @pytest.fixture(scope='module')
-def base_url():
+def base_url(tmp_path_factory):
     porta = _porta_libera()
+    # Prima questa fixture ereditava l'ambiente intero E non impostava DB_PATH:
+    # scriveva quindi in `/tmp/signals.db`, il database di default, lasciando
+    # segnali veri dietro di se'. Entrambe le cose passano ora da tests.ambiente.
+    db = tmp_path_factory.mktemp('web') / 'signals.db'
     proc = subprocess.Popen(
         [sys.executable, '-m', 'uvicorn', 'main:app', '--host', '127.0.0.1',
          '--port', str(porta), '--log-level', 'warning'],
-        cwd=RADICE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        cwd=RADICE, env=ambiente_di_servizio(DB_PATH=str(db)),
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
     url = f'http://127.0.0.1:{porta}'
     try:
@@ -73,7 +81,7 @@ def _esegui(script: str, url: str, tmp_path: Path) -> None:
     proc = subprocess.run(
         [sys.executable, str(Path(__file__).with_name(script)), url, str(tmp_path)],
         cwd=RADICE, capture_output=True, text=True, timeout=300,
-        env={**os.environ, 'PYTHONUNBUFFERED': '1'},
+        env=ambiente_di_supporto(PYTHONUNBUFFERED='1'),
     )
     if proc.returncode != 0:
         raise AssertionError(

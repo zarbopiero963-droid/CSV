@@ -1,4 +1,4 @@
-import csv, io, os, re, sqlite3
+import csv, hashlib, io, logging, os, re, sqlite3, threading
 from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import Response
@@ -65,16 +65,81 @@ def db():
     return c
 
 
-def make_csv(row):
+# XTrader reads the feed as UTF-8 with a BOM. Proven on x1.csv, the file the
+# Bridge writes and XTrader consumes: Notepad reports "UTF-8 con BOM" and the
+# header is fully quoted. The repository used to claim the opposite, and the
+# feed went out without a BOM: no error was raised anywhere, the signal simply
+# never arrived.
+CSV_BOM = '\ufeff'
+
+# One quoted field, allowing the doubled quote that escapes a quote inside it.
+_FIELD = r'"(?:[^"]|"")*"'
+_ROW = re.compile('^%s(?:,%s){%d}$' % (_FIELD, _FIELD, len(HEADERS) - 1))
+HEADER_LINE = ','.join('"%s"' % h for h in HEADERS)
+
+
+def csv_text(*rows):
+    """Serialise rows the way XTrader expects them. Single source of the format.
+
+    14 quoted fields, comma separated, CRLF terminated, UTF-8 with a BOM. Both
+    make_csv() and empty_csv() go through here so the format is defined once:
+    the two used to configure the writer separately, which is how a BOM added
+    to one and forgotten in the other would have gone unnoticed.
+    """
     out = io.StringIO(newline='')
-    csv.writer(out, quoting=csv.QUOTE_ALL, lineterminator='\r\n').writerows([HEADERS, row])
-    return out.getvalue()
+    csv.writer(out, quoting=csv.QUOTE_ALL, lineterminator='\r\n').writerows(rows)
+    return CSV_BOM + out.getvalue()
 
 
-def store_signal(c, csv_text, parser, profile=PIERO_PROFILE):
+def verify_csv(text):
+    """Return the text if it is a CSV XTrader can read, raise ValueError if not.
+
+    Checked at the point the data is produced rather than the point it is
+    served: a malformed row must not exist even for the 90 seconds of the TTL.
+    The feed path deliberately does not call this — a defect in the verifier
+    must not turn into a 500 towards XTrader.
+    """
+    if not text.startswith(CSV_BOM):
+        raise ValueError('CSV senza BOM: XTrader non leggerebbe la prima colonna')
+    body = text[len(CSV_BOM):]
+    if not body.endswith('\r\n'):
+        raise ValueError('CSV senza terminatore CRLF finale')
+    # Ogni CR seguito da LF e ogni LF preceduto da CR: il contratto dice CRLF, e
+    # un verificatore che accetta un CR o un LF isolati non sta vincolando il
+    # contratto che dichiara di vincolare.
+    residuo = body.replace('\r\n', '')
+    if '\r' in residuo or '\n' in residuo:
+        raise ValueError('CSV con un CR o un LF non appaiati in CRLF')
+    # Lo split su un corpo che finisce con CRLF lascia un ultimo elemento vuoto:
+    # quello si scarta. Ogni ALTRO elemento vuoto e' una riga in bianco e va
+    # respinta — filtrarli tutti, come faceva la prima versione, le accettava.
+    lines = body.split('\r\n')[:-1]
+    if not lines:
+        raise ValueError('CSV vuoto: manca anche l\'intestazione')
+    if '' in lines:
+        raise ValueError('CSV con una riga vuota alla posizione %d' % (lines.index('') + 1))
+    if lines[0] != HEADER_LINE:
+        raise ValueError('intestazione diversa dal contratto (%d colonne rilevate)'
+                         % len(lines[0].split(',')))
+    if len(lines) > 2:
+        raise ValueError('CSV con %d righe: atteso intestazione piu al massimo un segnale'
+                         % len(lines))
+    for n, line in enumerate(lines[1:], start=2):
+        if not _ROW.match(line):
+            raise ValueError('riga %d non ha %d campi tutti fra virgolette' % (n, len(HEADERS)))
+    return text
+
+
+def make_csv(row):
+    return csv_text(HEADERS, row)
+
+
+def store_signal(c, csv_text_value, parser, profile=PIERO_PROFILE):
     # One message produces one row; the next message only replaces this profile's row.
+    # Fail closed: a CSV that does not pass verification is never stored.
+    verify_csv(csv_text_value)
     c.execute('DELETE FROM signals WHERE profile=?', (profile,))
-    c.execute('INSERT INTO signals(csv,parser,profile,expires_at) VALUES (?,?,?,?)', (csv_text, parser, profile, int(__import__('time').time()) + 90))
+    c.execute('INSERT INTO signals(csv,parser,profile,expires_at) VALUES (?,?,?,?)', (csv_text_value, parser, profile, int(__import__('time').time()) + 90))
 
 
 def parse_message(message, cfg):
@@ -114,9 +179,95 @@ def get_profile(c, name):
 
 
 def empty_csv():
-    out = io.StringIO(newline='')
-    csv.writer(out, quoting=csv.QUOTE_ALL, lineterminator='\r\n').writerow(HEADERS)
-    return out.getvalue()
+    return csv_text(HEADERS)
+
+
+# Quante RIGHE guaste distinte il percorso di consegna ha degradato a feed vuoto,
+# e per quale motivo l'ultima volta.
+#
+# Serve perche' quel fallback non puo' sollevare — un raise verso XTrader
+# diventerebbe un 500 — ma degradare in silenzio ha il difetto opposto: un bug in
+# verify_csv() azzererebbe OGNI feed di OGNI cliente, e dall'esterno si vedrebbe
+# solo «nessun segnale», indistinguibile da un giorno senza partite. Il contatore
+# rende visibile la differenza.
+#
+# Conta le RIGHE, non le richieste, e la distinzione e' tutta la sua utilita':
+# XTrader interroga il feed a raffica e la risposta e' `no-store`, quindi una sola
+# riga vecchia resterebbe guasta per tutti i 90 secondi del TTL e produrrebbe
+# decine di «scarti» per un unico evento benigno — cioe' un contatore che sale in
+# fretta, che e' esattamente il segnale con cui si dovrebbe riconoscere il guasto
+# vero. Il riconoscimento passa da un digest: distingue due righe diverse senza
+# conservare il segnale di un cliente in una variabile globale.
+#
+# La chiave della deduplica e' la COPPIA profilo+riga, non la riga sola. Con un
+# digest globale il contatore sbagliava in due modi opposti, entrambi misurati su
+# 32d00ae e segnalati da Fable 5 e GPT-5.5:
+#
+#   - due profili con la STESSA riga guasta contavano 1 invece di 2, perche' il
+#     secondo risultava «gia' visto»: un guasto che colpisce due clienti si
+#     leggeva come se ne avesse colpito uno;
+#   - due profili con righe guaste DIVERSE contavano 12 richieste su 12, perche'
+#     l'impronta globale cambiava a ogni hit essendo quella dell'altro profilo —
+#     cioe' di nuovo la raffica che la deduplica doveva eliminare, ricomparsa in
+#     scenario multiutente, che e' proprio quello verso cui va questo servizio.
+#
+# Per un singolo profilo la voce e' l'ultima riga scartata, non un insieme: due
+# righe guaste alternate sullo stesso feed contano a ogni cambio, ed e' voluto —
+# un feed che oscilla fra due righe invalide e' un guasto, non un evento unico.
+#
+# Vive in memoria di proposito: e' una spia di salute del processo, non un dato da
+# conservare, e non deve aggiungere una scrittura sul percorso di consegna. Ne
+# seguono due limiti da tenere presenti leggendo `/health`, segnalati da GPT-5.5:
+# il valore e' PER PROCESSO, quindi con piu' worker o piu' istanze su Railway ogni
+# risposta riporta solo la propria quota e non un totale; e si azzera a ogni
+# riavvio. Il pannello Salute dell'admin non deve presentarlo come un totale
+# globale.
+def _scarti_azzerati():
+    """Lo stato iniziale del contatore, in un posto solo.
+
+    Esiste perche' anche i test devono azzerarlo: una copia del dizionario
+    scritta a mano la' divergerebbe da questa al primo campo aggiunto.
+
+    `impronte` e' una mappa profilo -> digest, non un digest solo: la chiave della
+    deduplica e' la COPPIA profilo+riga. Una impronta globale sbagliava in due
+    modi opposti, entrambi misurati e fissati da test — vedi il commento sotto.
+    Cresce di una voce per profilo con un feed guasto, quindi e' limitata dal
+    numero di profili e si azzera al riavvio.
+    """
+    return {'n': 0, 'ultimo': '', 'impronte': {}}
+
+
+_SCARTI_CONSEGNA = _scarti_azzerati()
+# Gli handler di FastAPI sono sincroni, quindi girano nel threadpool: due
+# richieste possono incrementare insieme e `+= 1` non e' atomico. Segnalato da
+# Fable 5. Il lock costa nulla su un percorso che tocca comunque il database, e
+# senza di esso il contatore perderebbe proprio gli incrementi sotto il carico in
+# cui conta di piu'.
+_SCARTI_LOCK = threading.Lock()
+
+
+def _registra_scarto(profile, csv_scartato, motivo):
+    """Registra uno scarto di consegna. Restituisce True se la riga e' nuova.
+
+    Sta in una funzione propria per due ragioni. La prima e' che la sezione
+    critica diventa esercitabile da un test: chiamata attraverso `profile_csv()`
+    e' preceduta dall'apertura del database, che serializza i thread e rende la
+    race irriproducibile — misurato, il lock si puo' togliere e un test di
+    concorrenza sul percorso completo resta verde. La seconda e' che chi domani
+    aggiungera' un secondo punto di degradazione trova qui la logica, invece di
+    ricopiarla.
+
+    Non solleva: e' chiamata dal percorso di consegna, dove un errore
+    diventerebbe un 500 verso XTrader.
+    """
+    impronta = hashlib.sha256(csv_scartato.encode('utf-8', 'replace')).hexdigest()[:16]
+    with _SCARTI_LOCK:
+        riga_nuova = _SCARTI_CONSEGNA['impronte'].get(profile) != impronta
+        if riga_nuova:
+            _SCARTI_CONSEGNA['n'] += 1
+            _SCARTI_CONSEGNA['impronte'][profile] = impronta
+        _SCARTI_CONSEGNA['ultimo'] = str(motivo)
+    return riga_nuova
 
 
 def profile_csv(profile, token):
@@ -127,7 +278,32 @@ def profile_csv(profile, token):
     c.commit()
     r = c.execute('SELECT csv FROM signals WHERE profile=? ORDER BY id DESC LIMIT 1', (profile,)).fetchone()
     c.close()
-    return Response(r[0] if r else empty_csv(), media_type='text/csv', headers={'Cache-Control': 'no-store'})
+    # store_signal() verifica cio' che SCRIVE, ma una riga finita nel database da
+    # una versione precedente e' gia' la' e uscirebbe cosi' com'e' — senza BOM,
+    # per i secondi che le restano. Qui si serve il feed vuoto invece del
+    # contenuto sospetto: e' sempre un CSV valido e XTrader non va in errore.
+    #
+    # E' l'UNICA verifica sul percorso di consegna, ed e' innocua per costruzione
+    # perche' non puo' produrre un errore: al massimo degrada a «nessun segnale».
+    # Un raise qui diventerebbe un 500 verso XTrader.
+    body = empty_csv()
+    if r:
+        try:
+            body = verify_csv(r[0])
+        except ValueError as e:
+            # Il motivo, mai il contenuto: i messaggi di verify_csv() sono
+            # strutturali (conteggi, posizioni, numeri di riga) e /health e' un
+            # endpoint senza token. Il nome del profilo resta nel log del server,
+            # dove serve per la diagnosi e dove non e' un segreto: e' gia' nell'URL.
+            # Il log segue il contatore: righe identiche a ogni richiesta per 90
+            # secondi renderebbero illeggibile proprio il log che serve a capire.
+            # Il log sta fuori dal lock di proposito: non si tiene un lock durante
+            # l'I/O.
+            if _registra_scarto(profile, r[0], e):
+                logging.getLogger('xtrader.relay').warning(
+                    'feed del profilo %s degradato a sola intestazione: %s', profile, e)
+            body = empty_csv()
+    return Response(body, media_type='text/csv', headers={'Cache-Control': 'no-store'})
 
 
 @app.get('/')
@@ -136,7 +312,48 @@ def root():
 
 @app.get('/health')
 def health():
-    return {'status': 'ok'}
+    """Liveness plus the CSV format self-check.
+
+    The check is wired here on purpose. In the Bridge the equivalent function
+    existed and was used elsewhere, but nothing on the health panel looked at
+    it: the only warning was a single log line at startup, and a CSV the program
+    could not use sat there for months. A check nobody reads is not a check.
+    """
+    # Derived from HEADERS rather than hand-written, so it cannot drift if the
+    # columns change. One field carries both a comma and an escaped quote: those
+    # are the two characters that break a CSV, and the sample exists to exercise
+    # them, not to look like a real signal.
+    sample = [''] * len(HEADERS)
+    sample[HEADERS.index('EventName')] = 'Squadra "A", Citta - Altra'
+    try:
+        verify_csv(empty_csv())
+        verify_csv(make_csv(sample))
+        csv_state = 'ok'
+    except ValueError as e:
+        csv_state = 'fault: %s' % e
+    # Il contatore degli scarti di consegna e' esposto ma NON fa scattare
+    # `degraded`, e la ragione non e' timidezza: lo scarto atteso — una riga
+    # scritta dalla versione precedente, subito dopo un deploy — e' benigno e si
+    # risolve da se' entro i 90 secondi del TTL. Farlo diventare `degraded`
+    # lascerebbe questo processo «malato» per tutta la sua vita dopo ogni deploy
+    # normale, cioe' un allarme sempre acceso, che e' il modo piu' rapido per
+    # insegnare a ignorarlo.
+    #
+    # Cio' che conta e' il RITMO: un contatore che continua a salire e' il bug in
+    # verify_csv() che azzera i feed, e si vede confrontando due letture. Chi
+    # guarda e' il pannello Salute dell'admin, che legge questo numero.
+    #
+    # `status` resta la risposta a «il formato che produco e' valido?», che e'
+    # esattamente quello che misura `csv`.
+    # Una lettura sola sotto lock: senza, `n` e `ultimo_scarto` potrebbero venire
+    # da due momenti diversi e la risposta descriverebbe uno stato mai esistito.
+    with _SCARTI_LOCK:
+        scarti, motivo = _SCARTI_CONSEGNA['n'], _SCARTI_CONSEGNA['ultimo']
+    stato = {'status': 'ok' if csv_state == 'ok' else 'degraded',
+             'csv': csv_state, 'feed_scartati': scarti}
+    if scarti:
+        stato['ultimo_scarto'] = motivo
+    return stato
 
 @app.get('/xtrader.csv')
 def xtrader_csv(token: str | None = Query(None)):
@@ -240,7 +457,18 @@ async def telegram_webhook(request: Request):
     if not parsed:
         c.close()
         return {'ok': True, 'ignored': 'parser_no_match'}
-    store_signal(c, parsed['csv'], profile['parser'], profile['name'])
+    try:
+        store_signal(c, parsed['csv'], profile['parser'], profile['name'])
+    except ValueError:
+        # Deterministic failure: the same message would produce the same broken
+        # CSV, so answer 200 and let Telegram stop retrying.
+        #
+        # The reason does NOT leave in the response: this endpoint is public,
+        # Telegram posts to it, and there is no reason to tell an arbitrary
+        # caller how the CSV is built. The condition stays visible on /health,
+        # which verifies the format on every call.
+        c.close()
+        return {'ok': True, 'ignored': 'csv_non_valido'}
     c.commit()
     c.close()
     return {'ok': True, 'profile': profile['name'], 'event': parsed['event']}

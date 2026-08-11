@@ -32,8 +32,10 @@ Il merge resta sempre manuale del repository owner.
 | Deploy | `Procfile`, `railway.json`, `requirements.txt` |
 | Workflow di review AI (GPT-5.5, Fable 5, Fugu Ultra) | `.github/workflows/pr-review-*.yml` |
 | Guardia sui workflow di review | `tests/safety/test_ai_audit_workflows.py` |
+| Test del relay: contratto CSV sui byte della risposta HTTP | `tests/relay/test_csv_contract.py` |
 | Test del motore e del contratto CSV (casi eseguiti in node) | `tests/engine/engine_cases.mjs`, `tests/engine/test_engine_contract.py` |
 | Test del prototipo in browser (Playwright/Chromium) | `tests/web/prototype_flow.py`, `tests/web/mobile_layout.py`, `tests/web/test_prototype_flow.py` |
+| Ambiente dei sottoprocessi di test (whitelist) + sua guardia | `tests/ambiente.py`, `tests/safety/test_ambiente_dei_test.py` |
 | Dipendenze dei soli test | `requirements-dev.txt` |
 
 **File core del bridge** (per i gate di review e per la soglia di attenzione):
@@ -192,9 +194,20 @@ PASS. UNKNOWN blocca il DONE esattamente come un FAIL.
 ### 5. Non toccare ciò che è dichiarato sano
 
 In questo repository l'area da non toccare senza task esplicito è il **contratto CSV verso
-XTrader**: 14 colonne, quell'ordine, tutti i campi tra virgolette, terminatore CRLF, UTF-8 senza
-BOM, svuotamento a sola intestazione. Funziona con XTrader in produzione ed è già stato
-verificato byte per byte. Ogni riga cambiata lì è rischio puro senza guadagno.
+XTrader**: 14 colonne, quell'ordine, tutti i campi tra virgolette, terminatore CRLF, **UTF-8 con
+BOM**, svuotamento a sola intestazione. Ogni riga cambiata lì è rischio puro senza guadagno.
+
+**Cosa vincola questa area, e cosa non la vincolava.** Fino all'11/08/2026 qui c'era scritto
+«funziona con XTrader in produzione ed è già stato verificato byte per byte». Era **falso**: il feed
+usciva senza BOM, XTrader lo pretende, e nessuno aveva mai guardato i byte. Una regola che vieta di
+toccare una cosa, appoggiata a una prova che non esiste, è il meccanismo con cui quel difetto è
+sopravvissuto per mesi.
+
+Adesso il contratto è vincolato da **test eseguibili**, non da un'affermazione: `verify_csv()` in
+`main.py`, `verifyCsv()` in `web/engine.js`, i casi in `tests/relay/test_csv_contract.py` che
+asseriscono i **byte** della risposta HTTP, e il confronto fra le due implementazioni in
+`tests/engine/test_engine_contract.py`. Se cambi il contratto, quei test diventano rossi — che è il
+solo modo in cui «dichiarato sano» significa qualcosa.
 
 Vale lo stesso per il filtro delle chat e per l'alias legacy `/xtrader.csv`. Se un task sembra
 richiederlo, fermati e chiedi invece di procedere.
@@ -215,8 +228,17 @@ Regole:
   `tools/build_single_file.py` emette il JavaScript in ASCII puro con escape `\uXXXX`. Non
   rimuovere quella conversione, e non aggiungere al bundle testo non ASCII fuori dal `<script>`
   senza passare da entità HTML.
-- Lato Python, il CSV va scritto UTF-8 **senza BOM**: un BOM davanti a `"Provider"` rompe la
-  prima colonna in XTrader.
+- Il CSV va scritto **UTF-8 con BOM**, e questo vale sia in Python (`main.py`) sia in JavaScript
+  (`web/engine.js`): sono due implementazioni dello stesso contratto e devono coincidere byte per
+  byte. Il BOM va scritto con l'escape `\ufeff`, in Python come in JavaScript, **mai**
+  come carattere letterale nel sorgente:
+  un U+FEFF letterale è invisibile in un editor ed è esattamente il tipo di carattere che questa
+  sezione dice di non lasciare in giro.
+  *Storia, perché non si ripeta:* qui c'era scritto il contrario — «senza BOM, un BOM davanti a
+  `"Provider"` rompe la prima colonna» — e il feed usciva senza BOM. Il proprietario ha provato il
+  contrario aprendo `x1.csv`, il file che il Bridge scrive e XTrader legge: la barra di stato di
+  Blocco note dice «UTF-8 con BOM». Nessuna delle due affermazioni era stata misurata; una era falsa
+  e ha tenuto in piedi il difetto.
 - Ogni test che riguarda un parser con marcatore emoji deve confrontare i **codepoint**, non
   fidarsi dell'aspetto visivo: `🆚` e una sequenza con variation selector si vedono uguali e non
   sono uguali.
@@ -703,17 +725,36 @@ Puoi continuare solo se `POST_FIX_AUDIT=PASS`.
 
 ## TEST HARD VERITIERI — OBBLIGATORIO
 
-> **Stato in questo repository:** `tests/` contiene tre cartelle —
-> `tests/safety/` (guardia sui workflow di review), `tests/engine/` (contratto CSV e motore di
-> parsing, casi eseguiti in node sul vero `web/engine.js`) e `tests/web/` (flusso del prototipo e
-> layout mobile, pilotati da Playwright su Chromium). Le dipendenze dei test stanno in
+> **Stato in questo repository:** `tests/` contiene quattro cartelle —
+> `tests/safety/` (guardia sui workflow di review e sul mount pubblico), `tests/engine/` (contratto
+> CSV e motore di parsing, casi eseguiti in node sul vero `web/engine.js`, più il confronto fra il
+> motore JS e il relay), `tests/relay/` (il CSV servito da `main.py`, asserito sui **byte** della
+> risposta HTTP) e `tests/web/` (flusso del prototipo e layout mobile, pilotati da Playwright su
+> Chromium). Le dipendenze dei test stanno in
 > `requirements-dev.txt`, separate da quelle del deploy:
 > `pip install -r requirements-dev.txt && python -m pytest -q`.
 >
 > **Nessun workflow CI esegue questi test:** girano solo in locale. Un check verde su una PR non
 > dice niente sul loro esito, e i casi che richiedono `node` o Chromium si **saltano** dove quei
 > runtime mancano. Chi dichiara i test passati deve aver eseguito il comando e riportato l'output.
-> Il relay (`main.py`) resta senza test propri: il primo task che ne cambia il comportamento li crea.
+> Il relay (`main.py`) ha i suoi test da `tests/relay/`, nati col passaggio a UTF-8 con BOM: sono i
+> primi test di `main.py` in questo repository e asseriscono i **byte** della risposta, non le stringhe.
+>
+> **Una fixture che avvia il relay NON deve ereditare `os.environ`.** `main.py` registra il webhook
+> Telegram all'avvio: con `TELEGRAM_BOT_TOKEN` nell'ambiente, avviare il servizio chiama `setWebhook`
+> verso `PUBLIC_URL`, il cui default è cablato sull'URL Railway di produzione. Far girare la suite su
+> una macchina col `.env` del proprietario caricato **ripunterebbe il webhook del bot vero**, e niente
+> diventerebbe rosso. Per lo stesso motivo va tolto `CSV_ACCESS_TOKEN`, che farebbe rispondere 401 alle
+> richieste senza token e renderebbe l'esito dipendente dalla macchina. La whitelist è in
+> `tests/ambiente.py` — fonte unica per entrambe le fixture che avviano `main:app` — ed è vincolata da
+> `tests/safety/test_ambiente_dei_test.py`. La whitelist protegge il sottoprocesso, **non** `import
+> main`: per le chiamate in processo `tests/relay/` ha una fixture autouse che azzera `main.TOKEN`
+> **e** rimuove le variabili pericolose da `os.environ`. Servono entrambe le cose, e la seconda l'ha
+> segnalata Fugu Ultra: l'handler di startup legge `os.environ` **direttamente**, non le costanti del
+> modulo, quindi azzerare `main.TOKEN` non fermerebbe un test che facesse partire l'app in processo.
+> Misurato senza la ripulitura: lo startup costruisce e tenta davvero
+> `https://api.telegram.org/bot<token>/setWebhook?url=<PUBLIC_URL>/telegram/webhook`, e non fallisce
+> niente perché l'handler ingoia ogni eccezione.
 
 I test devono essere veri, mirati e verificabili. Non puoi dire che un test è passato se non hai
 realmente eseguito il comando e visto esito positivo.
@@ -742,7 +783,7 @@ deploy, l'agente deve aggiungere o aggiornare test seri **prima** di dichiarare 
 I test devono esercitare funzioni reali del progetto e coprire, dove praticabile offline:
 
 - **contratto CSV:** intestazione esatta e nell'ordine, 14 colonne, tutti i campi tra virgolette,
-  CRLF, UTF-8 senza BOM, svuotamento a sola intestazione, nessun append incontrollato, nessuna
+  CRLF, UTF-8 **con BOM**, svuotamento a sola intestazione, nessun append incontrollato, nessuna
   riga parziale, virgolette e virgole nei nomi squadra correttamente escapate;
 - **parser:** messaggio valido, vuoto, non supportato; quota con virgola e con punto; marcatore
   emoji confrontato per codepoint; `" v "` finale sostituito e non un `" v "` interno al nome
@@ -898,7 +939,7 @@ Preserva sempre:
 1. Il webhook accetta solo messaggi da chat associate a un profilo/parser esistente.
 2. Il parser non inventa dati mancanti.
 3. Il CSV resta compatibile con XTrader: 14 colonne, quell'ordine, quel quoting, CRLF, UTF-8
-   senza BOM.
+   **con BOM**, verificato da `verify_csv()` prima di ogni scrittura e da `/health`.
 4. Ogni feed contiene solo il segnale attivo del proprio parser.
 5. Il segnale scade dopo 90 secondi e il feed torna a sola intestazione.
 6. Un parser non può cancellare, modificare o sostituire il segnale di un altro parser.
@@ -995,7 +1036,7 @@ Devi verificare:
   `Provider, EventId, EventName, MarketId, MarketName, MarketType, SelectionId, SelectionName,
   Handicap, Price, MinPrice, MaxPrice, BetType, Points`;
 - tutti i campi tra virgolette (`QUOTE_ALL`), separatore virgola, terminatore `\r\n`, UTF-8
-  **senza BOM**;
+  **con BOM** (`\ufeff` davanti a `"Provider"`);
 - compatibilità XTrader;
 - una sola riga attiva per parser;
 - svuotamento con sola intestazione allo scadere dei 90 secondi;
@@ -1268,7 +1309,7 @@ installate in posti diversi. Aspetta i loro check, leggi i loro commenti, fai il
 | ~~Label `final-fable-review`, `final-fugu-review`~~ | **Create il 2026-08-11.** La creazione era azione del proprietario, una volta sola. **Applicarle** è invece ricorrente e spetta all'agente: rimuovere e riaggiungere a ogni head stabile. |
 | Workflow GLM 5.2 | non importato per scelta: i reviewer a API key qui sono tre. Non contarlo né aspettarlo. |
 | Workflow di build/test propri del repo | non esistono: `pytest` va eseguito localmente, nessun check CI lo esegue. |
-| Test del relay (`main.py`) | `tests/` copre i workflow (`tests/safety/`), il motore e il contratto CSV (`tests/engine/`) e il prototipo in browser (`tests/web/`), ma **non** il relay: il primo task che cambia il comportamento di `main.py` crea i suoi. |
+| ~~Test del relay (`main.py`)~~ | **Creati l'11/08/2026** in `tests/relay/test_csv_contract.py` col passaggio a UTF-8 con BOM: byte della risposta HTTP, `verify_csv()`, fail-closed di `store_signal`, esito del verificatore su `/health`. `tests/` ha ora quattro cartelle. |
 | `docs/` | i documenti del Bridge citati sopra non esistono qui e non vanno inventati. |
 | `AGENTS.md` | questo file è autosufficiente; se AGENTS.md verrà aggiunto, ha precedenza. |
 | Motore di parsing Python | oggi il motore vive solo in `web/engine.js`. Quando nascerà quello Python, la regola 3 diventa vincolante su entrambi. |

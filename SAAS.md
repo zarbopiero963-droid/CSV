@@ -136,8 +136,86 @@ dalla configurazione, sarebbe corretto solo per i parser configurati bene. **Il
 motore Python deve normalizzare allo stesso modo**, o le due implementazioni
 divergono sul caso limite invece che sul caso normale, cioè dove nessuno guarda.
 
-Il formato di uscita non cambia ed è il contratto con XTrader: 14 colonne, tutti
-i campi tra virgolette, separatore virgola, terminatore CRLF, UTF-8 senza BOM.
+Il contratto con XTrader: 14 colonne, tutti i campi tra virgolette, separatore
+virgola, terminatore CRLF, **UTF-8 con BOM**.
+
+Colonne, ordine, quoting e terminatore sono sempre stati questi e non cambiano.
+**L'encoding invece è cambiato:** fino all'11/08/2026 il feed usciva senza BOM,
+e XTrader lo pretende. Non era un'aggiunta opzionale, era un difetto.
+
+## Verifica del formato
+
+Il contratto non è affidato a una convenzione: c'è una funzione che lo controlla,
+in entrambe le implementazioni. `verify_csv()` in `main.py` e `verifyCsv()` in
+`web/engine.js` verificano BOM, intestazione esatta nell'ordine, CRLF senza LF
+nudi, tutti i campi fra virgolette, 14 campi per riga, e al massimo due righe.
+
+È agganciata in **tre** punti, e il numero conta più della funzione:
+
+1. **`store_signal()`**, fail-closed: un CSV che non passa non viene memorizzato,
+   quindi una riga malformata non esiste nemmeno per i 90 secondi del TTL.
+2. **`GET /health`**, che restituisce `{"status": …, "csv": "ok", "feed_scartati": 0}`
+   e diventa `degraded` con il motivo quando il controllo fallisce.
+3. **La vista Feed CSV del prototipo**, con l'indicatore «formato valido per
+   XTrader» / «formato non valido» e il motivo scritto sotto.
+
+Sul percorso di consegna del feed c'è **una sola** verifica, e non può produrre un
+errore: se la riga letta dal database non passa il controllo, si serve il feed
+vuoto invece del contenuto sospetto. Serve per le righe scritte da una versione
+precedente, che stanno già nel database e uscirebbero così come sono per i
+secondi che restano loro. Degrada a «nessun segnale», mai a `500`: un difetto del
+verificatore non deve diventare un errore verso XTrader.
+
+**E lascia una traccia.** Degradare in silenzio ha il difetto opposto al `500`:
+un bug in `verify_csv()` azzererebbe *ogni* feed di *ogni* cliente, e dall'esterno
+si vedrebbe solo «nessun segnale» — indistinguibile da un giorno senza partite.
+Quindi ogni scarto incrementa un contatore in memoria e scrive una riga di log col
+nome del profilo e il motivo, **mai** il contenuto del CSV; `/health` espone
+`feed_scartati` e, se diverso da zero, `ultimo_scarto`.
+
+Conta le **righe distinte**, non le richieste. La differenza è tutta l'utilità del
+contatore: XTrader interroga il feed a raffica e la risposta è `no-store`, quindi
+una sola riga vecchia resterebbe guasta per tutti i 90 secondi del TTL e
+produrrebbe decine di scarti per un unico evento benigno — cioè un contatore che
+sale in fretta, che è esattamente il segnale con cui si dovrebbe riconoscere il
+guasto vero. La riga si riconosce da un **digest**, così due righe diverse si
+distinguono senza conservare il segnale di un cliente in una variabile del
+processo. Il log segue la stessa regola, altrimenti 90 secondi di righe identiche
+renderebbero illeggibile proprio il log che serve a capire.
+
+La chiave della deduplica è la **coppia profilo + riga**, non la riga sola, e la
+distinzione è nata da un bloccante di Fable 5 confermato da GPT-5.5: con un digest
+unico per processo il contatore sbagliava in due modi opposti, entrambi misurati e
+ora fissati da test. Due profili con la **stessa** riga guasta contavano 1 invece
+di 2 — un guasto che colpisce due clienti si leggeva come se ne avesse colpito
+uno; due profili con righe guaste **diverse** contavano 12 richieste su 12, perché
+l'impronta globale cambiava a ogni hit essendo quella dell'altro profilo, cioè di
+nuovo la raffica che la deduplica doveva eliminare. In un servizio multiutente su
+una sola istanza è lo scenario normale, non un caso limite.
+
+Sul singolo profilo la voce è l'ultima riga scartata, non un insieme: due righe
+guaste alternate sullo stesso feed contano a ogni cambio, ed è voluto — un feed che
+oscilla fra due righe invalide è un guasto, non un evento unico. La mappa cresce di
+una voce per profilo con un feed guasto, quindi è limitata dal numero di profili.
+
+Il contatore **non** fa scattare `degraded`, di proposito: lo scarto atteso — la
+riga della versione precedente, subito dopo un deploy — è benigno e si risolve da
+sé col TTL, quindi marcarlo `degraded` terrebbe il processo «malato» per tutta la
+sua vita dopo ogni deploy normale, cioè un allarme sempre acceso. Il segnale utile
+è il **ritmo**: un contatore che continua a salire è il bug che azzera i feed, e
+si vede confrontando due letture. È il pannello Salute dell'admin a leggerlo.
+
+Due limiti da tenere presenti quando il pannello lo mostrerà: il valore è **per
+processo** e si azzera al riavvio, quindi con più worker o più istanze su Railway
+ogni risposta riporta solo la propria quota e **non** un totale globale; e
+l'incremento è protetto da un lock perché gli handler sono sincroni e girano nel
+threadpool, dove `+= 1` non è atomico e si perderebbero proprio gli incrementi
+sotto il carico in cui contano di più.
+
+Il terzo punto è la lezione del Bridge. Là la funzione equivalente esisteva già
+ed era usata altrove, ma nessun semaforo del pannello la consultava: l'unico
+avviso era una riga di log all'avvio, e un CSV inservibile è rimasto tale per
+mesi. **Un controllo che nessuno legge non è un controllo.**
 
 ## Contratto API
 
@@ -210,4 +288,26 @@ uvicorn main:app --reload
 ```
 
 Poi `http://127.0.0.1:8000/app/`. I dati vivono in `localStorage`, si azzerano da
-Impostazioni. Gli endpoint del relay esistente non sono stati modificati.
+Impostazioni.
+
+### Vista «Feed CSV»
+
+Accanto al titolo «Contenuto attuale del feed» c'è l'indicatore del formato, con
+due soli stati:
+
+| Etichetta | Quando |
+|---|---|
+| `formato valido per XTrader` | `verifyCsv()` non trova niente da segnalare |
+| `formato non valido` | qualunque violazione del contratto |
+
+Nel secondo caso, sotto il CSV compare il motivo in chiaro — «manca il BOM:
+XTrader non leggerebbe la prima colonna», «intestazione diversa dal contratto
+(11 colonne)» — perché un indicatore rosso senza spiegazione trasforma un difetto
+diagnosticabile in una telefonata.
+
+La nota sotto il CSV dice, verbatim: «Un segnale resta nel feed 90 secondi, poi il
+CSV torna alla sola intestazione. Il timer di questo parser è indipendente da
+tutti gli altri. Il feed è UTF-8 con BOM, come XTrader lo pretende.»
+
+Il BOM è un carattere a larghezza zero: nel blocco del CSV non si vede, ed è
+corretto che non si veda. Chi vuole verificarlo guarda l'indicatore, non il testo.
