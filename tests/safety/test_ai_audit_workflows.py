@@ -544,20 +544,49 @@ def test_i_file_core_precedono_i_documenti_nel_payload(path):
         )
 
 
+# ------------------------- comporre le stringhe di prova, invece di scriverle
+#
+# Un file che testa un REDATTORE non puo' contenere le stringhe che il redattore
+# riconosce: quando questo file finisce nel payload di una review viene redatto
+# come qualunque altro diff, e il reviewer riceve Python con literal non terminati.
+#
+# Misurato su 988bb6e: 32 righe di questo file arrivavano maciullate, e GPT-5.5 ne
+# ha dedotto un bloccante per errore di sintassi. Non allucinava — descriveva
+# accuratamente il testo rotto che gli era arrivato. Il file piu' critico della PR
+# era diventato l'unico irrevisionabile.
+#
+# Quindi le parti sensibili si assemblano a runtime: nel SORGENTE non compare mai
+# `<chiave>: <espressione>` contiguo, mentre il valore passato a `redact()` e'
+# esattamente quello.
+_D = '$'
+_ESPR = _D + '{{ secrets.%s }' + '}'
+_CHIAVE = 'API' '_KEY'
+_CHIAVE_SECONDA = 'TOK' + 'EN'
+
+
+def _espressione(nome: str = 'NOME') -> str:
+    """L'espressione di GitHub Actions, composta e non scritta."""
+    return _ESPR % nome
+
+
+def _assegnazione(chiave: str, valore: str, sep: str = ': ') -> str:
+    """Una riga `chiave<sep>valore`, con la chiave sensibile passata a pezzi."""
+    return f'{chiave}{sep}{valore}\n'
+
 # Riga reale di un workflow di questo repository: il nome del Secret e- proprio
 # l'informazione che serve al reviewer per giudicare, e la #6 nasce dal fatto che
 # veniva cancellata.
 YAML_CON_SEGRETO = (
     '      - name: Review\n'
     '        env:\n'
-    '          PROVIDER_API_KEY: ${{ secrets.BETRELAY_FABLE }}\n'
-    '          ALTRO_API_KEY: ${{ secrets.BETRELAY_GPT }}\n'
-    '          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n'
+    + '          ' + _assegnazione('PROVIDER_' + _CHIAVE, _espressione('BETRELAY_FABLE'))
+    + '          ' + _assegnazione('ALTRO_' + _CHIAVE, _espressione('BETRELAY_GPT'))
+    + '          ' + _assegnazione('GITHUB_' + _CHIAVE_SECONDA, _espressione('GITHUB_TOKEN'))
     # Forma FRA VIRGOLETTE: la prima versione del lookahead la lasciava passare al
     # redattore, perche' guardava subito dopo i due punti e trovava la virgoletta
     # invece del dollaro. Segnalato da Sourcery, ed e' una forma YAML comunissima.
-    '          QUOTATO_API_KEY: "${{ secrets.BETRELAY_FUGU }}"\n'
-    "          APICE_API_KEY: '${{ secrets.BETRELAY_FUGU }}'\n"
+    + '          ' + _assegnazione('QUOTATO_' + _CHIAVE, '"' + _espressione('BETRELAY_FUGU') + '"')
+    + '          ' + _assegnazione('APICE_' + _CHIAVE, "'" + _espressione('BETRELAY_FUGU') + "'")
 )
 
 
@@ -614,30 +643,27 @@ def test_l_esenzione_copre_solo_l_espressione_COMPLETA(path):
     # un test decorativo — quelli che CLAUDE.md vieta — scritto da me nella patch che
     # doveva chiudere proprio questa classe di falla.
     for riga, sensibile in (
-        ('API_KEY: ${{ secrets.NOME }}CODA-SEGRETA-INCOLLATA\n', 'CODA-SEGRETA-INCOLLATA'),
-        ('TOKEN = ${{ secrets.NOME }}coda-sensibile\n', 'coda-sensibile'),
-        ('API_KEY: PREFISSO-SEGRETO${{ secrets.NOME }}\n', 'PREFISSO-SEGRETO'),
+        (_assegnazione(_CHIAVE, _espressione() + 'CODA-INCOLLATA'), 'CODA-INCOLLATA'),
+        (_assegnazione(_CHIAVE_SECONDA, _espressione() + 'coda-sensibile', ' = '), 'coda-sensibile'),
+        (_assegnazione(_CHIAVE, 'PREFISSO-SEGRETO' + _espressione()), 'PREFISSO-SEGRETO'),
+        (_assegnazione(_CHIAVE, 'chiave-vera-scritta-a-mano'), 'chiave-vera-scritta-a-mano'),
         # Coda separata da uno SPAZIO: la regola del letterale incollato pretende un
-        # carattere adiacente a `}}`, quella contestuale si ferma al primo spazio, e in
-        # mezzo passava il segreto. Bloccante di Fable 5 sul gate finale — la stessa
-        # classe che aveva trovato Fugu, a un separatore di distanza. Serviva una terza
-        # regola sull'ASSEGNAZIONE, che consuma fino a fine riga.
-        ('API_KEY: ${{ secrets.NOME }} CODA-SEPARATA-DA-SPAZIO\n', 'CODA-SEPARATA-DA-SPAZIO'),
-        ('TOKEN = ${{ secrets.NOME }} uno DUE tre\n', 'DUE'),
+        # carattere adiacente alle graffe di chiusura, quella contestuale si ferma al
+        # primo spazio, e in mezzo passava il segreto. Bloccante di Fable 5 sul gate
+        # finale, e la stessa classe che aveva trovato Fugu: un separatore di distanza.
+        (_assegnazione(_CHIAVE, _espressione() + ' CODA-SPAZIO'), 'CODA-SPAZIO'),
+        (_assegnazione(_CHIAVE_SECONDA, _espressione() + ' uno DUE tre', ' = '), 'DUE'),
         # Le varianti restanti della STESSA forma, enumerate invece di aspettare che il
-        # prossimo reviewer trovi la successiva. Due volte di fila ho corretto un'ISTANZA
-        # (coda incollata, poi coda con spazio) e due reviewer diversi hanno trovato quella
-        # dopo: e- la regola 2 mancata sullo stesso pattern. La forma e- «assegnazione
-        # sensibile il cui valore contiene un'espressione PIU' qualcos'altro», e qui c-e-
-        # tutta.
-        ('API_KEY:\t${{ secrets.NOME }}\tCODA-TAB\n', 'CODA-TAB'),
-        ('API_KEY: PREFISSO-SPAZIO ${{ secrets.NOME }}\n', 'PREFISSO-SPAZIO'),
-        ('API_KEY: ${{ secrets.A }}${{ secrets.B }}DUE-ESPRESSIONI\n', 'DUE-ESPRESSIONI'),
-        ('API_KEY: "${{ secrets.NOME }} DENTRO-VIRGOLETTE"\n', 'DENTRO-VIRGOLETTE'),
-        ("API_KEY: '${{ secrets.NOME }} DENTRO-APICI'\n", 'DENTRO-APICI'),
-        ('API_KEY: "${{ secrets.NOME }}"DOPO-VIRGOLETTA\n', 'DOPO-VIRGOLETTA'),
-        ('Authorization: Bearer ${{ secrets.NOME }}DOPO-BEARER\n', 'DOPO-BEARER'),
-        ('API_KEY: chiave-vera-scritta-a-mano\n', 'chiave-vera-scritta-a-mano'),
+        # prossimo reviewer trovi la successiva. Due volte di fila ho corretto
+        # un'ISTANZA e due reviewer diversi hanno trovato quella dopo: e' la regola 2
+        # mancata sullo stesso pattern.
+        (_assegnazione(_CHIAVE, _espressione() + '\tCODA-TAB', ':\t'), 'CODA-TAB'),
+        (_assegnazione(_CHIAVE, 'PREFISSO-SPAZIO ' + _espressione()), 'PREFISSO-SPAZIO'),
+        (_assegnazione(_CHIAVE, _espressione('A') + _espressione('B') + 'DUE-ESPR'), 'DUE-ESPR'),
+        (_assegnazione(_CHIAVE, '"' + _espressione() + ' IN-VIRGOLETTE"'), 'IN-VIRGOLETTE'),
+        (_assegnazione(_CHIAVE, "'" + _espressione() + " IN-APICI'"), 'IN-APICI'),
+        (_assegnazione(_CHIAVE, '"' + _espressione() + '"DOPO-VIRGOLETTA'), 'DOPO-VIRGOLETTA'),
+        (_assegnazione('Authorization', 'Bearer ' + _espressione() + 'DOPO-BEARER'), 'DOPO-BEARER'),
     ):
         ripulito = redact(riga)
         assert sensibile not in ripulito, (
@@ -649,7 +675,7 @@ def test_l_esenzione_copre_solo_l_espressione_COMPLETA(path):
     # La prosa senza una chiave sensibile non viene toccata dalla regola
     # sull'assegnazione: quella pretende `<chiave>: <espressione>`, quindi una frase che
     # cita un'espressione resta leggibile per il reviewer.
-    prosa = 'usa ${{ secrets.NOME }} per autenticarti'
+    prosa = 'usa ' + _espressione() + ' per autenticarti'
     assert redact(prosa) == prosa, (
         f'{path.name}: la regola sull-assegnazione ha mangiato della prosa: {redact(prosa)!r}'
     )
@@ -658,9 +684,9 @@ def test_l_esenzione_copre_solo_l_espressione_COMPLETA(path):
     # motivo per cui l'esenzione esiste, e va verificato nella stessa funzione perche-
     # le due proprieta- tirano in direzioni opposte.
     for riga in (
-        'API_KEY: ${{ secrets.BETRELAY_FABLE }}\n',
-        'API_KEY: "${{ secrets.BETRELAY_FABLE }}"\n',
-        "API_KEY: '${{ secrets.BETRELAY_FABLE }}'\n",
+        _assegnazione(_CHIAVE, _espressione('BETRELAY_FABLE')),
+        _assegnazione(_CHIAVE, '"' + _espressione('BETRELAY_FABLE') + '"'),
+        _assegnazione(_CHIAVE, "'" + _espressione('BETRELAY_FABLE') + "'"),
     ):
         ripulito = redact(riga)
         assert 'BETRELAY_FABLE' in ripulito and '${{' in ripulito, (
@@ -678,9 +704,9 @@ def test_un_valore_di_segreto_VERO_resta_redatto(path):
     """
     redact = _funzione_redact(path)
     for riga in (
-        'PROVIDER_API_KEY: sk-ant-api03-VALOREFINTOCHENONDEVEUSCIRE00',
-        'api_key = "chiave-scritta-a-mano-per-errore"',
-        'CSV_ACCESS_TOKEN: token-di-produzione-vero-12345',
+        _assegnazione('PROVIDER_' + _CHIAVE, 'sk-ant-api03-VALOREFINTOCHENONDEVEUSCIRE00'),
+        _assegnazione('api' '_key', '"chiave-scritta-a-mano-per-errore"', ' = '),
+        _assegnazione('CSV_ACCESS_' + _CHIAVE_SECONDA, 'token-di-produzione-vero-12345'),
     ):
         ripulito = redact(riga)
         assert '[REDACTED' in ripulito, f'{path.name}: valore NON redatto: {riga} -> {ripulito}'
@@ -875,12 +901,13 @@ def test_la_redazione_sovra_redige_la_punteggiatura_ed_e_una_SCELTA(path):
     redact = _funzione_redact(path)
 
     # Il comportamento attuale, dichiarato: la punteggiatura attaccata viene inghiottita.
-    assert '[REDACTED_VALORE_INCOLLATO]' in redact('vedi ${{ secrets.NOME }}) nel testo'), (
+    assert '[REDACTED_VALORE_INCOLLATO]' in redact('vedi ' + _espressione() + ') nel testo'), (
         f'{path.name}: comportamento cambiato. Se e- stato ristretto il trigger, '
         f'verificare che `<espressione>.coda-segreta` non esca piu- in chiaro.'
     )
     # E cio- che NON e' attaccato resta leggibile: la prosa attorno non si perde.
-    ripulito = redact('vedi ${{ secrets.NOME }}) nel testo')
+    prosa_punt = 'vedi ' + _espressione() + ') nel testo'
+    ripulito = redact(prosa_punt)
     assert 'nel testo' in ripulito and ripulito.startswith('vedi ')
 
 
