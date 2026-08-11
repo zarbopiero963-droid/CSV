@@ -1,0 +1,14 @@
+# Dipendenze dei soli test locali: non finiscono nel deploy Railway,
+# che installa requirements.txt.
+#
+#   pip install -r requirements-dev.txt
+#   python -m pytest -q
+#
+-r requirements.txt
+# 8.3.4 era il pin iniziale; CodeRabbit lo ha segnalato come coperto da
+# GHSA-6w46-j5rx-g56g. L'advisory non e' verificabile da questo ambiente (l'API
+# GitHub degli advisory e' bloccata dal proxy di sessione), ma non c'e' motivo di
+# restare su un pin vecchio per una dipendenza di solo test: la suite e' stata
+# eseguita su questa versione.
+pytest==9.0.3
+PyYAML==6.0.2
