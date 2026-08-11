@@ -188,9 +188,9 @@ jobs:
               # un URL spezzato su due righe — non la attiva e uscirebbe IN CHIARO
               # verso il modello esterno. Stessa classe del seed Ed25519 qui sopra:
               # un segreto senza pattern proprio non viene redatto e nessuno se ne
-              # accorge. Il minimo di 18 caratteri lascia intatto il `token_prefix`
+              # accorge. Il minimo di 12 caratteri lascia intatto il `token_prefix`
               # di 9 che il contratto mostra di proposito nella UI.
-              (re.compile(r"\bxt_[A-Za-z0-9_\-]{18,}\b"), "[REDACTED_FEED_TOKEN]"),
+              (re.compile(r"\bxt_[A-Za-z0-9_\-]{12,}\b"), "[REDACTED_FEED_TOKEN]"),
               # Issue #205 — il seed Ed25519 (32 byte = 64 hex): la chiave che firma TUTTE le
               # licenze, e l'unico segreto non sostituibile senza riemetterle. Non aveva alcun
               # pattern qui, quindi un diff che lo contenesse sarebbe uscito IN CHIARO verso un

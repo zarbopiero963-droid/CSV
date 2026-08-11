@@ -172,6 +172,13 @@ def _funzione_redact(path: Path):
 # (SAAS.md). Qui 36 caratteri esadecimali, come li genera web/api.js.
 TOKEN_FEED = 'xt_' + '7f3a91' * 6
 
+# Token piu' corto della specifica: non dovrebbe esistere, ma se esistesse — un
+# residuo, una configurazione a mano, un token generato da una versione
+# precedente — deve essere redatto comunque. Segnalato da GPT-5.5 sulla PR #1
+# come lacuna del limite inferiore. 12 caratteri stanno comodamente sopra i 6
+# del `token_prefix`, che va invece lasciato passare.
+TOKEN_FEED_CORTO = 'xt_' + 'a1b2c3d4e5f6'
+
 
 @pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
 def test_il_token_di_feed_nudo_viene_redatto(path):
@@ -189,6 +196,10 @@ def test_il_token_di_feed_nudo_viene_redatto(path):
     ripulito = redact(f'il feed risponde su /feed/piero.csv con {TOKEN_FEED} attivo')
     assert TOKEN_FEED not in ripulito, (
         f'{path.name}: il token di feed nudo NON viene redatto e uscirebbe in chiaro'
+    )
+    corto = redact(f'token residuo {TOKEN_FEED_CORTO} da una versione precedente')
+    assert TOKEN_FEED_CORTO not in corto, (
+        f'{path.name}: un token piu- corto della specifica NON viene redatto'
     )
 
 
