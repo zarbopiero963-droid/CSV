@@ -875,3 +875,44 @@ def test_la_tabella_di_redazione_e_identica_nei_tre_workflow():
             f'{p.name}: la tabella di redazione differisce da {FABLE.name}. Tre policy '
             f'diverse sono un segreto redatto verso un modello e in chiaro verso un altro.'
         )
+
+
+# Tetto minimo di output per workflow. Non uno solo per tutti, perche' i tre modelli
+# consumano il budget in modo diverso e il numero deve seguire la MISURA, non la
+# simmetria.
+TETTO_MINIMO_OUTPUT = {
+    'pr-review-gpt55.yml': 3000,
+    'pr-review-claude-fable5.yml': 3000,
+    # Fugu ragiona molto e non si puo' abbassare: `low` non e' fra i suoi
+    # supported_efforts (`max`/`xhigh`/`high`), quindi `high` e- il minimo. Misurato
+    # sulla PR #9: con il tetto a 3000 ha speso 3000 token di completion di cui
+    # **3000 di reasoning (100%)** e ha prodotto ZERO righe di review, a $0.168.
+    # Un tetto che non lascia spazio al testo dopo il ragionamento fa pagare una
+    # review che non esiste — che e' peggio di una review piu' cara.
+    'pr-review-openrouter-fugu-ultra.yml': 8000,
+}
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_il_tetto_di_output_lascia_spazio_al_testo_dopo_il_reasoning(path):
+    """I token di reasoning sono fatturati come output E contano nel tetto.
+
+    E- la stessa classe di difetto in due posti diversi, misurata due volte su questa
+    PR: GPT-5.5 a 1000 troncava a ogni giro, e Fugu a 3000 ha consumato il tetto
+    INTERO in ragionamento senza scrivere niente. In entrambi i casi il commento nel
+    file sosteneva che il tetto non fosse un problema perche- «il prompt controlla la
+    lunghezza reale»: vero per il testo, falso per il reasoning.
+
+    Il tetto non e- il costo — si pagano i token generati — quindi tenerlo basso non
+    risparmia: fa pagare review incomplete e le fa ripagare al giro dopo.
+    """
+    doc = _carica(path)
+    env = {**(doc.get('env') or {}), **(doc['jobs']['review'].get('env') or {})}
+    assert 'MAX_OUTPUT_TOKENS' in env, f'{path.name}: MAX_OUTPUT_TOKENS non dichiarato'
+    dichiarato = int(str(env['MAX_OUTPUT_TOKENS']))
+    minimo = TETTO_MINIMO_OUTPUT[path.name]
+    assert dichiarato >= minimo, (
+        f'{path.name}: MAX_OUTPUT_TOKENS={dichiarato}, minimo {minimo}. '
+        f'Un tetto che il reasoning esaurisce da solo produce una review vuota a '
+        f'pagamento.'
+    )

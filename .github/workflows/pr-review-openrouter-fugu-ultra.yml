@@ -85,14 +85,26 @@ jobs:
       # l'output resta capato dal prompt ultra-corto.
       MAX_PATCH_PER_FILE_CHARS_ESCALATED: "15000"
       MAX_TOTAL_PATCH_CHARS_ESCALATED: "60000"
-      # Tetto di output. NB: è un CEILING, non il costo — si pagano solo i token
-      # EFFETTIVAMENTE generati, e il prompt ultra-corto (2 sezioni, 150 parole) tiene
-      # l'output reale corto. A 1000 una review appena più lunga sbatteva contro il
-      # tetto → finish_reason=length → gate a label ROSSO per troncamento (falso-negativo,
-      # come Fable su #322). Alzarlo a 3000 elimina il cutoff a costo ~invariato: il
-      # PROMPT controlla la lunghezza reale, il tetto previene solo il taglio. (Il vecchio
-      # rischio ~0,70$/19k token era del prompt LUNGO, ora sostituito dall'ultra-corto.)
-      MAX_OUTPUT_TOKENS: "3000"
+      # Tetto di output. È un CEILING, non il costo: si pagano solo i token
+      # EFFETTIVAMENTE generati, quindi tenerlo basso non risparmia — fa pagare review
+      # incomplete e le fa ripagare al giro dopo.
+      #
+      # Qui c'era scritto che 3000 «elimina il cutoff» perché «il PROMPT controlla la
+      # lunghezza reale». Vero per il TESTO, falso per il REASONING, e questo è un
+      # modello reasoning: i token di ragionamento sono fatturati come output e contano
+      # nel tetto, ma il prompt non li governa.
+      #
+      # Misurato sulla PR #9, gate finale su 5f6ead8: con il tetto a 3000 il modello ha
+      # generato 3000 token di completion **di cui 3000 di reasoning (100%)** e ZERO
+      # righe di review, a ~$0.168. Il ragionamento si è mangiato il tetto intero prima
+      # di arrivare a scrivere. E l'effort non si può abbassare: `low` non è fra i
+      # supported_efforts di questo modello (`max`/`xhigh`/`high`), quindi `high` è già
+      # il minimo — l'unica leva è il tetto.
+      #
+      # 10000 lascia spazio al testo dopo un ragionamento come quello osservato (1552
+      # token su un head, 3000 tagliati su un altro). Il tetto minimo per workflow è
+      # vincolato da tests/safety/test_ai_audit_workflows.py, con le misure scritte.
+      MAX_OUTPUT_TOKENS: "10000"
 
       PRICE_INPUT_PER_MILLION: "5.00"
       PRICE_OUTPUT_PER_MILLION: "30.00"
