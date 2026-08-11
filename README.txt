@@ -32,10 +32,29 @@ POST /api/test-message?parser=Parser_Telegram_XTrader_v1
 Header: X-Admin-Token: TOKEN
 Body JSON: {"message":"testo completo del messaggio"}
 
+AUTENTICAZIONE
+CSV_ACCESS_TOKEN protegge dieci rotte: i due feed CSV (/xtrader.csv e
+/profiles/NOME.csv, col parametro ?token=) e le otto API di gestione (con
+l'header X-Admin-Token). Quattro sono in lettura, sei in scrittura.
+Restano pubbliche soltanto /, /health e /telegram/webhook, quest'ultima protetta
+dal filtro delle chat.
+Il controllo e' FAIL-CLOSED: se CSV_ACCESS_TOKEN non e' configurato il servizio
+risponde 503 "servizio non configurato" a tutte le rotte protette, e NON le
+lascia aperte. Un token sbagliato o assente nella richiesta da' invece 401: i due
+codici distinguono "la tua chiave e' sbagliata" da "questo servizio va
+configurato", che richiedono azioni diverse.
+Prima dell'11/08/2026 il controllo era fail-OPEN: senza la variabile ogni rotta
+rispondeva 200, feed e API di scrittura compresi, senza alcun errore nei log.
+Cancellare quella variabile dalla dashboard rendeva il servizio scrivibile da
+Internet. Non farlo: si controlla su /health.
+
 CONTROLLO
 GET /health
-Risponde {"status","csv","feed_scartati"} e, se feed_scartati non e' zero,
+Risponde {"status","csv","auth","feed_scartati"} e, se feed_scartati non e' zero,
 anche "ultimo_scarto" col motivo. "csv" e' l'esito del verificatore di formato;
+"auth" vale "ok" oppure "non configurato" e in quel caso "status" diventa
+"degraded" — a differenza degli scarti, una variabile mancante non si ripara da
+se'. /health non ha token, quindi dice se il token c'e', mai quale;
 "feed_scartati" conta le RIGHE DISTINTE salvate che non hanno passato la verifica
 e sono state servite come feed vuoto - non le richieste che le incontrano, perche'
 XTrader interroga il feed a raffica e una sola riga guasta resterebbe tale per
@@ -59,7 +78,8 @@ Il prototipo dell'interfaccia multiutente e' servito su /app (file statici in we
 Usa dati finti nel browser, non tocca il relay. Architettura e contratto API in SAAS.md.
 
 VARIABILI RAILWAY
-CSV_ACCESS_TOKEN: token segreto per proteggere CSV e inserimento.
+CSV_ACCESS_TOKEN: token segreto per proteggere CSV e inserimento. OBBLIGATORIA:
+  senza, il servizio risponde 503 a tutte le rotte protette (vedi AUTENTICAZIONE).
 TELEGRAM_BOT_TOKEN: token del bot; se presente il webhook viene registrato all'avvio.
 PUBLIC_URL: URL pubblico del servizio, usato per registrare il webhook.
 TELEGRAM_ALLOWED_CHAT_IDS: chat_id iniziali del profilo PIERO, separati da virgola.

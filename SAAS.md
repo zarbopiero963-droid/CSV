@@ -154,8 +154,11 @@ nudi, tutti i campi fra virgolette, 14 campi per riga, e al massimo due righe.
 
 1. **`store_signal()`**, fail-closed: un CSV che non passa non viene memorizzato,
    quindi una riga malformata non esiste nemmeno per i 90 secondi del TTL.
-2. **`GET /health`**, che restituisce `{"status": …, "csv": "ok", "feed_scartati": 0}`
-   e diventa `degraded` con il motivo quando il controllo fallisce.
+2. **`GET /health`**, che restituisce
+   `{"status": …, "csv": "ok", "auth": "ok", "feed_scartati": 0}` e diventa
+   `degraded` con il motivo quando il controllo fallisce. `auth` risponde a una
+   domanda diversa — se il token è configurato — e sta lì per la stessa ragione:
+   un controllo che nessuno legge non è un controllo.
 3. **La vista Feed CSV del prototipo**, con l'indicatore «formato valido per
    XTrader» / «formato non valido» e il motivo scritto sotto.
 
@@ -260,6 +263,59 @@ data-check-string si verifica lato server con chiave `sha256(bot_token)`.
 Fallback con deep-link al bot e codice a 6 cifre, per chi arriva da mobile.
 La sessione è un cookie httpOnly firmato. Il token del bot resta sul server: la
 web app non lo riceve e non lo conserva mai.
+
+### Il token del relay oggi: obbligatorio, e fail-closed
+
+Il servizio in produzione usa ancora `CSV_ACCESS_TOKEN`, un token unico che
+protegge dieci rotte: i due feed CSV e le otto API di gestione — quattro in
+lettura, sei in scrittura. Non è il modello
+finale — quello sono i token per-feed con hash descritti in «Token dei feed» — ma
+finché non esiste, quella variabile è **l'unica serratura del servizio**.
+
+`auth()` **rifiuta quando il token non è configurato**, con `503 servizio non
+configurato`. Non è una scelta di stile: fino all'11/08/2026 la funzione era
+`if TOKEN and token != TOKEN`, cioè un no-op a variabile assente, e il modo di
+rendere il servizio scrivibile da Internet era cancellare una variabile dalla
+dashboard di Railway. Misurato sul percorso HTTP reale: `GET /xtrader.csv` su un
+servizio senza token configurato rispondeva **200 con il feed**.
+
+`/health` riporta `auth: ok` oppure `auth: non configurato`, e in quel secondo
+caso `status` diventa `degraded`. A differenza degli scarti di consegna — che
+scadono da sé col TTL e quindi non fanno scattare `degraded` — una variabile
+mancante non si ripara da sola.
+
+### Pensionamento di `TELEGRAM_ALLOWED_CHAT_IDS`
+
+La variabile popola i `chat_ids` del **solo** profilo `PIERO`, cablato in
+`main.py`, tramite un `INSERT OR IGNORE` all'inizializzazione del database. Non
+è una via che scala male: è una via che non scala affatto — non esiste alcun
+meccanismo per cui possa servire un secondo utente, e una variabile per cliente
+imporrebbe un rideploy, cioè un'interruzione per tutti gli altri, per farne
+entrare uno.
+
+Tre stadi, e oggi siamo al secondo:
+
+| stadio | come entra un `chat_id` | serve un deploy? | serve il proprietario? |
+|---|---|---|---|
+| pre-SaaS | variabile d'ambiente, seed del profilo `PIERO` | sì | sì |
+| **oggi** | `POST /api/profiles` col token admin | no | sì |
+| M1 | l'utente lo registra da sé col codice di verifica | no | no |
+
+**Sequenza sicura per rimuoverla**, e l'ordine conta:
+
+1. volume montato e `DB_PATH` che punta al suo interno;
+2. deploy: il seed scrive i `chat_id` dalla variabile sul disco **persistente**;
+3. verifica che ci siano davvero (`GET /api/profiles`);
+4. **solo allora** si rimuove la variabile.
+
+Invertendo 1 e 4 il seed scrive una riga **vuota** su disco persistente, e
+`INSERT OR IGNORE` non la correggerà più: il guasto passa da temporaneo —
+si autoriparava al deploy successivo rimettendo la variabile — a permanente,
+riparabile solo via `POST /api/profiles`.
+
+Dopo il passo 1 la variabile è comunque **inerte**: la riga `PIERO` esiste già e
+`INSERT OR IGNORE` non la aggiorna, quindi modificarla non cambia più nulla. Per
+cambiare i `chat_id` si usa l'API.
 
 ## Note operative su Telegram
 

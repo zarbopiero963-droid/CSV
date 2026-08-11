@@ -34,6 +34,20 @@ CHIAVI_PERICOLOSE = (
     'DATABASE_URL',              # quando si passera' a Postgres
 )
 
+# Il token che i test PORTANO, invece di ereditare quello del proprietario.
+#
+# Da quando `auth()` e' fail-closed, «nessun token configurato» non e' piu' uno
+# stato in cui il servizio funziona: e' un 503 su ogni rotta protetta. I test che
+# parlano del contratto CSV hanno quindi bisogno di un token valido, e questo e'
+# quello — una costante nel sorgente, non un segreto, che non apre nulla di reale.
+#
+# Vive qui e non in un file di test perche' lo usano sia `tests/relay/` sia chi
+# avvia il servizio in sottoprocesso: due copie corrette oggi sono due copie
+# divergenti domani (regola 3). E resta separato dalla whitelist: quella dice
+# quali variabili NON passano per eredita', questo e' un valore che si passa di
+# proposito.
+TOKEN_DI_PROVA = 'token-di-prova-non-un-segreto'
+
 # Il minimo perche' `python -m uvicorn` parta e trovi l'interprete e le
 # librerie. Tutto il resto e' escluso per default.
 CHIAVI_AMMESSE = (

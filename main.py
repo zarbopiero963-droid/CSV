@@ -160,7 +160,32 @@ def parse_message(message, cfg):
 
 
 def auth(token):
-    if TOKEN and token != TOKEN:
+    """Rifiuta un token sbagliato — e rifiuta anche quando non ce n'e' uno da confrontare.
+
+    Fail-CLOSED, e il perche' va scritto perche' la versione precedente sembrava
+    innocua: `if TOKEN and token != TOKEN` non fa NIENTE quando `CSV_ACCESS_TOKEN`
+    e' assente o vuoto. Dieci rotte diventavano pubbliche — 4 in lettura e 6 in
+    scrittura, contate sulle rotte vere di `app.routes` e non a memoria: sovrascrivere un profilo, cancellare un parser, iniettare un segnale
+    nel CSV che XTrader legge. Il modo di arrivarci non era esotico — bastava
+    cancellare una variabile dalla dashboard di Railway. Misurato prima di questa
+    correzione, sul percorso HTTP vero: `GET /xtrader.csv` su un servizio senza
+    token configurato rispondeva **200 con il feed**, senza un errore da nessuna
+    parte. Una serratura che si apre quando le togli la chiave.
+
+    503 e non 401 perche' le due condizioni chiedono cose diverse a chi le legge:
+    401 dice «la tua chiave e' sbagliata», 503 dice «questo servizio non e'
+    configurato», e chi vede il secondo deve andare a mettere la variabile, non a
+    cercare il token giusto. `/health` espone la stessa informazione, cosi' la
+    diagnosi non richiede di indovinarla dai codici di stato.
+
+    Il messaggio nomina la variabile — un'indicazione di configurazione, non un
+    segreto — e non contiene mai un valore di token, ne' quello atteso ne' quello
+    ricevuto: per differenza si impara, e la risposta finisce nei log di chiunque
+    stia in mezzo.
+    """
+    if not TOKEN:
+        raise HTTPException(503, 'servizio non configurato: manca CSV_ACCESS_TOKEN')
+    if token != TOKEN:
         raise HTTPException(401, 'Unauthorized')
 
 
@@ -349,8 +374,22 @@ def health():
     # da due momenti diversi e la risposta descriverebbe uno stato mai esistito.
     with _SCARTI_LOCK:
         scarti, motivo = _SCARTI_CONSEGNA['n'], _SCARTI_CONSEGNA['ultimo']
-    stato = {'status': 'ok' if csv_state == 'ok' else 'degraded',
-             'csv': csv_state, 'feed_scartati': scarti}
+    # Lo stato dell'autenticazione, per lo stesso motivo per cui `csv` sta qui: un
+    # controllo che nessuno legge non e' un controllo. Senza questa riga, un deploy
+    # senza `CSV_ACCESS_TOKEN` si scoprirebbe solo notando che ogni rotta risponde
+    # 503 — e prima del fail-closed non si scopriva affatto, perche' rispondevano
+    # tutte 200.
+    #
+    # Questo SI' fa scattare `degraded`, a differenza degli scarti di consegna, e la
+    # differenza e' se il guasto si ripara da se': una riga scartata scade col TTL
+    # entro 90 secondi, una variabile mancante no. Una spia accesa per sempre dopo
+    # ogni deploy normale insegna a ignorare la spia; una accesa finche' qualcuno
+    # non agisce e' esattamente cio' che serve.
+    #
+    # Dice «configurato o no», non altro: `/health` e' senza token.
+    auth_state = 'ok' if TOKEN else 'non configurato'
+    stato = {'status': 'ok' if csv_state == 'ok' and auth_state == 'ok' else 'degraded',
+             'csv': csv_state, 'auth': auth_state, 'feed_scartati': scarti}
     if scarti:
         stato['ultimo_scarto'] = motivo
     return stato
