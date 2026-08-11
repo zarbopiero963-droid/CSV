@@ -27,11 +27,9 @@ from __future__ import annotations
 import inspect
 import json
 import re
-import socket
-import subprocess
 import sys
-import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -42,9 +40,8 @@ RADICE = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(RADICE))
 
 import main  # noqa: E402 - dopo l'inserimento del percorso
-from tests.ambiente import (  # noqa: E402
-    CHIAVI_PERICOLOSE, TOKEN_DI_PROVA, ambiente_di_servizio,
-)
+from tests.ambiente import CHIAVI_PERICOLOSE, TOKEN_DI_PROVA  # noqa: E402
+from tests.servizio import relay_avviato  # noqa: E402
 
 # Le rotte che sono pubbliche PER PROGETTO, elencate una per una. E' la parte
 # importante del test sulle rotte: una rotta nuova non compare qui, quindi se
@@ -56,6 +53,17 @@ ROTTE_PUBBLICHE = {
     ('GET', '/health'),              # deve rispondere anche a servizio guasto
     ('POST', '/telegram/webhook'),   # la chiama Telegram: la protegge il filtro chat
 }
+
+# I MOUNT sono un'altra cosa dalle rotte, e vanno dichiarati a parte: non hanno
+# `methods`, quindi l'enumeratore sotto li salterebbe — e li saltava. Segnalato da
+# CodeRabbit, ed era un buco vero nella guardia: `/app` serve file statici senza
+# autenticazione e nessun test lo verificava, ne' in un senso ne' nell'altro.
+#
+# Elencati per percorso esatto, con la stessa logica delle rotte: un mount nuovo
+# non compare qui e il test resta rosso finche' qualcuno non dichiara che vuole
+# esporlo. Un mount e' proprio il caso in cui esporre per sbaglio e' facile —
+# basta puntare a una cartella sbagliata.
+MOUNT_PUBBLICI = {'/app'}
 
 
 @pytest.fixture(autouse=True)
@@ -112,75 +120,78 @@ def test_auth_RIFIUTA_quando_il_token_non_e_configurato(monkeypatch):
         )
 
 
-def test_il_messaggio_di_errore_non_contiene_il_token():
+@pytest.mark.parametrize('configurato', [True, False], ids=['401', '503'])
+def test_il_messaggio_di_errore_non_contiene_il_token(configurato, monkeypatch):
     """Il rifiuto non deve insegnare niente a chi lo riceve.
 
-    Vale per entrambi i rami: `detail` non puo- contenere ne- il token atteso ne-
-    quello ricevuto, altrimenti un attaccante impara per differenza e il token
-    finisce nei log di chiunque intercetti la risposta.
+    `detail` non puo- contenere ne- il token atteso ne- quello ricevuto: per
+    differenza si impara, e la risposta finisce nei log di chiunque stia in mezzo.
+
+    Verificato su ENTRAMBI i rami. La prima versione copriva solo il 401, e il 503
+    e- il ramo nuovo di questa patch — cioe- proprio quello dove una regressione
+    non avrebbe incontrato nessun test. Segnalato da Sourcery.
     """
+    if not configurato:
+        monkeypatch.setattr(main, 'TOKEN', '')
     with pytest.raises(main.HTTPException) as e:
         main.auth('tentativo-di-indovinare')
+    atteso = 401 if configurato else 503
+    assert e.value.status_code == atteso
     detail = str(e.value.detail)
     assert TOKEN_DI_PROVA not in detail, f'il token atteso e- nel messaggio: {detail!r}'
     assert 'tentativo-di-indovinare' not in detail, f'il token ricevuto e- nel messaggio: {detail!r}'
 
 
-# --------------------------------------------- ogni rotta protetta, via HTTP
+def test_un_token_non_ASCII_da_401_e_non_un_500():
+    """Il confronto a tempo costante lavora sui BYTE, e non e- un dettaglio.
 
-def _porta_libera() -> int:
-    with socket.socket() as s:
-        s.bind(('127.0.0.1', 0))
-        return s.getsockname()[1]
+    `secrets.compare_digest` solleva `TypeError` su una stringa non ASCII. Passando
+    le stringhe cosi- come arrivano, un token con un accento — che un utente puo-
+    inviare per errore o di proposito — diventerebbe un `TypeError` non gestito,
+    cioe- un **500** invece di un 401: un modo per far scrivere una traccia nei log
+    del server con un solo parametro di query.
 
-
-def _avvia(tmp_path_factory, nome, **extra):
-    """Avvia il relay con l'ambiente ripulito, piu- le variabili chieste.
-
-    `ambiente_di_servizio` toglie le chiavi pericolose per eredita-; passarne una
-    di PROPOSITO resta possibile e va scritto, che e- esattamente il caso qui: il
-    token di prova serve, quello del proprietario no.
+    E- il caso limite introdotto dalla correzione del rilievo di Fable 5 sul
+    timing, quindi il test nasce insieme a quella correzione.
     """
-    porta = _porta_libera()
-    db = tmp_path_factory.mktemp(nome) / 'signals.db'
-    proc = subprocess.Popen(
-        [sys.executable, '-m', 'uvicorn', 'main:app', '--host', '127.0.0.1',
-         '--port', str(porta), '--log-level', 'warning'],
-        cwd=RADICE, env=ambiente_di_servizio(DB_PATH=str(db), **extra),
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    for esotico in ('tokèn-con-accento', 'токен', '🔑'):
+        with pytest.raises(main.HTTPException) as e:
+            main.auth(esotico)
+        assert e.value.status_code == 401, (
+            f'il token {esotico!r} ha prodotto {e.value.status_code} invece di 401: '
+            f'il confronto non sta lavorando sui byte'
+        )
+
+
+def test_il_confronto_del_token_e_a_tempo_costante():
+    """Guardia STRUTTURALE, e va detto che lo e-.
+
+    Un confronto a tempo costante non ha un comportamento osservabile diverso da
+    `!=`: qualunque test sui valori passa con entrambi. L'unica verifica possibile
+    e- sul sorgente, e serve a impedire che qualcuno «semplifichi» tornando a `!=`
+    — che e- la forma in cui il codice e- vissuto finora.
+    """
+    import inspect as _i
+    sorgente = _i.getsource(main.auth)
+    assert 'compare_digest' in sorgente, (
+        'auth() non usa piu- secrets.compare_digest: il confronto e- tornato a '
+        'uscire al primo carattere diverso, e il tempo di risposta racconta quanti '
+        'caratteri iniziali erano giusti'
     )
-    base = f'http://127.0.0.1:{porta}'
-    scaduto = time.monotonic() + 30
-    while time.monotonic() < scaduto:
-        if proc.poll() is not None:
-            proc_out = proc.stdout.read()[-2000:]
-            pytest.fail(f'uvicorn e- morto durante l-avvio:\n{proc_out}')
-        try:
-            with urllib.request.urlopen(f'{base}/health', timeout=1) as r:
-                if r.status == 200:
-                    return proc, base
-        except (urllib.error.URLError, OSError):
-            time.sleep(0.2)
-    proc.terminate()
-    pytest.fail('uvicorn non ha risposto su /health entro 30 s')
 
 
-def _spegni(proc):
-    proc.terminate()
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-
+# --------------------------------------------- ogni rotta protetta, via HTTP
 
 @pytest.fixture(scope='module')
 def servizio_con_token(tmp_path_factory):
-    """Il relay come in produzione: il token c'e-, e le richieste senza vanno rifiutate."""
-    proc, base = _avvia(tmp_path_factory, 'auth-con', CSV_ACCESS_TOKEN=TOKEN_DI_PROVA)
-    try:
+    """Il relay come in produzione: il token c'e-, e le richieste senza vanno rifiutate.
+
+    Il token si passa DI PROPOSITO: `ambiente_di_servizio` toglie quello del
+    proprietario per eredita-, questo e- il nostro e vale solo qui.
+    """
+    with relay_avviato(tmp_path_factory.mktemp('auth-con'),
+                       CSV_ACCESS_TOKEN=TOKEN_DI_PROVA) as base:
         yield base
-    finally:
-        _spegni(proc)
 
 
 @pytest.fixture(scope='module')
@@ -190,11 +201,24 @@ def servizio_senza_token(tmp_path_factory):
     E- lo stato in cui si arriva cancellando `CSV_ACCESS_TOKEN` dalla dashboard, e
     fino a questa patch era lo stato in cui tutto era scrivibile da chiunque.
     """
-    proc, base = _avvia(tmp_path_factory, 'auth-senza')
-    try:
+    with relay_avviato(tmp_path_factory.mktemp('auth-senza')) as base:
         yield base
-    finally:
-        _spegni(proc)
+
+
+def _valore_finto(campo):
+    """Un valore del tipo giusto per il campo, cosi- il body resta valido.
+
+    Oggi i tre modelli di `main.py` hanno solo campi `str`, quindi `'x'` bastava.
+    Ma questa guardia esiste per gli endpoint FUTURI — e' il suo scopo dichiarato —
+    e un modello con un campo `int` renderebbe il body invalido: FastAPI
+    risponderebbe 422 e il test fallirebbe per validazione invece che per
+    autenticazione. Segnalato da Sourcery.
+    """
+    tipo = campo.annotation
+    for atteso, valore in ((bool, True), (int, 1), (float, 1.0), (str, 'x')):
+        if tipo is atteso:
+            return valore
+    return 'x'  # tipo non previsto: ci pensa il controllo sul 422
 
 
 def _corpo_finto(endpoint):
@@ -207,7 +231,7 @@ def _corpo_finto(endpoint):
     for p in inspect.signature(endpoint).parameters.values():
         ann = p.annotation
         if inspect.isclass(ann) and issubclass(ann, BaseModel):
-            return {nome: 'x' for nome in ann.model_fields}
+            return {nome: _valore_finto(campo) for nome, campo in ann.model_fields.items()}
     return None
 
 
@@ -240,7 +264,11 @@ def _chiama(base, metodo, path, endpoint, token=None):
     concreto = re.sub(r'\{[^}]+\}', 'NON-ESISTE', path)
     url = f'{base}{concreto}'
     if token is not None:
-        url += f'?token={token}'
+        # Percent-encoding: `TOKEN_DI_PROVA` non ha caratteri speciali, ma un token
+        # con `&`, `#`, `+` o uno spazio arriverebbe diverso nella query e uguale
+        # nell'header, e i due percorsi di autenticazione non concorderebbero.
+        # Segnalato da CodeRabbit.
+        url += '?token=' + urllib.parse.quote(token, safe='')
     corpo = _corpo_finto(endpoint)
     intestazioni = {}
     dati = None
@@ -251,10 +279,35 @@ def _chiama(base, metodo, path, endpoint, token=None):
         intestazioni['X-Admin-Token'] = token
     req = urllib.request.Request(url, data=dati, headers=intestazioni, method=metodo)
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
-            return r.status
+        with urllib.request.urlopen(req, timeout=10) as r:  # noqa: S310 - loopback
+            return r.status, r.read()
     except urllib.error.HTTPError as e:
-        return e.code
+        return e.code, e.read()
+
+
+def _e_errore_di_validazione(corpo: bytes) -> bool:
+    """Distingue il 422 di FastAPI da un 422 dell'applicazione.
+
+    Servono entrambi i casi e sono cose opposte:
+
+    - FastAPI risponde 422 quando il BODY non passa la validazione, prima di
+      eseguire la funzione: la rotta non e- stata esercitata e un test che lo
+      ignorasse passerebbe senza controllare niente. `detail` e- una LISTA di
+      errori strutturati;
+    - `main.py` risponde 422 quando il messaggio non e- riconosciuto dal parser
+      (riga «Messaggio non riconosciuto da questo parser»). E- logica applicativa
+      raggiunta DOPO `auth()`, quindi e- la prova che l'autenticazione e- passata.
+      `detail` e- una STRINGA.
+
+    Il primo giro di questo controllo li confondeva e segnalava
+    `POST /api/test-message` come body invalido: il body era valido, era il
+    messaggio finto `'x'` a non combaciare col parser predefinito.
+    """
+    try:
+        dettaglio = json.loads(corpo).get('detail')
+    except (ValueError, AttributeError):
+        return True  # non e- JSON: non sappiamo dire, meglio rumoroso
+    return isinstance(dettaglio, list)
 
 
 def test_ogni_rotta_protetta_rifiuta_una_richiesta_senza_token(servizio_con_token):
@@ -272,7 +325,7 @@ def test_ogni_rotta_protetta_rifiuta_una_richiesta_senza_token(servizio_con_toke
     )
     aperte = []
     for metodo, path, endpoint in rotte:
-        stato = _chiama(servizio_con_token, metodo, path, endpoint)
+        stato, _ = _chiama(servizio_con_token, metodo, path, endpoint)
         if stato != 401:
             aperte.append(f'{metodo} {path} -> {stato}')
     assert not aperte, (
@@ -289,26 +342,74 @@ def test_le_rotte_protette_accettano_il_token_giusto(servizio_con_token):
     Non si asserisce un 200: `DELETE /api/parsers/NON-ESISTE` da- 404 ed e-
     corretto. Si asserisce che il rifiuto per autenticazione non c'e- piu-.
     """
-    negati = []
+    negati, invalidi = [], []
     for metodo, path, endpoint in _rotte_protette():
-        stato = _chiama(servizio_con_token, metodo, path, endpoint, token=TOKEN_DI_PROVA)
+        stato, corpo = _chiama(servizio_con_token, metodo, path, endpoint, token=TOKEN_DI_PROVA)
         if stato in (401, 503):
             negati.append(f'{metodo} {path} -> {stato}')
+        elif stato == 422 and _e_errore_di_validazione(corpo):
+            invalidi.append(f'{metodo} {path}')
+    # Il 422 va nominato invece di essere trattato come «non rifiutato»: FastAPI lo
+    # restituisce quando il body non passa la validazione, cioe- PRIMA di eseguire
+    # la funzione — quindi qui passerebbe in silenzio mentre la rotta non e- stata
+    # esercitata affatto. E- il punto sollevato da Sourcery su `_corpo_finto`, e la
+    # difesa vera non e- indovinare i tipi: e- accorgersi che il body non e- valido.
+    assert not invalidi, (
+        'body finto rifiutato con 422: queste rotte non sono state esercitate e il '
+        'test starebbe passando senza controllare niente. Aggiornare _valore_finto '
+        f'per i tipi del modello:\n  ' + '\n  '.join(invalidi)
+    )
     assert not negati, (
         'rotte che rifiutano ANCHE il token giusto:\n  ' + '\n  '.join(negati)
     )
 
 
-def test_le_rotte_pubbliche_restano_pubbliche(servizio_con_token):
-    """`/health` deve rispondere anche a servizio mal configurato.
+@pytest.mark.parametrize('nome_fixture', ['servizio_con_token', 'servizio_senza_token'])
+def test_le_rotte_pubbliche_restano_pubbliche(nome_fixture, request):
+    """`/health` deve rispondere anche a servizio MAL CONFIGURATO.
 
     E- il canale con cui il proprietario scopre il guasto: se il fail-closed
     chiudesse anche questo, la diagnosi diventerebbe impossibile proprio quando
     serve.
+
+    Girava sul solo servizio configurato, cioe- non verificava la frase che il suo
+    docstring dichiarava. Segnalato da CodeRabbit, ed e- la classe «il test dice
+    una cosa e ne controlla un'altra»: ora gira su entrambe le configurazioni.
     """
+    base = request.getfixturevalue(nome_fixture)
     for path in ('/', '/health'):
-        with urllib.request.urlopen(f'{servizio_con_token}{path}', timeout=10) as r:
-            assert r.status == 200, f'{path} non risponde piu- senza token'
+        with urllib.request.urlopen(f'{base}{path}', timeout=10) as r:  # noqa: S310 - loopback
+            assert r.status == 200, f'{path} non risponde piu- senza token ({nome_fixture})'
+
+
+@pytest.mark.parametrize('nome_fixture', ['servizio_con_token', 'servizio_senza_token'])
+def test_i_mount_sono_dichiarati_e_app_resta_pubblico(nome_fixture, request):
+    """I mount non hanno `methods`, quindi l'enumeratore delle rotte li salta.
+
+    Buco vero nella guardia, segnalato da CodeRabbit: `/app` serve `web/` senza
+    autenticazione e nessun test lo verificava. Qui si verificano due cose opposte,
+    ed e- il punto:
+
+    1. ogni mount dell'app e- DICHIARATO in `MOUNT_PUBBLICI` — un mount nuovo non
+       compare e il test resta rosso finche- qualcuno non dice che vuole esporlo;
+    2. `/app` risponde davvero senza token, anche a servizio mal configurato,
+       perche- e- il prototipo che si mostra ai clienti e chiuderlo per sbaglio
+       sarebbe una regressione silenziosa del prodotto.
+    """
+    montati = {r.path for r in main.app.routes
+               if getattr(r, 'methods', None) is None and hasattr(r, 'app')}
+    assert montati, (
+        'nessun mount trovato: `web/` non esiste in questo checkout oppure il '
+        'criterio di scoperta non funziona piu-, e il test non controlla niente'
+    )
+    assert montati == MOUNT_PUBBLICI, (
+        f'mount non dichiarati: {sorted(montati - MOUNT_PUBBLICI)}; '
+        f'dichiarati e non piu- presenti: {sorted(MOUNT_PUBBLICI - montati)}'
+    )
+
+    base = request.getfixturevalue(nome_fixture)
+    with urllib.request.urlopen(f'{base}/app/', timeout=10) as r:  # noqa: S310 - loopback
+        assert r.status == 200, '/app non risponde piu- senza token'
 
 
 # ------------------------------------- il servizio senza token configurato
@@ -332,14 +433,14 @@ def test_senza_token_configurato_il_feed_e_CHIUSO(servizio_senza_token):
 
 
 def test_senza_token_configurato_anche_le_api_di_scrittura_sono_chiuse(servizio_senza_token):
-    """Le sette rotte che SCRIVONO sono la parte grave del difetto.
+    """Le sei rotte che SCRIVONO sono la parte grave del difetto.
 
     Un feed leggibile e- una perdita di informazione; un `POST /api/profiles`
     aperto lascia sovrascrivere il profilo di chiunque, e un
     `POST /api/test-message` aperto inietta un segnale nel CSV che XTrader legge.
     """
     for metodo, path, endpoint in _rotte_protette():
-        stato = _chiama(servizio_senza_token, metodo, path, endpoint, token='qualunque-cosa')
+        stato, _ = _chiama(servizio_senza_token, metodo, path, endpoint, token='qualunque-cosa')
         assert stato == 503, f'{metodo} {path} risponde {stato} invece di 503'
 
 

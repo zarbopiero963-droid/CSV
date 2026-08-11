@@ -33,9 +33,8 @@ RADICE = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(RADICE))
 
 import main  # noqa: E402 - dopo l'inserimento del percorso
-from tests.ambiente import (  # noqa: E402
-    CHIAVI_PERICOLOSE, TOKEN_DI_PROVA, ambiente_di_servizio,
-)
+from tests.ambiente import CHIAVI_PERICOLOSE, TOKEN_DI_PROVA  # noqa: E402
+from tests.servizio import relay_avviato  # noqa: E402
 
 
 # Intestazione attesa, costruita dalle colonne reali e non ricopiata a mano:
@@ -653,51 +652,22 @@ def test_l_handler_di_startup_INGOIA_gli_errori(monkeypatch):
 
 # ------------------------------------------------------------------- HTTP
 
-def _porta_libera() -> int:
-    with socket.socket() as s:
-        s.bind(('127.0.0.1', 0))
-        return s.getsockname()[1]
-
-
 @pytest.fixture(scope='module')
 def servizio(tmp_path_factory):
-    """Il servizio vero su una porta libera: i byte contano, non le stringhe."""
-    porta = _porta_libera()
-    db = tmp_path_factory.mktemp('relay') / 'signals.db'
-    proc = subprocess.Popen(
-        [sys.executable, '-m', 'uvicorn', 'main:app', '--host', '127.0.0.1',
-         '--port', str(porta), '--log-level', 'warning'],
-        # Ambiente ripulito, non ereditato: con TELEGRAM_BOT_TOKEN in giro l'avvio
-        # del relay ripunterebbe il webhook di produzione. Il token di prova invece
-        # si passa DI PROPOSITO — `auth()` e' fail-closed, quindi un servizio senza
-        # token configurato risponde 503 a ogni rotta protetta e questi test non
-        # potrebbero nemmeno leggere il feed. Quello del proprietario resta fuori:
-        # la whitelist lo toglie, questo lo mettiamo noi e vale solo qui.
-        cwd=RADICE, env=ambiente_di_servizio(
-            DB_PATH=str(db), CSV_ACCESS_TOKEN=TOKEN_DI_PROVA),
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-    )
-    base = f'http://127.0.0.1:{porta}'
-    try:
-        scaduto = time.monotonic() + 30
-        while time.monotonic() < scaduto:
-            if proc.poll() is not None:
-                pytest.fail(f'uvicorn e- morto durante l-avvio:\n{proc.stdout.read()[-2000:]}')
-            try:
-                with urllib.request.urlopen(f'{base}/health', timeout=1) as r:
-                    if r.status == 200:
-                        break
-            except (urllib.error.URLError, OSError):
-                time.sleep(0.2)
-        else:
-            pytest.fail('uvicorn non ha risposto su /health entro 30 s')
+    """Il servizio vero su una porta libera: i byte contano, non le stringhe.
+
+    L'avvio passa da `tests.servizio`, fonte unica delle tre fixture che tirano su
+    il relay: prima erano tre copie, e portavano tutte lo stesso difetto (la pipe
+    di stdout mai letta, che appende i test invece di farli fallire).
+
+    Il token di prova si passa DI PROPOSITO — `auth()` e- fail-closed, quindi un
+    servizio senza token risponde 503 su ogni rotta protetta e questi test non
+    potrebbero nemmeno leggere il feed. Quello del proprietario resta fuori: lo
+    toglie la whitelist, questo lo mettiamo noi e vale solo qui.
+    """
+    with relay_avviato(tmp_path_factory.mktemp('relay'),
+                       CSV_ACCESS_TOKEN=TOKEN_DI_PROVA) as base:
         yield base
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
 
 
 def _get(base, path):

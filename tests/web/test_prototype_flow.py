@@ -23,7 +23,8 @@ import pytest
 RADICE = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(RADICE))
 
-from tests.ambiente import ambiente_di_servizio, ambiente_di_supporto  # noqa: E402
+from tests.ambiente import ambiente_di_supporto  # noqa: E402
+from tests.servizio import relay_avviato  # noqa: E402
 
 CHROMIUM = Path('/opt/pw-browsers/chromium-1194/chrome-linux/chrome')
 
@@ -35,46 +36,16 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _porta_libera() -> int:
-    with socket.socket() as s:
-        s.bind(('127.0.0.1', 0))
-        return s.getsockname()[1]
-
-
 @pytest.fixture(scope='module')
 def base_url(tmp_path_factory):
-    porta = _porta_libera()
-    # Prima questa fixture ereditava l'ambiente intero E non impostava DB_PATH:
-    # scriveva quindi in `/tmp/signals.db`, il database di default, lasciando
-    # segnali veri dietro di se'. Entrambe le cose passano ora da tests.ambiente.
-    db = tmp_path_factory.mktemp('web') / 'signals.db'
-    proc = subprocess.Popen(
-        [sys.executable, '-m', 'uvicorn', 'main:app', '--host', '127.0.0.1',
-         '--port', str(porta), '--log-level', 'warning'],
-        cwd=RADICE, env=ambiente_di_servizio(DB_PATH=str(db)),
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-    )
-    url = f'http://127.0.0.1:{porta}'
-    try:
-        scaduto = time.monotonic() + 30
-        while time.monotonic() < scaduto:
-            if proc.poll() is not None:
-                pytest.fail(f'uvicorn e\' morto durante l\'avvio:\n{proc.stdout.read()[-2000:]}')
-            try:
-                with urllib.request.urlopen(f'{url}/health', timeout=1) as r:
-                    if r.status == 200:
-                        break
-            except (urllib.error.URLError, OSError):
-                time.sleep(0.2)
-        else:
-            pytest.fail('uvicorn non ha risposto su /health entro 30 s')
-        yield f'{url}/app/'
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+    """Il prototipo servito da `/app`, dal relay vero.
+
+    L'avvio passa da `tests.servizio` come le altre due fixture. Qui NON serve
+    `CSV_ACCESS_TOKEN`: `/app` e- pubblico per progetto — sono file statici — e
+    questi test non toccano nessuna rotta protetta.
+    """
+    with relay_avviato(tmp_path_factory.mktemp('web')) as base:
+        yield f'{base}/app/'
 
 
 def _esegui(script: str, url: str, tmp_path: Path) -> None:

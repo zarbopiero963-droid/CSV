@@ -1,4 +1,4 @@
-import csv, hashlib, io, logging, os, re, sqlite3, threading
+import csv, hashlib, io, logging, os, re, secrets, sqlite3, threading
 from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import Response
@@ -182,10 +182,22 @@ def auth(token):
     segreto — e non contiene mai un valore di token, ne' quello atteso ne' quello
     ricevuto: per differenza si impara, e la risposta finisce nei log di chiunque
     stia in mezzo.
+
+    Il confronto usa `secrets.compare_digest` e non `!=`: segnalato da Claude
+    Fable 5. `!=` sulle stringhe esce al primo carattere diverso, quindi il tempo
+    di risposta racconta quanti caratteri iniziali erano giusti. Su un token unico
+    e condiviso l'attacco e' poco praticabile attraverso Internet, ma il confronto
+    a tempo costante e' gratuito e non richiede di stimare quanto sia praticabile.
+    Il confronto avviene sui BYTE: `compare_digest` solleva `TypeError` su una
+    stringa non ASCII, e un token con un accento diventerebbe un 500 invece di un
+    401 — c'e' un test che lo verifica.
     """
     if not TOKEN:
         raise HTTPException(503, 'servizio non configurato: manca CSV_ACCESS_TOKEN')
-    if token != TOKEN:
+    # Un token assente o vuoto si scarta prima: non c'e' niente da confrontare, e
+    # l'unica cosa che questa uscita anticipata rivela e' che era vuoto, cosa che
+    # chi l'ha inviato sa gia'.
+    if not token or not secrets.compare_digest(token.encode('utf-8'), TOKEN.encode('utf-8')):
         raise HTTPException(401, 'Unauthorized')
 
 

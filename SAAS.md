@@ -305,7 +305,10 @@ Tre stadi, e oggi siamo al secondo:
 
 1. volume montato e `DB_PATH` che punta al suo interno;
 2. deploy: il seed scrive i `chat_id` dalla variabile sul disco **persistente**;
-3. verifica che ci siano davvero (`GET /api/profiles`);
+3. verifica che i `chat_ids` di `PIERO` siano quelli attesi, con
+   `GET /api/profiles` **e l'header** `X-Admin-Token: <CSV_ACCESS_TOKEN>` — è una
+   rotta protetta, e senza header risponde 401 (o 503 se il token non è
+   configurato): il passo scritto senza header non verificherebbe niente;
 4. **solo allora** si rimuove la variabile.
 
 Invertendo 1 e 4 il seed scrive una riga **vuota** su disco persistente, e

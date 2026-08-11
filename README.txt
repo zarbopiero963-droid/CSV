@@ -36,8 +36,10 @@ AUTENTICAZIONE
 CSV_ACCESS_TOKEN protegge dieci rotte: i due feed CSV (/xtrader.csv e
 /profiles/NOME.csv, col parametro ?token=) e le otto API di gestione (con
 l'header X-Admin-Token). Quattro sono in lettura, sei in scrittura.
-Restano pubbliche soltanto /, /health e /telegram/webhook, quest'ultima protetta
-dal filtro delle chat.
+Restano pubbliche soltanto /, /health, /telegram/webhook (protetta dal filtro
+delle chat) e /app, che serve i file statici del prototipo: e' un mount, non una
+rotta, e non ha ne' puo' avere un token perche' e' la pagina che si apre nel
+browser. Nulla di sensibile deve finire in web/ (vedi anche SAAS.md).
 Il controllo e' FAIL-CLOSED: se CSV_ACCESS_TOKEN non e' configurato il servizio
 risponde 503 "servizio non configurato" a tutte le rotte protette, e NON le
 lascia aperte. Un token sbagliato o assente nella richiesta da' invece 401: i due
@@ -78,11 +80,19 @@ Il prototipo dell'interfaccia multiutente e' servito su /app (file statici in we
 Usa dati finti nel browser, non tocca il relay. Architettura e contratto API in SAAS.md.
 
 VARIABILI RAILWAY
-CSV_ACCESS_TOKEN: token segreto per proteggere CSV e inserimento. OBBLIGATORIA:
-  senza, il servizio risponde 503 a tutte le rotte protette (vedi AUTENTICAZIONE).
+CSV_ACCESS_TOKEN: token segreto che protegge i due feed CSV E tutte le API di
+  gestione. OBBLIGATORIA: senza, il servizio risponde 503 a tutte le rotte
+  protette (vedi AUTENTICAZIONE).
 TELEGRAM_BOT_TOKEN: token del bot; se presente il webhook viene registrato all'avvio.
-PUBLIC_URL: URL pubblico del servizio, usato per registrare il webhook.
+PUBLIC_URL: URL pubblico del servizio, usato per registrare il webhook. Se manca,
+  il codice usa un default cablato sull'URL Railway: impostarla sempre, perche' un
+  secondo deploy senza questa variabile ripunterebbe il webhook del bot vero.
 TELEGRAM_ALLOWED_CHAT_IDS: chat_id iniziali del profilo PIERO, separati da virgola.
+  TRANSITORIA, e ha una scaletta di pensionamento in SAAS.md. Su un database
+  persistente diventa INERTE: il seed usa INSERT OR IGNORE, quindi la riga PIERO
+  esiste gia' e modificare la variabile non cambia piu' nulla — per cambiare i
+  chat_id si usa POST /api/profiles. Non replicarla per altri utenti: popola solo
+  il profilo PIERO, e una variabile per cliente imporrebbe un rideploy.
 DB_PATH: facoltativo; su Railway usare un volume per conservare i dati tra riavvii.
 
 I valori di mercato non sono piu' variabili d'ambiente: parser e profili vivono nel
