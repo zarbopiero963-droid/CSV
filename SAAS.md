@@ -154,8 +154,8 @@ nudi, tutti i campi fra virgolette, 14 campi per riga, e al massimo due righe.
 
 1. **`store_signal()`**, fail-closed: un CSV che non passa non viene memorizzato,
    quindi una riga malformata non esiste nemmeno per i 90 secondi del TTL.
-2. **`GET /health`**, che restituisce `{"status": …, "csv": "ok"}` e diventa
-   `degraded` con il motivo quando il controllo fallisce.
+2. **`GET /health`**, che restituisce `{"status": …, "csv": "ok", "feed_scartati": 0}`
+   e diventa `degraded` con il motivo quando il controllo fallisce.
 3. **La vista Feed CSV del prototipo**, con l'indicatore «formato valido per
    XTrader» / «formato non valido» e il motivo scritto sotto.
 
@@ -165,6 +165,20 @@ vuoto invece del contenuto sospetto. Serve per le righe scritte da una versione
 precedente, che stanno già nel database e uscirebbero così come sono per i
 secondi che restano loro. Degrada a «nessun segnale», mai a `500`: un difetto del
 verificatore non deve diventare un errore verso XTrader.
+
+**E lascia una traccia.** Degradare in silenzio ha il difetto opposto al `500`:
+un bug in `verify_csv()` azzererebbe *ogni* feed di *ogni* cliente, e dall'esterno
+si vedrebbe solo «nessun segnale» — indistinguibile da un giorno senza partite.
+Quindi ogni scarto incrementa un contatore in memoria e scrive una riga di log col
+nome del profilo e il motivo, **mai** il contenuto del CSV; `/health` espone
+`feed_scartati` e, se diverso da zero, `ultimo_scarto`.
+
+Il contatore **non** fa scattare `degraded`, di proposito: lo scarto atteso — la
+riga della versione precedente, subito dopo un deploy — è benigno e si risolve da
+sé col TTL, quindi marcarlo `degraded` terrebbe il processo «malato» per tutta la
+sua vita dopo ogni deploy normale, cioè un allarme sempre acceso. Il segnale utile
+è il **ritmo**: un contatore che continua a salire è il bug che azzera i feed, e
+si vede confrontando due letture. È il pannello Salute dell'admin a leggerlo.
 
 Il terzo punto è la lezione del Bridge. Là la funzione equivalente esisteva già
 ed era usata altrove, ma nessun semaforo del pannello la consultava: l'unico

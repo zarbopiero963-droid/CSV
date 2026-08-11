@@ -34,6 +34,13 @@ Body JSON: {"message":"testo completo del messaggio"}
 
 CONTROLLO
 GET /health
+Risponde {"status","csv","feed_scartati"} e, se feed_scartati non e' zero,
+anche "ultimo_scarto" col motivo. "csv" e' l'esito del verificatore di formato;
+"feed_scartati" conta quante volte una riga salvata non ha passato la verifica ed
+e' stata servita come feed vuoto. Uno scarto subito dopo un deploy e' atteso (riga
+scritta dalla versione precedente, scade col TTL); un numero che continua a salire
+e' un guasto. Il motivo non contiene mai il contenuto del segnale: /health e' un
+endpoint senza token.
 
 Il parser attuale riconosce un messaggio contenente "P.Bet. PREMACHT 0,5HT", cerca la riga con 🆚, prende il testo successivo e converte " v " in " - ".
 

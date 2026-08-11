@@ -35,6 +35,7 @@ Il merge resta sempre manuale del repository owner.
 | Test del relay: contratto CSV sui byte della risposta HTTP | `tests/relay/test_csv_contract.py` |
 | Test del motore e del contratto CSV (casi eseguiti in node) | `tests/engine/engine_cases.mjs`, `tests/engine/test_engine_contract.py` |
 | Test del prototipo in browser (Playwright/Chromium) | `tests/web/prototype_flow.py`, `tests/web/mobile_layout.py`, `tests/web/test_prototype_flow.py` |
+| Ambiente dei sottoprocessi di test (whitelist) + sua guardia | `tests/ambiente.py`, `tests/safety/test_ambiente_dei_test.py` |
 | Dipendenze dei soli test | `requirements-dev.txt` |
 
 **File core del bridge** (per i gate di review e per la soglia di attenzione):
@@ -738,6 +739,16 @@ Puoi continuare solo se `POST_FIX_AUDIT=PASS`.
 > runtime mancano. Chi dichiara i test passati deve aver eseguito il comando e riportato l'output.
 > Il relay (`main.py`) ha i suoi test da `tests/relay/`, nati col passaggio a UTF-8 con BOM: sono i
 > primi test di `main.py` in questo repository e asseriscono i **byte** della risposta, non le stringhe.
+>
+> **Una fixture che avvia il relay NON deve ereditare `os.environ`.** `main.py` registra il webhook
+> Telegram all'avvio: con `TELEGRAM_BOT_TOKEN` nell'ambiente, avviare il servizio chiama `setWebhook`
+> verso `PUBLIC_URL`, il cui default è cablato sull'URL Railway di produzione. Far girare la suite su
+> una macchina col `.env` del proprietario caricato **ripunterebbe il webhook del bot vero**, e niente
+> diventerebbe rosso. Per lo stesso motivo va tolto `CSV_ACCESS_TOKEN`, che farebbe rispondere 401 alle
+> richieste senza token e renderebbe l'esito dipendente dalla macchina. La whitelist è in
+> `tests/ambiente.py` — fonte unica per entrambe le fixture che avviano `main:app` — ed è vincolata da
+> `tests/safety/test_ambiente_dei_test.py`. La whitelist protegge il sottoprocesso, **non** `import
+> main`: per le chiamate in processo `tests/relay/` neutralizza `main.TOKEN` con una fixture autouse.
 
 I test devono essere veri, mirati e verificabili. Non puoi dire che un test è passato se non hai
 realmente eseguito il comando e visto esito positivo.

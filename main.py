@@ -1,4 +1,4 @@
-import csv, io, os, re, sqlite3
+import csv, io, logging, os, re, sqlite3
 from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import Response
@@ -182,6 +182,20 @@ def empty_csv():
     return csv_text(HEADERS)
 
 
+# Quante volte il percorso di consegna ha degradato una riga salvata a feed
+# vuoto, e per quale motivo l'ultima volta.
+#
+# Serve perche' quel fallback non puo' sollevare — un raise verso XTrader
+# diventerebbe un 500 — ma degradare in silenzio ha il difetto opposto: un bug in
+# verify_csv() azzererebbe OGNI feed di OGNI cliente, e dall'esterno si vedrebbe
+# solo «nessun segnale», indistinguibile da un giorno senza partite. Il contatore
+# rende visibile la differenza.
+#
+# Vive in memoria di proposito: e' una spia di salute del processo, non un dato
+# da conservare, e non deve aggiungere una scrittura sul percorso di consegna.
+_SCARTI_CONSEGNA = {'n': 0, 'ultimo': ''}
+
+
 def profile_csv(profile, token):
     auth(token)
     c = db()
@@ -202,7 +216,15 @@ def profile_csv(profile, token):
     if r:
         try:
             body = verify_csv(r[0])
-        except ValueError:
+        except ValueError as e:
+            # Il motivo, mai il contenuto: i messaggi di verify_csv() sono
+            # strutturali (conteggi, posizioni, numeri di riga) e /health e' un
+            # endpoint senza token. Il nome del profilo resta nel log del server,
+            # dove serve per la diagnosi e dove non e' un segreto: e' gia' nell'URL.
+            _SCARTI_CONSEGNA['n'] += 1
+            _SCARTI_CONSEGNA['ultimo'] = str(e)
+            logging.getLogger('xtrader.relay').warning(
+                'feed del profilo %s degradato a sola intestazione: %s', profile, e)
             body = empty_csv()
     return Response(body, media_type='text/csv', headers={'Cache-Control': 'no-store'})
 
@@ -232,7 +254,25 @@ def health():
         csv_state = 'ok'
     except ValueError as e:
         csv_state = 'fault: %s' % e
-    return {'status': 'ok' if csv_state == 'ok' else 'degraded', 'csv': csv_state}
+    # Il contatore degli scarti di consegna e' esposto ma NON fa scattare
+    # `degraded`, e la ragione non e' timidezza: lo scarto atteso — una riga
+    # scritta dalla versione precedente, subito dopo un deploy — e' benigno e si
+    # risolve da se' entro i 90 secondi del TTL. Farlo diventare `degraded`
+    # lascerebbe questo processo «malato» per tutta la sua vita dopo ogni deploy
+    # normale, cioe' un allarme sempre acceso, che e' il modo piu' rapido per
+    # insegnare a ignorarlo.
+    #
+    # Cio' che conta e' il RITMO: un contatore che continua a salire e' il bug in
+    # verify_csv() che azzera i feed, e si vede confrontando due letture. Chi
+    # guarda e' il pannello Salute dell'admin, che legge questo numero.
+    #
+    # `status` resta la risposta a «il formato che produco e' valido?», che e'
+    # esattamente quello che misura `csv`.
+    stato = {'status': 'ok' if csv_state == 'ok' else 'degraded',
+             'csv': csv_state, 'feed_scartati': _SCARTI_CONSEGNA['n']}
+    if _SCARTI_CONSEGNA['n']:
+        stato['ultimo_scarto'] = _SCARTI_CONSEGNA['ultimo']
+    return stato
 
 @app.get('/xtrader.csv')
 def xtrader_csv(token: str | None = Query(None)):

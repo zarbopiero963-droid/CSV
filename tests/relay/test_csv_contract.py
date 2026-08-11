@@ -17,7 +17,6 @@ diversi, perché servono a cose diverse:
 
 from __future__ import annotations
 
-import os
 import socket
 import subprocess
 import sys
@@ -32,6 +31,7 @@ RADICE = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(RADICE))
 
 import main  # noqa: E402 - dopo l'inserimento del percorso
+from tests.ambiente import ambiente_di_servizio  # noqa: E402
 
 
 # Intestazione attesa, costruita dalle colonne reali e non ricopiata a mano:
@@ -40,6 +40,24 @@ INTESTAZIONE = ','.join('"%s"' % c for c in main.HEADERS)
 
 RIGA_VALIDA = ['XTrader', '', 'Juventus - Palermo', '', 'Over/Under 1,5 gol',
                'OVER_UNDER_15', '', 'Over 1,5 goal', '0', '', '', '', 'PUNTA', '']
+
+
+@pytest.fixture(autouse=True)
+def _senza_token_ambientale(monkeypatch):
+    """Neutralizza `CSV_ACCESS_TOKEN` per le chiamate IN PROCESSO.
+
+    La whitelist di `tests.ambiente` protegge il sottoprocesso uvicorn, ma non
+    puo' fare niente per `import main`: `main.TOKEN` viene letto da `os.environ`
+    al momento dell'import, quindi su una macchina dove quella variabile e'
+    impostata i test che chiamano `profile_csv()` direttamente ricevono un 401 e
+    la suite passa o fallisce a seconda di chi la esegue. Misurato: senza questa
+    fixture, `CSV_ACCESS_TOKEN=... pytest tests/relay` fallisce tre test.
+
+    Autouse di proposito: e' la classe del difetto, non i tre siti di oggi. Un
+    test che voglia invece verificare il rifiuto per token errato imposta
+    `main.TOKEN` da se', e il suo monkeypatch vince perche' arriva dopo.
+    """
+    monkeypatch.setattr(main, 'TOKEN', '')
 
 
 # ------------------------------------------------------------ funzioni pure
@@ -174,6 +192,83 @@ def test_una_riga_vecchia_senza_bom_non_viene_servita(tmp_path, monkeypatch):
     main.verify_csv(corpo)
 
 
+def test_il_feed_degradato_lascia_una_traccia(tmp_path, monkeypatch):
+    """Degradare a feed vuoto e- giusto; farlo in silenzio no.
+
+    `profile_csv()` non puo- sollevare \u2014 un raise diventerebbe un 500 verso
+    XTrader \u2014 quindi serve il feed vuoto quando la riga salvata non passa la
+    verifica. Ma il fallback silenzioso ha il difetto opposto, segnalato
+    indipendentemente da GPT-5.5 e da Fable 5 sulla stessa PR: un bug futuro in
+    `verify_csv()` azzererebbe OGNI feed di OGNI cliente, e dall-esterno si
+    vedrebbe solo \u00abnessun segnale oggi\u00bb \u2014 indistinguibile da un sabato senza
+    partite. Il contatore e- la differenza fra un guasto visibile e un guasto
+    che si scopre dal cliente che non punta piu-.
+    """
+    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'test.db'))
+    monkeypatch.setattr(main, '_SCARTI_CONSEGNA', {'n': 0, 'ultimo': ''})
+    c = main.db()
+    try:
+        vecchia = main.make_csv(RIGA_VALIDA)[len(main.CSV_BOM):]
+        c.execute('INSERT INTO signals(csv,parser,profile,expires_at) VALUES (?,?,?,?)',
+                  (vecchia, 'parser-finto', 'PIERO', 2 ** 31 - 1))
+        c.commit()
+    finally:
+        c.close()
+
+    assert main._SCARTI_CONSEGNA['n'] == 0
+    main.profile_csv('PIERO', None)
+
+    assert main._SCARTI_CONSEGNA['n'] == 1, 'lo scarto non e- stato contato'
+    assert 'BOM' in main._SCARTI_CONSEGNA['ultimo'], \
+        f'il motivo dello scarto non e- stato registrato: {main._SCARTI_CONSEGNA["ultimo"]!r}'
+
+    # E la traccia deve essere DOVE SI GUARDA, altrimenti e- la lezione del
+    # Bridge da capo: un contatore che nessun pannello legge non e- un contatore.
+    salute = main.health()
+    assert salute['feed_scartati'] == 1, f'/health non riporta lo scarto: {salute}'
+    assert salute['ultimo_scarto'], f'/health non riporta il motivo: {salute}'
+
+    # E `status` deve restare `ok`: lo scarto atteso e- quello della riga scritta
+    # dalla versione precedente, subito dopo un deploy, e si risolve da se- col
+    # TTL. Farlo diventare `degraded` terrebbe il processo «malato» per tutta la
+    # sua vita dopo ogni deploy normale — un allarme sempre acceso, che e- il modo
+    # piu- rapido per insegnare a ignorarlo. Il segnale utile e- il RITMO del
+    # contatore, non il fatto che sia diverso da zero.
+    assert salute['status'] == 'ok', (
+        f'uno scarto atteso e autorisolvente non deve marcare il processo come '
+        f'degradato: {salute}'
+    )
+    assert salute['csv'] == 'ok', 'il formato prodotto da questo processo e- valido'
+
+
+def test_il_motivo_dello_scarto_non_contiene_il_segnale(tmp_path, monkeypatch):
+    """`/health` e- pubblico: il motivo puo- dire COSA e- rotto, non cosa diceva.
+
+    I messaggi di `verify_csv()` sono strutturali di proposito \u2014 conteggi,
+    posizioni, numeri di riga \u2014 e questo test e- il guardiano di quella
+    proprieta-: chi domani aggiungesse il valore del campo al messaggio d-errore
+    esporrebbe il segnale di un cliente su un endpoint senza token.
+    """
+    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'test.db'))
+    monkeypatch.setattr(main, '_SCARTI_CONSEGNA', {'n': 0, 'ultimo': ''})
+    c = main.db()
+    try:
+        # Una riga che contiene un nome squadra riconoscibile E che e- invalida.
+        sporca = main.CSV_BOM + INTESTAZIONE + '\r\n"XTrader","Juventus Segreta"\r\n'
+        c.execute('INSERT INTO signals(csv,parser,profile,expires_at) VALUES (?,?,?,?)',
+                  (sporca, 'parser-finto', 'PIERO', 2 ** 31 - 1))
+        c.commit()
+    finally:
+        c.close()
+
+    main.profile_csv('PIERO', None)
+    motivo = main._SCARTI_CONSEGNA['ultimo']
+    assert motivo, 'nessun motivo registrato'
+    assert 'Juventus' not in motivo, f'il motivo espone il contenuto del segnale: {motivo!r}'
+    assert 'Segreta' not in motivo, f'il motivo espone il contenuto del segnale: {motivo!r}'
+    assert 'Juventus' not in str(main.health()), 'il segnale e- uscito da /health'
+
+
 # ------------------------------------------------------------------- HTTP
 
 def _porta_libera() -> int:
@@ -190,7 +285,10 @@ def servizio(tmp_path_factory):
     proc = subprocess.Popen(
         [sys.executable, '-m', 'uvicorn', 'main:app', '--host', '127.0.0.1',
          '--port', str(porta), '--log-level', 'warning'],
-        cwd=RADICE, env={**os.environ, 'DB_PATH': str(db)},
+        # Ambiente ripulito, non ereditato: con TELEGRAM_BOT_TOKEN in giro
+        # l'avvio del relay ripunterebbe il webhook di produzione, e con
+        # CSV_ACCESS_TOKEN le richieste senza token qui sotto darebbero 401.
+        cwd=RADICE, env=ambiente_di_servizio(DB_PATH=str(db)),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
     base = f'http://127.0.0.1:{porta}'
