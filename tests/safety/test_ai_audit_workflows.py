@@ -997,8 +997,18 @@ def test_le_helper_compongono_esattamente_le_forme_attese():
     atteso = 'API_KEY: ${' + '{ secrets.NOME }' + '}CODA\n'
     assert _assegnazione(_CHIAVE, _espressione() + 'CODA') == atteso
 
-    # Il fixture YAML deve contenere tutte e cinque le assegnazioni, non meno.
-    assert YAML_CON_SEGRETO.count('${' + '{') == 5, (
-        f'attese 5 espressioni nel fixture, trovate '
-        f'{YAML_CON_SEGRETO.count("${" + "{")}:\n{YAML_CON_SEGRETO}'
+    # Ogni assegnazione del fixture deve portare un'espressione. Controllo
+    # STRUTTURALE e non un conteggio: un `== 5` si romperebbe appena il fixture
+    # cresce legittimamente, e un test fragile viene disattivato invece che capito.
+    # Segnalato da GPT-5.5.
+    assegnazioni = [r for r in YAML_CON_SEGRETO.splitlines() if '_KEY:' in r or 'TOKEN:' in r]
+    assert assegnazioni, 'il fixture non contiene nessuna assegnazione sensibile'
+    senza_espressione = [r.split(':', 1)[0].strip() for r in assegnazioni
+                         if '${' + '{' not in r]
+    # Nel messaggio finiscono solo i NOMI delle chiavi, non le righe: un dump del
+    # fixture intero nel log CI e- gia- un'abitudine sbagliata in un file che parla
+    # di non far uscire i segreti, e domani il fixture potrebbe contenerne uno vero.
+    assert not senza_espressione, (
+        f'{len(senza_espressione)} assegnazioni del fixture senza espressione: '
+        f'{senza_espressione}'
     )
