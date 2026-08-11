@@ -576,17 +576,26 @@ def _assegnazione(chiave: str, valore: str, sep: str = ': ') -> str:
 # Riga reale di un workflow di questo repository: il nome del Secret e- proprio
 # l'informazione che serve al reviewer per giudicare, e la #6 nasce dal fatto che
 # veniva cancellata.
-YAML_CON_SEGRETO = (
-    '      - name: Review\n'
-    '        env:\n'
-    + '          ' + _assegnazione('PROVIDER_' + _CHIAVE, _espressione('BETRELAY_FABLE'))
-    + '          ' + _assegnazione('ALTRO_' + _CHIAVE, _espressione('BETRELAY_GPT'))
-    + '          ' + _assegnazione('GITHUB_' + _CHIAVE_SECONDA, _espressione('GITHUB_TOKEN'))
+# Le assegnazioni del fixture, come LISTA: il test le itera invece di ritrovarle
+# dentro una stringa con un filtro a sottostringhe. Un filtro del genere andava
+# allungato a ogni chiave nuova (`SECRET`, `PASSWORD`, minuscole...) e ogni volta che
+# qualcuno se ne dimenticava il fixture perdeva copertura in silenzio. Segnalato da
+# GPT-5.5, e la lista rimuove la classe invece della singola omissione.
+ASSEGNAZIONI_CON_SEGRETO = [
+    _assegnazione('PROVIDER_' + _CHIAVE, _espressione('BETRELAY_FABLE')),
+    _assegnazione('ALTRO_' + _CHIAVE, _espressione('BETRELAY_GPT')),
+    _assegnazione('GITHUB_' + _CHIAVE_SECONDA, _espressione('GITHUB_TOKEN')),
     # Forma FRA VIRGOLETTE: la prima versione del lookahead la lasciava passare al
     # redattore, perche' guardava subito dopo i due punti e trovava la virgoletta
     # invece del dollaro. Segnalato da Sourcery, ed e' una forma YAML comunissima.
-    + '          ' + _assegnazione('QUOTATO_' + _CHIAVE, '"' + _espressione('BETRELAY_FUGU') + '"')
-    + '          ' + _assegnazione('APICE_' + _CHIAVE, "'" + _espressione('BETRELAY_FUGU') + "'")
+    _assegnazione('QUOTATO_' + _CHIAVE, '"' + _espressione('BETRELAY_FUGU') + '"'),
+    _assegnazione('APICE_' + _CHIAVE, "'" + _espressione('BETRELAY_FUGU') + "'"),
+]
+
+YAML_CON_SEGRETO = (
+    '      - name: Review\n'
+    '        env:\n'
+    + ''.join('          ' + r for r in ASSEGNAZIONI_CON_SEGRETO)
 )
 
 
@@ -997,18 +1006,21 @@ def test_le_helper_compongono_esattamente_le_forme_attese():
     atteso = 'API_KEY: ${' + '{ secrets.NOME }' + '}CODA\n'
     assert _assegnazione(_CHIAVE, _espressione() + 'CODA') == atteso
 
-    # Ogni assegnazione del fixture deve portare un'espressione. Controllo
-    # STRUTTURALE e non un conteggio: un `== 5` si romperebbe appena il fixture
-    # cresce legittimamente, e un test fragile viene disattivato invece che capito.
-    # Segnalato da GPT-5.5.
-    assegnazioni = [r for r in YAML_CON_SEGRETO.splitlines() if '_KEY:' in r or 'TOKEN:' in r]
-    assert assegnazioni, 'il fixture non contiene nessuna assegnazione sensibile'
-    senza_espressione = [r.split(':', 1)[0].strip() for r in assegnazioni
+    # Ogni assegnazione composta deve portare un'espressione. Si itera la LISTA, non
+    # si cercano le righe dentro il testo: cosi- non c'e- nessun elenco di chiavi
+    # sensibili da tenere aggiornato, e una riga aggiunta al fixture e- coperta subito.
+    assert ASSEGNAZIONI_CON_SEGRETO, 'il fixture non contiene nessuna assegnazione'
+    senza_espressione = [r.split(':', 1)[0].strip() for r in ASSEGNAZIONI_CON_SEGRETO
                          if '${' + '{' not in r]
     # Nel messaggio finiscono solo i NOMI delle chiavi, non le righe: un dump del
-    # fixture intero nel log CI e- gia- un'abitudine sbagliata in un file che parla
-    # di non far uscire i segreti, e domani il fixture potrebbe contenerne uno vero.
+    # fixture nel log CI e- un'abitudine sbagliata in un file che parla di non far
+    # uscire i segreti, e domani il fixture potrebbe contenerne uno vero.
     assert not senza_espressione, (
         f'{len(senza_espressione)} assegnazioni del fixture senza espressione: '
         f'{senza_espressione}'
     )
+
+    # E ogni riga della lista deve finire davvero nel testo del fixture, altrimenti
+    # la lista e- una decorazione e il YAML mandato al redattore e- un altro.
+    for riga in ASSEGNAZIONI_CON_SEGRETO:
+        assert riga.strip() in YAML_CON_SEGRETO, f'riga composta assente dal fixture: {riga!r}'
