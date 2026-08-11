@@ -83,12 +83,7 @@ def relay_avviato(cartella: Path, **extra):
             _attendi(proc, base, log)
             yield base
         finally:
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
+            _spegni(proc)
 
 
 def _attendi(proc, base: str, log: Path) -> None:
@@ -113,9 +108,27 @@ def _attendi(proc, base: str, log: Path) -> None:
                     return
         except (urllib.error.URLError, OSError):
             time.sleep(INTERVALLO_S)
-    proc.terminate()
-    proc.wait(timeout=10)
+    _spegni(proc)
     raise RuntimeError(
         f'uvicorn non ha risposto su /health entro {ATTESA_AVVIO_S} s:\n'
         + log.read_text(encoding='utf-8', errors='replace')[-2000:]
     )
+
+
+def _spegni(proc) -> None:
+    """Spegne il processo, e non lascia nulla dietro in nessun caso.
+
+    Esiste come funzione perche' serviva in DUE punti — l'uscita normale e il
+    timeout d'avvio — e nella prima versione solo il primo aveva il `kill()` di
+    riserva. Nel secondo un `wait()` che scade avrebbe sollevato
+    `TimeoutExpired` **al posto** del `RuntimeError` che spiega il guasto, e
+    lasciato il processo vivo: l'errore utile sostituito da uno inutile, piu' un
+    uvicorn appeso. Segnalato da GPT-5.5, ed e- la stessa classe che avevo appena
+    corretto nell'altro ramo (regola 2: la classe, non il sito).
+    """
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()

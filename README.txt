@@ -39,7 +39,9 @@ l'header X-Admin-Token). Quattro sono in lettura, sei in scrittura.
 Restano pubbliche soltanto /, /health, /telegram/webhook (protetta dal filtro
 delle chat) e /app, che serve i file statici del prototipo: e' un mount, non una
 rotta, e non ha ne' puo' avere un token perche' e' la pagina che si apre nel
-browser. Nulla di sensibile deve finire in web/ (vedi anche SAAS.md).
+browser. Nulla di sensibile deve finire in web/: lo vincola la guardia
+tests/safety/test_static_mount.py, che controlla il tipo dei file E il loro
+contenuto (token dalla forma nota, chat_id non dichiarati finti).
 Il controllo e' FAIL-CLOSED: se CSV_ACCESS_TOKEN non e' configurato il servizio
 risponde 503 "servizio non configurato" a tutte le rotte protette, e NON le
 lascia aperte. Un token sbagliato o assente nella richiesta da' invece 401: i due
