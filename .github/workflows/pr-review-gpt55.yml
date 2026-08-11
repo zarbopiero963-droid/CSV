@@ -338,7 +338,21 @@ jobs:
           ]
 
           def priorita_payload(filename: str) -> int:
-              """Rango di priorita' del file: 0 core, 1 test, 2 il resto (docs)."""
+              """Rango di priorita' del file, dal piu' importante al meno.
+
+              0 = il codice che gira in produzione (relay, motore, tools, deploy, deps)
+              1 = l'impianto di review in `.github/` — safety-critical, ma dopo il codice
+                  che serve i clienti, perche' quei file sono enormi e ne mangerebbero
+                  il budget
+              2 = i test, che dicono se il codice sopra e' vincolato
+              3 = tutto il resto (documentazione)
+
+              Il numero di ranghi segue PRIORITA_PAYLOAD e non e' scritto a mano: la
+              versione precedente diceva «0 core, 1 test, 2 il resto» ed e' rimasta
+              indietro quando `.github/` ha avuto un tier proprio, cioe' la
+              documentazione ha iniziato a mentire sul codice a due righe di distanza.
+              Segnalato da Fable 5.
+              """
               for rango, pattern in enumerate(PRIORITA_PAYLOAD):
                   if pattern.search(filename):
                       return rango
