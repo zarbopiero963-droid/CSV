@@ -198,7 +198,9 @@ jobs:
               # nudi sono anche uno SHA-256: i lockfile del repo ne contengono 291 righe, e
               # redigerle svuoterebbe il diff mandato al reviewer. Copre anche la forma del
               # BACKUP, dove il file-chiave e' annidato come stringa JSON e le virgolette sono
-              # escapate. Stesso pattern di `tools/secret_policy.py` (in str invece che bytes):
+              # escapate. Stesso pattern di `tools/secret_policy.py` DEL BRIDGE (in str invece
+              # che bytes) — quel file NON esiste in questo repository, e dirlo qui evita che un
+              # reviewer chieda di allinearlo a un modulo che non c'e' (chiesto da GPT-5.5):
               # la condivisione per import e' impossibile qui, i workflow non fanno checkout.
               (re.compile(r'''(?i)\\?['"]?(?:signing[_-]?)?seed(?:[_-]?hex)?\\?['"]?\s*[:=]\s*\\?['"]?[0-9a-f]{64,}'''), "[REDACTED_ED25519_SEED]"),
               # Un'espressione con un letterale INCOLLATO: qui il letterale e' un segreto,

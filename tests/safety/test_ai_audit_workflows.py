@@ -821,3 +821,57 @@ def test_lo_script_non_contiene_espressioni_di_actions_letterali(path):
         f'"{nome_step}" — verra- interpolata prima dell\'esecuzione:\n  '
         + '\n  '.join(f'riga {n}: {r[:100]}' for n, r in colpevoli)
     )
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_la_redazione_sovra_redige_la_punteggiatura_ed_e_una_SCELTA(path):
+    """Documenta un compromesso, invece di lasciarlo scoprire a un futuro rilievo.
+
+    Segnalato da GPT-5.5: un'espressione seguita da punteggiatura in prosa —
+    `vedi <espressione>) nel testo` — viene redatta insieme alla punteggiatura.
+    Non e' una fuga di segreti, e' payload di review alterato, e in un progetto che
+    sta cercando di far leggere ai reviewer il file giusto e' un costo reale.
+
+    Non viene corretto, e la ragione va scritta perche' non e' ovvia. Il rimedio
+    naturale sarebbe far scattare la regola solo su caratteri plausibili come
+    inizio di un segreto (`[A-Za-z0-9_+/=-]`), escludendo `)`, `,`, `.`, backtick.
+    Ma quella esclusione riapre la falla: con `API_KEY: <espressione>.coda-segreta`
+    la regola del letterale incollato non scatterebbe, quella contestuale si
+    fermerebbe allo spazio, e `.coda-segreta` uscirebbe. Misurato.
+
+    Fra sovra-redigere della prosa e lasciare uscire un segreto, un redattore
+    sceglie il primo. Questo test fissa quella scelta: se un domani qualcuno
+    restringesse il trigger, il test accanto sulla coda incollata diventa rosso, e
+    questo diventa rosso al contrario — cioe' la coppia rende visibile il baratto.
+    """
+    redact = _funzione_redact(path)
+
+    # Il comportamento attuale, dichiarato: la punteggiatura attaccata viene inghiottita.
+    assert '[REDACTED_VALORE_INCOLLATO]' in redact('vedi ${{ secrets.NOME }}) nel testo'), (
+        f'{path.name}: comportamento cambiato. Se e- stato ristretto il trigger, '
+        f'verificare che `<espressione>.coda-segreta` non esca piu- in chiaro.'
+    )
+    # E cio- che NON e' attaccato resta leggibile: la prosa attorno non si perde.
+    ripulito = redact('vedi ${{ secrets.NOME }}) nel testo')
+    assert 'nel testo' in ripulito and ripulito.startswith('vedi ')
+
+
+def test_la_tabella_di_redazione_e_identica_nei_tre_workflow():
+    """Regola 3 sulla redazione, non solo sulle priorita'.
+
+    Chiesto da GPT-5.5, e il rischio e' concreto: tre reviewer con policy di
+    sanitizzazione diverse significa che un segreto redatto verso uno esce verso un
+    altro, e nulla lo segnala. I workflow non fanno checkout, quindi le tre copie
+    sono inevitabili — questo test le tiene allineate.
+    """
+    def tabella(p: Path) -> str:
+        m = re.search(r'^(\s*)REDACTIONS = \[.*?^\1\]', _script(p), re.S | re.M)
+        assert m, f'{p.name}: tabella REDACTIONS non trovata'
+        return textwrap.dedent(m.group(0))
+
+    riferimento = tabella(FABLE)
+    for p in (GPT, FUGU):
+        assert tabella(p) == riferimento, (
+            f'{p.name}: la tabella di redazione differisce da {FABLE.name}. Tre policy '
+            f'diverse sono un segreto redatto verso un modello e in chiaro verso un altro.'
+        )
