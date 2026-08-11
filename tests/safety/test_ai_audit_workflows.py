@@ -1030,3 +1030,49 @@ def test_le_helper_compongono_esattamente_le_forme_attese():
             f'assegnazione {indice} ({riga.split(":", 1)[0].strip()}) assente dal fixture: '
             f'la lista e- scollegata dal testo mandato al redattore'
         )
+
+
+# PR MISTA: tocca insieme il codice che gira in produzione e il proprio impianto di
+# review. E- il caso che Fugu Ultra ha isolato, e non era esercitato da nessun test
+# perche- questa PR tocca solo workflow.
+FILE_PR_MISTA = [
+    '.github/workflows/pr-review-claude-fable5.yml',
+    '.github/workflows/pr-review-gpt55.yml',
+    'main.py',
+    'web/engine.js',
+    'tests/relay/test_csv_contract.py',
+    'CLAUDE.md',
+]
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_su_una_PR_mista_il_relay_precede_i_workflow(path):
+    """Il codice che serve i clienti prima dell'impianto che lo revisiona.
+
+    Segnalato da Fugu Ultra sul gate finale, ed e- la stessa classe del difetto che
+    questa PR chiude, un livello dentro: dentro il tier-0 l'ordine resta quello
+    dell-API, cioe- alfabetico, e `.github/workflows/` viene prima di `main.py` e di
+    `web/`. I tre workflow sono file da ~48.000 caratteri l-uno: su una PR che tocca
+    insieme un workflow e il relay si mangerebbero il budget del core prima che il
+    motore arrivi al modello.
+
+    Non era esercitato da nessun test perche- questa PR tocca solo workflow — cioe-
+    esattamente il caso in cui il difetto non si vede.
+    """
+    build = _funzione_payload(path)
+    files = [_file_finto(n) for n in FILE_PR_MISTA]
+    testo, saltati, _, _ = build(files, 2000, 6000)
+
+    posizione = {n: testo.find(f'FILE: {n}') for n in FILE_PR_MISTA}
+    relay = {n: p for n, p in posizione.items() if p >= 0 and (n == 'main.py' or n.startswith('web/'))}
+    workflow = {n: p for n, p in posizione.items() if p >= 0 and n.startswith('.github/')}
+
+    assert 'main.py' not in saltati and 'web/engine.js' not in saltati, (
+        f'il relay o il motore sono stati scartati per far posto ai workflow: '
+        f'saltati={saltati}'
+    )
+    if workflow:
+        assert max(relay.values()) < min(workflow.values()), (
+            f'un workflow precede il codice di produzione nel payload:\n'
+            f'  relay    = {relay}\n  workflow = {workflow}'
+        )

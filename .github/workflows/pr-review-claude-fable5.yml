@@ -362,8 +362,17 @@ jobs:
               # review di troppo e' innocuo, mandare al modello i file sbagliati no.
               re.compile(r"^main\.py$|^web/|^tools/|^Procfile$|^railway\.json$"
                          r"|^requirements[^/]*\.(txt|in|lock)$|^pyproject\.toml$"
-                         r"|^poetry\.lock$|^\.github/workflows/"),
-              # 1 — i test: dicono se il codice sopra e' vincolato, ma valgono meno del
+                         r"|^poetry\.lock$"),
+              # 1 — l'impianto di review. E' safety-critical (un errore qui esce VERDE),
+              #     ma sta DOPO il codice che serve i clienti, e la ragione e' la
+              #     dimensione: questi tre file sono ~48.000 caratteri l'uno. Finche'
+              #     stavano nel tier-0 l'ordine alfabetico li metteva davanti a
+              #     `main.py` e `web/`, e su una PR che toccava insieme un workflow e il
+              #     relay si mangiavano il budget del core: misurato, `web/engine.js`
+              #     veniva scartato. Segnalato da Fugu Ultra sul gate finale, ed e' la
+              #     stessa classe del difetto che questa lista esiste per chiudere.
+              re.compile(r"^\.github/"),
+              # 2 — i test: dicono se il codice sopra e' vincolato, ma valgono meno del
               #     codice stesso quando il budget costringe a scegliere.
               re.compile(r"(^|/)tests?/|(^|/)test_[^/]*\.py$|[^/]*_test\.py$"),
           ]
