@@ -682,31 +682,33 @@ function paneFeed(p) {
           <p class="muted small" style="margin:0">Questo parser non ha ancora un token: il feed non è raggiungibile.</p>
           <div class="row"><button class="primary" data-act="rotate-token" data-id="${p.id}">Genera token</button></div>`}
       </div>
-      <div class="card">
+      ${(() => {
+        // Terzo punto di aggancio del verificatore, e il piu- importante: quello
+        // che il cliente vede. Nel Bridge il controllo esisteva nel codice ma
+        // nessun semaforo lo consultava, e un CSV inservibile e- rimasto tale
+        // per mesi.
+        //
+        // Calcolato UNA volta e riusato da pillola e banner: due chiamate sulla
+        // stessa cosa sono due risposte che possono divergere, ed e- esattamente
+        // il difetto che questo PR sta correggendo altrove.
+        const csvMostrato = s.live ? s.csv : headerOnlyCsv();
+        const motivo = verifyCsv(csvMostrato);
+        return `<div class="card">
         <div class="row"><strong class="small">Contenuto attuale del feed</strong><div class="spacer"></div>
-          ${(() => {
-            // Terzo punto di aggancio del verificatore, e il piu- importante:
-            // quello che il cliente vede. Nel Bridge il controllo esisteva nel
-            // codice ma nessun semaforo lo consultava, e un CSV inservibile e-
-            // rimasto tale per mesi.
-            const motivo = verifyCsv(s.live ? s.csv : headerOnlyCsv());
-            return motivo
-              ? `<span class="pill no" id="csv-format">formato non valido</span>`
-              : `<span class="pill on" id="csv-format">formato valido per XTrader</span>`;
-          })()}
+          ${motivo
+            ? `<span class="pill no" id="csv-format">formato non valido</span>`
+            : `<span class="pill on" id="csv-format">formato valido per XTrader</span>`}
         </div>
-        <pre class="csv-out" style="margin-top:10px">${esc(s.live ? s.csv : headerOnlyCsv())}</pre>
-        ${(() => {
-          const motivo = verifyCsv(s.live ? s.csv : headerOnlyCsv());
-          return motivo ? `<div class="banner warn" style="margin-top:10px">
-            XTrader non riuscirebbe a leggere questo feed: ${esc(motivo)}</div>` : '';
-        })()}
+        <pre class="csv-out" style="margin-top:10px">${esc(csvMostrato)}</pre>
+        ${motivo ? `<div class="banner warn" style="margin-top:10px">
+          XTrader non riuscirebbe a leggere questo feed: ${esc(motivo)}</div>` : ''}
         <p class="dim small" style="margin:10px 0 0">
           Un segnale resta nel feed 90 secondi, poi il CSV torna alla sola intestazione.
           Il timer di questo parser è indipendente da tutti gli altri.
           Il feed è UTF-8 con BOM, come XTrader lo pretende.
         </p>
-      </div>
+      </div>`;
+      })()}
     </div>`;
 }
 

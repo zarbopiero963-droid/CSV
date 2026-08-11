@@ -191,9 +191,16 @@ export function verifyCsv(text) {
   const s = String(text ?? '');
   if (!s.startsWith(CSV_BOM)) return 'manca il BOM: XTrader non leggerebbe la prima colonna';
   const body = s.slice(CSV_BOM.length);
-  if (body.replace(/\r\n/g, '').includes('\n')) return 'c’e’ un LF non preceduto da CR';
-  const lines = body.split('\r\n').filter(Boolean);
+  if (!body.endsWith('\r\n')) return 'manca il terminatore CRLF finale';
+  // Ogni CR seguito da LF e ogni LF preceduto da CR: il contratto dice CRLF.
+  const residuo = body.replace(/\r\n/g, '');
+  if (residuo.includes('\r') || residuo.includes('\n')) return 'c’e’ un CR o un LF non appaiati in CRLF';
+  // L'ultimo elemento dello split e' vuoto per il CRLF finale: si scarta.
+  // Ogni ALTRO elemento vuoto e' una riga in bianco e va respinta — filtrarli
+  // tutti, come faceva la prima versione, le accettava in silenzio.
+  const lines = body.split('\r\n').slice(0, -1);
   if (!lines.length) return 'CSV vuoto: manca anche l’intestazione';
+  if (lines.includes('')) return `c’e’ una riga vuota alla posizione ${lines.indexOf('') + 1}`;
   if (lines[0] !== HEADER_LINE) return `intestazione diversa dal contratto (${lines[0].split(',').length} colonne)`;
   if (lines.length > 2) return `${lines.length} righe: attesa intestazione piu’ al massimo un segnale`;
   for (let i = 1; i < lines.length; i++) {

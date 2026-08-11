@@ -84,9 +84,16 @@ caso('csv: il BOM c-e-, ed e- U+FEFF', () => {
 
 // Esportata perche' test_engine_contract.py la confronti con main.py: e- il
 // guardiano della regola 3, le due implementazioni dello stesso contratto.
-caso('csv: intestazione esportata per il confronto col motore Python', () => {
-  const h = headerOnlyCsv();
-  return { intestazione: h.slice(1).split('\r\n')[0], bom: h.codePointAt(0) };
+caso('csv: CSV completo esportato per il confronto col motore Python', () => {
+  // Non solo l'intestazione: una riga che contiene i tre caratteri capaci di
+  // rompere un CSV — campi vuoti, una virgola, una virgoletta da raddoppiare.
+  // Confrontare solo l'intestazione non vedrebbe una divergenza nel quoting.
+  // Segnalato da CodeRabbit.
+  const row = COLUMNS.map(() => '');
+  row[COLUMNS.indexOf('Provider')] = 'XTrader';
+  row[COLUMNS.indexOf('EventName')] = 'Squadra "A", Citta - Altra';
+  row[COLUMNS.indexOf('BetType')] = 'PUNTA';
+  return { csvCompleto: toCsv(row), soloIntestazione: headerOnlyCsv(), bom: headerOnlyCsv().codePointAt(0) };
 });
 
 caso('verifica: accetta il formato giusto', () => {
@@ -103,12 +110,16 @@ caso('verifica: respinge le forme sbagliate', () => {
     'BOM assente': buono.slice(1),
     // Intestazione a 11 colonne del vecchio prototipo del Bridge: un formato
     // che esiste davvero ed e- esattamente cio- che va respinto.
-    'intestazione a 11 colonne': '﻿Provider,SelectionId,MarketId,SelectionName,MarketName,EventName,MarketType,BetType,Price,MinPrice,MaxPrice\r\n',
-    'intestazione senza virgolette': '﻿' + COLUMNS.join(',') + '\r\n',
-    'LF nudo': '﻿' + intestazione + '\n',
-    'riga con 13 campi': '﻿' + intestazione + '\r\n' + Array(13).fill('"x"').join(',') + '\r\n',
-    'due segnali': '﻿' + intestazione + '\r\n' + quattordici + '\r\n' + quattordici + '\r\n',
+    'intestazione a 11 colonne': '\ufeffProvider,SelectionId,MarketId,SelectionName,MarketName,EventName,MarketType,BetType,Price,MinPrice,MaxPrice\r\n',
+    'intestazione senza virgolette': '\ufeff' + COLUMNS.join(',') + '\r\n',
+    'LF nudo': '\ufeff' + intestazione + '\n',
+    'riga con 13 campi': '\ufeff' + intestazione + '\r\n' + Array(13).fill('"x"').join(',') + '\r\n',
+    'due segnali': '\ufeff' + intestazione + '\r\n' + quattordici + '\r\n' + quattordici + '\r\n',
     'vuoto': '',
+    // Segnalata da CodeRabbit: filtrare tutte le righe vuote le accettava.
+    'riga vuota in mezzo': '\ufeff' + intestazione + '\r\n\r\n' + quattordici + '\r\n',
+    'senza terminatore finale': '\ufeff' + intestazione,
+    'CR isolato in un campo': '\ufeff' + intestazione + '\r\n"x\rx"' + ',"x"'.repeat(13) + '\r\n',
   };
   const passati = Object.entries(casi).filter(([, t]) => E.verifyCsv(t) === null).map(([n]) => n);
   eq(passati, [], 'forme sbagliate accettate per errore');

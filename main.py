@@ -102,11 +102,22 @@ def verify_csv(text):
     if not text.startswith(CSV_BOM):
         raise ValueError('CSV senza BOM: XTrader non leggerebbe la prima colonna')
     body = text[len(CSV_BOM):]
-    if '\n' in body.replace('\r\n', ''):
-        raise ValueError('CSV con un LF non preceduto da CR')
-    lines = [l for l in body.split('\r\n') if l]
+    if not body.endswith('\r\n'):
+        raise ValueError('CSV senza terminatore CRLF finale')
+    # Ogni CR seguito da LF e ogni LF preceduto da CR: il contratto dice CRLF, e
+    # un verificatore che accetta un CR o un LF isolati non sta vincolando il
+    # contratto che dichiara di vincolare.
+    residuo = body.replace('\r\n', '')
+    if '\r' in residuo or '\n' in residuo:
+        raise ValueError('CSV con un CR o un LF non appaiati in CRLF')
+    # Lo split su un corpo che finisce con CRLF lascia un ultimo elemento vuoto:
+    # quello si scarta. Ogni ALTRO elemento vuoto e' una riga in bianco e va
+    # respinta — filtrarli tutti, come faceva la prima versione, le accettava.
+    lines = body.split('\r\n')[:-1]
     if not lines:
         raise ValueError('CSV vuoto: manca anche l\'intestazione')
+    if '' in lines:
+        raise ValueError('CSV con una riga vuota alla posizione %d' % (lines.index('') + 1))
     if lines[0] != HEADER_LINE:
         raise ValueError('intestazione diversa dal contratto (%d colonne rilevate)'
                          % len(lines[0].split(',')))
@@ -179,7 +190,21 @@ def profile_csv(profile, token):
     c.commit()
     r = c.execute('SELECT csv FROM signals WHERE profile=? ORDER BY id DESC LIMIT 1', (profile,)).fetchone()
     c.close()
-    return Response(r[0] if r else empty_csv(), media_type='text/csv', headers={'Cache-Control': 'no-store'})
+    # store_signal() verifica cio' che SCRIVE, ma una riga finita nel database da
+    # una versione precedente e' gia' la' e uscirebbe cosi' com'e' — senza BOM,
+    # per i secondi che le restano. Qui si serve il feed vuoto invece del
+    # contenuto sospetto: e' sempre un CSV valido e XTrader non va in errore.
+    #
+    # E' l'UNICA verifica sul percorso di consegna, ed e' innocua per costruzione
+    # perche' non puo' produrre un errore: al massimo degrada a «nessun segnale».
+    # Un raise qui diventerebbe un 500 verso XTrader.
+    body = empty_csv()
+    if r:
+        try:
+            body = verify_csv(r[0])
+        except ValueError:
+            body = empty_csv()
+    return Response(body, media_type='text/csv', headers={'Cache-Control': 'no-store'})
 
 
 @app.get('/')
@@ -195,8 +220,12 @@ def health():
     it: the only warning was a single log line at startup, and a CSV the program
     could not use sat there for months. A check nobody reads is not a check.
     """
-    sample = ['XTrader', '', 'Squadra A - Squadra B', '', 'Over/Under 1,5 gol',
-              'OVER_UNDER_15', '', 'Over 1,5 goal', '0', '', '', '', 'PUNTA', '']
+    # Derived from HEADERS rather than hand-written, so it cannot drift if the
+    # columns change. One field carries both a comma and an escaped quote: those
+    # are the two characters that break a CSV, and the sample exists to exercise
+    # them, not to look like a real signal.
+    sample = [''] * len(HEADERS)
+    sample[HEADERS.index('EventName')] = 'Squadra "A", Citta - Altra'
     try:
         verify_csv(empty_csv())
         verify_csv(make_csv(sample))
@@ -309,12 +338,16 @@ async def telegram_webhook(request: Request):
         return {'ok': True, 'ignored': 'parser_no_match'}
     try:
         store_signal(c, parsed['csv'], profile['parser'], profile['name'])
-    except ValueError as e:
+    except ValueError:
         # Deterministic failure: the same message would produce the same broken
-        # CSV, so answer 200 and let Telegram stop retrying. The condition stays
-        # visible on /health, which verifies the format on every call.
+        # CSV, so answer 200 and let Telegram stop retrying.
+        #
+        # The reason does NOT leave in the response: this endpoint is public,
+        # Telegram posts to it, and there is no reason to tell an arbitrary
+        # caller how the CSV is built. The condition stays visible on /health,
+        # which verifies the format on every call.
         c.close()
-        return {'ok': True, 'ignored': 'csv_non_valido', 'reason': str(e)}
+        return {'ok': True, 'ignored': 'csv_non_valido'}
     c.commit()
     c.close()
     return {'ok': True, 'profile': profile['name'], 'event': parsed['event']}

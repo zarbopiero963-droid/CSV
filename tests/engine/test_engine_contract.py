@@ -77,13 +77,27 @@ def test_il_motore_js_e_il_relay_producono_lo_STESSO_formato(casi):
     main = importlib.import_module('main')
 
     esportato = next((c for c in casi if 'confronto col motore Python' in c['nome']), None)
-    assert esportato and esportato['ok'], 'il caso che esporta l\'intestazione non e\' passato'
+    assert esportato and esportato['ok'], 'il caso che esporta il CSV non e\' passato'
     dal_js = esportato['dettaglio']
 
     assert dal_js['bom'] == 0xfeff, f'il BOM del motore JS non e\' U+FEFF: {dal_js["bom"]:#x}'
     assert ord(main.CSV_BOM) == 0xfeff, f'il BOM del relay non e\' U+FEFF: {ord(main.CSV_BOM):#x}'
-    assert dal_js['intestazione'] == main.HEADER_LINE, (
-        'le due implementazioni scrivono intestazioni diverse:\n'
-        f'  JS     : {dal_js["intestazione"]}\n'
-        f'  Python : {main.HEADER_LINE}'
+
+    # La stessa riga costruita in Python: campi vuoti, una virgola e una
+    # virgoletta da raddoppiare. Confrontare solo l'intestazione non vedrebbe
+    # una divergenza nel quoting — segnalato da CodeRabbit.
+    riga = [''] * len(main.HEADERS)
+    riga[main.HEADERS.index('Provider')] = 'XTrader'
+    riga[main.HEADERS.index('EventName')] = 'Squadra "A", Citta - Altra'
+    riga[main.HEADERS.index('BetType')] = 'PUNTA'
+
+    assert dal_js['soloIntestazione'] == main.empty_csv(), (
+        'feed vuoto diverso fra le due implementazioni:\n'
+        f'  JS     : {dal_js["soloIntestazione"]!r}\n'
+        f'  Python : {main.empty_csv()!r}'
+    )
+    assert dal_js['csvCompleto'] == main.make_csv(riga), (
+        'CSV completo diverso fra le due implementazioni:\n'
+        f'  JS     : {dal_js["csvCompleto"]!r}\n'
+        f'  Python : {main.make_csv(riga)!r}'
     )

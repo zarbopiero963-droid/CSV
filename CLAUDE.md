@@ -229,7 +229,8 @@ Regole:
   senza passare da entità HTML.
 - Il CSV va scritto **UTF-8 con BOM**, e questo vale sia in Python (`main.py`) sia in JavaScript
   (`web/engine.js`): sono due implementazioni dello stesso contratto e devono coincidere byte per
-  byte. Il BOM va scritto con l'escape `'﻿'`, **mai** come carattere letterale nel sorgente:
+  byte. Il BOM va scritto con l'escape `\ufeff`, in Python come in JavaScript, **mai**
+  come carattere letterale nel sorgente:
   un U+FEFF letterale è invisibile in un editor ed è esattamente il tipo di carattere che questa
   sezione dice di non lasciare in giro.
   *Storia, perché non si ripeta:* qui c'era scritto il contrario — «senza BOM, un BOM davanti a

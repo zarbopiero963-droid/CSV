@@ -136,8 +136,12 @@ dalla configurazione, sarebbe corretto solo per i parser configurati bene. **Il
 motore Python deve normalizzare allo stesso modo**, o le due implementazioni
 divergono sul caso limite invece che sul caso normale, cioè dove nessuno guarda.
 
-Il formato di uscita non cambia ed è il contratto con XTrader: 14 colonne, tutti
-i campi tra virgolette, separatore virgola, terminatore CRLF, **UTF-8 con BOM**.
+Il contratto con XTrader: 14 colonne, tutti i campi tra virgolette, separatore
+virgola, terminatore CRLF, **UTF-8 con BOM**.
+
+Colonne, ordine, quoting e terminatore sono sempre stati questi e non cambiano.
+**L'encoding invece è cambiato:** fino all'11/08/2026 il feed usciva senza BOM,
+e XTrader lo pretende. Non era un'aggiunta opzionale, era un difetto.
 
 ## Verifica del formato
 
@@ -155,8 +159,12 @@ nudi, tutti i campi fra virgolette, 14 campi per riga, e al massimo due righe.
 3. **La vista Feed CSV del prototipo**, con l'indicatore «formato valido per
    XTrader» / «formato non valido» e il motivo scritto sotto.
 
-Non è agganciata sul percorso di consegna del feed, di proposito: un difetto del
-verificatore non deve trasformarsi in un `500` verso XTrader.
+Sul percorso di consegna del feed c'è **una sola** verifica, e non può produrre un
+errore: se la riga letta dal database non passa il controllo, si serve il feed
+vuoto invece del contenuto sospetto. Serve per le righe scritte da una versione
+precedente, che stanno già nel database e uscirebbero così come sono per i
+secondi che restano loro. Degrada a «nessun segnale», mai a `500`: un difetto del
+verificatore non deve diventare un errore verso XTrader.
 
 Il terzo punto è la lezione del Bridge. Là la funzione equivalente esisteva già
 ed era usata altrove, ma nessun semaforo del pannello la consultava: l'unico

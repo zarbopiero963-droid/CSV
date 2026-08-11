@@ -17,6 +17,7 @@ diversi, perché servono a cose diverse:
 
 from __future__ import annotations
 
+import os
 import socket
 import subprocess
 import sys
@@ -45,18 +46,18 @@ RIGA_VALIDA = ['XTrader', '', 'Juventus - Palermo', '', 'Over/Under 1,5 gol',
 
 def test_make_csv_comincia_con_il_bom():
     testo = main.make_csv(RIGA_VALIDA)
-    assert testo.startswith('﻿'), 'il CSV di un segnale non ha il BOM'
+    assert testo.startswith('\ufeff'), 'il CSV di un segnale non ha il BOM'
     assert testo.encode('utf-8').startswith(b'\xef\xbb\xbf')
 
 
 def test_empty_csv_comincia_con_il_bom():
     """Anche il feed vuoto: e- la forma in cui XTrader lo trova per 90 secondi su 90."""
     testo = main.empty_csv()
-    assert testo.startswith('﻿'), 'il CSV a sola intestazione non ha il BOM'
+    assert testo.startswith('\ufeff'), 'il CSV a sola intestazione non ha il BOM'
 
 
 def test_l_intestazione_e_esatta_e_nell_ordine():
-    corpo = main.empty_csv().lstrip('﻿')
+    corpo = main.empty_csv().lstrip('\ufeff')
     assert corpo.split('\r\n')[0] == INTESTAZIONE
     assert len(main.HEADERS) == 14
 
@@ -75,15 +76,25 @@ INTESTAZIONE_VECCHIA = ('Provider,SelectionId,MarketId,SelectionName,MarketName,
 
 @pytest.mark.parametrize('nome,testo', [
     ('BOM assente', INTESTAZIONE + '\r\n'),
-    ('intestazione a 11 colonne del vecchio prototipo', '﻿' + INTESTAZIONE_VECCHIA + '\r\n'),
-    ('intestazione senza virgolette', '﻿' + ','.join(main.HEADERS) + '\r\n'),
-    ('LF nudo invece di CRLF', '﻿' + INTESTAZIONE + '\n'),
-    ('riga con 13 campi', '﻿' + INTESTAZIONE + '\r\n' + ','.join('"x"' for _ in range(13)) + '\r\n'),
-    ('riga con 15 campi', '﻿' + INTESTAZIONE + '\r\n' + ','.join('"x"' for _ in range(15)) + '\r\n'),
-    ('due segnali invece di uno', '﻿' + INTESTAZIONE + '\r\n'
+    ('intestazione a 11 colonne del vecchio prototipo', '\ufeff' + INTESTAZIONE_VECCHIA + '\r\n'),
+    ('intestazione senza virgolette', '\ufeff' + ','.join(main.HEADERS) + '\r\n'),
+    ('LF nudo invece di CRLF', '\ufeff' + INTESTAZIONE + '\n'),
+    ('riga con 13 campi', '\ufeff' + INTESTAZIONE + '\r\n' + ','.join('"x"' for _ in range(13)) + '\r\n'),
+    ('riga con 15 campi', '\ufeff' + INTESTAZIONE + '\r\n' + ','.join('"x"' for _ in range(15)) + '\r\n'),
+    ('due segnali invece di uno', '\ufeff' + INTESTAZIONE + '\r\n'
      + ','.join('"x"' for _ in range(14)) + '\r\n'
      + ','.join('"y"' for _ in range(14)) + '\r\n'),
     ('vuoto', ''),
+    # Segnalati da GPT-5.5 sulla PR #8: il contratto dichiara CRLF, e un
+    # verificatore che accetta un CSV senza terminatore finale o con un CR
+    # isolato non sta vincolando il contratto che dice di vincolare.
+    ('senza terminatore finale', '\ufeff' + INTESTAZIONE),
+    ('CR isolato dentro un campo', '\ufeff' + INTESTAZIONE + '\r\n'
+     + '"x\rx"' + ',"x"' * 13 + '\r\n'),
+    # Segnalata da CodeRabbit: filtrare tutte le righe vuote le accettava.
+    ('riga vuota in mezzo', '\ufeff' + INTESTAZIONE + '\r\n\r\n'
+     + ','.join('"x"' for _ in range(14)) + '\r\n'),
+    ('riga vuota alla fine', '\ufeff' + INTESTAZIONE + '\r\n\r\n'),
 ])
 def test_verify_csv_respinge(nome, testo):
     with pytest.raises(ValueError):
@@ -94,7 +105,7 @@ def test_una_virgola_dentro_un_campo_sopravvive():
     """`Over/Under 1,5 gol` ha una virgola: e- il motivo per cui QUOTE_ALL non e- estetica."""
     testo = main.verify_csv(main.make_csv(RIGA_VALIDA))
     assert '"Over/Under 1,5 gol"' in testo
-    corpo = testo.lstrip('﻿')
+    corpo = testo.lstrip('\ufeff')
     assert len(corpo.split('\r\n')[1].split('","')) == 14, 'la virgola ha spezzato la riga'
 
 
@@ -108,10 +119,19 @@ def test_store_signal_rifiuta_un_csv_malformato(tmp_path, monkeypatch):
     monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'test.db'))
     c = main.db()
     try:
+        # Prima un segnale VALIDO: senza questo il test proverebbe solo che nulla
+        # viene inserito in un database vuoto, non che la verifica gira PRIMA
+        # della DELETE. Segnalato da CodeRabbit, ed e- la differenza fra
+        # «non scrive» e «non distrugge quello che c-era».
+        buono = main.make_csv(RIGA_VALIDA)
+        main.store_signal(c, buono, 'parser-finto', 'PIERO')
+
         with pytest.raises(ValueError):
             main.store_signal(c, 'Provider,EventId\r\n', 'parser-finto', 'PIERO')
-        righe = c.execute('SELECT COUNT(*) FROM signals').fetchone()[0]
-        assert righe == 0, 'il CSV malformato e- stato memorizzato'
+
+        righe = c.execute('SELECT csv FROM signals WHERE profile=?', ('PIERO',)).fetchall()
+        assert len(righe) == 1, f'attesa una sola riga, trovate {len(righe)}'
+        assert righe[0][0] == buono, 'il segnale valido precedente e- stato distrutto'
     finally:
         c.close()
 
@@ -122,9 +142,36 @@ def test_store_signal_accetta_un_csv_valido(tmp_path, monkeypatch):
     try:
         main.store_signal(c, main.make_csv(RIGA_VALIDA), 'parser-finto', 'PIERO')
         salvato = c.execute('SELECT csv FROM signals WHERE profile=?', ('PIERO',)).fetchone()[0]
-        assert salvato.startswith('﻿'), 'il BOM non e- arrivato fino al database'
+        assert salvato.startswith('\ufeff'), 'il BOM non e- arrivato fino al database'
     finally:
         c.close()
+
+
+def test_una_riga_vecchia_senza_bom_non_viene_servita(tmp_path, monkeypatch):
+    """Il feed non serve cio- che non passa la verifica, nemmeno se e- gia- nel database.
+
+    `store_signal()` verifica cio- che scrive, ma una riga finita nel database da
+    una versione precedente e- gia- la- e uscirebbe cosi- com-e-. Segnalato da
+    CodeRabbit: la finestra e- breve (90 secondi di TTL) ma esiste, e cade
+    esattamente subito dopo un deploy.
+    """
+    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'test.db'))
+    c = main.db()
+    try:
+        # Una riga nel formato PRECEDENTE: valida in tutto tranne il BOM.
+        vecchia = main.make_csv(RIGA_VALIDA)[len(main.CSV_BOM):]
+        assert not vecchia.startswith('\ufeff')
+        c.execute('INSERT INTO signals(csv,parser,profile,expires_at) VALUES (?,?,?,?)',
+                  (vecchia, 'parser-finto', 'PIERO', 2 ** 31 - 1))
+        c.commit()
+    finally:
+        c.close()
+
+    risposta = main.profile_csv('PIERO', None)
+    corpo = risposta.body.decode('utf-8')
+    assert corpo.startswith('\ufeff'), 'il feed ha servito la riga vecchia senza BOM'
+    assert 'Juventus' not in corpo, 'il contenuto sospetto e- uscito comunque'
+    main.verify_csv(corpo)
 
 
 # ------------------------------------------------------------------- HTTP
@@ -143,7 +190,7 @@ def servizio(tmp_path_factory):
     proc = subprocess.Popen(
         [sys.executable, '-m', 'uvicorn', 'main:app', '--host', '127.0.0.1',
          '--port', str(porta), '--log-level', 'warning'],
-        cwd=RADICE, env={'PATH': '/usr/bin:/bin:/usr/local/bin', 'DB_PATH': str(db)},
+        cwd=RADICE, env={**os.environ, 'DB_PATH': str(db)},
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
     base = f'http://127.0.0.1:{porta}'
@@ -235,7 +282,7 @@ def test_l_api_di_prova_restituisce_il_csv_col_bom(servizio):
     with urllib.request.urlopen(req, timeout=10) as r:
         dati = json.loads(r.read())
     assert dati['ok'] is True, dati
-    assert dati['csv'].startswith('﻿'), 'il CSV nel JSON non ha il BOM'
+    assert dati['csv'].startswith('\ufeff'), 'il CSV nel JSON non ha il BOM'
     assert dati['event'] == 'Juventus - Palermo', dati['event']
     # E il segnale appena scritto esce dal feed con gli stessi byte.
     _, _, corpo = _get(servizio, '/xtrader.csv')
