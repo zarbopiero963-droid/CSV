@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import sys
 import time
 from pathlib import Path
@@ -1426,19 +1427,55 @@ def test_un_TELEGRAM_ADMIN_ID_malformato_viene_RICONOSCIUTO(valore, monkeypatch)
         'nessun posto dove leggere perche- il suo account risulta vuoto')
 
 
-@pytest.mark.parametrize('valore', ['987654321', '1', '', '  987654321  ', '10'])
+@pytest.mark.parametrize('valore', ['987654321', '1', '10'])
 def test_un_TELEGRAM_ADMIN_ID_BUONO_non_viene_segnalato(valore, monkeypatch):
-    """Il verso opposto: un avviso che scatta sul valore giusto insegna a ignorarlo.
-
-    La stringa vuota **non** e' malformata: e' la variabile non configurata, che ha il suo
-    comportamento documentato (nessun collegamento, il proprietario resta un utente come
-    gli altri) e non e' un errore da segnalare.
-
-    Gli spazi ai bordi passano perche' il valore vero arriva da `os.getenv(...).strip()`;
-    qui il test li mette per verificare che il controllo non sia piu' severo della lettura.
-    """
-    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', valore.strip())
+    """Il verso opposto: un avviso che scatta sul valore giusto insegna a ignorarlo."""
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', valore)
     assert main.admin_id_malformato() is False, f'{valore!r} segnalato a torto'
+
+
+def test_la_variabile_NON_configurata_non_e_un_errore(monkeypatch):
+    """La stringa vuota non e' malformata: e' la variabile assente.
+
+    Ha il suo comportamento documentato — nessun collegamento, il proprietario resta un
+    utente come gli altri — e non e' uno stato da segnalare. Un avviso che scatta quando
+    non c'e' niente di sbagliato e' un avviso che si impara a ignorare, e allora non
+    servira' nemmeno il giorno in cui il valore E' sbagliato.
+    """
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', '')
+    assert main.admin_id_malformato() is False
+
+
+def test_gli_spazi_ai_bordi_li_toglie_la_LETTURA_non_il_controllo(tmp_path):
+    """Chiesto da Claude Fable 5 e da GPT-5.5 sulla PR #24, e avevano ragione a chiederlo.
+
+    La versione precedente di questo caso stava dentro il test qui sopra come
+    `'  987654321  '`, e faceva `monkeypatch.setattr(main, ..., valore.strip())`: **lo strip
+    lo faceva il test**. Non dimostrava che la lettura normalizzi, dimostrava che
+    `str.strip()` funziona — un test autoreferenziale, cioe' la forma di copertura finta che
+    questo repository passa il tempo a smascherare.
+
+    Qui la misura e' sul percorso reale: un processo separato con la variabile **sporca**
+    nell'ambiente, e la costante di modulo letta da `os.getenv(...).strip()` come in
+    produzione. Il sottoprocesso serve perche' quella costante si calcola all'import, e
+    ricaricare `main` nel processo dei test rilegherebbe i suoi globali per tutti i test
+    successivi.
+    """
+    import subprocess
+    import sys
+
+    esito = subprocess.run(
+        [sys.executable, '-c',
+         'import main; print(repr(main.TELEGRAM_ADMIN_ID)); print(main.admin_id_malformato())'],
+        cwd=str(RADICE), capture_output=True, text=True, timeout=60,
+        env={'PATH': os.environ.get('PATH', ''), 'PYTHONPATH': str(RADICE),
+             'TELEGRAM_ADMIN_ID': '  987654321\n', 'DB_PATH': str(tmp_path / 'x.db')})
+    assert esito.returncode == 0, esito.stderr
+    righe = esito.stdout.strip().splitlines()
+    assert righe[0] == "'987654321'", (
+        f'la lettura non ripulisce i bordi: {righe[0]}. Chi incolla il valore con un ritorno '
+        'a capo — cioe- chiunque copi da una pagina — otterrebbe un ID che non combacia mai')
+    assert righe[1] == 'False', 'un valore buono con spazi ai bordi risulta malformato'
 
 
 def test_la_riparazione_regge_uno_SLUG_in_collisione(tmp_path, monkeypatch):
