@@ -1002,3 +1002,55 @@ def test_parsers_name_e_ancora_una_chiave_GLOBALE(tmp_path, monkeypatch):
         'e- corretto solo se `name` identifica UNA riga in tutto il servizio. Con nomi '
         'unici per utente quella WHERE sovrascrive il parser di un altro: aggiungere '
         '`AND user_id=?` prima di cambiare la chiave')
+
+
+def test_la_deduplica_di_origin_profile_e_PER_PROFILO_non_globale(tmp_path):
+    """Due gruppi di duplicati distinti: ciascuno tiene il suo.
+
+    Suggerito da GPT-5.5, e misurando si e- visto che serve. Con un solo gruppo di
+    duplicati `SELECT MIN(id) ... GROUP BY origin_profile` e `SELECT MIN(id) ...` senza
+    GROUP BY si comportano in modo IDENTICO: il test a un gruppo non distingue la
+    deduplica per profilo da una deduplica globale, che invece lascerebbe
+    l'etichetta a UN SOLO utente in tutto il servizio e spoglierebbe tutti gli altri.
+
+    Togliendo il `GROUP BY` due test diventano rossi — quello sugli omonimi e quello
+    sul proprietario dei parser — ma per ragioni che non hanno niente a che vedere col
+    loro nome: coprono questo invariante per caso, perche' costruiscono due profili.
+    Riscrivere uno di quei due lo lascerebbe scoperto in silenzio. Qui l'invariante ha
+    un nome, che e- l'unico modo perche- resti protetto.
+
+    I NULL multipli restano intatti: non appartengono a nessun gruppo.
+    """
+    c = _database_di_produzione(tmp_path / 'due_gruppi.db')
+    c.execute('CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT,'
+              ' origin_profile TEXT, telegram_id TEXT UNIQUE, username TEXT,'
+              ' first_name TEXT, slug TEXT UNIQUE, token_hash TEXT, token_prefix TEXT,'
+              " status TEXT NOT NULL DEFAULT 'registrato', access_expires_at INTEGER,"
+              ' telegram_reachable INTEGER NOT NULL DEFAULT 0,'
+              ' session_version INTEGER NOT NULL DEFAULT 1,'
+              ' is_admin INTEGER NOT NULL DEFAULT 0,'
+              ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP)')
+    for profilo, slug in (('PIERO', 'piero'), ('PIERO', 'piero-2'),
+                          ('ALTRO', 'altro'), ('ALTRO', 'altro-2')):
+        c.execute('INSERT INTO users(origin_profile, first_name, slug) VALUES (?,?,?)',
+                  (profilo, profilo, slug))
+    # Due utenti senza profilo: il caso normale di chi arrivera- dal login.
+    c.execute("INSERT INTO users(first_name, slug) VALUES ('Tizio','tizio')")
+    c.execute("INSERT INTO users(first_name, slug) VALUES ('Caio','caio')")
+    attesi = {profilo: identificativo for profilo, identificativo in c.execute(
+        'SELECT origin_profile, MIN(id) FROM users WHERE origin_profile IS NOT NULL'
+        ' GROUP BY origin_profile').fetchall()}
+    assert len(attesi) == 2, attesi
+
+    main.migra(c)
+
+    restano = dict(c.execute('SELECT origin_profile, id FROM users'
+                             ' WHERE origin_profile IS NOT NULL').fetchall())
+    assert restano == attesi, (
+        f'la deduplica non e- per profilo: atteso {attesi}, trovato {restano}. Con una '
+        'deduplica GLOBALE un solo utente in tutto il servizio resta associato al suo '
+        'profilo e tutti gli altri perdono l-etichetta')
+    senza = c.execute('SELECT COUNT(*) FROM users WHERE origin_profile IS NULL').fetchone()[0]
+    assert senza == 4, (
+        f'{senza} righe senza profilo invece di 4: due erano NULL dall-inizio e due '
+        'sono le perdenti azzerate, e nessuna delle prime due va toccata')
