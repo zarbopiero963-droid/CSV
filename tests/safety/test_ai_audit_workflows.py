@@ -1896,17 +1896,41 @@ def _esegui_guard_bash(path: Path, ambiente: dict) -> int:
 
     Si taglia allo heredoc `python3` di proposito: eseguire anche quello farebbe
     partire il reviewer per davvero, chiamando GitHub e il fornitore.
+
+    E il taglio va VERIFICATO, non solo fatto. Segnalato da GPT-5.5 sulla PR #20, e il
+    rilievo non era di stile: `split('python3')[0]` dipende da un letterale, quindi se
+    un domani quel comando cambiasse nome il prefisso diventerebbe **tutto lo script**
+    e questo test eseguirebbe il reviewer vero — chiamate reali a GitHub e al
+    fornitore, con la spesa relativa, da una corsa di `pytest`. Un test che di
+    sorpresa spende soldi e scrive su una PR e- il tipo di guasto che non si vuole
+    scoprire dal traffico di rete. Le asserzioni qui sotto lo rendono impossibile:
+    se il prefisso contiene ancora l'heredoc o la chiamata al modello, il test
+    FALLISCE invece di eseguirlo.
     """
     import subprocess
     import tempfile
     passo = next(p for p in _carica(path)['jobs']['review']['steps'] if 'run' in p)
-    prefisso = passo['run'].split('python3')[0]
-    with tempfile.NamedTemporaryFile('w', suffix='.sh', delete=False) as f:
-        f.write(prefisso)
-        script = f.name
-    # `env` pulito: nessuna variabile della macchina puo' influenzare l'esito.
-    return subprocess.run(['bash', script], env=ambiente,
-                          capture_output=True, text=True).returncode
+    intero = passo['run']
+    prefisso = intero.split('python3')[0]
+    assert len(prefisso) < len(intero), (
+        f'{path.name}: `python3` non compare piu- nel passo, quindi il taglio non ha '
+        'tagliato NIENTE e questo test eseguirebbe il reviewer per davvero'
+    )
+    for pericolo in ("<<'PY'", 'urlopen', 'api.openai.com', 'api.anthropic.com',
+                     'api.github.com'):
+        assert pericolo not in prefisso, (
+            f'{path.name}: il prefisso da eseguire contiene ancora {pericolo!r}: '
+            'eseguirlo farebbe chiamate reali: test interrotto invece di spendere'
+        )
+    # TemporaryDirectory invece di delete=False: si ripulisce da se- anche se
+    # l'asserzione del chiamante solleva. Chiesto da GPT-5.5 nello stesso giro.
+    with tempfile.TemporaryDirectory() as cartella:
+        script = os.path.join(cartella, 'guard.sh')
+        with open(script, 'w', encoding='utf-8') as f:
+            f.write(prefisso)
+        # `env` pulito: nessuna variabile della macchina puo' influenzare l'esito.
+        return subprocess.run(['bash', script], env=ambiente,
+                              capture_output=True, text=True).returncode
 
 
 # `toJSON` di GitHub stampa il JSON indentato su piu' righe, ma il formato non e'
