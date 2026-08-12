@@ -111,8 +111,8 @@ dichiararle funzionanti sarebbe la copertura finta che `CLAUDE.md` vieta.
 ogni connessione) e sta sul percorso di `db()`. Da quest'ultimo fatto viene il vincolo
 che ne governa la forma: **non può sollevare per dati che esistono**, perché sollevare
 lì significa 500 su ogni richiesta, feed di XTrader compreso, e nessun riavvio lo
-cambierebbe. Tre stati dei dati veri lo avrebbero fatto, tutti trovati da review o da
-test e tutti chiusi con una disambiguazione deterministica invece di un errore:
+cambierebbe. Quattro stati dei dati veri lo avrebbero fatto, tutti trovati da review o
+da test e tutti chiusi con una disambiguazione deterministica invece di un errore:
 
 - due parser i cui nomi differiscono solo per maiuscole → `slug` uguale → `-2`, `-3`;
 - due profili nella stessa condizione → stesso trattamento su `users.slug`;
@@ -121,7 +121,17 @@ test e tutti chiusi con una disambiguazione deterministica invece di un errore:
   «Regole di isolamento» applicata: una chat appartiene a un solo utente. Chi
   puntava alla riga scartata viene **ri-puntato** su quella sopravvissuta, perché
   cancellare senza ri-puntare lascerebbe un `parser_chats.chat_id` che riferisce un
-  `id` inesistente — un parser che smette di ricevere in silenzio.
+  `id` inesistente — un parser che smette di ricevere in silenzio;
+- **due utenti con lo stesso `origin_profile`**, cioè lo stato che l'assenza di indice
+  sui database già migrati permetteva → l'etichetta resta all'`id` più basso e sugli
+  altri diventa NULL. Qui **non si cancella nessuna riga**, a differenza delle chat:
+  una riga di `users` possiede chat, parser e segnali, e cancellarla perderebbe dati di
+  un cliente. L'unica cosa ambigua è l'etichetta, quindi è l'unica che si tocca.
+
+Un indice UNIQUE non si crea su una tabella che contiene già duplicati: ogni vincolo
+nuovo va quindi preceduto dalla deduplica di ciò che esiste, o la migrazione muore
+proprio sul database che doveva proteggere. È la stessa classe tre volte in questo PR,
+e la terza l'ho reintrodotta subito dopo aver chiuso la seconda.
 
 Le colonne aggiunte a `parsers` sono riempite da `_completa_colonne_nuove()`, che la
 migrazione chiama **e** che chiama `POST /api/parsers`. Le due chiamate non sono un

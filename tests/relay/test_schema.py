@@ -925,3 +925,80 @@ def test_il_proprietario_dei_parser_senza_utente_e_quello_CHIESTO(tmp_path):
                              ('Di_Altro',)).fetchone()[0]
     assert proprietario == altro, (
         f'assegnato a {proprietario} invece che a ALTRO ({altro}); Piero e- {piero}')
+
+
+def test_un_database_con_origin_profile_GIA_duplicato_resta_attraversabile(tmp_path):
+    """La stessa classe della chat duplicata, e l'ho reintrodotta io un commit dopo.
+
+    Segnalato insieme da Claude Fable 5 e GPT-5.5 sul commit che aggiungeva l'indice:
+    `CREATE UNIQUE INDEX users_origin_profile` **solleva** su un database che contiene
+    gia- due righe con lo stesso `origin_profile` — cioe- esattamente lo stato che il
+    vincolo mancante permetteva, e che l'indice serve a chiudere. `migra()` sta sul
+    percorso di `db()`: il deploy andrebbe in crash a ogni richiesta.
+
+    **La deduplica qui NON cancella righe**, e la differenza con `chats` e- sostanziale:
+    una riga di `users` puo- possedere chat, parser e segnali, e cancellarla
+    perderebbe dati di un cliente. Si azzera invece `origin_profile` sulle righe
+    perdenti — l'unica cosa che puo- essere ambigua — tenendo l'`id` piu- basso come
+    portatore dell'etichetta. Nessun utente sparisce, nessuna proprieta- cambia, e
+    l'indice diventa creabile perche- i NULL multipli sono ammessi.
+    """
+    c = _database_di_produzione(tmp_path / 'utenti_doppi.db')
+    # Lo stato senza vincolo: la colonna c'e-, l'indice no. E- il database migrato da
+    # una versione intermedia di questo ramo.
+    c.execute('CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT,'
+              ' origin_profile TEXT, telegram_id TEXT UNIQUE, username TEXT,'
+              ' first_name TEXT, slug TEXT UNIQUE, token_hash TEXT, token_prefix TEXT,'
+              " status TEXT NOT NULL DEFAULT 'registrato', access_expires_at INTEGER,"
+              ' telegram_reachable INTEGER NOT NULL DEFAULT 0,'
+              ' session_version INTEGER NOT NULL DEFAULT 1,'
+              ' is_admin INTEGER NOT NULL DEFAULT 0,'
+              ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP)')
+    c.execute("INSERT INTO users(origin_profile, first_name, slug) VALUES ('PIERO','PIERO','piero')")
+    c.execute("INSERT INTO users(origin_profile, first_name, slug) VALUES ('PIERO','PIERO','piero-2')")
+    doppi = [r[0] for r in c.execute(
+        "SELECT id FROM users WHERE origin_profile='PIERO' ORDER BY id").fetchall()]
+    assert len(doppi) == 2, 'il test non parte dallo stato che vuole'
+
+    main.migra(c)  # non deve sollevare
+
+    etichettati = [r[0] for r in c.execute(
+        "SELECT id FROM users WHERE origin_profile='PIERO'").fetchall()]
+    assert etichettati == [doppi[0]], (
+        f'l-etichetta doveva restare al solo id piu- basso {doppi[0]}: {etichettati}')
+    superstiti = {r[0] for r in c.execute('SELECT id FROM users').fetchall()}
+    assert set(doppi) <= superstiti, (
+        f'un utente e- stato CANCELLATO: {sorted(doppi)} -> {sorted(superstiti)}. '
+        'Una riga di users possiede chat, parser e segnali: qui non si cancella')
+    # E l'indice adesso c'e- davvero.
+    with pytest.raises(sqlite3.IntegrityError):
+        c.execute("UPDATE users SET origin_profile='PIERO' WHERE id=?", (doppi[1],))
+
+
+def test_parsers_name_e_ancora_una_chiave_GLOBALE(tmp_path, monkeypatch):
+    """Il test-guardia che Claude Fable 5 chiede per `save_parser`.
+
+    L'`UPDATE ... WHERE name=?` di quell'endpoint non filtra per `user_id`, e oggi e-
+    corretto **proprio perche-** `parsers.name` e- PRIMARY KEY globale: esiste una
+    sola riga per nome, quindi non c'e- nessun parser di un altro utente da
+    sovrascrivere. La correttezza dipende quindi da una proprieta- dello SCHEMA, non
+    da qualcosa scritto nell'endpoint.
+
+    Il giorno che i nomi diventeranno unici PER UTENTE — il PR sul login, dove due
+    clienti possono chiamare «Over 1,5» il proprio parser — quella `WHERE` colpirebbe
+    la riga di un altro. Questo test diventa rosso in quel momento e dice dove
+    guardare, che e- l'unica forma di guardia possibile per un difetto che non esiste
+    ancora.
+    """
+    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'chiave.db'))
+    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    c = main.db()
+    chiavi = [r[1] for r in c.execute('PRAGMA table_info(parsers)') if r[5]]
+    c.close()
+
+    assert chiavi == ['name'], (
+        f'la chiave primaria di parsers e- cambiata: {chiavi}. `save_parser` fa '
+        '`UPDATE parsers SET ... WHERE name=?` senza filtrare per `user_id`, e questo '
+        'e- corretto solo se `name` identifica UNA riga in tutto il servizio. Con nomi '
+        'unici per utente quella WHERE sovrascrive il parser di un altro: aggiungere '
+        '`AND user_id=?` prima di cambiare la chiave')

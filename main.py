@@ -644,6 +644,20 @@ def _travasa_nel_multiutente(c):
     # certo. Segnalato in modo indipendente da GPT-5.5 e Claude Fable 5.
     # I NULL multipli restano ammessi, ed e' cio' che serve: chi non viene da un
     # profilo — tutti i prossimi utenti — ha questa colonna vuota.
+    #
+    # E prima dell'indice la deduplica, per la stessa ragione delle chat: un indice
+    # UNIQUE non si crea su una tabella che contiene duplicati, e senza questo passo
+    # `migra()` solleverebbe su un database che si trova nello stato che il vincolo
+    # mancante permetteva. Segnalato da Claude Fable 5 e GPT-5.5 — la stessa classe
+    # che avevo appena chiuso sulle chat, reintrodotta un commit dopo.
+    #
+    # Qui NON si cancella nessuna riga, e la differenza con `chats` e' sostanziale:
+    # una riga di `users` possiede chat, parser e segnali, quindi cancellarla
+    # perderebbe dati di un cliente. Si azzera invece `origin_profile` sulle perdenti
+    # — l'unica cosa che puo' essere ambigua — e l'etichetta resta all'`id` piu' basso.
+    c.execute("UPDATE users SET origin_profile = NULL WHERE origin_profile IS NOT NULL"
+              ' AND id NOT IN (SELECT MIN(id) FROM users WHERE origin_profile IS NOT NULL'
+              ' GROUP BY origin_profile)')
     c.execute('CREATE UNIQUE INDEX IF NOT EXISTS users_origin_profile'
               ' ON users (origin_profile)')
     # `UNIQUE (telegram_chat_id, message_thread_id)` sulla tabella NON deduplica le
