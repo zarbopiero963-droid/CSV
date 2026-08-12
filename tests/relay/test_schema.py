@@ -1500,3 +1500,52 @@ def test_la_deduplica_delle_chat_NON_crea_legami_fra_utenti_diversi(tmp_path):
                      (CHAT_A,)).fetchone()[0] == 1
     assert c.execute('SELECT owner_user_id FROM chats WHERE telegram_chat_id=?',
                      (CHAT_A,)).fetchone()[0] == alfa
+
+
+def test_il_trasferimento_dei_parser_regge_uno_SLUG_in_collisione(tmp_path):
+    """Trasferire un parser non puo- sollevare per uno slug che esiste sul superstite.
+
+    Bloccante di GPT-5.5, e smentisce un'assunzione che avevo scritto in un commento:
+    «gli slug sono univoci globalmente, quindi spostare un parser non puo- violare
+    `UNIQUE (user_id, slug)`». Vero per il codice che li assegna, ma NON e- un vincolo:
+    il vincolo effettivo e- sulla COPPIA, e sotto quel vincolo due parser di due utenti
+    diversi con lo stesso slug sono uno stato legale. Trasferendoli sullo stesso utente
+    la coppia collide. Misurato sul codice precedente:
+
+        prima: [('Alfa', 1, 'condiviso'), ('Beta', 2, 'condiviso'), ...]
+        migra(): IntegrityError - UNIQUE constraint failed: parsers.user_id, parsers.slug
+
+    Quinta comparsa in questa PR della stessa classe — una scrittura che i dati possono
+    rendere impossibile — e la prima in cui la mia difesa era una PROVA CHE NON ESISTE,
+    cioe- il meccanismo che `CLAUDE.md` racconta per il BOM: una regola appoggiata a
+    un'affermazione mai misurata.
+
+    Lo slug in collisione viene ri-disambiguato con `_slug_libero`, come per i nomi che
+    differiscono solo per maiuscole, e per la stessa ragione: deterministico, cosi- due
+    esecuzioni danno lo stesso risultato.
+    """
+    c = _database_di_produzione(tmp_path / 'slug_collisione.db')
+    _crea_users(c, con_origin_profile=True)
+    main.migra(c)
+    c.execute('DROP INDEX users_origin_profile')
+    superstite = c.execute('SELECT id FROM users WHERE origin_profile=?',
+                           (main.PIERO_PROFILE,)).fetchone()[0]
+    c.execute("INSERT INTO users(origin_profile, first_name, slug)"
+              " VALUES (?, 'P', 'piero-2')", (main.PIERO_PROFILE,))
+    perdente = c.execute('SELECT id FROM users WHERE slug=?', ('piero-2',)).fetchone()[0]
+    # Due parser con lo STESSO slug, uno per utente: legale sotto UNIQUE (user_id, slug).
+    c.execute('UPDATE parsers SET user_id=?, slug=? WHERE name=?',
+              (superstite, 'condiviso', main.DEFAULT_PARSER))
+    c.execute('UPDATE parsers SET user_id=?, slug=? WHERE name=?',
+              (perdente, 'condiviso', 'Secondo_Parser'))
+
+    main.migra(c)  # non deve sollevare
+
+    righe = dict(c.execute('SELECT name, slug FROM parsers').fetchall())
+    proprietari = dict(c.execute('SELECT name, user_id FROM parsers').fetchall())
+    assert proprietari['Secondo_Parser'] == superstite, proprietari
+    assert righe['Secondo_Parser'] != righe[main.DEFAULT_PARSER], (
+        f'i due parser hanno lo stesso slug dopo il trasferimento: {righe}')
+    assert righe[main.DEFAULT_PARSER] == 'condiviso', (
+        f'lo slug del parser che era GIA- del superstite e- stato cambiato: {righe}')
+    assert righe['Secondo_Parser'].startswith('condiviso-'), righe

@@ -558,6 +558,34 @@ def _assegna_slug_e_ordine(c):
             prossimo += 1
 
 
+def _trasferisci_parser(c, da_utente, a_utente):
+    """Passa i parser di un utente a un altro, ri-disambiguando gli slug che collidono.
+
+    Un `UPDATE parsers SET user_id=?` in blocco solleverebbe se i due utenti hanno un
+    parser con lo stesso slug: `UNIQUE (user_id, slug)` vieta la coppia, e sotto quel
+    vincolo due parser di due utenti diversi con lo stesso slug sono uno stato legale —
+    quindi lo stato esiste e la scrittura lo incontra. Misurato:
+    `IntegrityError: UNIQUE constraint failed: parsers.user_id, parsers.slug`, cioe'
+    `migra()` che solleva sul percorso di ogni richiesta. Bloccante di GPT-5.5.
+
+    Chi era GIA' del destinatario tiene il suo slug: a cambiare nome e' chi arriva, che
+    e' l'unico ordine sensato — l'altro potrebbe essere in un URL che qualcuno usa.
+    `ORDER BY name` per lo stesso motivo di `_assegna_slug_e_ordine`: due esecuzioni
+    devono disambiguare allo stesso modo.
+    """
+    for nome, slug in c.execute(
+            'SELECT name, slug FROM parsers WHERE user_id=? ORDER BY name',
+            (da_utente,)).fetchall():
+        if slug is not None and c.execute(
+                'SELECT 1 FROM parsers WHERE user_id=? AND slug=?',
+                (a_utente, slug)).fetchone():
+            presi = {r[0] for r in c.execute(
+                'SELECT slug FROM parsers WHERE slug IS NOT NULL').fetchall()}
+            c.execute('UPDATE parsers SET slug=? WHERE name=?',
+                      (_slug_libero(slug, presi), nome))
+        c.execute('UPDATE parsers SET user_id=? WHERE name=?', (a_utente, nome))
+
+
 def _completa_colonne_nuove(c, profilo_proprietario):
     """Riempie `user_id`, `id`, `slug` e `ordine` di ogni parser che ne e' senza.
 
@@ -626,10 +654,13 @@ def _travasa_nel_multiutente(c):
     # `[REAL_FINDING]` di GPT-5.6 Sol. Cio' che la perdente possiede si TRASFERISCE
     # al superstite prima di togliere l'etichetta.
     #
-    # Gli slug dei parser sono univoci GLOBALMENTE (vedi `_slug_libero`), quindi
-    # spostare un parser da un utente all'altro non puo' violare `UNIQUE (user_id,
-    # slug)`: se un giorno diventassero univoci per utente, questo va rivisto — e il
-    # test sulla chiave primaria di `parsers` diventa rosso proprio allora.
+    # Il trasferimento dei parser passa da `_trasferisci_parser`, che ri-disambigua lo
+    # slug quando collide. Qui c'era scritto che gli slug sono univoci GLOBALMENTE e che
+    # quindi spostare un parser non poteva violare `UNIQUE (user_id, slug)`: vero per il
+    # codice che li assegna, ma non e' un vincolo — il vincolo e' sulla COPPIA, e sotto
+    # quel vincolo due parser di due utenti con lo stesso slug sono uno stato legale.
+    # Misurato: `IntegrityError: UNIQUE constraint failed: parsers.user_id, parsers.slug`.
+    # Bloccante di GPT-5.5, ed era una regola appoggiata a una prova che non esiste.
     for (etichetta,) in c.execute(
             'SELECT origin_profile FROM users WHERE origin_profile IS NOT NULL'
             ' GROUP BY origin_profile HAVING COUNT(*) > 1').fetchall():
@@ -641,7 +672,7 @@ def _travasa_nel_multiutente(c):
             c.execute('UPDATE chats SET owner_user_id=? WHERE owner_user_id=?',
                       (superstite, perdente))
             c.execute('UPDATE signals SET user_id=? WHERE user_id=?', (superstite, perdente))
-            c.execute('UPDATE parsers SET user_id=? WHERE user_id=?', (superstite, perdente))
+            _trasferisci_parser(c, perdente, superstite)
             c.execute('UPDATE users SET origin_profile=NULL WHERE id=?', (perdente,))
     # `ORDER BY name` non e' decorazione: decide CHI vince quando due profili
     # rivendicano la stessa cosa — una chat o un parser. Senza, «il primo» significa
