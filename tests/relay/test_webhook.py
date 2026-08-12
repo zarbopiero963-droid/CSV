@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 import threading
 import urllib.error
@@ -574,6 +575,48 @@ def test_l_avvio_RITENTA_la_registrazione(monkeypatch):
 async def _senza_attesa(_secondi):
     """Sostituisce `asyncio.sleep` nei test: l'attesa vera renderebbe la suite lenta."""
     return None
+
+
+def test_nessuna_eccezione_con_URL_esce_da_chiama_set_webhook(monkeypatch, caplog):
+    """Il confine su cui poggia la sicurezza dei log, reso vincolante.
+
+    `register_telegram_webhook` e l'handler registrano il traceback intero con
+    `logging.exception`, e questo e- sicuro **solo** perche- `_chiama_set_webhook`
+    ingoia le sue eccezioni: e- l'unico posto dove l'URL — che contiene il token del
+    bot nel percorso — sta in una variabile. Se un domani quell'`except`
+    scomparisse, un'eccezione di `urllib` risalirebbe fino a un `logging.exception`
+    e il token finirebbe nei log a ogni guasto di rete.
+
+    Fino a ora quel confine era tenuto da un commento. GPT-5.5 lo ha chiamato
+    «fragile» e Fable 5 ci ha appoggiato il proprio giudizio di sicurezza: due
+    review che si fidano della stessa convenzione non verificata. Qui diventa un
+    test, con il caso peggiore realistico — un'eccezione il cui messaggio contiene
+    l'URL per intero.
+    """
+    url_col_token = (f'https://api.telegram.org/bot{BOT_FINTO}/setWebhook')
+
+    class EccezioneCheParlaTroppo(OSError):
+        def __str__(self):
+            return f'<urlopen error> mentre chiamavo {url_col_token}'
+
+    for eccezione in (EccezioneCheParlaTroppo(),
+                      urllib.error.HTTPError(url_col_token, 404, 'Not Found', {}, None),
+                      ValueError(url_col_token)):
+        caplog.clear()
+        monkeypatch.setattr(urllib.request, 'urlopen',
+                            lambda *a, e=eccezione, **k: (_ for _ in ()).throw(e))
+        with caplog.at_level(logging.DEBUG):
+            esito = main._chiama_set_webhook(BOT_FINTO, 'https://esempio.invalid')
+        assert esito is False, (
+            f'{type(eccezione).__name__} e- SFUGGITA da _chiama_set_webhook: da qui '
+            f'risalirebbe a un logging.exception e il token del bot finirebbe nei log'
+        )
+        assert BOT_FINTO not in caplog.text, (
+            f'il token del bot e- nei log dopo {type(eccezione).__name__}: '
+            f'{caplog.text[:300]!r}'
+        )
+        # E la causa c'e- comunque, altrimenti il guasto non si diagnostica.
+        assert type(eccezione).__name__ in caplog.text, caplog.text
 
 
 def test_l_avvio_non_RITARDA_la_disponibilita_del_servizio():
