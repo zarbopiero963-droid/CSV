@@ -226,6 +226,29 @@ def servizio(tmp_path):
         yield base
 
 
+def _attendi_righe_del_log(log: Path, cosa: str, secondi: float = 15.0) -> list:
+    """Aspetta che nel log compaia almeno una riga con `cosa`, e le restituisce.
+
+    Serve perche' la registrazione del webhook e' ASINCRONA rispetto all'avvio: la
+    fixture attende `/health`, che risponde prima che il tentativo sia finito. Il
+    limite e' generoso di proposito — nel caso peggiore documentato in `README.txt`
+    i tre tentativi durano ~33 s, ma col proxy morto ogni rifiuto e' immediato,
+    quindi la prima riga arriva in millesimi e i 15 s non vengono mai avvicinati.
+    """
+    import time
+    scadenza = time.monotonic() + secondi
+    ultimo = ''
+    while time.monotonic() < scadenza:
+        ultimo = log.read_text(encoding='utf-8') if log.exists() else ''
+        righe = [r for r in ultimo.splitlines() if cosa in r]
+        if righe:
+            return righe
+        time.sleep(0.05)
+    raise AssertionError(
+        f'nessuna riga con {cosa!r} entro {secondi} s: il servizio non ha nemmeno '
+        f'tentato la registrazione.\nUltimo log:\n{ultimo[-800:]}')
+
+
 def test_il_servizio_NON_ha_raggiunto_telegram(servizio, tmp_path):
     """La prova end-to-end: il log dice `URLError`, non `HTTPError`.
 
@@ -243,10 +266,16 @@ def test_il_servizio_NON_ha_raggiunto_telegram(servizio, tmp_path):
         URLError   ->  connessione rifiutata dal proxy morto: non e- uscita
 
     Misurato senza il proxy: `HTTPError` in 0,83 s. Con il proxy: `URLError`.
+
+    **Si ASPETTA la riga invece di leggerla una volta**, e questa non e' prudenza
+    generica: `README.txt` dice che la registrazione parte DIETRO l'avvio, e la
+    fixture attende `/health`, che risponde prima. Leggere il log subito era quindi
+    una corsa — vinta quasi sempre, perche' col proxy morto il rifiuto e' immediato,
+    e persa a caso in CI. Segnalato da GPT-5.5 sulla PR #21, che ha chiesto di
+    verificare proprio questo. Un test intermittente e' peggio di nessun test:
+    insegna a rieseguire invece di leggere.
     """
-    log = (tmp_path / 'uvicorn.log').read_text(encoding='utf-8')
-    righe = [r for r in log.splitlines() if 'registrazione webhook' in r]
-    assert righe, f'il servizio non ha nemmeno tentato la registrazione:\n{log[-800:]}'
+    righe = _attendi_righe_del_log(tmp_path / 'uvicorn.log', 'registrazione webhook')
     assert any('URLError' in r for r in righe), (
         'atteso URLError (connessione rifiutata dal proxy morto). '
         f'Righe trovate:\n' + '\n'.join(f'  {r}' for r in righe))
