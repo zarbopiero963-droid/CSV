@@ -496,6 +496,24 @@ quando la verifica è **impossibile** si dichiara il limite e si lascia decidere
 Sulla PR #8 sono stati tre bloccanti su tre, tutti su `web/engine.js`, e tutti smentiti — ma dal test
 che confronta le due implementazioni byte per byte, non dal fatto che il file fosse nell'elenco.
 
+**La seconda causa di bloccanti falsi è la nostra redazione**, e va conosciuta prima di patchare.
+I tre workflow redigono il diff prima di mandarlo al modello, e una regola troppo larga produceva
+codice *rotto*: `name: pytest (${{ matrix.python }})` arrivava come
+`name: pytest ([REDACTED_VALORE_INCOLLATO]`, con la parentesi di apertura spaiata. Il modello legge
+un file corrotto e conclude — correttamente, dato quello che vede — che qualcuno ha incollato un
+segreto. Sulla PR #14 ha prodotto un `SyntaxError` inventato; sulla #18 **tre bloccanti su tre**, e
+~$0,63 di Fugu spesi per revisionare la redazione del proprio input. Corretto il 12/08/2026
+restringendo il trigger alle sole **chiusure**, con la coppia di test in
+`tests/safety/test_ai_audit_workflows.py` che tiene i due lati: le chiusure sopravvivono, e ogni
+coda che potrebbe essere materiale segreto resta redatta.
+
+Da quella correzione viene una regola generale che vale oltre la redazione: **un baratto documentato
+può essere presentato come binario e non esserlo.** Qui il test precedente affermava che escludere
+`)`, `,` e `.` avrebbe riaperto una falla, e per questo non si toccava. Misurato regola per regola,
+`)` e `.` non avevano lo stesso costo: la falla su `.` la chiudeva un'**altra** regola, e su `,`
+non c'era protezione da perdere perché la classe di consumazione la escludeva già. Prima di
+accettare un «non si corregge, ecco perché», si misura ogni ramo del perché.
+
 Quell'elenco è ora molto più corto, ma non è vuoto per definizione. I tre workflow ordinano il
 payload per **priorità** prima di consumare il budget — `PRIORITA_PAYLOAD`: prima il codice
 (`main.py`, `web/`, `tools/`, deploy, workflow), poi i test, poi la documentazione. Prima non

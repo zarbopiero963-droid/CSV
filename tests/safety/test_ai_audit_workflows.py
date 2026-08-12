@@ -1147,38 +1147,97 @@ def test_lo_script_non_contiene_espressioni_di_actions_letterali(path):
     )
 
 
+# I caratteri che CHIUDONO qualcosa: dopo un'espressione sono markup, non segreto.
+# Un segreto non comincia con una parentesi chiusa.
+CHIUSURE = (')', ']', '}', '>', ',', ';')
+
+# I caratteri che POTREBBERO cominciare del materiale segreto incollato. `.` e `/`
+# stanno qui e non fra le chiusure: un JWT contiene punti, il base64 contiene barre.
+INIZI_PLAUSIBILI = ('CODA-INCOLLATA', '.coda-segreta', '/coda', '+coda', '=coda',
+                    ':coda', '_coda', '9coda')
+
+
 @pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
-def test_la_redazione_sovra_redige_la_punteggiatura_ed_e_una_SCELTA(path):
-    """Documenta un compromesso, invece di lasciarlo scoprire a un futuro rilievo.
+@pytest.mark.parametrize('chiusura', CHIUSURE)
+def test_una_chiusura_dopo_un_espressione_NON_viene_mangiata(path, chiusura):
+    """Il difetto che ha prodotto tre bloccanti falsi su una PR sola.
 
-    Segnalato da GPT-5.5: un'espressione seguita da punteggiatura in prosa —
-    `vedi <espressione>) nel testo` — viene redatta insieme alla punteggiatura.
-    Non e' una fuga di segreti, e' payload di review alterato, e in un progetto che
-    sta cercando di far leggere ai reviewer il file giusto e' un costo reale.
+    `name: pytest (<espressione>)` diventava
+    `name: pytest ([REDACTED_VALORE_INCOLLATO]` — con la parentesi di **apertura
+    spaiata**. Fugu Ultra lo ha letto come «valore incollato redatto con parentesi
+    non chiusa», ha chiesto di verificare che non fosse un token e ha bloccato il
+    merge; poi ha bloccato altre due volte sulla stessa causa. Misurato sulla
+    PR #18: tre bloccanti su tre, tutti generati dalla redazione del nostro stesso
+    input, e ~$0.63 di Fugu spesi per produrli.
 
-    Non viene corretto, e la ragione va scritta perche' non e' ovvia. Il rimedio
-    naturale sarebbe far scattare la regola solo su caratteri plausibili come
-    inizio di un segreto (`[A-Za-z0-9_+/=-]`), escludendo `)`, `,`, `.`, backtick.
-    Ma quella esclusione riapre la falla: con `API_KEY: <espressione>.coda-segreta`
-    la regola del letterale incollato non scatterebbe, quella contestuale si
-    fermerebbe allo spazio, e `.coda-segreta` uscirebbe. Misurato.
+    **Perche' adesso si puo' restringere, e prima sembrava di no.** Il test che
+    stava qui documentava il baratto come binario: «escludere `)`, `,`, `.`
+    riaprirebbe la falla di `API_KEY: <espressione>.coda-segreta`». Misurato regola
+    per regola, quel baratto non esiste come descritto:
 
-    Fra sovra-redigere della prosa e lasciare uscire un segreto, un redattore
-    sceglie il primo. Questo test fissa quella scelta: se un domani qualcuno
-    restringesse il trigger, il test accanto sulla coda incollata diventa rosso, e
-    questo diventa rosso al contrario — cioe' la coppia rende visibile il baratto.
+    | caso | chi lo protegge |
+    |---|---|
+    | `API_KEY: <esp>.coda-segreta` | la regola dell'ASSEGNAZIONE, da sola |
+    | `foo: <esp>.coda-segreta` | solo il letterale incollato → `.` resta trigger |
+    | `foo: <esp>,abc` | **nessuno**: `,` fa scattare la regola ma la consumazione
+      si ferma subito, e `,abc` esce in chiaro **gia' oggi** |
+    | `name: pytest (<esp>)` | nessuno, e la regola lo rompe |
+
+    Quindi `)` e `.` non hanno lo stesso costo, ed erano trattati come se lo
+    avessero. Si escludono solo le **chiusure**: un segreto non comincia con una
+    parentesi chiusa, e per la virgola l'esclusione non perde nemmeno protezione
+    teorica, perche' non ce n'era.
     """
     redact = _funzione_redact(path)
-
-    # Il comportamento attuale, dichiarato: la punteggiatura attaccata viene inghiottita.
-    assert '[REDACTED_VALORE_INCOLLATO]' in redact('vedi ' + _espressione() + ') nel testo'), (
-        f'{path.name}: comportamento cambiato. Se e- stato ristretto il trigger, '
-        f'verificare che `<espressione>.coda-segreta` non esca piu- in chiaro.'
+    riga = 'name: pytest (' + _espressione() + chiusura
+    fuori = redact(riga)
+    assert '[REDACTED_VALORE_INCOLLATO]' not in fuori, (
+        f'{path.name}: una {chiusura!r} dopo un-espressione viene inghiottita: il '
+        f'reviewer riceve markup rotto e conclude che il file e- corrotto.\n'
+        f'  in : {riga!r}\n  out: {fuori!r}'
     )
-    # E cio- che NON e' attaccato resta leggibile: la prosa attorno non si perde.
-    prosa_punt = 'vedi ' + _espressione() + ') nel testo'
-    ripulito = redact(prosa_punt)
-    assert 'nel testo' in ripulito and ripulito.startswith('vedi ')
+    assert fuori.endswith(chiusura), \
+        f'{path.name}: la {chiusura!r} finale e- sparita: {fuori!r}'
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+@pytest.mark.parametrize('coda', INIZI_PLAUSIBILI)
+def test_una_coda_che_POTREBBE_essere_un_segreto_resta_redatta(path, coda):
+    """Il rovescio del test sopra, e senza di lui quello sarebbe un indebolimento.
+
+    La coppia e' il punto: uno pretende che le chiusure sopravvivano, l'altro che
+    tutto cio' che potrebbe essere materiale segreto incollato continui a sparire.
+    Se un domani qualcuno allargasse le esclusioni a `.` o `/`, questo diventa
+    rosso — che e' il solo modo in cui «abbiamo ristretto con giudizio» significa
+    qualcosa.
+
+    Nessuna chiave sensibile nella riga, di proposito: con `API_KEY:` scatterebbe
+    la regola dell'assegnazione e questo test non misurerebbe piu' il letterale
+    incollato ma un'altra regola.
+    """
+    redact = _funzione_redact(path)
+    riga = 'foo: ' + _espressione() + coda
+    fuori = redact(riga)
+    sensibile = coda.lstrip('.:/+=_9')
+    assert sensibile not in fuori, (
+        f'{path.name}: la coda {coda!r} esce in chiaro dopo un-espressione: se e- '
+        f'un segreto incollato, e- pubblicato.\n  in : {riga!r}\n  out: {fuori!r}'
+    )
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_la_prosa_attorno_a_un_espressione_resta_leggibile(path):
+    """Quello che il reviewer deve poter leggere: la frase, non un buco.
+
+    Segnalato in origine da GPT-5.5 come sovra-redazione della punteggiatura in
+    prosa. Adesso e' corretto e non piu' soltanto documentato.
+    """
+    redact = _funzione_redact(path)
+    prosa = 'vedi ' + _espressione() + ') nel testo'
+    ripulito = redact(prosa)
+    assert ripulito.startswith('vedi ') and 'nel testo' in ripulito
+    assert '[REDACTED_VALORE_INCOLLATO]' not in ripulito, \
+        f'{path.name}: la prosa e- ancora alterata: {ripulito!r}'
 
 
 def test_la_tabella_di_redazione_e_identica_nei_tre_workflow():
