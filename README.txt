@@ -131,6 +131,13 @@ Come distinguere i tre casi, guardando insieme "webhook" e "webhook_registrato":
   webhook "protetto", chiave assente    -> registrazione in corso, o mai tentata
   webhook "protetto", registrato false  -> tentata e fallita: guarda PUBLIC_URL,
                                            la rete, il token del bot
+Nel terzo caso i log del servizio dicono il TIPO del guasto - "registrazione
+webhook: chiamata fallita (URLError)" e' rete o DNS, "(timeout)" e' Telegram che
+non risponde, "(HTTPError)" e' Telegram che rifiuta token o URL, "(JSONDecodeError)"
+e' una risposta non interpretabile. Il tipo e non il messaggio, di proposito: il
+messaggio di un'eccezione di urllib puo' contenere l'URL, e l'URL contiene il token
+del bot. Un token nei log a ogni guasto di rete non e' un compromesso accettabile
+per una diagnosi piu' comoda.
 "non ancora tentato" e "tentato e fallito" sono stati diversi, e la differenza dice
 se aspettare o intervenire.
 Prima questa attesa stava DAVANTI all'avvio: uvicorn non serviva finche' la

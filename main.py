@@ -119,7 +119,16 @@ def _chiama_set_webhook(bot_token, public_url):
         with urllib.request.urlopen(richiesta, timeout=10) as r:
             risposta = json.loads(r.read().decode('utf-8'))
         return risposta.get('ok') is True
-    except Exception:
+    except Exception as e:
+        # Solo il NOME del tipo, mai il messaggio e mai il traceback. Il messaggio
+        # di un'eccezione di `urllib` puo' contenere l'URL, e l'URL contiene il token
+        # del bot nel percorso: `logging.exception` qui sarebbe un token nei log a
+        # ogni guasto di rete. Il tipo basta per la diagnosi — `URLError` (rete o
+        # DNS), `timeout`, `HTTPError` (token o URL rifiutati da Telegram),
+        # `JSONDecodeError` (risposta non interpretabile) sono cause diverse e
+        # richiedono azioni diverse. Che la causa andasse registrata l'ha segnalato
+        # Claude Fable 5; che qui non possa esserlo per intero e' la regola sui token.
+        logging.warning('registrazione webhook: chiamata fallita (%s)', type(e).__name__)
         return False
 
 
@@ -270,6 +279,14 @@ async def register_telegram_webhook():
         # fallimento va REGISTRATO: «non tentato» e «tentato e fallito» sono stati
         # diversi, e solo il secondo dice che c'e' un guasto da guardare.
         # Segnalato da GPT-5.5 come conseguenza dello spostamento in background.
+        #
+        # Qui il traceback INTERO si puo' registrare, a differenza di
+        # `_chiama_set_webhook`: le eccezioni che arrivano fin qui vengono da
+        # `asyncio.to_thread` o da `assicura_registrazione`, dove l'URL col token
+        # del bot non entra mai. Un `webhook_registrato: false` senza causa non si
+        # diagnostica — rete? token? `PUBLIC_URL`? — e la causa mancante l'ha
+        # segnalata Claude Fable 5.
+        logging.exception('registrazione webhook: il compito e\' terminato con un errore')
         #
         # Solo se nessun tentativo ha registrato un esito: un guasto qui non deve
         # cancellare il `True` di una registrazione riuscita.
@@ -831,7 +848,17 @@ async def telegram_webhook(request: Request):
         # fino al prossimo deploy. Telegram ritenta le consegne: il segnale arriva
         # col giro dopo. In un thread per non bloccare il loop, e con il freno di
         # `ATTESA_FRA_TENTATIVI_S` perche' questo percorso lo raggiunge chiunque.
-        await asyncio.to_thread(assicura_registrazione)
+        try:
+            await asyncio.to_thread(assicura_registrazione)
+        except Exception:
+            # Il 403 e' la DECISIONE: questa richiesta non e' autenticata. Il
+            # ritentativo e' un rimedio opportunistico che non c'entra con quella
+            # decisione, e un rimedio che rovescia il verdetto e' peggio di nessun
+            # rimedio: senza questo `try`, un guasto inatteso qui farebbe rispondere
+            # 500 invece di 403 — un errore del server, provocabile da un estraneo
+            # con un POST, che nasconde i guasti veri nel rumore. Trovato cercando il
+            # fratello del `try` intorno al compito di avvio, non da una review.
+            logging.exception('webhook: il ritentativo di registrazione e\' fallito')
         raise HTTPException(403, 'Forbidden')
     payload = await request.json()
     msg = payload.get('message') or payload.get('channel_post') or {}

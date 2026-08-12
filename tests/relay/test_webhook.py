@@ -378,6 +378,40 @@ def test_un_compito_di_registrazione_che_MUORE_non_lascia_lo_stato_indEFINITO(mo
     )
 
 
+def test_tre_fallimenti_PULITI_lasciano_lo_stato_a_False(monkeypatch):
+    """L'altro percorso: tre tentativi che falliscono senza sollevare.
+
+    Il ramo `except` non scatta, quindi lo stato dipende interamente dal fatto che
+    sia `assicura_registrazione` a scriverlo. Era vero ma non verificato — «lo stato
+    resta corretto **solo se** e- lei a scriverlo» e- il rilievo di Claude Fable 5, e
+    un'invariante che regge per costruzione e non per test e- un'invariante che
+    domani si rompe in silenzio.
+
+    Distinzione che conta per chi guarda `/health`: qui `webhook_registrato` deve
+    essere `false` — tentato e fallito — non assente. Assente significherebbe «non
+    ancora tentato», cioe- «aspetta», quando invece bisogna guardare `PUBLIC_URL`.
+    """
+    monkeypatch.setenv('TELEGRAM_BOT_TOKEN', BOT_FINTO)
+    monkeypatch.setattr(main, '_WEBHOOK_REGISTRATO', None)
+    monkeypatch.setattr(main, 'SEGRETO_WEBHOOK', main.webhook_secret(BOT_FINTO))
+    monkeypatch.setattr(main.asyncio, 'sleep', _senza_attesa)
+    tentativi = []
+    monkeypatch.setattr(main, '_chiama_set_webhook',
+                        lambda bot, url: tentativi.append(bot) or False)
+
+    asyncio.run(main.register_telegram_webhook())
+
+    assert len(tentativi) == 3, f'tentativi: {len(tentativi)}'
+    assert main._WEBHOOK_REGISTRATO is False, (
+        f'tre fallimenti puliti hanno lasciato lo stato a '
+        f'{main._WEBHOOK_REGISTRATO!r}: /health direbbe «non ancora tentato», '
+        f'cioe- «aspetta», su un guasto che richiede un intervento'
+    )
+    salute = main.health()
+    assert salute['status'] == 'degraded', salute
+    assert salute['webhook_registrato'] is False, salute
+
+
 def test_health_legge_lo_stato_della_registrazione_UNA_VOLTA(monkeypatch):
     """`status` e `webhook_registrato` non possono contraddirsi.
 
@@ -896,6 +930,34 @@ def test_una_consegna_rifiutata_CHIAMA_l_autoriparazione_dall_handler(monkeypatc
     assert stato == 200, stato
     assert risultato == {'ok': True, 'ignored': 'no_text'}, risultato
     assert chiamate == [], 'una consegna accettata ha richiamato Telegram'
+
+
+def test_un_autoriparazione_che_SOLLEVA_non_cambia_il_rifiuto(monkeypatch):
+    """L'esito della decisione di sicurezza non dipende dal rimedio.
+
+    Trovato dal mio audit della classe, non da una review: `except Exception` era
+    stato aggiunto attorno al compito di avvio (segnalato da GPT-5.5), ma l'altra
+    chiamata all'autoriparazione — quella dentro l'handler, raggiungibile da
+    CHIUNQUE — restava scoperta. Un'eccezione inattesa la- si propagherebbe
+    nell'handler e la richiesta rifiutata riceverebbe **500** invece di 403.
+
+    Perche- conta, al di la- del codice: il 403 e- la decisione: «questa richiesta
+    non e- autenticata». Il ritentativo e- un rimedio opportunistico che non c'entra
+    con quella decisione, e un rimedio che rovescia il verdetto e- peggio di nessun
+    rimedio. In piu- un 500 su un percorso pubblico e- rumore che nasconde i guasti
+    veri, ed e- provocabile da un estraneo con un POST.
+    """
+    monkeypatch.setattr(main, 'SEGRETO_WEBHOOK', main.webhook_secret(BOT_FINTO))
+
+    def esplode(*a, **k):
+        raise RuntimeError('guasto inatteso nel ritentativo')
+
+    monkeypatch.setattr(main, 'assicura_registrazione', esplode)
+    stato, _ = _handler(RichiestaFinta({'X-Telegram-Bot-Api-Secret-Token': 'sbagliato'}))
+    assert stato == 403, (
+        f'un guasto nell-autoriparazione ha cambiato il rifiuto in {stato}: il '
+        f'verdetto di sicurezza non deve dipendere dal rimedio'
+    )
 
 
 def test_senza_bot_il_rifiuto_NON_chiama_telegram(monkeypatch):
