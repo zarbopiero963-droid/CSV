@@ -36,6 +36,40 @@ def webhook_secret(bot_token):
     return hashlib.sha256(('betrelay-webhook-v1:' + bot_token).encode('utf-8')).hexdigest()
 
 
+def campi_firmati(dati):
+    """I campi nella forma TESTUALE su cui Telegram calcola la firma.
+
+    Serve perche' i valori arrivano come JSON, quindi possono essere numeri o booleani, e
+    la `data_check_string` e' fatta di testo. La conversione non e' `str()` di Python:
+    `str(True)` da' `'True'`, mentre JSON — e quindi Telegram — scrive `true`. Una
+    divergenza di quattro caratteri fa fallire la verifica di una firma **valida**, in
+    silenzio e per sempre. Segnalato da Claude Fable 5 sulla PR #23.
+
+    I campi vuoti restano **esclusi**: Telegram firma soltanto quelli che manda, e il
+    modello Pydantic riempie di stringhe vuote quelli assenti. Includerli cambierebbe la
+    stringa e farebbe fallire ogni login vero — un difetto che si vedrebbe solo in
+    produzione, perche' un test che costruisce i campi a mano li manderebbe tutti.
+
+    Fonte unica di proposito (regola 3): la usano l'endpoint e i test, e due conversioni
+    corrette oggi sono due conversioni divergenti domani.
+    """
+    fuori = {}
+    for chiave, valore in dati.items():
+        if valore is None:
+            continue
+        if isinstance(valore, str):
+            testo = valore
+        elif isinstance(valore, bool):
+            # Prima di `int`: in Python `bool` E' un `int`, e senza questo ramo
+            # `True` diventerebbe `1`.
+            testo = 'true' if valore else 'false'
+        else:
+            testo = json.dumps(valore)
+        if testo != '':
+            fuori[chiave] = testo
+    return fuori
+
+
 def verifica_login_telegram(dati, bot_token):
     """Vero se questi campi vengono davvero dal Login Widget di Telegram.
 
@@ -1549,27 +1583,42 @@ TENTATIVI_PRIMA_DEL_FRENO = 5
 DURATA_FRENO = 300
 
 
-def _freno_password():
-    """Secondi da aspettare prima di poter ritentare, 0 se la strada e' libera."""
+def _prenota_tentativo():
+    """`0` se il tentativo puo' partire — e in quel caso lo **conta** — altrimenti i secondi.
+
+    Controllo e conteggio sono **un solo gesto**, dentro un solo lock, e questa e' la
+    correzione: prima il controllo prendeva il lock, leggeva e lo rilasciava, poi arrivava
+    `scrypt` — ~100 ms di CPU — e solo alla fine il conteggio. Fra la lettura e
+    l'incremento passava tutto il calcolo, quindi N richieste concorrenti vedevano tutte
+    «zero tentativi falliti» e passavano tutte.
+
+    Due conseguenze, e la seconda e' peggiore: il limite di cinque tentativi si aggirava
+    mandando le richieste **insieme** invece che in fila, e ogni richiesta che passava
+    accendeva uno `scrypt` — cioe' il freno che doveva proteggere la password diventava un
+    amplificatore di carico, con un `for` di shell a metterlo in ginocchio. Segnalato da
+    GPT-5.6 Sol sulla PR #23.
+
+    Il tentativo si conta **prima** della verifica, ottimisticamente, e si azzera solo in
+    caso di successo (`_azzera_tentativi`): e' la forma «consuma un gettone prima di
+    lavorare», e mette un tetto anche al numero di `scrypt` concorrenti.
+    """
     with _LOCK_TENTATIVI:
-        if _TENTATIVI_PASSWORD['falliti'] < TENTATIVI_PRIMA_DEL_FRENO:
-            return 0
-        resto = DURATA_FRENO - (time.time() - _TENTATIVI_PASSWORD['ultimo'])
-        if resto <= 0:
+        if _TENTATIVI_PASSWORD['falliti'] >= TENTATIVI_PRIMA_DEL_FRENO:
+            resto = DURATA_FRENO - (time.time() - _TENTATIVI_PASSWORD['ultimo'])
+            if resto > 0:
+                return int(resto) + 1
             # Finestra scaduta: si ricomincia a contare, altrimenti il primo blocco
             # sarebbe definitivo e servirebbe un riavvio per rientrare.
             _TENTATIVI_PASSWORD['falliti'] = 0
-            return 0
-        return int(resto) + 1
+        _TENTATIVI_PASSWORD['falliti'] += 1
+        _TENTATIVI_PASSWORD['ultimo'] = time.time()
+        return 0
 
 
-def _registra_tentativo(riuscito):
+def _azzera_tentativi():
+    """Dopo un accesso riuscito il contatore torna a zero."""
     with _LOCK_TENTATIVI:
-        if riuscito:
-            _TENTATIVI_PASSWORD['falliti'] = 0
-        else:
-            _TENTATIVI_PASSWORD['falliti'] += 1
-            _TENTATIVI_PASSWORD['ultimo'] = time.time()
+        _TENTATIVI_PASSWORD['falliti'] = 0
 
 
 def _annota_admin(c, chi, azione, bersaglio=None):
@@ -1667,9 +1716,17 @@ class LoginTelegramIn(BaseModel):
     Il verso opposto resta chiuso: accettare i campi sconosciuti non apre niente, perche'
     entrano nella stringa firmata. Un campo aggiunto **dopo** la firma la invalida — lo
     verifica `test_un_campo_AGGIUNTO_dopo_la_firma_viene_rifiutato`.
+
+    `coerce_numbers_to_str` perche' il widget consegna `id` e `auth_date` come **numeri**
+    JSON, e Pydantic v2 non converte un numero in stringa: misurato, `id=12345678`
+    solleva `ValidationError`, quindi la rotta rispondeva `422` a **ogni** login reale —
+    non a qualcuno, a tutti, dal primo. Nessuno dei 519 test lo raggiungeva, perche' li' i
+    campi li costruisco io e li costruisco come stringhe: il codice era coerente con se
+    stesso e sbagliato rispetto al mondo. Alzato dai due gate finali — Fable 5 e
+    GPT-5.6 Sol — contemporaneamente, sulla PR #23.
     """
 
-    model_config = ConfigDict(extra='allow')
+    model_config = ConfigDict(extra='allow', coerce_numbers_to_str=True)
 
     id: str
     auth_date: str
@@ -1695,8 +1752,7 @@ def login_telegram(data: LoginTelegramIn):
     che si vedrebbe solo in produzione, perche' un test che costruisce i campi a mano
     li manderebbe tutti.
     """
-    campi = {k: v for k, v in data.model_dump().items() if v != ''}
-    if not verifica_login_telegram(campi, BOT_TOKEN):
+    if not verifica_login_telegram(campi_firmati(data.model_dump()), BOT_TOKEN):
         # Il messaggio non distingue «firma sbagliata» da «scaduta»: per differenza si
         # impara, e chi prova non deve sapere quale dei due muri ha toccato.
         raise HTTPException(401, 'login non valido')
@@ -1766,7 +1822,7 @@ def login_password(data: LoginPasswordIn):
     Ogni accesso riuscito finisce in `admin_audit`: e' l'unico modo per cui un accesso
     non suo sia visibile, e per cui «non sono stato io» sia dimostrabile.
     """
-    attesa = _freno_password()
+    attesa = _prenota_tentativo()
     if attesa:
         # 429 e non 401: chi legge deve sapere che il muro e' il freno e non la
         # password, altrimenti prova a cambiare password quando deve solo aspettare.
@@ -1781,9 +1837,10 @@ def login_password(data: LoginPasswordIn):
     giusta = (hmac.compare_digest(data.username.encode('utf-8'),
                                  ADMIN_USERNAME.encode('utf-8'))
               and verifica_password_admin(data.password, ADMIN_PASSWORD_HASH))
-    _registra_tentativo(giusta)
     if not giusta:
+        # Il tentativo e- gia- contato da `_prenota_tentativo`: qui non si conta due volte.
         raise HTTPException(401, 'credenziali non valide')
+    _azzera_tentativi()
 
     c = db()
     riga = c.execute('SELECT id, session_version FROM users WHERE origin_profile=?',

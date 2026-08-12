@@ -52,7 +52,11 @@ Due porte, e averne due non e' ridondanza: se Telegram non e' disponibile o se i
 proprietario perde quell'account, la seconda lo fa entrare comunque.
 
 POST /api/login/telegram
-Body JSON: i campi del Login Widget di Telegram, compreso "hash".
+Body JSON: i campi del Login Widget COSI' COME LI CONSEGNA, "hash" compreso. id e
+auth_date il widget li passa come NUMERI e il server li accetta tali: prima
+rispondeva 422 a OGNI login reale, perche' Pydantic v2 non converte un numero in
+stringa. La firma si calcola sulle forme testuali JSON dei valori, che e' cio' che
+firma Telegram: per un booleano "true", non "True".
 La firma HMAC-SHA256 viene verificata con una chiave derivata da TELEGRAM_BOT_TOKEN:
 Telegram non manda un token, manda i campi in chiaro piu' la firma, quindi chi non la
 verifica accetta un "id" scritto da chiunque. auth_date viene controllato in ENTRAMBE
@@ -64,7 +68,12 @@ POST /api/login/password
 Body JSON: {"username":"administrator","password":"..."}
 L'accesso di emergenza. Senza ADMIN_PASSWORD_HASH risponde 503 (percorso
 DISABILITATO, non aperto). Dopo 5 tentativi falliti si frena per 300 secondi e
-risponde 429 — anche alla password giusta, altrimenti non frenerebbe nulla. Il freno
+risponde 429 — anche alla password giusta, altrimenti non frenerebbe nulla.
+Il tentativo viene CONTATO prima della verifica, dentro lo stesso lock che controlla
+il freno, e azzerato solo in caso di successo. Prima erano due gesti separati con
+scrypt in mezzo (~100 ms), quindi 12 richieste concorrenti passavano tutte: il limite
+si aggirava mandandole insieme, e ogni richiesta accendeva uno scrypt — il freno
+amplificava il carico invece di ridurlo. Il freno
 e' globale e non per IP: per IP non fermerebbe chi prova in automatico, che cambia
 indirizzo. Il prezzo — un estraneo puo' tenere occupato questo percorso per qualche
 minuto — e' accettabile perche' il login Telegram resta disponibile.

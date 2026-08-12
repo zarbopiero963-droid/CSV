@@ -460,6 +460,7 @@ passare inosservata.
 | Rotta | Cosa fa | Rifiuta con |
 |---|---|---|
 | `POST /api/login/telegram` | firma del Login Widget → sessione | `401 login non valido` |
+| | i campi si mandano **come li consegna il widget**: `id` e `auth_date` sono numeri e vengono accettati tali. La firma si calcola sulle forme **testuali JSON** (`true`, non `True`) | |
 | `POST /api/login/password` | `administrator` + password → sessione | `401`, `429` se frenato, `503` se la variabile manca |
 | *entrambe* | | `503` anche se manca `TELEGRAM_BOT_TOKEN`: il segreto dei cookie deriva da lì, quindi non c'è nessuna sessione da emettere |
 | `POST /api/logout` | cancella il cookie | niente: è pubblica di proposito |
@@ -499,7 +500,12 @@ cambia password cambiando la variabile; il comando che genera l'hash è in `READ
 
 Il percorso a password ha un **freno**: cinque tentativi falliti e si chiude per cinque
 minuti, con `429` e non `401`, perché chi legge deve sapere che il muro è il freno e non
-la password. Il freno è **globale e non per IP**, con un baratto dichiarato: per IP non
+la password. Il tentativo si **conta prima** della verifica, dentro lo stesso lock che
+controlla il freno, e si azzera solo in caso di successo — «consuma un gettone prima di
+lavorare». Erano due gesti separati con `scrypt` in mezzo, quindi dodici richieste
+concorrenti passavano tutte: il limite si aggirava mandandole insieme, e ogni richiesta
+accendeva uno `scrypt`, cioè il freno amplificava il carico invece di ridurlo. Segnalato
+da GPT-5.6 Sol sulla PR #23. Il freno è **globale e non per IP**, con un baratto dichiarato: per IP non
 frenerebbe nulla, perché chi prova password in automatico cambia indirizzo; globale sì,
 al prezzo che un estraneo può tenere occupato quel percorso per qualche minuto. Il
 prezzo è accettabile **proprio perché le porte sono due** — il proprietario entra col

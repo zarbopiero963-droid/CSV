@@ -1008,3 +1008,119 @@ def test_ogni_rotta_che_usa_la_SESSIONE_rinnova_anche_il_cookie():
     # sopra non guarda niente e il test passa dicendo nulla.
     assert guardate, (
         'nessuna rotta chiama utente_dalla_sessione: questa guardia non misura niente')
+
+
+def test_il_widget_manda_NUMERI_e_il_login_deve_accettarli(servizio):
+    """**Il bloccante che rompeva ogni login reale.** Alzato da Fable 5 e da Sol, insieme.
+
+    Il Login Widget di Telegram consegna a JavaScript un oggetto in cui `id` e `auth_date`
+    sono **numeri**, non stringhe. Un client che lo passa a `JSON.stringify` — cioe'
+    qualunque client scritto nel modo ovvio — manda `{"id": 987654321, ...}`.
+
+    E Pydantic v2 **non** converte un numero in stringa: misurato,
+    `LoginTelegramIn(id=12345678, ...)` solleva `ValidationError`, quindi la rotta
+    risponde 422. Non un login su mille: **tutti**, sempre, dal primo.
+
+    E' il difetto peggiore che questo PR poteva contenere, perche' non e' raggiungibile da
+    nessuno dei 519 test scritti finora: li' i campi li costruisco io, e li costruisco
+    come stringhe. Il codice era coerente con se stesso e sbagliato rispetto al mondo. Se
+    ne sono accorti i due gate finali contemporaneamente, cioe' esattamente il punto per
+    cui esistono e si pagano.
+
+    La firma deve continuare a verificare: Telegram calcola l'HMAC sulle **forme testuali**
+    dei valori, e un intero stringificato e' identico da entrambe le parti.
+    """
+    campi = {
+        'id': 987654321,                    # NUMERO, come dal widget
+        'first_name': 'Piero',
+        'username': 'piero',
+        'auth_date': int(time.time()),      # NUMERO
+    }
+    # La firma si calcola sulle forme testuali, che e' cio' che fa Telegram.
+    campi['hash'] = _firma_telegram({k: str(v) for k, v in campi.items()})
+
+    stato, corpo, intestazioni = _chiama(servizio, 'POST', '/api/login/telegram', corpo=campi)
+    assert stato == 200, (
+        f'un payload con id e auth_date NUMERICI — cioe- quello che il widget produce — '
+        f'risponde {stato} invece di 200 (corpo {corpo[:300]!r}): il login Telegram e- '
+        'inutilizzabile per ogni utente reale')
+    assert _cookie_dalla_risposta(intestazioni), 'nessun cookie di sessione'
+
+
+def test_un_campo_extra_BOOLEANO_firmato_da_Telegram_non_rompe_la_verifica():
+    """`str(True)` in Python e' `'True'`, in JSON e' `'true'`. Non e' la stessa stringa.
+
+    Secondo bloccante di Fable 5. I campi extra non sono dichiarati nel modello, quindi
+    non passano da nessuna conversione: finiscono nella `data_check_string` con lo `str()`
+    di Python. Per un campo booleano — o per un numero non intero — quella forma **diverge**
+    da quella che Telegram ha firmato, e il login legittimo viene rifiutato.
+
+    Oggi Telegram non manda booleani, quindi il difetto e' latente: e' la stessa forma del
+    bloccante qui sopra, che era latente finche' nessun client vero esisteva. Ne ho appena
+    pagato uno; il secondo lo chiudo insieme.
+    """
+    grezzi = {'id': 55, 'auth_date': int(time.time()), 'is_premium': True, 'saldo': 1.5}
+    # Come firma Telegram: la serializzazione JSON dei valori, non il repr di Python.
+    import json as _json
+    atteso = {k: (_json.dumps(v) if not isinstance(v, str) else v) for k, v in grezzi.items()}
+    grezzi['hash'] = _firma_telegram(atteso)
+
+    assert main.verifica_login_telegram(main.campi_firmati(grezzi), BOT_FINTO) is True, (
+        'un campo extra booleano o decimale fa fallire la verifica di una firma valida: '
+        "str(True) e- 'True' e non 'true', e la data_check_string non combacia")
+
+
+def test_il_freno_non_si_AGGIRA_con_richieste_concorrenti(monkeypatch):
+    """Controllo del freno e conteggio del tentativo devono essere **un solo gesto**.
+
+    Bloccante di GPT-5.6 Sol, e reale: `_freno_password()` prende il lock, legge, lo
+    rilascia; poi arriva `scrypt`, che costa ~100 ms di CPU per progetto; solo alla fine
+    `_registra_tentativo` incrementa. Fra la lettura e l'incremento passa tutto il calcolo,
+    quindi N richieste concorrenti vedono tutte «zero tentativi falliti» e passano tutte.
+
+    Due conseguenze, e la seconda e' peggiore della prima: il limite di cinque tentativi si
+    aggira mandando le richieste insieme invece che in fila, e ogni richiesta che passa
+    accende uno `scrypt` — cioe' il freno che doveva proteggere la password diventa un
+    amplificatore di carico. Un `for` in una riga di shell mette il servizio in ginocchio.
+
+    La correzione e' la forma «consuma un gettone prima di lavorare»: il tentativo si conta
+    **dentro** il lock, prima della verifica, e si azzera solo in caso di successo.
+    """
+    quante = {'verifiche': 0}
+    vera = main.verifica_password_admin
+
+    def conta(password, salvato):
+        quante['verifiche'] += 1
+        time.sleep(0.05)          # scrypt costa: e- la finestra in cui gli altri entrano
+        return vera(password, salvato)
+
+    monkeypatch.setattr(main, 'verifica_password_admin', conta)
+    monkeypatch.setattr(main, 'ADMIN_PASSWORD_HASH', main.hash_password('giusta'))
+    monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
+    main._TENTATIVI_PASSWORD.update({'falliti': 0, 'ultimo': 0.0})
+
+    import threading
+    esiti = []
+    porta = threading.Barrier(12)
+
+    def prova():
+        porta.wait()
+        try:
+            main.login_password(main.LoginPasswordIn(username='administrator',
+                                                     password='sbagliata'))
+            esiti.append(200)
+        except Exception as e:
+            esiti.append(getattr(e, 'status_code', type(e).__name__))
+
+    fili = [threading.Thread(target=prova) for _ in range(12)]
+    for f in fili:
+        f.start()
+    for f in fili:
+        f.join(timeout=30)
+
+    assert quante['verifiche'] <= main.TENTATIVI_PRIMA_DEL_FRENO, (
+        f"{quante['verifiche']} verifiche scrypt su 12 richieste concorrenti, con un freno "
+        f'da {main.TENTATIVI_PRIMA_DEL_FRENO}: il limite si aggira mandandole insieme, e '
+        'ogni richiesta che passa accende uno scrypt — il freno amplifica il carico invece '
+        'di ridurlo')
+    assert 429 in esiti, f'nessuna richiesta e- stata frenata: {esiti}'
