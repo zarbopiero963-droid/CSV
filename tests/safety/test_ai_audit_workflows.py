@@ -1549,11 +1549,23 @@ def test_il_gate_riconosce_il_troncamento_nella_forma_GIUSTA(path):
 
     Su entrambi i workflow di questo endpoint, non solo sul gate: la stessa lettura
     vive in due posti per costruzione.
+
+    *Cosa e' cambiato qui, e perche' non e' un indebolimento.* Questo test pretendeva
+    la stringa `"status") == "incomplete"`, cioe- vincolava la condizione ESATTA che
+    `gpt-5.6-sol` ha poi mostrato essere sbagliata: una blacklist di un solo valore.
+    Un test che pinna la forma difettosa la protegge, e infatti e- diventato rosso
+    quando l'ho corretta — nel verso opposto a quello utile. Ora asserisce che i due
+    campi giusti vengano LETTI, e la semantica — quali stati contano come completo —
+    la vincola il test parametrizzato che esegue `call_model` su sei stati diversi.
+    Il resto (nessun `finish_reason`) resta identico, perche- quello era e rimane il
+    difetto silenzioso della sostituzione.
     """
     corpo = _blocco(path, 'call_model')
-    assert 'incomplete_details' in corpo, 'il troncamento non e- piu- rilevato'
-    assert '"status") == "incomplete"' in corpo or "'status') == 'incomplete'" in corpo, \
-        'manca il controllo su status=incomplete'
+    assert 'incomplete_details' in corpo, (
+        'il motivo del troncamento non viene piu- letto: il banner non puo- dire se '
+        'alzare il tetto o guardare altro'
+    )
+    assert '"status"' in corpo, 'lo stato della risposta non viene piu- letto'
     assert 'finish_reason' not in _solo_codice(corpo), (
         'legge ancora `finish_reason`, che su v1/responses non esiste: una review '
         'troncata passerebbe per completa'
@@ -1763,6 +1775,112 @@ def test_una_risposta_TRONCATA_non_passa_per_completa(monkeypatch, path, dettagl
     # il banner lo dichiara invece di tacere.
     atteso = (dettagli or {}).get('reason', 'non dichiarato')
     assert atteso in testo, f'il motivo {atteso!r} non compare nel banner:\n{testo!r}'
+
+
+# Gli stati terminali di `v1/responses` non sono due. `completed` significa «ho
+# finito»; `incomplete` era il solo che il codice riconosceva come non-finito; e
+# `failed`, `cancelled` o uno `status` assente sono i modi in cui una risposta NON
+# completa passava per completa — perche' la condizione era una blacklist di un solo
+# valore invece di una whitelist.
+@pytest.mark.parametrize('path', SU_V1_RESPONSES, ids=lambda p: p.name)
+@pytest.mark.parametrize('stato, completa', (
+    ('completed', True),
+    ('incomplete', False),
+    ('failed', False),
+    ('cancelled', False),
+    ('in_progress', False),
+    (None, False),
+), ids=('completed', 'incomplete', 'failed', 'cancelled', 'in_progress', 'assente'))
+def test_solo_status_completed_conta_come_review_completa(monkeypatch, path, stato, completa):
+    """Whitelist, non blacklist — e questa volta il difetto era mio.
+
+    Su Fable ho corretto la classe scrivendo una whitelist (`end_turn` e nient'altro)
+    e nei due workflow su `v1/responses` ho lasciato la forma debole,
+    `status == "incomplete"`, cioe- una blacklist di un solo valore. Poi ho scritto in
+    `CLAUDE.md` che tutti e tre «dichiarano completa solo l'uscita che significa ho
+    finito», mettendo fra parentesi «`status` diverso da `incomplete` su OpenAI» — che
+    e- l'opposto di una whitelist, nella stessa frase che afferma di esserlo. La
+    documentazione conteneva la contraddizione che avrebbe dovuto impedire.
+
+    Conseguenza concreta: una risposta `failed` o `cancelled` con del testo dentro
+    veniva pubblicata come review completa e timbrata col `done_marker`, quindi mai
+    piu- rifatta. Segnalato da `gpt-5.6-sol` come `[REAL_FINDING]` alla sua PRIMA
+    chiamata reale, sul workflow che quella chiamata serviva a collaudare.
+
+    `completed` sta nell'elenco per la ragione opposta: e- l'unico caso che NON deve
+    portare il banner, e senza di lui un `truncated` sempre vero passerebbe tutto.
+    """
+    risposta = {'output_text': 'meta- review', 'usage': {}}
+    if stato is not None:
+        risposta['status'] = stato
+    call_model, _ = _call_model_del_gate(monkeypatch, path=path, risposta=risposta)
+    testo, _ = call_model('sistema', 'utente')
+
+    assert _e_marcata_non_completa(testo, path) is not completa, (
+        f'status={stato!r}: atteso completa={completa}. Una risposta non completa '
+        f'senza banner riceve il done_marker e non viene mai piu- rifatta.\n{testo!r}'
+    )
+
+
+# I DUE workflow con gate finale. GPT-5.5 non ne ha uno: gira su ogni push come
+# reviewer opzionale, e il suo fail-open e- voluto.
+CON_GATE_FINALE = (FABLE, SOL)
+
+
+@pytest.mark.parametrize('path', CON_GATE_FINALE, ids=lambda p: p.name)
+def test_il_fail_closed_guarda_lo_STATO_del_gate_non_il_nome_dell_evento(path):
+    """Un gate finale non e- «l'evento si chiama labeled».
+
+    `decisione_gate` lo dice da se- nella sua docstring, e un test verde lo dimostra
+    da prima di questa PR (`...pr_aperta_con_label_gia_presente_revisiona`): GitHub
+    NON emette `labeled` per una PR aperta con la label gia- applicata, quindi su
+    `opened`, `reopened` e `ready_for_review` il workflow si comporta da gate finale
+    pur non avendo mai visto un evento `labeled`.
+
+    I guard fail-closed invece chiedevano `EVENT_ACTION == "labeled"`. Su quei tre
+    eventi, quindi, una chiave assente o un errore del fornitore uscivano **verdi**:
+    il gate finale risultava superato senza che nessun modello avesse letto una riga.
+    E- la classe di difetto per cui esiste la regola «un check verde non e- prova di
+    review», arrivata fin dentro il meccanismo che quella regola doveva imporre.
+
+    Segnalato da `gpt-5.6-sol` su se stesso; corretto in entrambi i workflow con gate,
+    perche- i siti erano sei e non tre (regola 2).
+    """
+    sorgente = _script(path)
+    assert 'GATE_FINALE = esito_gate == "revisiona"' in sorgente, (
+        f'{path.name}: manca la nozione unica di «sto agendo da gate finale», derivata '
+        'da decisione_gate invece di essere riderivata dal nome dell-evento'
+    )
+    colpevoli = [r.strip() for r in sorgente.splitlines()
+                 if 'EVENT_ACTION == "labeled"' in r
+                 and ('model_failed' in r or 'not published' in r)]
+    assert not colpevoli, (
+        f'{path.name}: {len(colpevoli)} guard fail-closed decidono ancora sul NOME '
+        f'dell-evento invece che sullo stato del gate, quindi su opened/reopened/'
+        f'ready_for_review con la label presente escono verdi senza review:\n'
+        + '\n'.join(f'  {r}' for r in colpevoli)
+    )
+
+
+@pytest.mark.parametrize('path', CON_GATE_FINALE, ids=lambda p: p.name)
+def test_anche_il_guard_in_bash_copre_la_pr_aperta_con_la_label(path):
+    """Lo stesso difetto prima che Python parta.
+
+    Il controllo «Secret assente» sta in bash, quindi non puo- chiamare
+    `decisione_gate`. Non per questo puo- guardare il solo nome dell-evento: se la
+    label finale e- nel quadro — nell-elenco della PR o come label dell-evento — una
+    chiave mancante deve essere ROSSA, altrimenti il gate risulta superato con zero
+    righe lette. Il test pretende che entrambe le variabili siano consultate.
+    """
+    passo = next(p for p in _carica(path)['jobs']['review']['steps'] if 'run' in p)
+    prima_di_python = passo['run'].split('python3')[0]
+    assert 'BETRELAY' in prima_di_python, 'il controllo del Secret non e- piu- qui'
+    for variabile in ('LABELS_PRESENTI', 'LABEL_EVENTO'):
+        assert variabile in prima_di_python, (
+            f'{path.name}: il guard in bash sul Secret assente non consulta '
+            f'{variabile}, quindi una PR aperta con la label finale gia- applicata '
+            'esce VERDE senza review'
+        )
 
 
 @pytest.mark.parametrize('path', SU_V1_RESPONSES, ids=lambda p: p.name)

@@ -579,13 +579,53 @@ Segnalato da CodeRabbit sulla PR #20 e corretto in entrambi.
 **E il sito segnalato non era l'unico.** Fable 5 sta su Anthropic, dove il campo si chiama
 `stop_reason` e i valori sono altri, ma la condizione aveva la stessa forma sbagliata: nominava il
 solo motivo atteso (`== "max_tokens"`), quindi un `refusal`, un `pause_turn` o una risposta senza
-`stop_reason` producevano «review completa». Adesso tutti e tre i workflow ragionano al contrario —
-si dichiara completa **solo** l'uscita che significa «ho finito» (`end_turn` su Anthropic, `status`
-diverso da `incomplete` su OpenAI), e ogni altro caso, incluso quello sconosciuto, porta il banner.
-È regola 2 applicata: il difetto è stato trovato in un posto e cercato in tutti. I test eseguono
-`call_model` di ciascun workflow con una risposta finta per ciascun motivo, e includono il caso
-«uscita normale» — senza, un `truncated` sempre vero passerebbe tutti gli altri e la review si
-ripagherebbe a ogni push.
+`stop_reason` producevano «review completa». È regola 2 applicata: il difetto è stato trovato in un
+posto e cercato in tutti.
+
+**Poi la correzione stessa è stata corretta, e questo pezzo è il motivo per cui vale la pena
+leggerlo.** Qui c'era scritto che tutti e tre i workflow «dichiarano completa **solo** l'uscita che
+significa "ho finito"», e fra parentesi: «`end_turn` su Anthropic, `status` diverso da `incomplete`
+su OpenAI». La parentesi contraddice la frase che la contiene — «diverso da un valore» è una
+*blacklist*, non una whitelist — e descriveva fedelmente il codice: su Fable avevo scritto una
+whitelist vera, nei due workflow OpenAI era rimasta la forma debole. Una risposta `failed` o
+`cancelled` **con del testo dentro** veniva quindi pubblicata come review completa e timbrata col
+`done_marker`. L'ha trovato **`gpt-5.6-sol` alla sua primissima chiamata reale**, sul workflow che
+quella chiamata serviva a collaudare.
+
+Adesso è una whitelist in tutti e tre, davvero: completa **solo** `end_turn` su Anthropic e **solo**
+`status == "completed"` su OpenAI. Ogni altro esito — inclusi quelli che non conosciamo e un campo
+assente perché la forma è cambiata — porta il banner. I test eseguono `call_model` di ciascun
+workflow su una risposta finta per ciascuno stato, e includono l'uscita normale: senza quel caso, un
+`truncated` sempre vero passerebbe tutti gli altri e la review si ripagherebbe a ogni push.
+
+**Lezione generale, perché non è un aneddoto:** una documentazione può contenere, nella stessa frase,
+l'affermazione e la sua smentita. Qui la parentesi che spiegava la regola era il difetto. Quando
+scrivi «solo X», controlla che il codice dica *solo X* e non *diverso da Y*.
+
+### Il gate finale non è «l'evento si chiama labeled»
+
+Secondo `[REAL_FINDING]` di `gpt-5.6-sol` alla stessa prima chiamata, e con la conseguenza più grave
+delle due. I tre guard che tengono il gate **fail-closed** — Secret assente, errore del fornitore,
+commento non pubblicato — chiedevano `EVENT_ACTION == "labeled"`. Ma **GitHub non emette `labeled`
+per una PR aperta con la label già applicata**: lo dice la docstring di `decisione_gate` e lo
+dimostrava un test verde da prima di quella PR. Su `opened`, `reopened` e `ready_for_review` con la
+label finale presente, quindi, il job faceva il gate finale mentre i suoi guard credevano di essere
+su un push opzionale: chiave mancante o errore API uscivano **verdi**, e il gate risultava superato
+con **zero righe lette**.
+
+È la classe di difetto per cui esiste la regola «un check verde non è prova di review» — arrivata
+dentro il meccanismo che quella regola doveva imporre. I siti erano **sei**, in entrambi i workflow
+con gate, non i tre segnalati.
+
+La correzione è una nozione sola, `GATE_FINALE = esito_gate == "revisiona"`, derivata dalla funzione
+che la decisione la prende già, invece di riderivarla dal nome dell'evento in ogni guard. Il guard in
+bash gira prima di Python e non può chiamarla: la sua condizione è volutamente più **grossolana** —
+«la label finale è nel quadro?» — e in ogni caso in cui le due divergono sbaglia verso il rosso, che
+per una chiave mancante è il verso giusto.
+
+**Cosa ne segue per chi legge un gate verde:** un check verde di Fable o Sol vale come review solo se
+nel log c'è la riga d'uso token. Vale già per i Secret mancanti (`::notice`), e fino al 12/08/2026
+valeva anche per i tre percorsi qui sopra.
 
 **Quanto costano davvero.** Misurato sulla PR #8, sette head, 15 review addebitate: **$2,6247** in
 totale. La distribuzione conta più del totale, perché decide dove risparmiare:

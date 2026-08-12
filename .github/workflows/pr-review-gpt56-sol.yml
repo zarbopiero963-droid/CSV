@@ -180,8 +180,19 @@ jobs:
           # una review non eseguibile per key mancante NON deve risultare verde:
           # fallisci il job (coerente col fail-closed sul fallimento modello, GPT-5.5).
           if [ -z "${BETRELAY_GPT:-}" ]; then
-            if [ "${EVENT_ACTION:-}" = "labeled" ]; then
-              echo "::error::Gate finale a label ma BETRELAY_GPT assente: review non eseguibile → job fallito (il gate non deve risultare verde)."
+            # Questo guard gira PRIMA di Python, quindi non puo- chiamare
+            # `decisione_gate`: la sua condizione e- volutamente piu- GROSSOLANA — «la
+            # label finale e- nel quadro?» — e in ogni caso in cui le due divergono
+            # sbaglia verso il ROSSO, che e- il verso giusto per una chiave mancante.
+            #
+            # Prima chiedeva solo che l-evento si chiamasse `labeled`, e GitHub non
+            # emette quell-evento per una PR aperta con la label gia- applicata: su
+            # `opened`, `reopened` e `ready_for_review` una chiave assente usciva
+            # VERDE e il gate finale risultava superato con zero righe lette.
+            # Segnalato da `gpt-5.6-sol`, corretto in entrambi i workflow con gate.
+            if [ "${LABEL_EVENTO:-}" = "${FINAL_LABEL:-}" ] \
+               || printf '%s' "${LABELS_PRESENTI:-}" | grep -q "\"${FINAL_LABEL}\""; then
+              echo "::error::Gate finale armato (label «${FINAL_LABEL}») ma BETRELAY_GPT assente: review non eseguibile → job fallito (il gate non deve risultare verde)."
               exit 1
             fi
             echo "::notice::BETRELAY_GPT non configurato: reviewer GPT-5.6 Sol saltato (push automatico, nessun check rosso)."
@@ -674,7 +685,16 @@ jobs:
                       # model_failed sul gate a label e niente done_marker, quindi la
                       # review parziale non viene deduplicata come completata.
                       #
-                      # E il troncamento vale QUALUNQUE sia il motivo.
+                      # E il troncamento vale QUALUNQUE sia il motivo, e QUALUNQUE sia
+                      # lo stato che non sia `completed`. La condizione e' una
+                      # WHITELIST: `completed` significa «ho finito», e tutto il resto —
+                      # `incomplete`, `failed`, `cancelled`, uno `status` assente perche'
+                      # la forma e' cambiata — e' una review che non e' finita. Scriverla
+                      # come blacklist di un solo valore era il difetto che
+                      # `gpt-5.6-sol` ha trovato alla sua prima chiamata reale: una
+                      # risposta `failed` CON del testo riceveva il done_marker, cioe'
+                      # veniva certificata completa e non piu' rifatta.
+                      #
                       # Prima la condizione pretendeva anche
                       # `incomplete_details.reason == "max_output_tokens"`, e quella
                       # congiunzione era la falla: l'API puo' rispondere `incomplete`
@@ -690,14 +710,15 @@ jobs:
                       # sapere se aumentare il tetto o guardare altro.
                       incomplete = body.get("incomplete_details") or {}
                       motivo_incompleto = incomplete.get("reason") or "non dichiarato"
-                      truncated = body.get("status") == "incomplete"
+                      stato = body.get("status") or "assente"
+                      truncated = stato != "completed"
                       if not text:
                           # Budget di output esaurito prima del testo: segnalalo con
                           # verita'.
                           if truncated:
                               text = (
                                   "Output troncato: il modello si e' interrotto "
-                                  f"(MAX_OUTPUT_TOKENS={MAX_OUTPUT_TOKENS}, status=incomplete, reason={motivo_incompleto}) "
+                                  f"(MAX_OUTPUT_TOKENS={MAX_OUTPUT_TOKENS}, status={stato}, reason={motivo_incompleto}) "
                                   "prima di produrre la review. Se il motivo e' "
                                   "max_output_tokens, aumenta MAX_OUTPUT_TOKENS o riduci "
                                   "l'ampiezza del diff; altrimenti il motivo e' quello "
@@ -711,7 +732,7 @@ jobs:
                           text = (
                               "Output troncato: il modello ha prodotto solo una review "
                               f"PARZIALE (MAX_OUTPUT_TOKENS={MAX_OUTPUT_TOKENS}, "
-                              f"status=incomplete, reason={motivo_incompleto}). Segue il testo parziale.\n\n"
+                              f"status={stato}, reason={motivo_incompleto}). Segue il testo parziale.\n\n"
                               + text
                           )
                       return text, body.get("usage", {})
@@ -870,6 +891,24 @@ jobs:
           esito_gate = decisione_gate(EVENT_ACTION, etichette_pr, FINAL_LABEL,
                                       os.environ.get("LABEL_EVENTO", ""))
 
+          # «Sto agendo da gate finale?» — UNA volta, derivata da `decisione_gate`
+          # invece di essere riderivata dal nome dell'evento in ogni guard.
+          #
+          # Il difetto che chiude: i guard fail-closed chiedevano che l'evento si
+          # chiamasse `labeled`, ma GitHub NON emette quell'evento per una PR aperta
+          # con la label gia' applicata — lo dice la docstring qui sopra e lo dimostra
+          # un test verde da prima di questa PR. Su `opened`, `reopened` e
+          # `ready_for_review` il job faceva quindi il gate finale mentre i suoi guard
+          # credevano di essere su un push opzionale: chiave assente o errore del
+          # fornitore uscivano VERDI, e il gate risultava superato con zero righe
+          # lette. Segnalato da `gpt-5.6-sol` su se stesso; i siti erano sei, in
+          # entrambi i workflow con gate.
+          #
+          # `revisiona` e' l'unico esito che significa «review dell'intera PR perche'
+          # il gate e' armato»: `core` (solo Fable) e' il push su file core, dove il
+          # fail-open e' voluto, e `salta`/`stantio` non arrivano fino qui.
+          GATE_FINALE = esito_gate == "revisiona"
+
           if esito_gate == "stantio":
               print(
                   f"::error::{REVIEW_ID}: il head è cambiato DOPO che il gate finale era "
@@ -1018,7 +1057,7 @@ jobs:
 
           Modalità sicurezza: niente checkout, niente esecuzione codice PR, niente auto-merge.
           """[:64000])
-              if not published and EVENT_ACTION == "labeled":
+              if not published and GATE_FINALE:
                   print("::error::Gate finale a label: esito non pubblicato → job fallito di proposito (P3-38 #76).")
                   sys.exit(1)
               sys.exit(0)
@@ -1175,7 +1214,7 @@ jobs:
           # review forte richiesta non è avvenuta. Falliamo il job DOPO aver
           # pubblicato il commento con l'errore. Sui push automatici (file core)
           # resta fail-open: reviewer opzionale che non blocca la PR (Codex P2).
-          if model_failed and EVENT_ACTION == "labeled":
+          if model_failed and GATE_FINALE:
               print(
                   "::error::Gate finale a label: la review GPT-5.6 Sol non è stata "
                   "completata (errore provider) → job fallito di proposito."
@@ -1186,7 +1225,7 @@ jobs:
           # review pubblicata): sul gate a LABEL il commento È il deliverable del job —
           # se la pubblicazione fallisce il check NON deve risultare verde. Sui push
           # automatici resta fail-open: reviewer opzionale che non blocca la PR.
-          if not published and EVENT_ACTION == "labeled":
+          if not published and GATE_FINALE:
               print(
                   "::error::Gate finale a label: review completata ma NON pubblicata "
                   "(permessi/quota API GitHub) → job fallito di proposito."
