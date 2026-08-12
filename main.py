@@ -342,25 +342,198 @@ class ProfileIn(BaseModel):
     parser: str = DEFAULT_PARSER
 
 
+# Le tre tabelle con cui il servizio e' nato. Restano con QUESTI nomi e questa
+# forma: gli endpoint le leggono, e questa migrazione non cambia il comportamento
+# di nessuna rotta. Lo scambio delle letture verso lo schema multiutente e' un
+# lavoro successivo (PR 8/9/12 della roadmap in #2).
+SCHEMA_ORIGINALE = (
+    'CREATE TABLE IF NOT EXISTS signals (id INTEGER PRIMARY KEY AUTOINCREMENT,'
+    ' csv TEXT NOT NULL, parser TEXT, profile TEXT,'
+    ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP, expires_at INTEGER)',
+    'CREATE TABLE IF NOT EXISTS parsers (name TEXT PRIMARY KEY, header TEXT NOT NULL,'
+    ' market_name TEXT, market_type TEXT, selection_name TEXT, handicap TEXT, bet_type TEXT)',
+    'CREATE TABLE IF NOT EXISTS profiles (name TEXT PRIMARY KEY, chat_ids TEXT NOT NULL,'
+    ' parser TEXT NOT NULL)',
+)
+
+# Lo schema multiutente deciso in #2. NOVE tabelle nuove: `users` e `chats` e le
+# altre non esistevano, quindi si creano.
+#
+# `parsers` e `signals` NON sono qui, e la ragione e' un vincolo reale: esistono
+# gia' con una forma diversa, e SQLite non ammette due tabelle con lo stesso nome.
+# Creare `parsers_v2` accanto a `parsers` avrebbe lasciato due fonti per la stessa
+# cosa — esattamente cio' che la regola 3 vieta — e rinominare le vecchie avrebbe
+# rotto ogni endpoint. Si estendono invece con ALTER additivo, vedi
+# `COLONNE_MULTIUTENTE`.
+#
+# `token_hash` e `token_prefix` stanno su `users` e non sui parser: il feed e il
+# timer appartengono all'utente, il parser possiede solo configurazione e log. E'
+# la correzione del modello sbagliato del prototipo, registrata in #2.
+SCHEMA_MULTIUTENTE = (
+    'CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT,'
+    ' telegram_id TEXT UNIQUE, username TEXT, first_name TEXT, slug TEXT UNIQUE,'
+    ' token_hash TEXT, token_prefix TEXT,'
+    " status TEXT NOT NULL DEFAULT 'registrato', access_expires_at INTEGER,"
+    ' telegram_reachable INTEGER NOT NULL DEFAULT 0,'
+    ' session_version INTEGER NOT NULL DEFAULT 1,'
+    ' is_admin INTEGER NOT NULL DEFAULT 0,'
+    ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP)',
+    'CREATE TABLE IF NOT EXISTS chats (id INTEGER PRIMARY KEY AUTOINCREMENT,'
+    ' telegram_chat_id TEXT NOT NULL, message_thread_id TEXT, title TEXT, type TEXT,'
+    ' owner_user_id INTEGER, verified_at INTEGER,'
+    ' UNIQUE (telegram_chat_id, message_thread_id))',
+    'CREATE TABLE IF NOT EXISTS parser_chats (parser_id INTEGER NOT NULL,'
+    ' chat_id INTEGER NOT NULL, PRIMARY KEY (parser_id, chat_id))',
+    'CREATE TABLE IF NOT EXISTS message_logs (id INTEGER PRIMARY KEY AUTOINCREMENT,'
+    ' user_id INTEGER, parser_id INTEGER, chat_id INTEGER, text TEXT, esito TEXT,'
+    ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP)',
+    'CREATE TABLE IF NOT EXISTS chat_verifications (code TEXT PRIMARY KEY,'
+    ' user_id INTEGER, expires_at INTEGER, consumed_at INTEGER)',
+    'CREATE TABLE IF NOT EXISTS access_requests (id INTEGER PRIMARY KEY AUTOINCREMENT,'
+    ' user_id INTEGER, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,'
+    ' decided_at INTEGER, decided_by INTEGER, granted_days INTEGER, outcome TEXT)',
+    'CREATE TABLE IF NOT EXISTS admin_audit (id INTEGER PRIMARY KEY AUTOINCREMENT,'
+    ' admin_user_id INTEGER, target_user_id INTEGER, action TEXT,'
+    ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP)',
+    'CREATE TABLE IF NOT EXISTS feed_reads (token_id INTEGER, giorno TEXT,'
+    ' ip_hash TEXT, PRIMARY KEY (token_id, giorno, ip_hash))',
+    # `update_id` UNIQUE e' il dedup dei webhook duplicati: Telegram riconsegna, e
+    # senza questa tabella una riconsegna riscrive il segnale e fa ripartire il TTL.
+    'CREATE TABLE IF NOT EXISTS webhook_seen (update_id TEXT PRIMARY KEY,'
+    ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP)',
+)
+
+# Colonne aggiunte alle due tabelle che esistono gia'. Additive e nullable: una
+# colonna in piu' non cambia nessuna `SELECT` esistente, perche' tutte nominano le
+# colonne che leggono invece di usare `SELECT *`. Verificato prima di scriverle.
+COLONNE_MULTIUTENTE = (
+    ('parsers', 'user_id', 'INTEGER'),
+    ('parsers', 'slug', 'TEXT'),
+    ('parsers', 'config_json', 'TEXT'),
+    ('parsers', 'active', 'INTEGER DEFAULT 1'),
+    # `ordine` decide chi vince quando due parser dello stesso utente riconoscono
+    # lo stesso messaggio. Serve un ORDER BY esplicito, e va mostrato in UI.
+    ('parsers', 'ordine', 'INTEGER'),
+    ('parsers', 'created_at', 'DATETIME'),
+    # I segnali passano da per-PROFILO a per-UTENTE. La colonna vecchia `profile`
+    # resta e continua a governare il feed: qui si aggiunge solo la destinazione.
+    ('signals', 'user_id', 'INTEGER'),
+)
+
+# I percorsi gia' migrati in QUESTO processo. Prima la migrazione girava a ogni
+# `db()`, cioe' a ogni richiesta: tre CREATE TABLE, due ALTER, due INSERT OR
+# IGNORE, una UPDATE e un COMMIT — una transazione di SCRITTURA anche sulle
+# letture del feed, che XTrader interroga a raffica. Funzionava perche' e'
+# idempotente, non perche' fosse progettato. Con undici tabelle quel costo si
+# moltiplicherebbe sul percorso piu' caldo del servizio.
+#
+# Un insieme di percorsi e non un booleano: i test usano un database per test
+# nello stesso processo, e un flag globale li lascerebbe senza schema.
+_PERCORSI_MIGRATI: set = set()
+_LOCK_MIGRAZIONE = threading.Lock()
+
+
+def migra(c):
+    """Porta il database allo schema corrente. Idempotente: si puo' rieseguire.
+
+    Non cancella e non rinomina niente. Le tre tabelle originali restano con la
+    loro forma, gli endpoint continuano a leggerle, e nessuna rotta cambia
+    comportamento — se questa migrazione avesse un difetto il servizio funziona
+    comunque e si corregge senza aver perso dati. E' la scelta deliberata per il
+    cambiamento piu' rischioso del progetto: in produzione il database sta su un
+    volume e contiene i parser veri del proprietario.
+
+    L'idempotenza non e' un'aspirazione: `CREATE TABLE IF NOT EXISTS`, `ALTER`
+    dentro un `try` che ingoia solo «duplicate column name», e `INSERT OR IGNORE`.
+    Il test la esegue due volte di fila su un database popolato e confronta.
+    """
+    for istruzione in SCHEMA_ORIGINALE + SCHEMA_MULTIUTENTE:
+        c.execute(istruzione)
+    for tabella, colonna, tipo in COLONNE_MULTIUTENTE:
+        try:
+            c.execute(f'ALTER TABLE {tabella} ADD COLUMN {colonna} {tipo}')
+        except sqlite3.OperationalError as e:
+            # SOLO la colonna che esiste gia'. Prima questo `except` era nudo e
+            # avrebbe ingoiato anche «no such table», cioe' uno schema mancante.
+            if 'duplicate column name' not in str(e).lower():
+                raise
+    c.execute('INSERT OR IGNORE INTO parsers(name,header,market_name,market_type,'
+              'selection_name,handicap,bet_type) VALUES (?,?,?,?,?,?,?)',
+              (DEFAULT_PARSER, 'P.Bet. PREMACHT 0,5HT', 'Over/Under 1,5 gol',
+               'OVER_UNDER_15', 'Over 1,5 goal', '0', 'PUNTA'))
+    # Preserve the existing Telegram setup as the default PIERO feed.
+    c.execute('INSERT OR IGNORE INTO profiles(name,chat_ids,parser) VALUES (?,?,?)',
+              (PIERO_PROFILE, os.getenv('TELEGRAM_ALLOWED_CHAT_IDS', ''), DEFAULT_PARSER))
+    c.execute('UPDATE signals SET profile=? WHERE profile IS NULL', (PIERO_PROFILE,))
+    _travasa_nel_multiutente(c)
+    c.commit()
+
+
+def _travasa_nel_multiutente(c):
+    """I dati esistenti nello schema nuovo, senza toccare quelli vecchi.
+
+    `telegram_id` resta NULL: il proprietario non ha ancora fatto login Telegram e
+    inventarne uno creerebbe un utente che il login non riconoscerebbe. SQLite
+    ammette piu' NULL in una colonna UNIQUE, quindi il vincolo regge.
+
+    `token_hash` resta NULL per la stessa ragione: oggi il feed e' protetto da
+    `CSV_ACCESS_TOKEN`, uno per tutto il servizio. I token per utente nascono con
+    il feed per utente, e generarne uno qui vorrebbe dire scriverlo da qualche
+    parte — cioe' un segreto in piu' senza nessuno che lo usi.
+    """
+    for profilo, chat_ids in c.execute('SELECT name, chat_ids FROM profiles').fetchall():
+        c.execute('INSERT OR IGNORE INTO users(slug, first_name, status, is_admin)'
+                  ' VALUES (?,?,?,?)',
+                  (profilo.lower(), profilo, 'attivo' if profilo == PIERO_PROFILE else 'registrato',
+                   1 if profilo == PIERO_PROFILE else 0))
+        riga = c.execute('SELECT id FROM users WHERE slug=?', (profilo.lower(),)).fetchone()
+        if not riga:
+            continue
+        utente = riga[0]
+        # Le chat: da stringa separata da virgole a righe. `message_thread_id` resta
+        # NULL — i topic dei gruppi non sono ancora gestiti — e il vincolo UNIQUE e'
+        # sulla coppia, quindi due chat diverse non collidono.
+        for chat in {x.strip() for x in (chat_ids or '').split(',') if x.strip()}:
+            c.execute('INSERT OR IGNORE INTO chats(telegram_chat_id, owner_user_id)'
+                      ' VALUES (?,?)', (chat, utente))
+        c.execute('UPDATE signals SET user_id=? WHERE profile=? AND user_id IS NULL',
+                  (utente, profilo))
+    # Ogni parser al proprietario, che oggi e' l'unico utente. `slug` dal nome, e
+    # `ordine` per nome: deterministico, che e' cio' che #2 pretende perche' decide
+    # chi vince fra due parser dello stesso utente.
+    piero = c.execute('SELECT id FROM users WHERE slug=?', (PIERO_PROFILE.lower(),)).fetchone()
+    if piero:
+        c.execute('UPDATE parsers SET user_id=? WHERE user_id IS NULL', (piero[0],))
+    c.execute('UPDATE parsers SET slug=lower(name) WHERE slug IS NULL')
+    for indice, (nome,) in enumerate(
+            c.execute('SELECT name FROM parsers ORDER BY name').fetchall()):
+        c.execute('UPDATE parsers SET ordine=? WHERE name=? AND ordine IS NULL',
+                  (indice, nome))
+    # I parser di uno stesso utente non possono avere due volte lo stesso slug:
+    # e' il vincolo `UNIQUE (user_id, slug)` di #2, che su una tabella esistente
+    # non si puo' aggiungere con ALTER e si esprime come indice.
+    c.execute('CREATE UNIQUE INDEX IF NOT EXISTS parsers_utente_slug'
+              ' ON parsers (user_id, slug)')
+    # `UNIQUE (telegram_chat_id, message_thread_id)` sulla tabella NON deduplica le
+    # chat senza topic, e non e' un dettaglio: in SQL `NULL != NULL`, quindi due
+    # righe con la stessa chat e `message_thread_id` NULL sono entrambe ammesse.
+    # Misurato: la seconda esecuzione della migrazione duplicava tutte le chat, e il
+    # test sul duplicato non sollevava. Un indice sull'ESPRESSIONE chiude il buco
+    # senza rendere la colonna obbligatoria — «nessun topic» resta NULL, che e' il
+    # suo significato, invece di diventare una stringa vuota che sembra un valore.
+    c.execute('CREATE UNIQUE INDEX IF NOT EXISTS chats_chat_topic'
+              " ON chats (telegram_chat_id, IFNULL(message_thread_id, ''))")
+
+
 def db():
     c = sqlite3.connect(DB_PATH)
-    c.execute('CREATE TABLE IF NOT EXISTS signals (id INTEGER PRIMARY KEY AUTOINCREMENT, csv TEXT NOT NULL, parser TEXT, profile TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, expires_at INTEGER)')
-    # Migrate databases created before profile support.
-    try:
-        c.execute('ALTER TABLE signals ADD COLUMN expires_at INTEGER')
-    except sqlite3.OperationalError:
-        pass
-    try:
-        c.execute('ALTER TABLE signals ADD COLUMN profile TEXT')
-    except sqlite3.OperationalError:
-        pass
-    c.execute('CREATE TABLE IF NOT EXISTS parsers (name TEXT PRIMARY KEY, header TEXT NOT NULL, market_name TEXT, market_type TEXT, selection_name TEXT, handicap TEXT, bet_type TEXT)')
-    c.execute('CREATE TABLE IF NOT EXISTS profiles (name TEXT PRIMARY KEY, chat_ids TEXT NOT NULL, parser TEXT NOT NULL)')
-    c.execute('INSERT OR IGNORE INTO parsers VALUES (?,?,?,?,?,?,?)', (DEFAULT_PARSER, 'P.Bet. PREMACHT 0,5HT', 'Over/Under 1,5 gol', 'OVER_UNDER_15', 'Over 1,5 goal', '0', 'PUNTA'))
-    # Preserve the existing Telegram setup as the default PIERO feed.
-    c.execute('INSERT OR IGNORE INTO profiles(name,chat_ids,parser) VALUES (?,?,?)', (PIERO_PROFILE, os.getenv('TELEGRAM_ALLOWED_CHAT_IDS', ''), DEFAULT_PARSER))
-    c.execute("UPDATE signals SET profile=? WHERE profile IS NULL", (PIERO_PROFILE,))
-    c.commit()
+    if DB_PATH not in _PERCORSI_MIGRATI:
+        with _LOCK_MIGRAZIONE:
+            # Riletto DENTRO il lock: due richieste possono arrivare qui insieme, e
+            # senza il secondo controllo entrambe migrerebbero.
+            if DB_PATH not in _PERCORSI_MIGRATI:
+                migra(c)
+                _PERCORSI_MIGRATI.add(DB_PATH)
     return c
 
 
