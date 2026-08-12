@@ -1662,3 +1662,34 @@ def test_nella_riconciliazione_vince_chi_ha_il_TELEGRAM_ID(tmp_path):
     proprietario = c.execute('SELECT owner_user_id FROM chats WHERE telegram_chat_id=?',
                              (CHAT_A,)).fetchone()[0]
     assert proprietario == vero, (proprietario, vero)
+
+
+def test_a_PARITA_di_telegram_id_vince_l_id_piu_basso(tmp_path):
+    """Il caso di parita-, che il criterio nuovo non deve aver reso indeterminato.
+
+    Chiesto da GPT-5.5 dopo la correzione che fa vincere chi ha un `telegram_id`: se
+    entrambe le righe ne hanno uno, `(telegram_id IS NULL)` vale 0 per tutte e due e
+    l'ordinamento cade sul secondo criterio. Il test lo fissa, perche- «vince chi ha
+    l'identita-» senza un secondo criterio sarebbe una regola a meta-.
+    """
+    c = _database_di_produzione(tmp_path / 'parita.db')
+    _crea_users(c, con_origin_profile=True)
+    main.migra(c)
+    c.execute('DROP INDEX users_origin_profile')
+    primo = c.execute('SELECT id FROM users WHERE origin_profile=?',
+                      (main.PIERO_PROFILE,)).fetchone()[0]
+    c.execute('UPDATE users SET telegram_id=? WHERE id=?', ('111', primo))
+    c.execute("INSERT INTO users(origin_profile, telegram_id, first_name, slug)"
+              " VALUES (?, '222', 'Piero', 'piero-2')", (main.PIERO_PROFILE,))
+    secondo = c.execute('SELECT id FROM users WHERE telegram_id=?', ('222',)).fetchone()[0]
+    assert secondo > primo
+
+    main.migra(c)
+
+    superstite = c.execute('SELECT id FROM users WHERE origin_profile=?',
+                           (main.PIERO_PROFILE,)).fetchone()[0]
+    assert superstite == primo, (
+        f'a parita- di telegram_id ha vinto {superstite} invece del piu- basso {primo}: '
+        'la regola non e- deterministica')
+    # E nessuna delle due righe e- stata cancellata: entrambe sono identita- vere.
+    assert {r[0] for r in c.execute('SELECT id FROM users').fetchall()} >= {primo, secondo}
