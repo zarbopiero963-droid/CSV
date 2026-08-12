@@ -59,6 +59,32 @@ ROTTE_PUBBLICHE = {
     # da- 401. La correzione e- il secret_token di Telegram — Issue #13 — e finche-
     # non c'e- questa voce elenca un rischio noto, non una difesa.
     ('POST', '/telegram/webhook'),
+    # Chiudere una sessione che non esiste e' un no-op, e deve riuscire sempre: chi
+    # premesse «esci» con un cookie gia' scaduto vedrebbe altrimenti un errore per
+    # un'operazione che ha ottenuto ciò che voleva. Non tocca il database e non
+    # rivela niente — cancella un cookie.
+    ('POST', '/api/logout'),
+}
+
+# La TERZA categoria, nata col PR 6: rotte che non usano `CSV_ACCESS_TOKEN` ma non
+# sono pubbliche — hanno un'autenticazione **propria**.
+#
+# Esistono perche' `CSV_ACCESS_TOKEN` e' un segreto unico per tutto il servizio, e un
+# login non puo' pretenderlo: chi fa login e' proprio chi non ha ancora niente in mano.
+#
+# Metterle in `ROTTE_PUBBLICHE` sarebbe stato piu' rapido e avrebbe **spento la
+# guardia** su di loro: la guardia dice «questa rotta rifiuta chi non ha il token», e
+# per queste la frase giusta e' «rifiuta chi non ha la propria credenziale». Il valore
+# atteso e' scritto qui accanto a ciascuna, e il test lo verifica invece di saltarle.
+ROTTE_CON_AUTENTICAZIONE_PROPRIA = {
+    # Firma HMAC del Login Widget assente o non valida → 401.
+    ('POST', '/api/login/telegram'): 401,
+    # `ADMIN_PASSWORD_HASH` non configurato → 503, come `auth()` senza token: chi lo
+    # vede deve andare a configurare, non a cercare la password giusta. Il servizio dei
+    # test non porta quella variabile, quindi qui l'atteso e' 503.
+    ('POST', '/api/login/password'): 503,
+    # Cookie di sessione assente, non firmato o scaduto → 401.
+    ('GET', '/api/me'): 401,
 }
 
 # I MOUNT sono un'altra cosa dalle rotte, e vanno dichiarati a parte: non hanno
@@ -242,12 +268,13 @@ def _corpo_finto(endpoint):
     return None
 
 
-def _rotte_protette():
-    """Ogni rotta dell'app che non e- dichiarata pubblica in `ROTTE_PUBBLICHE`.
+def _tutte_le_rotte():
+    """Ogni `(metodo, path, endpoint)` dell'app, senza filtri.
 
-    Enumerata da `main.app.routes`, non scritta a mano: un endpoint NUOVO che si
-    dimentica `auth()` fa diventare rosso questo test, che e- la meta- del suo
-    valore. Un elenco a mano coprirebbe solo i dodici di oggi.
+    Estratta perche' la usano in tre: `_rotte_protette`, il test che verifica le rotte
+    con autenticazione propria, e quello che conta le tre categorie. Tenerne tre copie
+    e- la duplicazione che la regola 3 vieta, e la divergenza sarebbe silenziosa —
+    ognuna salterebbe rotte diverse.
     """
     for r in main.app.routes:
         metodi = getattr(r, 'methods', None)
@@ -257,13 +284,31 @@ def _rotte_protette():
         if r.path.startswith(('/openapi', '/docs', '/redoc')):
             continue  # generate da FastAPI, non nostre
         for metodo in sorted(metodi - {'HEAD', 'OPTIONS'}):
-            if (metodo, r.path) in ROTTE_PUBBLICHE:
-                continue
             yield metodo, r.path, endpoint
 
 
+def _rotte_protette():
+    """Ogni rotta dell'app che non e- dichiarata pubblica in `ROTTE_PUBBLICHE`.
+
+    Enumerata da `main.app.routes`, non scritta a mano: un endpoint NUOVO che si
+    dimentica `auth()` fa diventare rosso questo test, che e- la meta- del suo
+    valore. Un elenco a mano coprirebbe solo i dodici di oggi.
+    """
+    for metodo, path, endpoint in _tutte_le_rotte():
+        if (metodo, path) in ROTTE_PUBBLICHE:
+            continue
+        if (metodo, path) in ROTTE_CON_AUTENTICAZIONE_PROPRIA:
+            continue  # verificate dal test dedicato, con il loro codice atteso
+        yield metodo, path, endpoint
+
+
 def _chiama(base, metodo, path, endpoint, token=None):
-    """Esegue la richiesta e restituisce il codice di stato, senza sollevare."""
+    """Esegue la richiesta e restituisce `(stato, corpo, intestazioni)`, senza sollevare.
+
+    Le intestazioni servono perche' un cookie di sessione sta in `Set-Cookie` e non nel
+    corpo: senza, l'asserzione che verifica «una risposta di rifiuto non emette cookie»
+    cercava nel posto sbagliato e passava sempre.
+    """
     # I parametri di percorso non esistono: `auth()` viene prima della ricerca nel
     # database, quindi un nome inventato deve dare 401 e non 404 — e il fatto che
     # dia 401 dimostra proprio quell'ordine, cioe- che il servizio non rivela
@@ -287,9 +332,9 @@ def _chiama(base, metodo, path, endpoint, token=None):
     req = urllib.request.Request(url, data=dati, headers=intestazioni, method=metodo)
     try:
         with urllib.request.urlopen(req, timeout=10) as r:  # noqa: S310 - loopback
-            return r.status, r.read()
+            return r.status, r.read(), r.headers
     except urllib.error.HTTPError as e:
-        return e.code, e.read()
+        return e.code, e.read(), e.headers
 
 
 def _e_errore_di_validazione(corpo: bytes) -> bool:
@@ -332,7 +377,7 @@ def test_ogni_rotta_protetta_rifiuta_una_richiesta_senza_token(servizio_con_toke
     )
     aperte = []
     for metodo, path, endpoint in rotte:
-        stato, _ = _chiama(servizio_con_token, metodo, path, endpoint)
+        stato, _, _ = _chiama(servizio_con_token, metodo, path, endpoint)
         if stato != 401:
             aperte.append(f'{metodo} {path} -> {stato}')
     assert not aperte, (
@@ -351,7 +396,8 @@ def test_le_rotte_protette_accettano_il_token_giusto(servizio_con_token):
     """
     negati, invalidi = [], []
     for metodo, path, endpoint in _rotte_protette():
-        stato, corpo = _chiama(servizio_con_token, metodo, path, endpoint, token=TOKEN_DI_PROVA)
+        stato, corpo, _ = _chiama(servizio_con_token, metodo, path, endpoint,
+                                  token=TOKEN_DI_PROVA)
         if stato in (401, 503):
             negati.append(f'{metodo} {path} -> {stato}')
         elif stato == 422 and _e_errore_di_validazione(corpo):
@@ -447,7 +493,8 @@ def test_senza_token_configurato_anche_le_api_di_scrittura_sono_chiuse(servizio_
     `POST /api/test-message` aperto inietta un segnale nel CSV che XTrader legge.
     """
     for metodo, path, endpoint in _rotte_protette():
-        stato, _ = _chiama(servizio_senza_token, metodo, path, endpoint, token='qualunque-cosa')
+        stato, _, _ = _chiama(servizio_senza_token, metodo, path, endpoint,
+                              token='qualunque-cosa')
         assert stato == 503, f'{metodo} {path} risponde {stato} invece di 503'
 
 
@@ -497,3 +544,60 @@ def test_health_non_contiene_il_token(servizio_con_token):
     with urllib.request.urlopen(f'{servizio_con_token}/health', timeout=10) as r:  # noqa: S310 - loopback
         corpo = r.read()
     assert TOKEN_DI_PROVA.encode() not in corpo, f'il token e- in /health: {corpo!r}'
+
+
+# ------------------------------- le rotte con autenticazione propria (PR 6)
+
+@pytest.mark.parametrize(('metodo', 'path'), sorted(ROTTE_CON_AUTENTICAZIONE_PROPRIA))
+def test_le_rotte_di_login_rifiutano_chi_non_ha_la_PROPRIA_credenziale(
+        metodo, path, servizio_con_token):
+    """Non usano `CSV_ACCESS_TOKEN`, ma non per questo sono aperte.
+
+    Il rischio che questo test copre e- l'abbreviazione comoda: dichiarare una rotta di
+    login «pubblica» perche' non pretende il token del feed, e con quel gesto spegnere
+    la guardia su di lei. Qui l'atteso e- scritto per ciascuna, e il fatto che una rotta
+    di login **rifiuti** e- verificato, non assunto.
+
+    La richiesta parte con il token del feed VALIDO, cosi- l'eventuale successo non
+    potrebbe essere spiegato con «mancava il token»: se una di queste rispondesse 200,
+    starebbe aprendo una sessione a chi non ha ne' firma ne' password.
+    """
+    atteso = ROTTE_CON_AUTENTICAZIONE_PROPRIA[(metodo, path)]
+    endpoint = next(e for m, p, e in _tutte_le_rotte() if (m, p) == (metodo, path))
+    stato, corpo, intestazioni = _chiama(servizio_con_token, metodo, path, endpoint,
+                                        token=TOKEN_DI_PROVA)
+    assert stato == atteso, (
+        f'{metodo} {path} risponde {stato} invece di {atteso}. Se e- 200, questa rotta '
+        f'apre una sessione a chi non ha nessuna credenziale; il corpo era: {corpo[:200]!r}')
+    # Sull'header `Set-Cookie`, non sul corpo: il cookie vive la-, quindi cercarlo nel
+    # corpo passava anche se la rotta lo avesse impostato davvero. Era la mia asserzione
+    # che non asseriva niente, segnalata da CodeRabbit sulla PR #23 — e una guardia
+    # vacua e- peggio di nessuna guardia, perche- si legge come copertura.
+    emessi = intestazioni.get_all('Set-Cookie') or []
+    assert not any(main.NOME_COOKIE in c for c in emessi), (
+        f'{metodo} {path} ha messo un cookie di sessione in una risposta di rifiuto: '
+        f'{emessi}')
+
+
+def test_le_tre_categorie_di_rotte_coprono_TUTTE_le_rotte():
+    """Nessuna rotta puo' sfuggire alla classificazione.
+
+    E- il guardiano del guardiano: `_rotte_protette()` salta ciò che e' dichiarato
+    pubblico o con autenticazione propria, quindi una voce aggiunta per comodita- a uno
+    dei due insiemi **toglie** una rotta dal controllo. Questo test conta, e il totale
+    deve tornare.
+
+    Serve anche al caso opposto: una voce rimasta nei due insiemi dopo che la rotta e-
+    stata cancellata farebbe credere coperta una cosa che non esiste piu-.
+    """
+    tutte = {(m, p) for m, p, _ in _tutte_le_rotte()}
+    protette = {(m, p) for m, p, _ in _rotte_protette()}
+    pubbliche = set(ROTTE_PUBBLICHE)
+    proprie = set(ROTTE_CON_AUTENTICAZIONE_PROPRIA)
+
+    assert protette | pubbliche | proprie == tutte, (
+        'classificazione incompleta:\n'
+        f'  rotte non classificate: {sorted(tutte - protette - pubbliche - proprie)}\n'
+        f'  dichiarate ma inesistenti: {sorted((pubbliche | proprie) - tutte)}')
+    doppie = (pubbliche & proprie) | (pubbliche & protette) | (proprie & protette)
+    assert not doppie, f'rotte in due categorie insieme: {sorted(doppie)}'

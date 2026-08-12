@@ -234,7 +234,9 @@ veda.
 ## Regole di isolamento
 
 1. Ogni parser appartiene obbligatoriamente a un utente. `user_id` viene sempre
-   preso dalla sessione, mai da un parametro della richiesta.
+   preso dalla sessione, mai da un parametro della richiesta. Dal PR 6 quella
+   sessione esiste, e il solo posto da cui leggerla è `utente_dalla_sessione()`
+   in `main.py` — vedi «Il cookie di sessione».
 2. Ogni endpoint che riceve un `parser_id` verifica la proprietà prima di leggere
    o scrivere. Un parser di un altro utente risponde 404, non 403: non si rivela
    nemmeno l'esistenza.
@@ -399,7 +401,12 @@ mesi. **Un controllo che nessuno legge non è un controllo.**
 
 ## Contratto API
 
-Implementato con dati finti in `web/api.js`, un commento per endpoint.
+Il **disegno**, implementato con dati finti in `web/api.js`, un commento per endpoint.
+Non è ciò che il server espone: le rotte che esistono davvero sono elencate in
+«Le rotte di sessione che esistono davvero» sotto «Autenticazione», e i **nomi non
+coincidono** — il disegno dice `/api/auth/telegram/widget`, il server risponde su
+`/api/login/telegram`. Riconciliare i due è il PR che collega la web app al backend,
+non questo: fino a quel momento va letta la sezione sotto, non questo blocco.
 
 ```text
 POST   /api/auth/telegram/widget      verifica HMAC del Login Widget → sessione
@@ -440,6 +447,146 @@ data-check-string si verifica lato server con chiave `sha256(bot_token)`.
 Fallback con deep-link al bot e codice a 6 cifre, per chi arriva da mobile.
 La sessione è un cookie httpOnly firmato. Il token del bot resta sul server: la
 web app non lo riceve e non lo conserva mai.
+
+### Le rotte di sessione che esistono davvero
+
+Dal PR 6. Quattro rotte, e sono le **uniche** del servizio con un'autenticazione
+propria: tutte le altre sono o pubbliche, o protette da `auth()` col token unico
+descritto sotto. La distinzione non è narrativa — è una delle tre categorie che
+`tests/relay/test_autenticazione.py` verifica coprano **ogni** rotta dichiarata
+dall'app, così una rotta nuova senza serratura fa fallire quel test invece di
+passare inosservata.
+
+| Rotta | Cosa fa | Rifiuta con |
+|---|---|---|
+| `POST /api/login/telegram` | firma del Login Widget → sessione | `401 login non valido` |
+| | i campi si mandano **come li consegna il widget**: `id` e `auth_date` sono numeri e vengono accettati tali. La firma si calcola sulle forme **testuali JSON** (`true`, non `True`) | |
+| `POST /api/login/password` | `administrator` + password → sessione | `401`, `429` se frenato, `503` se la variabile manca |
+| *entrambe* | | `503` anche se manca `TELEGRAM_BOT_TOKEN`: il segreto dei cookie deriva da lì, quindi non c'è nessuna sessione da emettere |
+| `POST /api/logout` | cancella il cookie | niente: è pubblica di proposito |
+| `GET /api/me` | chi è l'utente della sessione | `401 sessione assente o scaduta` |
+
+`POST /api/logout` è pubblica **per scelta**, non per dimenticanza: cancella un cookie
+e non legge nulla. Metterle una serratura significherebbe che chi ha un cookie
+malformato non riesce a liberarsene, cioè resta incastrato in uno stato da cui
+l'unica uscita è svuotare i cookie a mano.
+
+`GET /api/me` non restituisce mai un token, né l'hash della password, né il
+`telegram_id`: i primi due sono segreti, il terzo non serve al browser e finirebbe nei
+log di qualunque proxy davanti al servizio. Restituisce `utente`, `nome`, `stato`,
+`admin`, `accesso_scade`.
+
+**Il messaggio d'errore non distingue «firma sbagliata» da «firma scaduta».** Per
+differenza si impara, e chi prova non deve sapere quale dei due muri ha toccato.
+
+### Le due porte, e perché non sono ridondanza
+
+Il proprietario entra in due modi, e il secondo non è un vezzo:
+
+1. **Login Telegram** (`TELEGRAM_ADMIN_ID`). Il suo account nel database esiste già —
+   è la riga con `origin_profile = 'PIERO'` — e possiede i suoi parser, ma **non ha
+   `telegram_id`**, perché nessuno lo aveva mai saputo. Al primo login la variabile
+   dice «questo ID è il proprietario», e il codice **attacca** il `telegram_id` a quella
+   riga invece di crearne una nuova. Senza la variabile resterebbero due account: uno
+   con tutta la sua roba e nessun modo di entrarci, e uno vuoto in cui entra.
+2. **Password** (`ADMIN_PASSWORD_HASH`), utente fisso `administrator`. Esiste perché
+   con il solo login Telegram un guasto di Telegram, o la perdita di quell'account,
+   chiuderebbero il proprietario fuori dal proprio pannello.
+
+Nella variabile va **l'hash**, non la password. La dashboard di Railway è leggibile da
+chi ha accesso al progetto, e con la password in chiaro chi la legge entra nel pannello
+— da cui si cancellano parser e si inietta un segnale nel feed che XTrader legge. Si
+cambia password cambiando la variabile; il comando che genera l'hash è in `README.txt`.
+
+Il percorso a password ha un **freno**: cinque tentativi falliti e si chiude per cinque
+minuti, con `429` e non `401`, perché chi legge deve sapere che il muro è il freno e non
+la password. Il tentativo si **conta prima** della verifica, dentro lo stesso lock che
+controlla il freno, e si azzera solo in caso di successo — «consuma un gettone prima di
+lavorare». Erano due gesti separati con `scrypt` in mezzo, quindi dodici richieste
+concorrenti passavano tutte: il limite si aggirava mandandole insieme, e ogni richiesta
+accendeva uno `scrypt`, cioè il freno amplificava il carico invece di ridurlo. Segnalato
+da GPT-5.6 Sol sulla PR #23. Il freno è **globale e non per IP**, con un baratto dichiarato: per IP non
+frenerebbe nulla, perché chi prova password in automatico cambia indirizzo; globale sì,
+al prezzo che un estraneo può tenere occupato quel percorso per qualche minuto. Il
+prezzo è accettabile **proprio perché le porte sono due** — il proprietario entra col
+login Telegram mentre quella a password è frenata. È la ragione tecnica per cui averne
+due non è ridondanza.
+
+Ogni accesso riuscito con password scrive una riga in `admin_audit`: è l'unico modo per
+cui un accesso non suo sia visibile, e per cui «non sono stato io» sia dimostrabile.
+
+### Il cookie di sessione
+
+`utente.versione.emessa.firma`, firmato HMAC-SHA256. Un cookie lo scrive il browser:
+senza firma `utente=7` diventa `utente=8` con un editor di testo, e la firma è ciò che
+lo trasforma da dichiarazione in credenziale.
+
+Il segreto è **derivato dal token del bot**, `sha256('betrelay-sessione-v1:' + token)`,
+come `webhook_secret` e per la stessa ragione: una variabile a sé lascerebbe una
+finestra fra il deploy e la sua configurazione, e in quella finestra bisognerebbe
+scegliere fra un login rotto e un login che accetta cookie non firmati — due modi di
+sbagliare. Il prefisso lo separa dal segreto del webhook, così un valore rubato da un
+canale non serve nell'altro. **Senza bot il segreto è vuoto e nessuna sessione è
+valida**: fail-closed, come `auth()` dopo la correzione di luglio.
+
+Attributi: `HttpOnly` (un cookie leggibile da JavaScript è un cookie che un XSS porta
+via), `SameSite=Lax` (una POST da un altro sito non deve portarsi dietro la sessione),
+`Secure` (il servizio è dietro TLS, quindi non c'è niente da perdere).
+
+Tre controlli, e ognuno serve per un motivo diverso:
+
+- la **firma**, contro un cookie riscritto;
+- la **scadenza per inattività**, 20 minuti dal momento in `emessa`. È «di inattività» e
+  non «di sessione» perché **ogni rotta che valida la sessione riemette il cookie** con
+  un `emessa` nuovo — oggi `GET /api/me`, e ogni rotta autenticata futura deve fare lo
+  stesso. **È verificato, non raccomandato:**
+  `test_ogni_rotta_che_usa_la_SESSIONE_rinnova_anche_il_cookie` elenca le rotte il cui
+  codice legge `utente_dalla_sessione` e pretende che riemettano il cookie — una rotta
+  nuova che se ne dimentica fa fallire quel test invece di funzionare benissimo e far
+  scadere la sessione di chi la usa. Il rischio è stato alzato da Fable 5 e GPT-5.5 sulla
+  PR #23. Il rinnovo va **dopo** la validazione: prima, un cookie scaduto tornerebbe buono
+  al primo tentativo e la scadenza si annullerebbe da sé. Ed è **per-rotta e non un
+  middleware**, di proposito: un middleware girerebbe anche su `/xtrader.csv`, cioè
+  metterebbe codice di sessione sul percorso del feed — esattamente la NON-relazione
+  descritta sotto. *Fino al 12/08/2026 il rinnovo non esisteva e questa riga diceva
+  comunque «di inattività»: la scadenza era assoluta dal login, quindi il proprietario si
+  sarebbe trovato buttato fuori ogni venti minuti mentre lavorava. Segnalato
+  indipendentemente da GPT-5.5, Claude Fable 5 e CodeRabbit sulla PR #23 — tre reviewer
+  sullo stesso punto, perché la promessa era scritta qui e in `README.txt` e il codice non
+  la manteneva;*
+- **`session_version` confrontata con quella nel database**, che è il modo di invalidare
+  una sessione **subito** senza aspettare i venti minuti: serve per «entra come cliente»
+  e per buttare fuori un accesso sospetto. Senza quel confronto un cookie rubato
+  resterebbe valido fino alla scadenza naturale e non ci sarebbe niente da fare. Il
+  meccanismo era completamente scoperto dai test finché un sabotaggio non l'ha mostrato:
+  toltogli il confronto, la suite restava verde.
+
+`POST /api/logout` **non** incrementa `session_version`: quello butterebbe fuori tutte
+le sessioni di quell'utente da tutti i dispositivi, e non è ciò che chiede chi preme
+«esci» su un computer.
+
+### La sessione e il feed non si toccano
+
+`user_id` viene **sempre** dalla sessione (`utente_dalla_sessione`) e **mai** da un
+parametro della richiesta: un `user_id` letto da un parametro o da un header è un
+`user_id` scelto dal mittente.
+
+Il verso opposto conta altrettanto, ed è una **NON-relazione** che va misurata via HTTP
+perché non si vede leggendo il codice: `/xtrader.csv` e `/profiles/…` **non consultano
+la sessione**. Non la leggono oggi e non devono cominciare. XTrader non ha cookie, non
+fa login e interroga il feed a raffica: il giorno che una scadenza di sessione potesse
+svuotare un feed, il segnale morirebbe in silenzio mentre il pannello funziona
+perfettamente. Il test `test_la_sessione_scaduta_NON_tocca_il_feed` presenta un cookie
+scaduto, verifica il `401` su `/api/me`, e asserisce che i **byte** del feed sono
+identici a prima.
+
+### Cosa il PR 6 non fa
+
+Un account nuovo nasce con `status = 'registrato'` e non può fare niente: **concedere
+l'accesso è il PR sull'approvazione**, non questo. Le rotte `/api/*` di gestione restano
+protette da `auth()` col token unico: passarle alla sessione è il PR sul feed per
+utente. E la web app in `web/` continua a girare sui dati finti di `web/api.js` — i suoi
+nomi di rotta non sono ancora quelli del server, vedi «Contratto API».
 
 ### Il token del relay oggi: obbligatorio, e fail-closed
 
@@ -683,9 +830,10 @@ senza doppio ruolo.
 | Fatto | Prototipo web app in `web/`, servito su `/app`, con motore di parsing e contratto API |
 | Fatto | Test hard del motore e del contratto CSV (`tests/engine/`), guardia sui workflow di review (`tests/safety/`) |
 | Fatto | Lo **schema** di questa sezione, creato in place su SQLite da `migra()`, con i dati esistenti travasati e i test in `tests/relay/test_schema.py`. Le tabelle esistono e i vincoli reggono; il *comportamento* che le usa è dei PR sotto |
+| Fatto | **Login Telegram reale e sessioni** (PR 6): le quattro rotte di «Le rotte di sessione che esistono davvero», il cookie firmato, le due porte del proprietario, e la NON-relazione fra sessione e feed. Manca il resto di M3: la web app è ancora sui dati finti |
 | M1 | Token hashati, verifica chat, feed per utente, compatibilità `/xtrader.csv`. **Postgres differito** e non più urgente: i dati persistono già, `DB_PATH` in produzione è `/data/signals.db` dentro il volume (misurato il 12/08/2026) |
 | M2 | Motore di parsing generico in Python, endpoint di test, dispatch multi-parser nel webhook |
-| M3 | Login Telegram reale, sessioni, la web app collegata al backend |
+| M3 | Accesso su approvazione, la web app collegata al backend |
 | M4 | Log persistenti, sospensione, suggerimento AI lato server, abbonamenti |
 
 ## Facciata pubblica

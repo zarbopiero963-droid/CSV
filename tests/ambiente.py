@@ -32,6 +32,14 @@ CHIAVI_PERICOLOSE = (
     'CSV_ACCESS_TOKEN',          # farebbe rispondere 401 alle richieste senza token
     'PUBLIC_URL',                # destinazione del setWebhook
     'DATABASE_URL',              # quando si passera' a Postgres
+    # Le due del PR 6. Ereditarle non fa danno al bot vero, ma rende l'esito
+    # dipendente dalla macchina: con `ADMIN_PASSWORD_HASH` del proprietario un test
+    # sul percorso a password non potrebbe entrare — non conosce la sua password — e
+    # verificherebbe la cosa sbagliata credendo di aver verificato quella giusta. Con
+    # `TELEGRAM_ADMIN_ID` reale, un test che afferma «questo utente NON e' admin»
+    # passerebbe o fallirebbe secondo chi lo esegue.
+    'TELEGRAM_ADMIN_ID',
+    'ADMIN_PASSWORD_HASH',
 )
 
 # Il token che i test PORTANO, invece di ereditare quello del proprietario.
