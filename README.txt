@@ -121,10 +121,18 @@ status ok e webhook_registrato true, poi manda un segnale di prova dal canale.
 
 ASPETTA QUALCHE SECONDO PRIMA DI GUARDARE. La registrazione del webhook parte
 DIETRO l'avvio, non davanti: il servizio risponde subito e la registrazione
-prosegue in parallelo, ritentando fino a tre volte. Nei primi secondi /health puo'
-quindi non avere ancora la chiave webhook_registrato, o averla false: non e' un
-guasto, e' una registrazione ancora in corso. Se dopo mezzo minuto e' ancora false,
-allora e' un guasto e sotto c'e' scritto dove guardare.
+prosegue in parallelo, ritentando fino a tre volte. Nei primi secondi /health dice
+quindi status degraded, senza la chiave webhook_registrato: non e' un guasto, e' una
+registrazione ancora in corso, e in quella finestra il relay davvero non puo'
+ricevere niente. Se dopo mezzo minuto non e' diventato ok, allora e' un guasto e
+sotto c'e' scritto dove guardare.
+Come distinguere i tre casi, guardando insieme "webhook" e "webhook_registrato":
+  webhook "chiuso senza bot"            -> manca TELEGRAM_BOT_TOKEN
+  webhook "protetto", chiave assente    -> registrazione in corso, o mai tentata
+  webhook "protetto", registrato false  -> tentata e fallita: guarda PUBLIC_URL,
+                                           la rete, il token del bot
+"non ancora tentato" e "tentato e fallito" sono stati diversi, e la differenza dice
+se aspettare o intervenire.
 Prima questa attesa stava DAVANTI all'avvio: uvicorn non serviva finche' la
 registrazione non era finita, quindi con la rete lenta /health non rispondeva per
 oltre trenta secondi dopo ogni deploy. Un handler di startup ASGI deve terminare

@@ -257,11 +257,26 @@ async def register_telegram_webhook():
     """
     if not os.getenv('TELEGRAM_BOT_TOKEN', ''):
         return
-    for tentativo in range(3):
-        if await asyncio.to_thread(assicura_registrazione, True):
-            return
-        if tentativo < 2:
-            await asyncio.sleep(1 + tentativo)
+    try:
+        for tentativo in range(3):
+            if await asyncio.to_thread(assicura_registrazione, True):
+                return
+            if tentativo < 2:
+                await asyncio.sleep(1 + tentativo)
+    except Exception:
+        # Da quando questa coroutine gira come `Task` dietro l'avvio, un'eccezione
+        # inattesa morirebbe FUORI dal flusso di avvio: nessuno la vedrebbe, e lo
+        # stato resterebbe `None`, cioe' «non ancora tentato», per sempre. Il
+        # fallimento va REGISTRATO: «non tentato» e «tentato e fallito» sono stati
+        # diversi, e solo il secondo dice che c'e' un guasto da guardare.
+        # Segnalato da GPT-5.5 come conseguenza dello spostamento in background.
+        #
+        # Solo se nessun tentativo ha registrato un esito: un guasto qui non deve
+        # cancellare il `True` di una registrazione riuscita.
+        global _WEBHOOK_REGISTRATO
+        with _WEBHOOK_LOCK:
+            if _WEBHOOK_REGISTRATO is None:
+                _WEBHOOK_REGISTRATO = False
 
 DB_PATH = os.getenv('DB_PATH', '/tmp/signals.db')
 TOKEN = os.getenv('CSV_ACCESS_TOKEN', '')
@@ -669,8 +684,17 @@ def health():
     # separate una registrazione che completa nel mezzo faceva uscire `status: ok`
     # accanto a `webhook_registrato: false`.
     registrato = _stato_registrazione()
+    # `is True`, non `is not False`: con il bot configurato «sano» significa
+    # REGISTRATO. `None` non e' una buona notizia, e' «non ancora» — e un'istanza
+    # col bot che non ha mai completato la registrazione non riceve nessun segnale,
+    # quindi dichiararla sana a tempo indeterminato era la meta- non corretta della
+    # stessa classe chiusa per il caso «nessun bot». Segnalato da GPT-5.5.
+    #
+    # Conseguenza voluta: nei primi istanti dopo un deploy lo stato e' `degraded`,
+    # perche' in quella finestra il relay davvero non puo' ricevere niente. Sta in
+    # `README.txt`, accanto al controllo da fare dopo un deploy.
     sano = (csv_state == 'ok' and auth_state == 'ok'
-            and webhook_state == 'protetto' and registrato is not False)
+            and webhook_state == 'protetto' and registrato is True)
     stato = {'status': 'ok' if sano else 'degraded',
              'csv': csv_state, 'auth': auth_state, 'webhook': webhook_state,
              'feed_scartati': scarti}

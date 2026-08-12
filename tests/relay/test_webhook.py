@@ -312,6 +312,72 @@ def test_senza_bot_health_dice_DEGRADED_non_ok(servizio_senza_bot):
     assert dati.get('auth') == 'ok', dati
 
 
+def test_con_bot_ma_senza_registrazione_health_dice_DEGRADED(monkeypatch):
+    """`None` con un bot configurato non e- «sano», e- «non ancora».
+
+    Il giro precedente ha reso `degraded` il caso «nessun bot». Restava l'altra
+    meta- della stessa classe: con un bot configurato e `_WEBHOOK_REGISTRATO` a
+    `None` — registrazione mai completata — la condizione era `registrato is not
+    False`, e `None is not False` e- vero. Quindi un'istanza col bot che non ha mai
+    registrato il webhook, e che quindi **non riceve nessun segnale**, si dichiarava
+    sana a tempo indeterminato. Segnalato da GPT-5.5.
+
+    La condizione giusta e- `is True`: con il bot presente, sano significa
+    registrato. Nei primi istanti dopo un deploy lo stato e- quindi `degraded` —
+    ed e- corretto, perche- in quella finestra il relay davvero non puo- ricevere
+    niente. `README.txt` lo dice a chi guarda dopo un deploy.
+    """
+    monkeypatch.setattr(main, 'SEGRETO_WEBHOOK', main.webhook_secret(BOT_FINTO))
+    monkeypatch.setattr(main, '_WEBHOOK_REGISTRATO', None)
+    salute = main.health()
+    assert salute['webhook'] == 'protetto', salute
+    assert salute['status'] == 'degraded', (
+        f'col bot configurato e nessuna registrazione avvenuta si dichiara sana: '
+        f'{salute}'
+    )
+    # E la chiave non c'e-, perche- nessun tentativo e- stato fatto: `status` da solo
+    # dice che qualcosa non va, e `webhook: protetto` esclude che sia il bot.
+    assert 'webhook_registrato' not in salute, salute
+
+
+def test_un_compito_di_registrazione_che_MUORE_non_lascia_lo_stato_indEFINITO(monkeypatch):
+    """Se il task di registrazione solleva, il fallimento va REGISTRATO.
+
+    Da quando la registrazione gira dietro l'avvio e- un `Task`, e un `Task` che
+    muore per un'eccezione inattesa muore **fuori** dal flusso di avvio: nessuno la
+    vede, e `_WEBHOOK_REGISTRATO` resterebbe `None` per sempre. Con la condizione
+    corretta di `health()` quello e- gia- `degraded`, ma «non ancora tentato» e
+    «tentato e fallito» sono stati diversi e il secondo va detto. Segnalato da
+    GPT-5.5 come conseguenza dello spostamento in background.
+
+    Solo se nessun tentativo ha registrato un esito: un fallimento del compito non
+    deve sovrascrivere il `True` di un tentativo che era riuscito.
+    """
+    monkeypatch.setenv('TELEGRAM_BOT_TOKEN', BOT_FINTO)
+    monkeypatch.setattr(main, '_WEBHOOK_REGISTRATO', None)
+
+    def esplode(*a, **k):
+        raise RuntimeError('guasto inatteso dentro la registrazione')
+
+    monkeypatch.setattr(main, 'assicura_registrazione', esplode)
+    monkeypatch.setattr(main.asyncio, 'sleep', _senza_attesa)
+
+    asyncio.run(main.register_telegram_webhook())   # non deve propagare
+
+    assert main._WEBHOOK_REGISTRATO is False, (
+        f'il compito e- morto e lo stato e- rimasto {main._WEBHOOK_REGISTRATO!r}: '
+        f'un webhook non registrato non deve poter apparire «non ancora tentato» '
+        f'per sempre'
+    )
+
+    # E non sovrascrive un successo: se un tentativo era riuscito, resta riuscito.
+    monkeypatch.setattr(main, '_WEBHOOK_REGISTRATO', True)
+    asyncio.run(main.register_telegram_webhook())
+    assert main._WEBHOOK_REGISTRATO is True, (
+        'un guasto del compito ha cancellato una registrazione riuscita'
+    )
+
+
 def test_health_legge_lo_stato_della_registrazione_UNA_VOLTA(monkeypatch):
     """`status` e `webhook_registrato` non possono contraddirsi.
 

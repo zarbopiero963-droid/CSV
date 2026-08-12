@@ -409,11 +409,23 @@ per niente. Con tre tentativi da dieci secondi sono oltre trenta secondi di
 indisponibilità a ogni deploy con la rete lenta. Segnalato da Fugu Ultra.
 
 Conseguenza operativa, scritta anche in `README.txt`: nei primi secondi dopo un
-deploy `webhook_registrato` può mancare o essere `false` perché la registrazione è
-ancora in corso. Non è un guasto; lo diventa se resta `false` dopo mezzo minuto. Il
-riferimento al task è tenuto in una variabile di modulo: un `Task` senza riferimenti
-può essere raccolto dal garbage collector prima di finire, e la registrazione non
-avverrebbe in silenzio.
+deploy lo `status` è `degraded` perché la registrazione è ancora in corso — e in
+quella finestra il relay davvero non può ricevere niente, quindi è la risposta
+onesta. Non è un guasto; lo diventa se non passa a `ok` entro mezzo minuto.
+
+`sano` chiede `webhook_registrato is True`, non `is not False`: `None` con un bot
+configurato significa **«non ancora»**, non «sano», e un'istanza col bot che non ha
+mai completato la registrazione non riceve nessun segnale. Dichiararla sana a tempo
+indeterminato era la metà non corretta della stessa classe chiusa per il caso
+«nessun bot». Segnalato da GPT-5.5.
+
+Il riferimento al task è tenuto in una variabile di modulo: un `Task` senza
+riferimenti può essere raccolto dal garbage collector prima di finire, e la
+registrazione non avverrebbe in silenzio. E se il task muore per un'eccezione
+inattesa il fallimento viene **registrato** (`webhook_registrato: false`), perché
+muore fuori dal flusso di avvio dove nessuno lo vedrebbe: «non tentato» e «tentato e
+fallito» sono stati diversi, e solo il secondo dice che c'è un guasto da guardare.
+Il fallimento del task non sovrascrive il `true` di un tentativo riuscito.
 
 Il valore di `webhook_registrato` si legge **una volta e sotto lock**
 (`_stato_registrazione`). Con tre letture separate e fuori dal lock — com'era — una

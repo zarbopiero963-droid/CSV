@@ -275,7 +275,12 @@ def test_il_feed_degradato_lascia_una_traccia(tmp_path, monkeypatch):
     # `test_senza_bot_health_dice_DEGRADED_non_ok`), in processo `SEGRETO_WEBHOOK`
     # e- vuoto e `status` sarebbe degradato per un motivo che non c'entra con lo
     # scarto. Questo test parla di UN asse: gli altri si isolano, non si ignorano.
+    # Servono ENTRAMBI: il segreto derivabile e la registrazione riuscita. Da quando
+    # `sano` chiede `registrato is True` e non `is not False` (segnalato da GPT-5.5,
+    # perche- `None` con un bot configurato significa «non ancora», non «sano»), il
+    # solo segreto non basta a rendere verde l'asse che qui va neutralizzato.
     monkeypatch.setattr(main, 'SEGRETO_WEBHOOK', 'segreto-di-prova-non-un-bot-vero')
+    monkeypatch.setattr(main, '_WEBHOOK_REGISTRATO', True)
     salute = main.health()
     assert salute['status'] == 'ok', (
         f'uno scarto atteso e autorisolvente non deve marcare il processo come '
