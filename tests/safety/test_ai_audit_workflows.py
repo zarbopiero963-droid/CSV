@@ -496,7 +496,7 @@ def test_i_file_core_entrano_nel_payload_anche_col_budget_stretto(path):
     # Budget deliberatamente insufficiente per tutti e 13: qualcosa DEVE essere
     # scartato. Il test non chiede di non scartare — chiede di scartare i file
     # giusti.
-    testo, saltati, critici, troncato = build(files, 2000, 9000)
+    testo, saltati, critici, troncato, tagliati = build(files, 2000, 9000)
 
     assert 'web/engine.js' not in saltati, (
         'il motore e- stato scartato per budget mentre la documentazione entrava: '
@@ -542,7 +542,7 @@ def test_i_file_core_precedono_i_documenti_nel_payload(path):
     files = [_file_finto(n) for n in FILE_COME_LA_PR_8]
 
     # 1. Budget stretto: si scarta, e si scartano i documenti.
-    testo, saltati, _, _ = build(files, 2000, 5000)
+    testo, saltati, _, _, _ = build(files, 2000, 5000)
     posizione = {n: testo.find(f'FILE: {n}') for n in FILE_COME_LA_PR_8}
     core = {n: p for n, p in posizione.items() if p >= 0 and (n == 'main.py' or n.startswith('web/'))}
     docs = {n: p for n, p in posizione.items() if p >= 0 and n.endswith(('.md', '.txt'))}
@@ -554,7 +554,7 @@ def test_i_file_core_precedono_i_documenti_nel_payload(path):
     )
 
     # 2. Budget largo: entra tutto, e l'ordine si verifica senza condizioni.
-    testo, saltati, _, _ = build(files, 2000, 40000)
+    testo, saltati, _, _, _ = build(files, 2000, 40000)
     posizione = {n: testo.find(f'FILE: {n}') for n in FILE_COME_LA_PR_8}
     core = {n: p for n, p in posizione.items() if p >= 0 and (n == 'main.py' or n.startswith('web/'))}
     docs = {n: p for n, p in posizione.items() if p >= 0 and n.endswith(('.md', '.txt'))}
@@ -805,6 +805,157 @@ def test_gpt55_ha_un_budget_di_output_sufficiente():
     assert int(m.group(1)) >= 3000, (
         f'il default nello script e- {m.group(1)} mentre env dichiara {dichiarato}: '
         f'togliere la riga da env farebbe tornare il troncamento in silenzio'
+    )
+
+
+def test_i_token_dalla_cache_non_si_pagano_a_tariffa_piena():
+    """Il rendiconto non deve dichiarare piu- del vero.
+
+    Sull'API OpenAI il prompt caching e- AUTOMATICO sopra i ~1024 token e
+    `input_tokens` LI INCLUDE. Il workflow li prezzava tutti a tariffa piena,
+    quindi il costo stampato nel commento era piu- alto di quello addebitato — e
+    su quei numeri il proprietario ha deciso di riordinare la roadmap e di
+    smettere di armare il gate. Un rendiconto che sbaglia in eccesso e- meno
+    pericoloso di uno che sbaglia in difetto, ma resta sbagliato.
+
+    Il test ESEGUE `usage_note`: verificare che nel sorgente compaia
+    `cached_tokens` passerebbe anche con la formula vecchia due righe sotto.
+    """
+    sorgente = _script(GPT)
+    blocco = re.search(r'^(\s*)def usage_note\(.*?(?=\n\1[A-Za-z_@])', sorgente, re.S | re.M)
+    assert blocco, 'usage_note non trovata'
+    spazio: dict = {'PRICE_INPUT_PER_MILLION': 5.0,
+                    'PRICE_OUTPUT_PER_MILLION': 30.0,
+                    'PRICE_CACHE_READ_PER_MILLION': 0.5}
+    exec(textwrap.dedent(blocco.group(0)), spazio)  # noqa: S102 - sorgente del repo
+    usage_note = spazio['usage_note']
+
+    # 100.000 input di cui 80.000 dalla cache, 1.000 output.
+    #   giusto : 20.000*5 + 80.000*0.5 + 1.000*30 = 100 + 40 + 30 = $0.170 /M
+    #   vecchio: 100.000*5           + 1.000*30 = 500 + 30       = $0.530 /M
+    con_cache = usage_note(
+        {'input_tokens': 100_000, 'output_tokens': 1_000,
+         'input_tokens_details': {'cached_tokens': 80_000}},
+        'sys', 'usr', 'review')
+    assert '~$0.1700' in con_cache, f'aritmetica della cache sbagliata:\n{con_cache}'
+    assert '~$0.5300' not in con_cache, 'sta ancora prezzando tutto a tariffa piena'
+    # E i token cachati devono essere VISIBILI, non solo scontati.
+    assert '80000' in con_cache, f'i token dalla cache non sono dichiarati:\n{con_cache}'
+
+    # Senza cache il conto non cambia rispetto a prima: nessuna regressione.
+    senza = usage_note({'input_tokens': 100_000, 'output_tokens': 1_000}, 'sys', 'usr', 'review')
+    assert '~$0.5300' in senza, f'senza cache il costo e- cambiato:\n{senza}'
+    assert 'dalla cache' not in senza, 'aggiunge la riga della cache anche quando e- zero'
+
+    # Difesa contro un usage incoerente: cached > input non deve far scendere il
+    # costo sotto il vero, che e- l'errore nella direzione che NASCONDE la spesa.
+    assurdo = usage_note(
+        {'input_tokens': 1_000, 'output_tokens': 0,
+         'input_tokens_details': {'cached_tokens': 999_999}},
+        'sys', 'usr', 'review')
+    assert '-' not in assurdo.split('Costo stimato base')[1], (
+        f'un cached_tokens assurdo ha prodotto un costo negativo:\n{assurdo}'
+    )
+
+
+def _funzione_contesto(path: Path):
+    """Estrae ed ESEGUE `blocco_contesto_mancante` dal workflow reale."""
+    sorgente = _script(path)
+    blocco = re.search(r'^(\s*)def blocco_contesto_mancante\(.*?(?=\n\1[A-Za-z_@])',
+                       sorgente, re.S | re.M)
+    assert blocco, f'{path.name}: blocco_contesto_mancante non trovata'
+    spazio: dict = {}
+    exec(textwrap.dedent(blocco.group(0)), spazio)  # noqa: S102 - sorgente del repo
+    return spazio['blocco_contesto_mancante']
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_il_prompt_DICE_al_modello_cosa_non_ha_visto(path):
+    """Il modello deve sapere di avere un contesto incompleto, non dedurlo.
+
+    Il payload portava gia- il marcatore inline sui file tagliati e il commento
+    elencava i non inviati — ma il PROMPT non diceva niente, quindi il modello
+    riceveva codice incompleto senza saperlo. Misurato sulla PR #14: nove
+    bloccanti dai gate finali, QUATTRO falsi, tutti nella forma «non verificabile
+    dal diff troncato». Il modello dichiarava il proprio limite come se fosse un
+    difetto del codice, e ogni giro cosi- costa ~$1 piu- una correzione inutile.
+
+    Questo test ESEGUE la funzione invece di cercare una stringa: un blocco
+    presente ma mai interpolato passerebbe un controllo strutturale.
+    """
+    blocco = _funzione_contesto(path)
+
+    # Niente troncamento → nessun rumore nel prompt.
+    assert blocco([], []) == '', 'aggiunge il preambolo anche quando non serve'
+
+    testo = blocco(['main.py'], ['web/engine.js'])
+    assert 'main.py' in testo and 'web/engine.js' in testo
+    # I due stati vanno DISTINTI: «incompleto» e «non inviato» richiedono azioni
+    # diverse a chi legge la review.
+    assert 'INCOMPLET' in testo.upper(), testo
+    assert 'NON inviati' in testo, testo
+    # Il vocabolario che rende triabile un bloccante.
+    for etichetta in ('[REAL_FINDING]', '[INSUFFICIENT_CONTEXT]'):
+        assert etichetta in testo, f'{path.name}: manca {etichetta}'
+    # E l'istruzione che impedisce di trasformare un'assenza in un difetto.
+    assert 'NON autorizza' in testo, testo
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_il_preambolo_del_contesto_e_davvero_nel_prompt(path):
+    """Una funzione corretta e mai chiamata non serve a niente.
+
+    E- la meta- che l'esecuzione della funzione non copre: va verificato che il
+    valore finisca DENTRO l'f-string mandata al modello, prima del diff.
+    """
+    sorgente = _script(path)
+    assert 'contesto_mancante = blocco_contesto_mancante(' in sorgente, (
+        f'{path.name}: la funzione non viene chiamata'
+    )
+    prompt = sorgente[sorgente.index('user_prompt = f"""'):]
+    assert '{contesto_mancante}' in prompt, (
+        f'{path.name}: il preambolo non e- interpolato nel prompt utente'
+    )
+    assert prompt.index('{contesto_mancante}') < prompt.index('{diff_text}'), (
+        f'{path.name}: il preambolo arriva DOPO il diff: va letto prima'
+    )
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_un_file_TAGLIATO_a_meta_non_si_confonde_con_uno_non_inviato(path):
+    """Due stati diversi, e il peggiore dei due era invisibile.
+
+    `saltati` elenca i file che il modello NON HA RICEVUTO. Un file tagliato a
+    metà dal tetto per-file non stava da nessuna parte: il modello riceveva
+    codice vero, incompleto, e concludeva su cio- che non poteva vedere senza
+    accorgersene. E- il caso peggiore dei due, perche- l'assenza totale almeno si
+    nota.
+
+    Misurato sulla PR #14: la patch di `main.py` era 25.037 caratteri contro un
+    tetto di 15.000 — il 60% inviato — e su NOVE bloccanti dei gate finali
+    QUATTRO erano falsi, tutti su quel file, tutti dichiarati dai reviewer come
+    «non verificabile dal diff troncato». Costo dei giri buttati: ~$1 l'uno.
+
+    Da qui il quinto valore di ritorno: chi e- stato inviato INCOMPLETO. Serve al
+    prompt, che lo dice al modello, e al commento, che lo dice a chi legge.
+    """
+    build = _funzione_payload(path)
+    # Un file enorme e uno piccolo: il primo verra- tagliato, il secondo entra intero.
+    files = [_file_finto('main.py', righe=4000), _file_finto('README.txt', righe=5)]
+
+    testo, saltati, _, troncato, tagliati = build(files, 2000, 400000)
+
+    assert troncato is True, 'il taglio per-file non ha marcato il troncamento'
+    assert 'main.py' in tagliati, (
+        f'il file tagliato a meta- non e- stato dichiarato: tagliati={tagliati}'
+    )
+    assert 'main.py' not in saltati, (
+        'un file tagliato e- stato messo fra i NON INVIATI: sono stati diversi, e '
+        'confonderli fa perdere il caso piu- pericoloso'
+    )
+    assert 'FILE: main.py' in testo, 'il file tagliato deve comunque essere nel payload'
+    assert 'README.txt' not in tagliati, (
+        f'un file che entra intero non e- tagliato: tagliati={tagliati}'
     )
 
 
@@ -1124,7 +1275,7 @@ def test_su_una_PR_mista_il_relay_precede_i_workflow(path):
     """
     build = _funzione_payload(path)
     files = [_file_finto(n) for n in FILE_PR_MISTA]
-    testo, saltati, _, _ = build(files, 2000, 6000)
+    testo, saltati, _, _, _ = build(files, 2000, 6000)
 
     posizione = {n: testo.find(f'FILE: {n}') for n in FILE_PR_MISTA}
     relay = {n: p for n, p in posizione.items() if p >= 0 and (n == 'main.py' or n.startswith('web/'))}

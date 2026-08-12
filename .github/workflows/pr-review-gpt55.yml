@@ -61,11 +61,32 @@ jobs:
       # Tier di escalation, come Fable e Fugu: se il diff risulta troncato dal budget
       # basso, il job RICOSTRUISCE l'input più largo invece di far giudicare il modello
       # su file mancanti. GPT-5.5 era l'unico dei tre senza questo tier.
-      MAX_PATCH_PER_FILE_CHARS_ESCALATED: "15000"
+      #
+      # PER-FILE a 30000, e il numero è misurato: la patch di `main.py` sulla PR #14 era
+      # 25.037 caratteri contro un tetto di 15.000, quindi i reviewer forti ne vedevano
+      # il 60% — e il 40% invisibile era il corpo dell'handler del webhook. Su nove
+      # bloccanti di quel gate, QUATTRO erano falsi e tutti dichiaratamente da
+      # troncamento. Il collo di bottiglia era il tetto PER-FILE, non il totale:
+      # `main.py` entra primo per PRIORITA_PAYLOAD, quindi con 30.000 prende i suoi 25k e
+      # ne restano 35k per il resto dentro lo STESSO totale. Costo per giro invariato.
+      MAX_PATCH_PER_FILE_CHARS_ESCALATED: "30000"
       MAX_TOTAL_PATCH_CHARS_ESCALATED: "60000"
 
       PRICE_INPUT_PER_MILLION: "5.00"
       PRICE_OUTPUT_PER_MILLION: "30.00"
+      # Input SERVITO DALLA CACHE, a tariffa ridotta. Sull'API OpenAI il prompt caching
+      # è AUTOMATICO sopra i ~1024 token — non serve nessun `cache_control` come su
+      # Anthropic — e `input_tokens` nel report INCLUDE i token cachati. Prezzarli tutti
+      # a tariffa piena, com'era, gonfia il costo dichiarato: il rendiconto su cui il
+      # proprietario decide diceva più del vero, e su questi numeri si è deciso di
+      # riordinare la roadmap.
+      #
+      # $0.50/M è la tariffa documentata per la famiglia GPT-5.6 (input $5.00, cached
+      # $0.50). Se il modello di questo workflow cambia, VA RICONTROLLATA sulla sua
+      # pagina: qui resta una variabile proprio perché sia correggibile senza toccare il
+      # codice, e i token cachati compaiono come riga a sé nel rendiconto — visibili, non
+      # nascosti dentro un totale.
+      PRICE_CACHE_READ_PER_MILLION: "0.50"
 
       MANUAL_REVIEW_LABEL: manual-review-required
 
@@ -116,6 +137,7 @@ jobs:
 
           PRICE_INPUT_PER_MILLION = float(os.environ.get("PRICE_INPUT_PER_MILLION", "0"))
           PRICE_OUTPUT_PER_MILLION = float(os.environ.get("PRICE_OUTPUT_PER_MILLION", "0"))
+          PRICE_CACHE_READ_PER_MILLION = float(os.environ.get("PRICE_CACHE_READ_PER_MILLION", "0"))
 
           MANUAL_REVIEW_LABEL = os.environ.get("MANUAL_REVIEW_LABEL", "manual-review-required")
 
@@ -363,7 +385,7 @@ jobs:
               # dell'API, quindi il payload e' riproducibile fra due esecuzioni.
               files = sorted(files, key=lambda f: priorita_payload(
                   safe_display(f.get("filename", ""))))
-              chunks, skipped, critical = [], [], []
+              chunks, skipped, critical, tagliati = [], [], [], []
               total = 0
               # `budget_truncated`: True se almeno un file e' stato tagliato o saltato PER
               # BUDGET. Non conta un file binario/senza patch, che alzare il budget non
@@ -401,6 +423,12 @@ jobs:
                   if len(patch) > max_per_file:
                       patch = patch[:max_per_file] + "\n...[PATCH FILE TRONCATO PER BUDGET TOKEN]..."
                       budget_truncated = True
+                      # Il file È nel payload ma INCOMPLETO. Va distinto da `skipped`
+                      # (non inviato affatto) perché è il caso peggiore dei due: il
+                      # modello vede codice vero e conclude su ciò che manca senza
+                      # accorgersene. Misurato sulla PR #14: 4 bloccanti falsi su 9,
+                      # tutti su un file tagliato a metà.
+                      tagliati.append(filename)
 
                   block = (
                       f"\n\n### FILE: {filename}\n"
@@ -416,7 +444,8 @@ jobs:
                   chunks.append(block)
                   total += len(block)
 
-              return "\n".join(chunks), sorted(set(skipped)), sorted(set(critical)), budget_truncated
+              return ("\n".join(chunks), sorted(set(skipped)), sorted(set(critical)),
+                      budget_truncated, sorted(set(tagliati)))
 
           def try_add_label():
               try:
@@ -546,22 +575,41 @@ jobs:
           def usage_note(usage, system_prompt, user_prompt, review):
               prompt_tokens = int((usage or {}).get("input_tokens") or (usage or {}).get("prompt_tokens") or 0)
               completion_tokens = int((usage or {}).get("output_tokens") or (usage or {}).get("completion_tokens") or 0)
+              # Token serviti dalla CACHE. Il caching di OpenAI e' automatico sopra i
+              # ~1024 token e `input_tokens` LI INCLUDE: prezzarli a tariffa piena
+              # gonfiava il costo dichiarato. Si sottraggono e si prezzano a parte.
+              dettagli_input = (usage or {}).get("input_tokens_details") or {}
+              cached_tokens = int(dettagli_input.get("cached_tokens") or 0)
 
               source = "OpenAI usage"
               if prompt_tokens <= 0:
                   prompt_tokens = max(1, len(system_prompt + user_prompt) // 4)
                   source = "stimato localmente"
+                  cached_tokens = 0
               if completion_tokens <= 0:
                   completion_tokens = max(1, len(review) // 4)
 
+              # Difesa: un `cached_tokens` maggiore dell'input renderebbe negativo il
+              # non-cachato e il costo piu' basso del vero — cioe' l'errore opposto,
+              # nella direzione che nasconde la spesa.
+              cached_tokens = max(0, min(cached_tokens, prompt_tokens))
+              input_pieno = prompt_tokens - cached_tokens
+
               total_tokens = prompt_tokens + completion_tokens
-              estimated = prompt_tokens / 1_000_000 * PRICE_INPUT_PER_MILLION + completion_tokens / 1_000_000 * PRICE_OUTPUT_PER_MILLION
+              estimated = (
+                  input_pieno / 1_000_000 * PRICE_INPUT_PER_MILLION
+                  + cached_tokens / 1_000_000 * PRICE_CACHE_READ_PER_MILLION
+                  + completion_tokens / 1_000_000 * PRICE_OUTPUT_PER_MILLION
+              )
 
               return (
                   "\n\n## Uso token / costo stimato\n"
                   f"- Fonte token: `{source}`\n"
                   f"- Prompt token: `{prompt_tokens}`\n"
-                  f"- Completion token: `{completion_tokens}`\n"
+                  + (f"- di cui serviti dalla cache: `{cached_tokens}`"
+                     f" (a ${PRICE_CACHE_READ_PER_MILLION:.2f}/M invece di"
+                     f" ${PRICE_INPUT_PER_MILLION:.2f}/M)\n" if cached_tokens else "")
+                  + f"- Completion token: `{completion_tokens}`\n"
                   f"- Total token: `{total_tokens}`\n"
                   f"- Costo stimato base: `~${estimated:.4f}`\n"
               )
@@ -575,7 +623,7 @@ jobs:
               sys.exit(0)
           files = compared.get("files") or []
           commit_count = len(compared.get("commits") or [])
-          diff_text, skipped_files, critical_files, budget_truncated = build_patch_payload(
+          diff_text, skipped_files, critical_files, budget_truncated, file_tagliati = build_patch_payload(
               files, MAX_PATCH_PER_FILE_CHARS, MAX_TOTAL_PATCH_CHARS)
           patch_budget_used = MAX_TOTAL_PATCH_CHARS
           if budget_truncated and (
@@ -584,7 +632,7 @@ jobs:
               print(f"::notice::{REVIEW_ID}: diff troncato dal budget basso "
                     f"({MAX_TOTAL_PATCH_CHARS} char) → ricostruisco al budget alto "
                     f"({MAX_TOTAL_PATCH_CHARS_ESCALATED} char) per non perdere file.")
-              diff_text, skipped_files, critical_files, budget_truncated = build_patch_payload(
+              diff_text, skipped_files, critical_files, budget_truncated, file_tagliati = build_patch_payload(
                   files, MAX_PATCH_PER_FILE_CHARS_ESCALATED, MAX_TOTAL_PATCH_CHARS_ESCALATED)
               patch_budget_used = MAX_TOTAL_PATCH_CHARS_ESCALATED
 
@@ -703,6 +751,50 @@ jobs:
           """[:64000])
               sys.exit(0)
 
+
+          def blocco_contesto_mancante(file_tagliati, skipped_files):
+              """Cosa il modello NON ha visto, detto AL MODELLO e non solo nel commento.
+
+              Il payload conteneva gia' il marcatore inline sui file tagliati e il
+              commento elencava i non inviati, ma il PROMPT non diceva niente: il
+              modello riceveva codice incompleto senza saperlo e concludeva su cio'
+              che mancava. Misurato sulla PR #14: nove bloccanti dai gate finali,
+              QUATTRO falsi, tutti su `main.py` tagliato al 60%, tutti nella forma
+              «non verificabile dal diff troncato» — cioe' il modello dichiarava il
+              proprio limite come se fosse un difetto del codice. Ogni giro cosi'
+              costa ~$1 e produce una correzione che non serve.
+
+              E' una funzione e non codice inline perche' un test la ESEGUE: la
+              regola di questo repository e' che cio' che non e' osservabile non e'
+              vincolato.
+              """
+              if not file_tagliati and not skipped_files:
+                  return ""
+              elenchi = []
+              if file_tagliati:
+                  elenchi.append(
+                      "File inviati INCOMPLETI (patch tagliata dal budget, il codice "
+                      "che vedi non e' tutto):\n"
+                      + "\n".join(f"- {n}" for n in file_tagliati[:20]))
+              if skipped_files:
+                  elenchi.append(
+                      "File NON inviati affatto:\n"
+                      + "\n".join(f"- {n}" for n in skipped_files[:20]))
+              return (
+                  "\nCONTESTO INCOMPLETO — leggi prima di concludere:\n"
+                  + "\n\n".join(elenchi)
+                  + "\n\nRegola: l'assenza di codice dal tuo input NON autorizza nessuna "
+                    "conclusione sulla sua esistenza, correttezza o assenza. Non dedurre "
+                    "un difetto da cio' che non hai potuto leggere.\n"
+                    "Etichetta OGNI bloccante col suo primo token:\n"
+                    "- [REAL_FINDING] verificato sul codice che hai ricevuto;\n"
+                    "- [INSUFFICIENT_CONTEXT] sospetto, ma il file che serve e' fra "
+                    "quelli qui sopra.\n"
+                    "Un [INSUFFICIENT_CONTEXT] non e' un difetto: e' una richiesta di "
+                    "verifica umana. Non gonfiare la lista con essi.\n")
+
+          contesto_mancante = blocco_contesto_mancante(file_tagliati, skipped_files)
+
           system_prompt = """
           Sei un senior code reviewer per XTrader Signal Relay.
           Devi fare una review tecnica in italiano.
@@ -739,6 +831,7 @@ jobs:
           ## Test minimi
           ## Verdetto finale
 
+          {contesto_mancante}
           Diff del range appena pushato:
           {diff_text}
           """
