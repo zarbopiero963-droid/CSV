@@ -148,7 +148,18 @@ da test e tutti chiusi con una disambiguazione deterministica invece di un error
   sui database già migrati permetteva → l'etichetta resta all'`id` più basso e sugli
   altri diventa NULL. Qui **non si cancella nessuna riga**, a differenza delle chat:
   una riga di `users` possiede chat, parser e segnali, e cancellarla perderebbe dati di
-  un cliente. L'unica cosa ambigua è l'etichetta, quindi è l'unica che si tocca.
+  un cliente. Ma azzerare l'etichetta **non basta**: ciò che la riga perdente possiede
+  — chat, segnali, parser — viene **trasferito al superstite** prima di togliergliela,
+  altrimenti quei dati restano su un utente che non risulta più quel profilo, cioè
+  nessuno li rivendica e per il codice multiutente sono di un altro.
+
+Il ri-puntamento di `parser_chats` sposta **solo** le associazioni dei parser che
+appartengono al proprietario della chat sopravvissuta. Con la stessa chat rivendicata da
+due utenti — la riga del primo sopravvive, quella del secondo viene scartata — spostare
+tutto aggancerebbe un parser del secondo alla chat del primo: un legame fra utenti
+diversi, che nel dispatch significa i segnali di una chat consegnati al feed sbagliato.
+La correzione non è spostare meglio, è **non spostare**: la chat appartiene a un solo
+utente, quindi l'associazione di un parser altrui è illegittima e viene rimossa.
 
 Un indice UNIQUE non si crea su una tabella che contiene già duplicati: ogni vincolo
 nuovo va quindi preceduto dalla deduplica di ciò che esiste, o la migrazione muore

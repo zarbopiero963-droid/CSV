@@ -666,27 +666,40 @@ def test_un_database_con_chat_GIA_duplicate_resta_attraversabile(tmp_path):
 def test_la_deduplica_non_ORFANA_le_associazioni_parser_chat(tmp_path):
     """Chi puntava alla riga cancellata punta alla sopravvissuta.
 
-    `parser_chats.chat_id` riferisce `chats.id`. Cancellare il duplicato senza
-    ripuntare le associazioni non solleva niente: lascia una riga che riferisce un
-    `id` che non esiste piu-, e il parser smette di ricevere da quella chat **in
-    silenzio**. E' la perdita di segnale che questo servizio esiste per evitare.
+    `parser_chats.chat_id` riferisce `chats.id`. Cancellare il duplicato senza ripuntare
+    le associazioni non solleva niente: lascia una riga che riferisce un `id` che non
+    esiste piu-, e il parser smette di ricevere da quella chat **in silenzio**. E- la
+    perdita di segnale che questo servizio esiste per evitare.
 
-    Oggi nessun codice scrive in `parser_chats` (verificato: nessun `INSERT INTO
-    parser_chats` in `main.py`) — quindi questo non e- un bug attivo, e- il PR sul
-    dispatch multi-parser che lo renderebbe attivo trovandoselo gia- chiuso.
+    Il parser usato e- quello VERO del proprietario della chat, e non un `parser_id`
+    inventato come nella prima versione: da quando il ripuntamento verifica la
+    proprieta- — per non creare legami fra utenti diversi — un'associazione a un parser
+    che non esiste non e- ripuntabile e viene rimossa, il che e- giusto ma non e- cio-
+    che questo test vuole misurare. Perche- l'`id` del parser esista serve una prima
+    `migra()`, quindi lo stato duplicato si costruisce DOPO.
+
+    Oggi nessun codice scrive in `parser_chats` — quindi non e- un bug attivo, e- il PR
+    sul dispatch multi-parser che lo renderebbe attivo trovandoselo gia- chiuso.
     """
-    c = _con_chat_duplicate(tmp_path / 'orfane.db')
-    perdente = c.execute('SELECT MAX(id) FROM chats WHERE telegram_chat_id=?',
-                         (CHAT_A,)).fetchone()[0]
-    vincente = c.execute('SELECT MIN(id) FROM chats WHERE telegram_chat_id=?',
-                         (CHAT_A,)).fetchone()[0]
-    assert perdente != vincente
-    c.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (?,?)', (7, perdente))
+    c = _database_di_produzione(tmp_path / 'orfane.db')
+    main.migra(c)
+    utente = c.execute('SELECT id FROM users WHERE origin_profile=?',
+                       (main.PIERO_PROFILE,)).fetchone()[0]
+    parser = c.execute('SELECT id FROM parsers WHERE name=?',
+                       (main.DEFAULT_PARSER,)).fetchone()[0]
+    # Lo stato duplicato: due righe per la stessa chat, entrambe di questo utente.
+    c.execute('DROP INDEX chats_chat_topic')
+    c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id) VALUES (?,?)',
+              (CHAT_A, utente))
+    vincente, perdente = [r[0] for r in c.execute(
+        'SELECT id FROM chats WHERE telegram_chat_id=? ORDER BY id', (CHAT_A,)).fetchall()]
+    c.execute('UPDATE chats SET owner_user_id=? WHERE id=?', (utente, vincente))
+    c.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (?,?)', (parser, perdente))
 
     main.migra(c)
 
     righe = c.execute('SELECT parser_id, chat_id FROM parser_chats').fetchall()
-    assert righe == [(7, vincente)], (
+    assert righe == [(parser, vincente)], (
         f'associazione orfana o persa: {righe}, la chat sopravvissuta e- {vincente}')
 
 
@@ -1373,3 +1386,117 @@ def test_la_chat_condivisa_va_al_PRIMO_profilo_anche_a_scansione_invertita(tmp_p
     assert proprietario == 'ALFA', (
         f'la chat condivisa e- andata a {proprietario!r} invece che ad ALFA, che e- il '
         'primo per nome: la regola dipende ancora dall-ordine di scansione')
+
+
+def test_la_perdente_di_origin_profile_CONSEGNA_i_suoi_dati_al_superstite(tmp_path):
+    """Azzerare l'etichetta non basta: i dati della perdente vanno trasferiti.
+
+    `[REAL_FINDING]` di GPT-5.6 Sol. La deduplica azzerava `origin_profile` sulle righe
+    perdenti e le lasciava proprietarie di chat, parser e segnali. Quei dati restavano
+    quindi su un utente che **non risulta piu- quel profilo**: nessuno li rivendica, e
+    per il codice multiutente sono di un altro. Misurato sul codice precedente:
+
+        utente superstite del profilo PIERO : 1
+        proprietario della chat -100888    : 2
+        utente del segnale                 : 2
+
+    Lo stato si raggiunge da un database migrato da una versione intermedia di questo
+    ramo — quella in cui la deduplica girava DOPO i lookup — quindi non e- produzione,
+    ma «i dati sono attribuiti all'utente sbagliato» e- isolamento rotto, e la regola
+    non fa eccezioni per gli stati che ci siamo procurati da soli.
+    """
+    c = _database_di_produzione(tmp_path / 'consegna.db')
+    # `users` creata dall'ALTER, cioe- SENZA il vincolo UNIQUE di tabella: e- l'unico
+    # stato in cui due righe possono condividere l'etichetta, e la misura lo dimostra —
+    # sulla tabella creata da zero l'inserimento del duplicato solleva
+    # `IntegrityError: UNIQUE constraint failed: users.origin_profile` a prescindere
+    # dall'indice. Il difetto vive quindi solo sui database di un build intermedio di
+    # questo ramo, e resta isolamento rotto.
+    _crea_users(c, con_origin_profile=True)
+    main.migra(c)   # prima migrazione: colonne nuove, utente del profilo, indice
+    superstite = c.execute('SELECT id FROM users WHERE origin_profile=?',
+                           (main.PIERO_PROFILE,)).fetchone()[0]
+    # L'indice si toglie per poter costruire il duplicato; il vincolo di tabella non
+    # c'e- perche- `users` e- nata dall'ALTER.
+    c.execute('DROP INDEX users_origin_profile')
+    c.execute("INSERT INTO users(origin_profile, first_name, slug)"
+              " VALUES (?, 'PIERO', 'piero-2')", (main.PIERO_PROFILE,))
+    perdente = c.execute('SELECT id FROM users WHERE slug=?', ('piero-2',)).fetchone()[0]
+    assert perdente != superstite
+    c.execute('UPDATE chats SET owner_user_id=? WHERE telegram_chat_id=?', (perdente, CHAT_A))
+    c.execute('UPDATE signals SET user_id=? WHERE profile=?', (perdente, main.PIERO_PROFILE))
+    c.execute('UPDATE parsers SET user_id=? WHERE name=?', (perdente, 'Secondo_Parser'))
+
+    main.migra(c)
+
+    assert c.execute('SELECT id FROM users WHERE id=?', (perdente,)).fetchone(), (
+        'la riga perdente e- stata cancellata: possiede dati, non si cancella')
+    assert c.execute('SELECT origin_profile FROM users WHERE id=?',
+                     (perdente,)).fetchone()[0] is None, "la perdente ha ancora l-etichetta"
+    proprietario = c.execute('SELECT owner_user_id FROM chats WHERE telegram_chat_id=?',
+                             (CHAT_A,)).fetchone()[0]
+    assert proprietario == superstite, (
+        f'la chat e- rimasta alla perdente ({proprietario}) invece di passare al '
+        f'superstite ({superstite}): nessuno la rivendica piu-')
+    rimasti = c.execute('SELECT id FROM signals WHERE user_id=?', (perdente,)).fetchall()
+    assert not rimasti, f'segnali rimasti sulla perdente: {rimasti}'
+    parser_rimasti = c.execute('SELECT name FROM parsers WHERE user_id=?',
+                               (perdente,)).fetchall()
+    assert not parser_rimasti, f'parser rimasti sulla perdente: {parser_rimasti}'
+
+
+def test_la_deduplica_delle_chat_NON_crea_legami_fra_utenti_diversi(tmp_path):
+    """Un parser non puo- finire associato alla chat di un altro utente.
+
+    Secondo `[REAL_FINDING]` di GPT-5.6 Sol, e- il piu- grave dei due: il ripuntamento
+    spostava **ogni** associazione sulla chat vincente senza guardare di chi fosse il
+    parser. Con la stessa chat rivendicata da due utenti — la riga di ALFA sopravvive,
+    quella di BETA viene scartata — un parser di BETA finiva agganciato alla chat di
+    ALFA. Misurato sul codice precedente:
+
+        prima: chat 1 di ALFA(1), chat 2 di BETA(2); parser 1 di BETA -> chat 2
+        dopo : parser 1 (utente 2) -> chat 1 (utente 1)   CROSS-TENANT
+
+    Nel PR sul dispatch quel legame significa i segnali di una chat consegnati al feed
+    di un altro utente, cioe- esattamente cio- che `CLAUDE.md` mette fra le regole non
+    negoziabili.
+
+    La correzione non e- spostare meglio: e- **non** spostare. La chat appartiene a un
+    solo utente, quindi l'associazione di un parser altrui e- illegittima e va rimossa.
+    """
+    c = _database_di_produzione(tmp_path / 'cross_tenant.db')
+    c.execute('INSERT INTO parsers(name, header) VALUES (?,?)', ('Di_Beta', 'H'))
+    c.execute('INSERT INTO profiles VALUES (?,?,?)', ('ALFA', CHAT_A, main.DEFAULT_PARSER))
+    c.execute('INSERT INTO profiles VALUES (?,?,?)', ('BETA', CHAT_B, 'Di_Beta'))
+    main.migra(c)
+    alfa = c.execute("SELECT id FROM users WHERE origin_profile='ALFA'").fetchone()[0]
+    beta = c.execute("SELECT id FROM users WHERE origin_profile='BETA'").fetchone()[0]
+
+    # Lo stato: la stessa chat in due righe, una per utente, e il parser di BETA
+    # agganciato alla PROPRIA.
+    c.execute('DROP INDEX chats_chat_topic')
+    c.execute('UPDATE chats SET owner_user_id=? WHERE telegram_chat_id=?', (alfa, CHAT_A))
+    c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id) VALUES (?,?)', (CHAT_A, beta))
+    di_alfa, di_beta = [r[0] for r in c.execute(
+        'SELECT id FROM chats WHERE telegram_chat_id=? ORDER BY id', (CHAT_A,)).fetchall()]
+    parser_di_beta = c.execute("SELECT id FROM parsers WHERE name='Di_Beta'").fetchone()[0]
+    c.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (?,?)',
+              (parser_di_beta, di_beta))
+
+    main._PERCORSI_MIGRATI.clear()
+    main.migra(c)
+
+    for parser_id, chat_id in c.execute('SELECT parser_id, chat_id FROM parser_chats').fetchall():
+        utente_parser = c.execute('SELECT user_id FROM parsers WHERE id=?',
+                                  (parser_id,)).fetchone()[0]
+        utente_chat = c.execute('SELECT owner_user_id FROM chats WHERE id=?',
+                                (chat_id,)).fetchone()[0]
+        assert utente_parser == utente_chat, (
+            f'legame fra utenti diversi: il parser {parser_id} e- dell-utente '
+            f'{utente_parser} ed e- associato alla chat {chat_id} dell-utente '
+            f'{utente_chat}. Nel dispatch questo consegna i segnali al feed sbagliato')
+    # La chat di ALFA e- sopravvissuta e l'associazione illegittima non c'e- piu-.
+    assert c.execute('SELECT COUNT(*) FROM chats WHERE telegram_chat_id=?',
+                     (CHAT_A,)).fetchone()[0] == 1
+    assert c.execute('SELECT owner_user_id FROM chats WHERE telegram_chat_id=?',
+                     (CHAT_A,)).fetchone()[0] == alfa

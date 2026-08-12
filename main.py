@@ -615,13 +615,34 @@ def _travasa_nel_multiutente(c):
     #
     # NON si cancella nessuna riga, e la differenza con `chats` e' sostanziale: una
     # riga di `users` possiede chat, parser e segnali, quindi cancellarla perderebbe
-    # dati di un cliente. Si azzera invece `origin_profile` sulle perdenti — l'unica
-    # cosa che puo' essere ambigua — e l'etichetta resta all'`id` piu' basso. Serve
-    # anche perche' un indice UNIQUE non si crea su una tabella con duplicati:
-    # segnalato prima da Claude Fable 5 e GPT-5.5.
-    c.execute("UPDATE users SET origin_profile = NULL WHERE origin_profile IS NOT NULL"
-              ' AND id NOT IN (SELECT MIN(id) FROM users WHERE origin_profile IS NOT NULL'
-              ' GROUP BY origin_profile)')
+    # dati di un cliente. L'etichetta resta all'`id` piu' basso. Serve anche perche' un
+    # indice UNIQUE non si crea su una tabella con duplicati: segnalato prima da Claude
+    # Fable 5 e GPT-5.5.
+    #
+    # Ma azzerare l'etichetta NON BASTA, e la prima versione si fermava li': la riga
+    # perdente restava proprietaria di cio' che possedeva, quindi quei dati finivano su
+    # un utente che non risulta piu' quel profilo — nessuno li rivendica, e per il
+    # codice multiutente sono di un altro. Misurato: superstite 1, chat 2, segnale 2.
+    # `[REAL_FINDING]` di GPT-5.6 Sol. Cio' che la perdente possiede si TRASFERISCE
+    # al superstite prima di togliere l'etichetta.
+    #
+    # Gli slug dei parser sono univoci GLOBALMENTE (vedi `_slug_libero`), quindi
+    # spostare un parser da un utente all'altro non puo' violare `UNIQUE (user_id,
+    # slug)`: se un giorno diventassero univoci per utente, questo va rivisto — e il
+    # test sulla chiave primaria di `parsers` diventa rosso proprio allora.
+    for (etichetta,) in c.execute(
+            'SELECT origin_profile FROM users WHERE origin_profile IS NOT NULL'
+            ' GROUP BY origin_profile HAVING COUNT(*) > 1').fetchall():
+        utenti = [r[0] for r in c.execute(
+            'SELECT id FROM users WHERE origin_profile=? ORDER BY id',
+            (etichetta,)).fetchall()]
+        superstite, perdenti = utenti[0], utenti[1:]
+        for perdente in perdenti:
+            c.execute('UPDATE chats SET owner_user_id=? WHERE owner_user_id=?',
+                      (superstite, perdente))
+            c.execute('UPDATE signals SET user_id=? WHERE user_id=?', (superstite, perdente))
+            c.execute('UPDATE parsers SET user_id=? WHERE user_id=?', (superstite, perdente))
+            c.execute('UPDATE users SET origin_profile=NULL WHERE id=?', (perdente,))
     # `ORDER BY name` non e' decorazione: decide CHI vince quando due profili
     # rivendicano la stessa cosa — una chat o un parser. Senza, «il primo» significa
     # «il primo che la tabella restituisce», cioe' l'ordine di inserimento: due database
@@ -738,8 +759,22 @@ def _travasa_nel_multiutente(c):
             # Niente va perso: `OR IGNORE` sposta cio' che puo' spostarsi, la DELETE
             # toglie le righe rimaste indietro proprio perche' la loro destinazione
             # c'era gia'. L'associazione `(parser, vincente)` esiste in entrambi i casi.
-            c.execute('UPDATE OR IGNORE parser_chats SET chat_id=? WHERE chat_id=?',
-                      (vincente, perdente))
+            # Si spostano SOLO le associazioni dei parser che appartengono al
+            # proprietario della chat sopravvissuta. Prima si spostavano tutte, e con la
+            # stessa chat rivendicata da due utenti — la riga di ALFA sopravvive, quella
+            # di BETA viene scartata — un parser di BETA finiva agganciato alla chat di
+            # ALFA. Misurato: `parser 1 (utente 2) -> chat 1 (utente 1)`. Nel PR sul
+            # dispatch quel legame significa i segnali di una chat consegnati al feed di
+            # un altro utente. `[REAL_FINDING]` di GPT-5.6 Sol, il piu' grave dei suoi.
+            #
+            # La correzione non e' spostare meglio, e' NON spostare: la chat appartiene a
+            # un solo utente, quindi l'associazione di un parser altrui e' illegittima e
+            # la `DELETE` sotto la porta via insieme al resto. `IS` e non `=` perche' un
+            # proprietario NULL deve combaciare con un `user_id` NULL, e con `=` no.
+            c.execute('UPDATE OR IGNORE parser_chats SET chat_id=? WHERE chat_id=?'
+                      ' AND parser_id IN (SELECT id FROM parsers WHERE user_id IS'
+                      ' (SELECT owner_user_id FROM chats WHERE id=?))',
+                      (vincente, perdente, vincente))
             c.execute('DELETE FROM parser_chats WHERE chat_id=?', (perdente,))
             c.execute('DELETE FROM chats WHERE id=?', (perdente,))
     c.execute('CREATE UNIQUE INDEX IF NOT EXISTS chats_chat_topic'
