@@ -1,4 +1,4 @@
-import asyncio, csv, hashlib, io, json, logging, os, re, secrets, sqlite3, threading, time
+import asyncio, base64, binascii, csv, hashlib, hmac, io, json, logging, os, re, secrets, sqlite3, threading, time
 from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -34,6 +34,166 @@ def webhook_secret(bot_token):
     if not bot_token:
         return ''
     return hashlib.sha256(('betrelay-webhook-v1:' + bot_token).encode('utf-8')).hexdigest()
+
+
+def verifica_login_telegram(dati, bot_token):
+    """Vero se questi campi vengono davvero dal Login Widget di Telegram.
+
+    Telegram non manda un token da confrontare: manda i campi **in chiaro** piu' un
+    `hash` HMAC-SHA256 calcolato con una chiave derivata dal token del bot. Chi non
+    verifica quella firma accetta un `id` scritto da chiunque — cioe' accetta «sono
+    Piero» da un estraneo, e non c'e' nessun altro controllo dietro.
+
+    L'algoritmo e' quello della documentazione Telegram:
+
+        secret_key        = SHA256(bot_token)
+        data_check_string = campi ordinati per chiave, 'k=v' uniti da \\n, senza `hash`
+        hash              = HMAC_SHA256(data_check_string, secret_key)
+
+    La firma copre **tutti** i campi, non solo l'identificativo, e i campi entrano
+    nella stringa cosi' come arrivano: un campo aggiunto dopo la firma la invalida, ed
+    e' cio' che serve — altrimenti chi intercetta un login potrebbe aggiungerne uno che
+    il codice futuro leggera'.
+
+    `auth_date` va guardato in entrambe le direzioni. Troppo vecchio: una firma valida
+    resterebbe valida per sempre. Nel futuro: un `auth_date` messo a mano in avanti
+    sarebbe accettato per sempre.
+
+    Senza bot restituisce `False` e non «accetta tutto»: senza il token non esiste la
+    chiave con cui validare, quindi non c'e' niente da validare. E' la stessa forma di
+    `webhook_secret`, e il difetto opposto — una serratura che si apre quando le togli
+    la chiave — e' quello corretto su `auth()` a luglio.
+
+    Non solleva mai: i dati arrivano da fuori, e un'eccezione su una rotta di login
+    sarebbe un 500 pilotabile dall'esterno.
+    """
+    if not bot_token:
+        return False
+    atteso = dati.get('hash')
+    if not atteso:
+        return False
+    try:
+        eta = time.time() - int(dati['auth_date'])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if abs(eta) > ETA_MASSIMA_LOGIN:
+        return False
+    stringa = '\n'.join(f'{k}={dati[k]}' for k in sorted(dati) if k != 'hash')
+    chiave = hashlib.sha256(bot_token.encode('utf-8')).digest()
+    calcolato = hmac.new(chiave, stringa.encode('utf-8'), hashlib.sha256).hexdigest()
+    # Confronto a tempo costante: la durata della risposta non deve raccontare quanti
+    # caratteri iniziali erano giusti. Stesso motivo per cui `auth()` usa
+    # `compare_digest` sul token del feed.
+    return hmac.compare_digest(calcolato, str(atteso))
+
+
+def hash_password(password):
+    """L'hash da mettere in `ADMIN_PASSWORD_HASH`, con sale casuale.
+
+    `scrypt` dalla libreria standard: nessuna dipendenza nuova, e un costo di calcolo
+    che rende inutile provare le password in serie. I parametri sono quelli consigliati
+    per un uso interattivo (`n=16384, r=8, p=1`).
+
+    Il sale sta DENTRO il valore salvato, quindi due hash della stessa password sono
+    diversi: senza sale, hash uguali rivelerebbero password uguali e un hash sarebbe
+    riconoscibile da una tabella precalcolata.
+
+    Il formato nomina l'algoritmo (`scrypt$sale$derivata`) perche' il giorno che se ne
+    cambiasse uno, un valore vecchio deve restare riconoscibile invece di sembrare
+    corrotto.
+    """
+    sale = secrets.token_bytes(16)
+    derivata = hashlib.scrypt(password.encode('utf-8'), salt=sale, n=16384, r=8, p=1, dklen=32)
+    return 'scrypt$' + base64.b64encode(sale).decode() + '$' + base64.b64encode(derivata).decode()
+
+
+def verifica_password_admin(password, salvato):
+    """Vero se `password` corrisponde all'hash salvato. Fail-closed su tutto il resto.
+
+    Restituisce `False` — non solleva, e non accetta — quando:
+
+    - `salvato` e' vuoto o `None`: la variabile non e' configurata, quindi il percorso
+      a password e' **disabilitato**. E' la regola che `auth()` ha imparato a luglio,
+      dove `if TOKEN and token != TOKEN` non faceva niente con la variabile vuota e
+      dieci rotte diventavano pubbliche cancellandola dalla dashboard;
+    - `salvato` e' malformato: e' un errore di configurazione, e un `raise` qui
+      diventerebbe un 500 su una rotta di login, cioe' un modo di scoprire dall'esterno
+      che la variabile e' scritta male.
+
+    Confronto a tempo costante, per la ragione di sempre: per differenza si impara.
+    """
+    if not salvato:
+        return False
+    try:
+        algoritmo, sale_b64, derivata_b64 = salvato.split('$')
+        if algoritmo != 'scrypt':
+            return False
+        sale = base64.b64decode(sale_b64, validate=True)
+        derivata = base64.b64decode(derivata_b64, validate=True)
+        if not sale or not derivata:
+            return False
+    except (ValueError, TypeError, AttributeError, binascii.Error):
+        return False
+    calcolata = hashlib.scrypt(password.encode('utf-8'), salt=sale,
+                               n=16384, r=8, p=1, dklen=len(derivata))
+    return hmac.compare_digest(calcolata, derivata)
+
+
+def firma_sessione(utente, versione, emessa=None):
+    """Il valore del cookie di sessione: chi sei, quale versione, e da quando.
+
+    Un cookie lo scrive il browser, quindi senza firma `utente=7` diventa `utente=8`
+    con un editor di testo. La firma HMAC lo trasforma da dichiarazione in credenziale.
+
+    `versione` e' `users.session_version`: incrementarla nel database invalida tutti i
+    cookie emessi prima, che e' il modo di buttare fuori una sessione senza aspettare
+    la scadenza — serve per «entra come cliente» e per un accesso sospetto.
+
+    `emessa` e' il momento dell'emissione, e il cookie va riemesso a ogni richiesta
+    valida: e' cosi' che venti minuti diventano «di inattivita'» e non «di sessione».
+
+    Senza segreto restituisce stringa vuota: non si firma cio' che non si puo'
+    verificare.
+    """
+    if not SEGRETO_SESSIONE:
+        return ''
+    if emessa is None:
+        emessa = time.time()
+    corpo = f'{int(utente)}.{int(versione)}.{int(emessa)}'
+    firma = hmac.new(SEGRETO_SESSIONE.encode('utf-8'), corpo.encode('utf-8'),
+                     hashlib.sha256).hexdigest()
+    return f'{corpo}.{firma}'
+
+
+def leggi_sessione(cookie):
+    """`{'utente': …, 'versione': …}` se il cookie e' valido e non scaduto, altrimenti `None`.
+
+    Non solleva su nessun ingresso: il valore arriva dal browser, quindi lo scrive il
+    mittente, e un'eccezione non gestita su una rotta autenticata sarebbe un 500
+    pilotabile dall'esterno.
+
+    Non consulta il database — e' pura — perche' chi la chiama deve poi confrontare
+    `versione` con `users.session_version`: la firma dice che il cookie e' nostro, non
+    che la sessione e' ancora buona.
+    """
+    if not SEGRETO_SESSIONE or not cookie:
+        return None
+    pezzi = str(cookie).split('.')
+    if len(pezzi) != 4:
+        return None
+    utente, versione, emessa, firma = pezzi
+    corpo = f'{utente}.{versione}.{emessa}'
+    atteso = hmac.new(SEGRETO_SESSIONE.encode('utf-8'), corpo.encode('utf-8'),
+                      hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(atteso, firma):
+        return None
+    try:
+        utente, versione, emessa = int(utente), int(versione), int(emessa)
+    except ValueError:
+        return None
+    if time.time() - emessa > INATTIVITA_MASSIMA:
+        return None
+    return {'utente': utente, 'versione': versione}
 
 
 # Esito dell'ultimo tentativo di registrazione: None = non tentato (nessun bot),
@@ -320,6 +480,60 @@ TOKEN = os.getenv('CSV_ACCESS_TOKEN', '')
 # l'handler del webhook lo leggevano entrambi da `os.environ` a ogni chiamata, e
 # due letture separate possono divergere. Segnalato da Sourcery.
 SEGRETO_WEBHOOK = webhook_secret(os.getenv('TELEGRAM_BOT_TOKEN', ''))
+BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
+
+# Il segreto che firma i cookie di sessione, DERIVATO dal token del bot invece di
+# essere una variabile a se'. Stessa ragione di `webhook_secret`: una variabile nuova
+# lascerebbe una finestra fra il deploy e la sua configurazione, e in quella finestra
+# bisognerebbe scegliere fra un login rotto e un login che accetta cookie non firmati
+# — due modi di sbagliare. Derivandolo, il valore esiste sempre dove esiste il bot.
+#
+# Il prefisso lo separa dal segreto del webhook: due usi dello stesso token non devono
+# produrre lo stesso segreto, altrimenti un valore rubato da un canale servirebbe
+# nell'altro. Non contiene il token e non lo rivela: e' un digest.
+#
+# Senza bot il segreto e' vuoto, e in quel caso NESSUNA sessione e' valida — vedi
+# `leggi_sessione`. Fail-closed, come `auth()` dopo la correzione di luglio.
+SEGRETO_SESSIONE = (hashlib.sha256(('betrelay-sessione-v1:' + BOT_TOKEN).encode('utf-8')).hexdigest()
+                    if BOT_TOKEN else '')
+
+# L'ID Telegram del proprietario. Non e' un segreto — chiunque riceva un suo messaggio
+# lo conosce — ma decide CHI e' l'amministratore, e serve a collegare il suo login
+# all'utente che possiede i suoi parser: quella riga ha `origin_profile = 'PIERO'` e
+# nessun `telegram_id`, perche' nessuno lo aveva mai saputo. Senza questa variabile il
+# login creerebbe un secondo account vuoto e la dashboard del proprietario sarebbe
+# vuota, senza nessun errore da nessuna parte. Scelta A del proprietario, 12/08/2026;
+# scartata «il primo login vince» perche' il sito e' pubblico e il primo estraneo
+# erediterebbe parser e feed.
+TELEGRAM_ADMIN_ID = os.getenv('TELEGRAM_ADMIN_ID', '').strip()
+
+# L'hash della password dell'accesso di emergenza, nella forma
+# `scrypt$<sale base64>$<derivata base64>`. Nella variabile va l'HASH e non la
+# password: la dashboard di Railway e' leggibile da chi ha accesso al progetto, e con
+# la password in chiaro chi la legge entra nel pannello — da cui si cancellano parser,
+# si cambiano le chat autorizzate e si inietta un segnale nel feed che XTrader legge.
+# Assente → il percorso a password e' DISABILITATO, non aperto.
+ADMIN_PASSWORD_HASH = os.getenv('ADMIN_PASSWORD_HASH', '').strip()
+
+# L'utente dell'accesso di emergenza. Fisso e pubblico: non aggiunge sicurezza, e non
+# ne toglie, ed e' quello che il proprietario ha chiesto.
+ADMIN_USERNAME = 'administrator'
+
+# Quanto puo' essere vecchia la firma di un Login Widget. Senza questo limite una
+# firma valida resterebbe valida per sempre, e l'URL di ritorno di un login riuscito
+# sarebbe una credenziale a tempo indeterminato — copiabile da una cronologia, da un
+# log del browser, da uno screenshot. Il limite vale in ENTRAMBE le direzioni: anche
+# una firma dal futuro va rifiutata, o un `auth_date` messo a mano nel 2030 sarebbe
+# accettato per sempre.
+ETA_MASSIMA_LOGIN = 300
+
+# I venti minuti di inattivita' della Issue #7, in secondi. Riguardano la SESSIONE DEL
+# SITO e non hanno niente a che fare con il token del feed: XTrader non ha una
+# sessione, non fa login e non «resta attivo». Collegare le due cose farebbe perdere i
+# segnali a ogni cliente venti minuti dopo aver chiuso il browser, e nessun test di
+# login lo troverebbe perche' il login funzionerebbe benissimo.
+INATTIVITA_MASSIMA = 20 * 60
+
 HEADERS = ['Provider','EventId','EventName','MarketId','MarketName','MarketType','SelectionId','SelectionName','Handicap','Price','MinPrice','MaxPrice','BetType','Points']
 DEFAULT_PARSER = 'Parser_Telegram_XTrader_v1'
 PIERO_PROFILE = 'PIERO'
