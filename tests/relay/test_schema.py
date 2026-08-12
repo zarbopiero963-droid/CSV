@@ -346,3 +346,341 @@ def test_l_ALTER_NON_ingoia_un_errore_diverso_da_colonna_duplicata(tmp_path):
     finta = _ConnessioneCheRompeGliALTER(vera, 'no such table: parsers')
     with pytest.raises(sqlite3.OperationalError, match='no such table'):
         main.migra(finta)
+
+
+# ------------------------------- i casi che avrebbero spento il servizio
+
+def test_due_parser_che_differiscono_SOLO_per_maiuscole_non_bloccano_l_avvio(tmp_path):
+    """Il bloccante di Fable 5 e GPT-5.5 sulla PR #22, misurato.
+
+    `slug = lower(name)` mandava `Over15` e `over15` sullo stesso slug, l'indice
+    UNIQUE non si creava, `migra()` sollevava — e `migra()` sta sul percorso di
+    `db()`, cioe' di OGNI richiesta. Il feed che XTrader interroga avrebbe iniziato a
+    dare 500 e non avrebbe piu' smesso: un guasto permanente, peggiore del difetto
+    che la #21 ha corretto.
+
+    Misurato prima della correzione:
+        IntegrityError: UNIQUE constraint failed: parsers.user_id, parsers.slug
+
+    La disambiguazione e' deterministica e per nome, non casuale: rieseguire la
+    migrazione deve dare gli stessi slug, altrimenti l'idempotenza cade.
+    """
+    c = sqlite3.connect(tmp_path / 'collisione.db')
+    for istruzione in SCHEMA_DI_PRODUZIONE:
+        c.execute(istruzione)
+    for nome in ('Over15', 'over15', 'OVER15'):
+        c.execute('INSERT INTO parsers VALUES (?,?,?,?,?,?,?)',
+                  (nome, 'H', '', '', '', '0', 'PUNTA'))
+    c.execute('INSERT INTO profiles VALUES (?,?,?)', ('PIERO', '', 'Over15'))
+
+    main.migra(c)  # non deve sollevare
+
+    slug = dict(c.execute('SELECT name, slug FROM parsers').fetchall())
+    assert len(set(slug.values())) == len(slug), f'slug ancora in collisione: {slug}'
+    assert 'over15' in slug.values(), slug
+
+
+def test_la_disambiguazione_degli_slug_e_STABILE_fra_due_esecuzioni(tmp_path):
+    """Deterministica, altrimenti ogni riavvio rinomina gli slug dei clienti."""
+    c = sqlite3.connect(tmp_path / 'stabile.db')
+    for istruzione in SCHEMA_DI_PRODUZIONE:
+        c.execute(istruzione)
+    for nome in ('Uno', 'UNO', 'uno'):
+        c.execute('INSERT INTO parsers VALUES (?,?,?,?,?,?,?)',
+                  (nome, 'H', '', '', '', '0', 'PUNTA'))
+    c.execute('INSERT INTO profiles VALUES (?,?,?)', ('PIERO', '', 'Uno'))
+    main.migra(c)
+    prima = dict(c.execute('SELECT name, slug FROM parsers').fetchall())
+    main.migra(c)
+    assert dict(c.execute('SELECT name, slug FROM parsers').fetchall()) == prima
+
+
+def test_due_profili_che_differiscono_solo_per_maiuscole_non_bloccano_l_avvio(tmp_path):
+    """Stessa classe su `users.slug`, cercata perche' era la stessa forma.
+
+    Segnalato da GPT-5.5 come rischio manuale; l'ho trattato come il gemello del
+    bloccante invece di aspettare che diventasse un incidente.
+    """
+    c = sqlite3.connect(tmp_path / 'profili.db')
+    for istruzione in SCHEMA_DI_PRODUZIONE:
+        c.execute(istruzione)
+    for nome in ('PIERO', 'piero'):
+        c.execute('INSERT INTO profiles VALUES (?,?,?)', (nome, '', 'X'))
+    main.migra(c)
+    slug = [r[0] for r in c.execute('SELECT slug FROM users').fetchall()]
+    assert len(set(slug)) == len(slug) == 2, slug
+
+
+def test_parsers_ha_una_colonna_id_a_cui_parser_chats_puo_puntare(tmp_path):
+    """`parser_chats.parser_id` e' INTEGER e `parsers` aveva solo `name` TEXT.
+
+    Segnalato da GPT-5.5: lo schema nuovo nasceva incoerente e `parser_chats` era
+    una tabella morta — nessuna colonna a cui il suo `parser_id` potesse riferirsi.
+    #2 prevede `parsers id`, e mancava perche' un PRIMARY KEY non si aggiunge con
+    ALTER. Si aggiunge come colonna con indice UNIQUE, riempita dal `rowid`.
+    """
+    c = _database_di_produzione(tmp_path / 'signals.db')
+    main.migra(c)
+    colonne = [r[1] for r in c.execute('PRAGMA table_info(parsers)').fetchall()]
+    assert 'id' in colonne, colonne
+    ids = [r[0] for r in c.execute('SELECT id FROM parsers').fetchall()]
+    assert all(i is not None for i in ids), f'id non riempiti: {ids}'
+    assert len(set(ids)) == len(ids), f'id non univoci: {ids}'
+    # e il collegamento diventa possibile
+    chat = c.execute('SELECT id FROM chats LIMIT 1').fetchone()[0]
+    c.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (?,?)', (ids[0], chat))
+
+
+def test_una_migrazione_fallita_non_lascia_la_connessione_aperta(tmp_path, monkeypatch):
+    """Il terzo bloccante di Fable: `db()` perdeva una connessione per richiesta.
+
+    Se `migra()` solleva, `db()` deve chiudere e rilanciare. Altrimenti ogni
+    richiesta successiva ritenta, sbaglia, e lascia dietro un'altra connessione: un
+    guasto che peggiora da solo mentre il traffico continua.
+
+    Si misura la proprieta- vera — la connessione e- chiusa — usandola: una
+    connessione sqlite chiusa solleva `ProgrammingError`. La prima versione di questo
+    test provava a monkeypatchare `Connection.close`, e non si puo-: il tipo e-
+    immutabile. Un test che non gira non e- una copertura.
+    """
+    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'rotta.db'))
+    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    aperte = []
+    vero_connect = sqlite3.connect
+    monkeypatch.setattr(main.sqlite3, 'connect',
+                        lambda *a, **k: (aperte.append(vero_connect(*a, **k)), aperte[-1])[1])
+    monkeypatch.setattr(main, 'migra',
+                        lambda c: (_ for _ in ()).throw(
+                            sqlite3.OperationalError('finta rottura della migrazione')))
+
+    with pytest.raises(sqlite3.OperationalError, match='finta rottura'):
+        main.db()
+
+    assert aperte, 'nessuna connessione aperta: il test non ha misurato niente'
+    with pytest.raises(sqlite3.ProgrammingError):
+        aperte[0].execute('SELECT 1')
+    assert str(tmp_path / 'rotta.db') not in main._PERCORSI_MIGRATI, \
+        'percorso marcato migrato nonostante il fallimento'
+
+
+def test_la_connessione_ha_un_busy_timeout(tmp_path, monkeypatch):
+    """Secondo bloccante di Fable: DDL concorrente fra processi.
+
+    Il lock e- per-processo. Con piu- worker due processi eseguono la migrazione sullo
+    stesso file, e senza `busy_timeout` il secondo riceve subito «database is locked»
+    invece di aspettare: un deploy che parte rotto.
+    """
+    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'timeout.db'))
+    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    c = main.db()
+    try:
+        assert c.execute('PRAGMA busy_timeout').fetchone()[0] >= 1000, 'busy_timeout non impostato'
+    finally:
+        c.close()
+
+
+def test_l_ordine_resta_univoco_quando_un_parser_ne_ha_gia_uno(tmp_path):
+    """Il Major di CodeRabbit sulla PR #22, e il difetto era reale nella prima forma.
+
+    La versione precedente enumerava TUTTI i parser e scriveva solo quelli con
+    `ordine IS NULL`: con `Alfa` a 1 e un `Beta` nuovo, l'enumerazione dava a `Beta`
+    l'indice 1 e i due finivano pari. Il pareggio rende non deterministico
+    esattamente cio- per cui questa colonna esiste — chi vince fra due parser dello
+    stesso utente.
+
+    La correzione parte da `MAX(ordine) + 1`. Misurato: `Alfa=0`, default`=1`,
+    `Beta` nuovo -> `2`.
+    """
+    c = _database_di_produzione(tmp_path / 'ordine.db')
+    main.migra(c)
+    c.execute('INSERT INTO parsers(name, header) VALUES (?,?)', ('Beta', 'H'))
+    main.migra(c)
+    ordini = [r[0] for r in c.execute('SELECT ordine FROM parsers').fetchall()]
+    assert all(o is not None for o in ordini), ordini
+    assert len(set(ordini)) == len(ordini), f'ordine in pareggio: {ordini}'
+
+
+def test_dieci_thread_insieme_migrano_UNA_volta_sola(tmp_path, monkeypatch):
+    """Il doppio controllo dentro il lock, esercitato da thread veri.
+
+    Chiesto da CodeRabbit, e `CLAUDE.md` lo pretende fra gli scenari di resilienza
+    («richieste concorrenti»). I test precedenti percorrevano solo la via
+    sequenziale: togliendo il secondo controllo dentro il lock restavano verdi.
+    """
+    import threading
+    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'concorrenti.db'))
+    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    chiamate = []
+    vera = main.migra
+    conta = threading.Lock()
+
+    def contata(c):
+        with conta:
+            chiamate.append(1)
+        return vera(c)
+
+    monkeypatch.setattr(main, 'migra', contata)
+    via = threading.Event()
+    errori = []
+
+    def apri():
+        via.wait()  # partenza simultanea: senza, i thread si serializzano da soli
+        try:
+            main.db().close()
+        except Exception as e:  # noqa: BLE001 - l'errore E' il risultato in prova
+            errori.append(e)
+
+    thread = [threading.Thread(target=apri) for _ in range(10)]
+    for t in thread:
+        t.start()
+    via.set()
+    for t in thread:
+        t.join(timeout=15)
+
+    assert not errori, f'connessioni fallite in concorrenza: {errori}'
+    assert len(chiamate) == 1, f'migrazione eseguita {len(chiamate)} volte su 10 thread'
+
+
+def test_due_profili_che_condividono_una_chat_non_la_duplicano(tmp_path):
+    """Il comportamento della chat condivisa, FISSATO invece che accidentale.
+
+    Segnalato da CodeRabbit come Major sull'isolamento: con `INSERT OR IGNORE` e
+    l'unicita- globale della chat, se due profili elencano lo stesso `chat_id` il
+    secondo non ottiene una riga e la chat resta attribuita al primo.
+
+    Verificato: oggi **non produce dati sbagliati**, perche' esiste un solo profilo.
+    E la regola che scrive e' quella REGISTRATA in #2 — «chats … owner_user_id …
+    UNIQUE (telegram_chat_id, message_thread_id)», cioe- una riga per chat con un
+    solo proprietario. Cambiarla in unicita- per utente sarebbe contraddire una
+    decisione chiusa, e la decisione vera — a chi appartiene una chat che due utenti
+    dichiarano — e' del PR sul dispatch multi-parser, dove il webhook deve sceglierne
+    uno.
+
+    Questo test non approva quel comportamento: lo **fissa**, cosi' quando la
+    decisione arrivera- si vedra- cosa cambia. Se il PR sul dispatch rendera-
+    l'unicita- per utente, questo test diventera- rosso, che e' il punto.
+    """
+    c = sqlite3.connect(tmp_path / 'condivisa.db')
+    for istruzione in SCHEMA_DI_PRODUZIONE:
+        c.execute(istruzione)
+    c.execute('INSERT INTO profiles VALUES (?,?,?)', ('PIERO', CHAT_A, 'X'))
+    c.execute('INSERT INTO profiles VALUES (?,?,?)', ('ALTRO', CHAT_A, 'X'))
+    main.migra(c)
+
+    righe = c.execute('SELECT telegram_chat_id, owner_user_id FROM chats').fetchall()
+    assert len(righe) == 1, f'la chat condivisa e- stata duplicata: {righe}'
+    utenti = {r[0]: r[1] for r in c.execute('SELECT first_name, id FROM users').fetchall()}
+    assert len(utenti) == 2, utenti
+    assert righe[0][1] in utenti.values(), righe
+
+
+def _con_chat_duplicate(percorso: Path) -> sqlite3.Connection:
+    """Un database che contiene GIA' due righe per la stessa chat senza topic.
+
+    Lo stato si costruisce a mano perche' e' proprio quello che la migrazione non
+    sapeva attraversare: le due righe si inseriscono PRIMA che l'indice esista,
+    esattamente come faceva la versione che ha prodotto il difetto.
+    """
+    c = _database_di_produzione(percorso)
+    for istruzione in main.SCHEMA_MULTIUTENTE:
+        c.execute(istruzione)
+    c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id) VALUES (?,?)', (CHAT_A, 1))
+    c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id) VALUES (?,?)', (CHAT_A, 2))
+    return c
+
+
+def test_un_database_con_chat_GIA_duplicate_resta_attraversabile(tmp_path):
+    """La migrazione non solleva su duplicati che trova, li unifica.
+
+    Misurato sul codice precedente, e la riga che sollevava non era l'INSERT:
+
+        c.execute('CREATE UNIQUE INDEX IF NOT EXISTS chats_chat_topic ...')
+        sqlite3.IntegrityError: UNIQUE constraint failed: index 'chats_chat_topic'
+
+    Cioe- l'indice che serve a impedire i duplicati non si poteva creare **a causa
+    dei duplicati**, e nessun riavvio successivo lo avrebbe cambiato. `migra()` sta
+    sul percorso di `db()`, quindi ogni richiesta — feed di XTrader compreso —
+    avrebbe preso 500 per sempre. Stessa classe della collisione di slug: una
+    migrazione sul percorso di ogni richiesta non puo- sollevare per dati che
+    esistono.
+    """
+    c = _con_chat_duplicate(tmp_path / 'duplicate.db')
+
+    main.migra(c)  # non deve sollevare
+
+    righe = c.execute('SELECT telegram_chat_id, owner_user_id FROM chats'
+                      ' WHERE telegram_chat_id=?', (CHAT_A,)).fetchall()
+    assert len(righe) == 1, f'i duplicati non sono stati unificati: {righe}'
+    assert righe[0][1] == 1, (
+        f'ha tenuto il proprietario sbagliato ({righe[0][1]}): sopravvive la riga piu- '
+        'vecchia, cioe- il primo che ha dichiarato la chat')
+    # E adesso l'indice esiste davvero, altrimenti la deduplica avrebbe solo
+    # nascosto il problema fino al prossimo inserimento.
+    with pytest.raises(sqlite3.IntegrityError):
+        c.execute('INSERT INTO chats(telegram_chat_id) VALUES (?)', (CHAT_A,))
+
+
+def test_la_deduplica_non_ORFANA_le_associazioni_parser_chat(tmp_path):
+    """Chi puntava alla riga cancellata punta alla sopravvissuta.
+
+    `parser_chats.chat_id` riferisce `chats.id`. Cancellare il duplicato senza
+    ripuntare le associazioni non solleva niente: lascia una riga che riferisce un
+    `id` che non esiste piu-, e il parser smette di ricevere da quella chat **in
+    silenzio**. E' la perdita di segnale che questo servizio esiste per evitare.
+
+    Oggi nessun codice scrive in `parser_chats` (verificato: nessun `INSERT INTO
+    parser_chats` in `main.py`) — quindi questo non e- un bug attivo, e- il PR sul
+    dispatch multi-parser che lo renderebbe attivo trovandoselo gia- chiuso.
+    """
+    c = _con_chat_duplicate(tmp_path / 'orfane.db')
+    perdente = c.execute('SELECT MAX(id) FROM chats WHERE telegram_chat_id=?',
+                         (CHAT_A,)).fetchone()[0]
+    vincente = c.execute('SELECT MIN(id) FROM chats WHERE telegram_chat_id=?',
+                         (CHAT_A,)).fetchone()[0]
+    assert perdente != vincente
+    c.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (?,?)', (7, perdente))
+
+    main.migra(c)
+
+    righe = c.execute('SELECT parser_id, chat_id FROM parser_chats').fetchall()
+    assert righe == [(7, vincente)], (
+        f'associazione orfana o persa: {righe}, la chat sopravvissuta e- {vincente}')
+
+
+def test_una_seconda_migrazione_non_TENTA_di_reinserire_le_chat(tmp_path):
+    """Lo stato stabile della migrazione e- un no-op, non una scrittura ripetuta.
+
+    Distingue le DUE forme che producono lo stesso contenuto finale, e serve perche'
+    senza di esso il controllo di esistenza nel travaso sarebbe codice che nessun
+    test protegge — la deduplica piu- sotto ripulisce comunque cio- che un
+    `INSERT OR IGNORE` sporca, quindi ogni assert sul CONTENUTO passa in entrambi i
+    casi. Misurato su tre migrazioni di fila dello stesso database:
+
+        controllo di esistenza:  sqlite_sequence(chats) = 1, 1, 1
+        INSERT OR IGNORE:        sqlite_sequence(chats) = 1, 2, 3
+
+    La riga sopravvissuta ha `id` 1 in entrambi, quindi nessun riferimento si rompe:
+    cio- che cambia e- che la seconda forma **tenta** un inserimento a ogni avvio del
+    processo e brucia un `id` anche quando viene ignorato. Su un database su volume,
+    riavviato a ogni deploy, e- una scrittura per chat per deploy per sempre.
+
+    `sqlite_sequence` e- escluso da `_fotografia` (con la sua motivazione scritta), e
+    proprio per questo va guardato QUI: e- l-unica traccia osservabile di un
+    inserimento che non ha lasciato righe.
+    """
+    # Il profilo PIERO con le sue due chat lo mette gia- il database di produzione.
+    c = _database_di_produzione(tmp_path / 'nooop.db')
+    main.migra(c)
+
+    def _sequenza():
+        riga = c.execute("SELECT seq FROM sqlite_sequence WHERE name='chats'").fetchone()
+        return riga[0] if riga else None
+
+    prima = _sequenza()
+    assert prima is not None, 'nessuna chat inserita: il test non misura niente'
+    main.migra(c)
+    dopo = _sequenza()
+
+    assert dopo == prima, (
+        f'la seconda migrazione ha bruciato un id ({prima} -> {dopo}): sta tentando '
+        'di reinserire una chat che esiste gia-, a ogni avvio del processo')

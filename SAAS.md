@@ -26,33 +26,99 @@ Il "profilo" si riduce allo slug dell'utente nell'URL del feed:
 
 ## Modello dati
 
+Questo elenco è **misurato su `PRAGMA table_info`** dopo `migra()`, non copiato dal
+disegno: fino al 12/08/2026 descriveva un modello che il codice non aveva ancora, e
+due voci erano diventate false — `token_hash` risultava su `parsers` mentre sta su
+`users`, e `signals` risultava con `parser_id` mentre ha `profile` e `user_id`. Un
+modello dati scritto a mano accanto a un modello dati eseguito è la duplicazione che
+la regola 3 vieta; qui vive perché il codice non lo genera, e per questo va
+ri-misurato ogni volta che lo schema cambia.
+
 ```text
 users
-  id, telegram_id (unique), username, first_name, slug (unique), status, created_at
+  id, telegram_id (unique), username, first_name, slug (unique),
+  token_hash, token_prefix, status, access_expires_at, telegram_reachable,
+  session_version, is_admin, created_at
 
-parsers
-  id, user_id, slug, name, config_json, token_hash, token_prefix, active, created_at
-  unique (user_id, slug)
+parsers            ← tabella PREESISTENTE, estesa con ALTER additivo
+  name (primary key), header, market_name, market_type, selection_name,
+  handicap, bet_type,                       ← le colonne del formato originale
+  user_id, slug, config_json, active, ordine, created_at, id
+  unique (user_id, slug)   come indice: su una tabella esistente UNIQUE non si
+  unique (id)              aggiunge con ALTER, e un PRIMARY KEY nemmeno. `id` è
+                           riempito dal `rowid`, che `parser_chats` può riferire
 
 chats
   id, telegram_chat_id, message_thread_id, title, type, owner_user_id, verified_at
-  unique (telegram_chat_id, message_thread_id)
+  unique (telegram_chat_id, IFNULL(message_thread_id, ''))
+                           l'`IFNULL` NON è cosmetico: in SQL `NULL != NULL`, quindi
+                           un UNIQUE sulla coppia non deduplica le chat senza topic
 
 parser_chats
   parser_id, chat_id
   primary key (parser_id, chat_id)
 
-signals
-  id, parser_id, csv, expires_at, created_at
-  una sola riga viva per parser
+signals            ← tabella PREESISTENTE, estesa con ALTER additivo
+  id, csv, parser, profile, created_at, expires_at,   ← formato originale
+  user_id                                             ← destinazione nuova
+  una sola riga viva per parser. `profile` continua a governare il feed: il
+  passaggio a `user_id` è del PR sul feed per utente, non di questo
 
 message_logs
-  id, parser_id, chat_id, text, matched, created_at
+  id, user_id, parser_id, chat_id, text, esito, created_at
   mai token, mai segreti
 
 chat_verifications
-  code (unique), user_id, expires_at, consumed_at
+  code (primary key), user_id, expires_at, consumed_at
+
+access_requests
+  id, user_id, created_at, decided_at, decided_by, granted_days, outcome
+
+admin_audit
+  id, admin_user_id, target_user_id, action, created_at
+
+feed_reads
+  token_id, giorno, ip_hash
+  primary key (token_id, giorno, ip_hash)
+
+webhook_seen
+  update_id (primary key), created_at
+  il dedup delle riconsegne di Telegram: senza, una riconsegna riscrive il
+  segnale e fa ripartire il TTL
+
+profiles           ← tabella PREESISTENTE, invariata
+  name (primary key), chat_ids, parser
+  resta la fonte del filtro delle chat finché il dispatch multi-parser non arriva
 ```
+
+`webhook_seen`, `message_logs` e `feed_reads` **esistono ma nessun codice le legge
+ancora**: il dedup degli `update_id`, i log persistenti e il conteggio delle letture
+sono comportamenti dei PR successivi. Le tabelle nascono adesso perché aggiungerle
+dopo vorrebbe dire una seconda migrazione su un database con dati dei clienti;
+dichiararle funzionanti sarebbe la copertura finta che `CLAUDE.md` vieta.
+
+### Cosa fa la migrazione con i dati che trova
+
+`migra()` non cancella e non rinomina niente, gira **una volta per processo** (non a
+ogni connessione) e sta sul percorso di `db()`. Da quest'ultimo fatto viene il vincolo
+che ne governa la forma: **non può sollevare per dati che esistono**, perché sollevare
+lì significa 500 su ogni richiesta, feed di XTrader compreso, e nessun riavvio lo
+cambierebbe. Tre stati dei dati veri lo avrebbero fatto, tutti trovati da review o da
+test e tutti chiusi con una disambiguazione deterministica invece di un errore:
+
+- due parser i cui nomi differiscono solo per maiuscole → `slug` uguale → `-2`, `-3`;
+- due profili nella stessa condizione → stesso trattamento su `users.slug`;
+- **due profili che elencano la stessa chat** → una sola riga in `chats`, e la
+  proprietà resta al primo che l'ha dichiarata (`id` più basso). È la regola 3 di
+  «Regole di isolamento» applicata: una chat appartiene a un solo utente. Chi
+  puntava alla riga scartata viene **ri-puntato** su quella sopravvissuta, perché
+  cancellare senza ri-puntare lascerebbe un `parser_chats.chat_id` che riferisce un
+  `id` inesistente — un parser che smette di ricevere in silenzio.
+
+A quale dei due utenti debba appartenere una chat che entrambi rivendicano *davvero*
+è una decisione del PR sul dispatch multi-parser, dove il webhook deve sceglierne uno;
+qui è fissata come «il primo», e un test la tiene ferma perché il giorno che cambia si
+veda.
 
 ## Regole di isolamento
 
@@ -505,7 +571,8 @@ senza doppio ruolo.
 |---|---|
 | Fatto | Prototipo web app in `web/`, servito su `/app`, con motore di parsing e contratto API |
 | Fatto | Test hard del motore e del contratto CSV (`tests/engine/`), guardia sui workflow di review (`tests/safety/`) |
-| M1 | Postgres, tabelle utenti/parser/chat, token hashati, verifica chat, feed per parser, compatibilità `/xtrader.csv` |
+| Fatto | Lo **schema** di questa sezione, creato in place su SQLite da `migra()`, con i dati esistenti travasati e i test in `tests/relay/test_schema.py`. Le tabelle esistono e i vincoli reggono; il *comportamento* che le usa è dei PR sotto |
+| M1 | Token hashati, verifica chat, feed per utente, compatibilità `/xtrader.csv`. **Postgres differito** e non più urgente: i dati persistono già, `DB_PATH` in produzione è `/data/signals.db` dentro il volume (misurato il 12/08/2026) |
 | M2 | Motore di parsing generico in Python, endpoint di test, dispatch multi-parser nel webhook |
 | M3 | Login Telegram reale, sessioni, la web app collegata al backend |
 | M4 | Log persistenti, sospensione, suggerimento AI lato server, abbonamenti |
