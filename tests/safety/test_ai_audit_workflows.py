@@ -1814,7 +1814,7 @@ def _e_marcata_non_completa(testo: str, path: Path) -> bool:
     return any(testo.lstrip().startswith(g) for g in _prefissi_guard(path))
 
 
-def test_la_premessa_della_whitelist_di_fable_resta_vera():
+def test_la_premessa_della_whitelist_di_fable_resta_vera(monkeypatch):
     """Fable dichiara completo solo `end_turn`, e quella scelta ha una PREMESSA.
 
     Su Anthropic ci sono altri due modi legittimi di finire bene: `tool_use`, se al
@@ -1829,23 +1829,32 @@ def test_la_premessa_della_whitelist_di_fable_resta_vera():
     sarebbe mai stato pubblicato, e la review si sarebbe ripagata a ogni push. Un
     guasto silenzioso e costoso, non un errore.
 
-    Questo test lega la premessa alla whitelist: se un giorno il payload guadagna
-    strumenti o sequenze di arresto, questo diventa rosso e obbliga a riguardare
-    `MOTIVI_COMPLETI` invece di scoprirlo dalla bolletta.
+    L'asserzione e' sul corpo del POST **effettivamente spedito**, non sul sorgente.
+    La prima versione cercava le stringhe `"tools"` e `"stop_sequences"` nel testo di
+    `call_model`, e GPT-5.5 ha obiettato al giro dopo che una ricerca per stringa da-
+    un falso negativo se il payload viene costruito indirettamente — via variabile,
+    helper o costante esterna. Aveva ragione: il test sarebbe stato verde mentre il
+    campo veniva spedito. Serializzare il payload e guardare le chiavi che arrivano
+    al fornitore chiude quel buco, e non si rompe per un refactor equivalente.
+
+    Che `end_turn` sia l'unico motivo accettato non e' asserito qui sul testo della
+    whitelist: lo dimostra, sui cinque valori, il test parametrizzato qui sopra.
     """
-    corpo = _solo_codice(_blocco(FABLE, 'call_model'))
-    assert '"tools"' not in corpo, (
-        'il payload di Fable ora passa `tools`: `stop_reason=tool_use` diventa un modo '
-        'LEGITTIMO di finire, e la whitelist `MOTIVI_COMPLETI` va aggiornata o ogni '
-        'review verra- marcata troncata e ripagata a ogni push'
+    import json as _json
+    risposta = {'content': [{'type': 'text', 'text': 'ok'}],
+                'stop_reason': 'end_turn', 'usage': {}}
+    call_model, chiamate = _call_model_di_fable(monkeypatch, risposta)
+    call_model('sistema', 'utente')
+
+    corpo = _json.loads(chiamate[0].data.decode('utf-8'))
+    assert 'tools' not in corpo, (
+        'il payload di Fable ora spedisce `tools`: `stop_reason=tool_use` diventa un '
+        'modo LEGITTIMO di finire, e la whitelist `MOTIVI_COMPLETI` va aggiornata o '
+        f'ogni review verra- marcata troncata e ripagata a ogni push. Corpo: {sorted(corpo)}'
     )
-    assert '"stop_sequences"' not in corpo, (
-        'il payload di Fable ora passa `stop_sequences`: `stop_reason=stop_sequence` '
-        'diventa un esito atteso e va aggiunto a `MOTIVI_COMPLETI`'
-    )
-    assert 'MOTIVI_COMPLETI = ("end_turn",)' in corpo, (
-        'la whitelist e- cambiata: se ha guadagnato valori, le due asserzioni qui sopra '
-        'non descrivono piu- la premessa su cui si regge'
+    assert 'stop_sequences' not in corpo, (
+        'il payload di Fable ora spedisce `stop_sequences`: `stop_reason=stop_sequence` '
+        f'diventa un esito atteso e va aggiunto a `MOTIVI_COMPLETI`. Corpo: {sorted(corpo)}'
     )
 
 
@@ -1875,8 +1884,13 @@ def _call_model_di_fable(monkeypatch, risposta):
         def __exit__(self, *_):
             return False
 
-    monkeypatch.setattr(urllib.request, 'urlopen',
-                        lambda req, timeout=None: RispostaFinta(risposta))
+    chiamate = []
+
+    def finta_urlopen(req, timeout=None):
+        chiamate.append(req)
+        return RispostaFinta(risposta)
+
+    monkeypatch.setattr(urllib.request, 'urlopen', finta_urlopen)
     spazio: dict = {
         'ANTHROPIC_MODEL': 'claude-fable-5',
         'ANTHROPIC_VERSION': '2023-06-01',
@@ -1890,7 +1904,7 @@ def _call_model_di_fable(monkeypatch, risposta):
         'io': io,
     }
     exec(_blocco(FABLE, 'call_model'), spazio)  # noqa: S102 - sorgente del repo
-    return spazio['call_model']
+    return spazio['call_model'], chiamate
 
 
 # `end_turn` e' l'UNICO motivo che significa «ho finito la review». `max_tokens` era
@@ -1919,7 +1933,8 @@ def test_fable_marca_troncata_ogni_uscita_che_non_sia_end_turn(monkeypatch, stop
     risposta = {'content': [{'type': 'text', 'text': 'meta- review'}], 'usage': {}}
     if stop is not None:
         risposta['stop_reason'] = stop
-    testo, _ = _call_model_di_fable(monkeypatch, risposta)('sistema', 'utente')
+    call_model, _ = _call_model_di_fable(monkeypatch, risposta)
+    testo, _ = call_model('sistema', 'utente')
 
     assert _e_marcata_non_completa(testo, FABLE) is troncata, (
         f'stop_reason={stop!r}: atteso troncata={troncata}, ottenuto:\n{testo!r}'
