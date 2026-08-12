@@ -12,3 +12,10 @@
 # eseguita su questa versione.
 pytest==9.0.3
 PyYAML==6.0.2
+
+# Playwright: i test di `tests/web/` pilotano un browser vero. NON era elencata, e
+# la CI e' fallita al primo run con «No module named playwright» — in locale non si
+# vedeva perche' qui e' preinstallata nell'immagine. Il binario del browser non
+# arriva da pip: lo installa `playwright install --with-deps chromium`, che il
+# workflow esegue dopo questo file.
+playwright==1.62.0

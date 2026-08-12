@@ -25,12 +25,13 @@ import sys
 import tempfile
 from urllib.parse import urlparse
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 from playwright.sync_api import sync_playwright
 
-# Lo stesso Chromium pinnato dagli altri script di questa cartella. Passato
-# esplicitamente perche' Playwright cerca `chromium_headless_shell-<altra
-# versione>` e in questo ambiente non c'e': senza, `launch()` fallisce.
-CHROMIUM = '/opt/pw-browsers/chromium-1194/chrome-linux/chrome'
+# Fonte unica dell-avvio del browser: il percorso pinnato in questo
+# ambiente, quello di Playwright in CI. Prima era ricopiato in cinque file.
+from tests.runtime import apri_chromium  # noqa: E402
+
 
 BASE = (sys.argv[1] if len(sys.argv) > 1 else 'http://127.0.0.1:8099/').rstrip('/') + '/'
 OUT = pathlib.Path(sys.argv[2]) if len(sys.argv) > 2 else pathlib.Path(tempfile.mkdtemp())
@@ -97,7 +98,7 @@ def _senza_scorrimento(pagina, dove):
 
 
 with sync_playwright() as pw:
-    browser = pw.chromium.launch(executable_path=CHROMIUM)
+    browser = apri_chromium(pw)
     for nome, larghezza, altezza in MISURE:
         pagina = browser.new_page(viewport={'width': larghezza, 'height': altezza})
         _ascolta(pagina)

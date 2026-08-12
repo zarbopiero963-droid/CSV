@@ -1,0 +1,110 @@
+name: Test
+
+# Il primo workflow di questo repository che esegue i test. Fino alla sua nascita
+# `pytest` girava solo in locale: un check verde su una PR non diceva niente sul
+# loro esito, ed era scritto in CLAUDE.md come limite dichiarato.
+#
+# La cosa da NON fare, ed e' il motivo per cui questo file e' commentato: una CI
+# che esce verde senza aver eseguito. Basta che l'installazione di Chromium non
+# riesca e pytest riporta «229 passed, 5 skipped», esce 0, e la spunta e'
+# identica a quella di una suite completa. E' la stessa classe del difetto chiuso
+# dalla PR #16 sui reviewer AI — un `::notice` invece di un errore, tre spunte e
+# zero righe lette. Per questo il job impone TEST_RUNTIME_OBBLIGATORIO, che
+# trasforma ogni skip per runtime mancante in un fallimento.
+#
+# Vincolato da `tests/safety/test_ci.py`, che legge QUESTO file.
+
+# `push` limitato a `main`, `pull_request` per tutto il resto. Senza il filtro
+# ogni PR consumerebbe DUE corse — una per il push sul branch e una per la PR —
+# e i minuti di Actions si pagano. Cosi' una PR costa una corsa, e `main` viene
+# ricontrollato dopo ogni merge, che e' il momento in cui il risultato serve
+# davvero: e' il codice che va in deploy.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Sola lettura, e nessun Secret. La suite non ne usa nessuno, e uno qui potrebbe
+# fare danno: con TELEGRAM_BOT_TOKEN nell'ambiente, avviare il servizio chiama
+# setWebhook verso PUBLIC_URL, cioe' ripunterebbe il webhook del bot vero da un
+# runner della CI. E' lo stesso difetto da cui nasce la whitelist di
+# tests/ambiente.py, un livello piu' in alto.
+permissions:
+  contents: read
+
+# Un push subito dopo un altro annulla la corsa precedente: i minuti di Actions
+# si pagano, e il risultato di un head superato non serve a nessuno.
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: pytest (${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # La versione con cui la suite gira in sviluppo. Una matrice piu' larga
+        # moltiplicherebbe i minuti senza coprire un rischio: il deploy Railway
+        # usa un solo interprete.
+        python: ['3.11']
+
+    steps:
+      # `persist-credentials: false` non e' pignoleria: `actions/checkout@v4`
+      # lascia per default il token di installazione nel git config locale, e il
+      # codice dei test — che su una PR arriva da un contributore — potrebbe
+      # leggerlo da li'. `permissions: contents: read` NON disattiva quel
+      # comportamento: limita cosa il token puo- fare, non chi lo puo- leggere.
+      # Questa suite non fa nessuna operazione git dopo il checkout, quindi il
+      # token non serve a niente. Segnalato da CodeRabbit, e da zizmor come
+      # `artipacked`.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      # node NON viene installato: `ubuntu-latest` lo porta gia', e i casi del
+      # motore (`tests/engine/engine_cases.mjs`) girano su quello. Se un giorno
+      # sparisse, la modalita' severa lo renderebbe rosso invece di saltarlo — che
+      # e' esattamente il comportamento voluto.
+      - name: Versioni dei runtime
+        run: |
+          python --version
+          node --version
+
+      - name: Dipendenze
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      # Il browser va installato qui: il percorso pinnato in tests/runtime.py e'
+      # dell'immagine di sviluppo e su un runner non esiste, quindi senza questo
+      # passo la modalita' severa renderebbe rossi i test browser a ogni corsa.
+      # `--with-deps` porta le librerie di sistema che Chromium pretende.
+      #
+      # `chromium` e non `chromium-headless-shell`: Playwright in modalita'
+      # headless avvia la *headless shell*, e l'argomento `chromium` installa
+      # entrambi i pezzi. Misurato nell'ambiente di sviluppo, dove la shell manca:
+      # `BrowserType.launch: Executable doesn't exist at .../chromium_headless_shell-1234/...`
+      # — cioe' esattamente il guasto che si otterrebbe installando la cosa
+      # sbagliata, ed e' il motivo per cui lassu' il percorso e' pinnato.
+      #
+      # NOTA DI ONESTA': questo passo, e il ramo di `apri_chromium` che lascia
+      # scegliere il browser a Playwright, sono l'unica parte di questa PR che
+      # NON e' verificabile in locale — qui il pinnaggio c'e' sempre, quindi quel
+      # ramo non viene mai percorso. Il primo run della CI e' la sua verifica. Se
+      # sbaglia, sbaglia in ROSSO e non in verde silenzioso: e' la proprieta' per
+      # cui esiste TEST_RUNTIME_OBBLIGATORIO.
+      - name: Chromium per i test browser
+        run: python -m playwright install --with-deps chromium
+
+      - name: Suite completa
+        env:
+          # Il patto di questo workflow: un runtime mancante FALLISCE, non salta.
+          TEST_RUNTIME_OBBLIGATORIO: '1'
+        run: python -m pytest -q

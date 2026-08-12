@@ -24,16 +24,15 @@ RADICE = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(RADICE))
 
 from tests.ambiente import ambiente_di_supporto  # noqa: E402
+from tests.runtime import esigi_browser  # noqa: E402
 from tests.servizio import relay_avviato  # noqa: E402
 
-CHROMIUM = Path('/opt/pw-browsers/chromium-1194/chrome-linux/chrome')
-
-playwright = pytest.importorskip('playwright', reason='playwright non installato')
-
-pytestmark = pytest.mark.skipif(
-    not CHROMIUM.is_file(),
-    reason=f'Chromium non presente in {CHROMIUM}: il flusso browser non e\' eseguibile',
-)
+# Playwright e Chromium: se mancano si salta con motivo scritto, MA in CI la
+# variabile TEST_RUNTIME_OBBLIGATORIO trasforma lo skip in un fallimento. Una CI
+# che salta i test browser esce verde senza averli eseguiti, ed e' la stessa classe
+# del check verde senza review chiusa dalla PR #16. La decisione vive in
+# `tests/runtime.py`, in un punto solo.
+esigi_browser()
 
 
 @pytest.fixture(scope='module')

@@ -33,6 +33,9 @@ Il merge resta sempre manuale del repository owner.
 | Deploy | `Procfile`, `railway.json`, `requirements.txt` |
 | Workflow di review AI (GPT-5.5, Fable 5, Fugu Ultra) | `.github/workflows/pr-review-*.yml` |
 | Guardia sui workflow di review | `tests/safety/test_ai_audit_workflows.py` |
+| Workflow che esegue i test (ogni PR, e i push a `main`) | `.github/workflows/test.yml` |
+| Runtime esterni dei test (node, Chromium) e modalita' severa | `tests/runtime.py` |
+| Guardie sulla CI e sul suo meccanismo | `tests/safety/test_ci.py`, `tests/safety/test_runtime_severo.py` |
 | Test del relay: contratto CSV sui byte della risposta HTTP | `tests/relay/test_csv_contract.py` |
 | Test del motore e del contratto CSV (casi eseguiti in node) | `tests/engine/engine_cases.mjs`, `tests/engine/test_engine_contract.py` |
 | Test del prototipo in browser (Playwright/Chromium) | `tests/web/prototype_flow.py`, `tests/web/mobile_layout.py`, `tests/web/test_prototype_flow.py` |
@@ -806,9 +809,28 @@ Puoi continuare solo se `POST_FIX_AUDIT=PASS`.
 > `requirements-dev.txt`, separate da quelle del deploy:
 > `pip install -r requirements-dev.txt && python -m pytest -q`.
 >
-> **Nessun workflow CI esegue questi test:** girano solo in locale. Un check verde su una PR non
-> dice niente sul loro esito, e i casi che richiedono `node` o Chromium si **saltano** dove quei
-> runtime mancano. Chi dichiara i test passati deve aver eseguito il comando e riportato l'output.
+> **La CI li esegue, dal 12/08/2026:** `.github/workflows/test.yml` gira su ogni PR e sui push a
+> **`main`** — non su ogni push, o ogni PR consumerebbe due corse di minuti Actions — e lancia
+> `python -m pytest -q` sull'intera suite. Fino a quel giorno giravano solo in locale, e un
+> check verde non diceva niente sul loro esito.
+>
+> **E non puo' passare saltandoli.** Il workflow impone `TEST_RUNTIME_OBBLIGATORIO=1`, che trasforma
+> ogni skip per runtime mancante in un **fallimento**: senza, un'installazione di Chromium andata
+> male produrrebbe «252 passed, 5 skipped», exit 0, e una spunta identica a quella di una suite
+> completa — la stessa classe del check verde senza review chiusa dalla PR #16, e piu' difficile da
+> notare, perche' nessuno legge il conteggio degli skip di una CI che passa. In locale la variabile
+> resta spenta e gli skip restano skip, con motivo scritto: chi non ha Chromium non puo' eseguire i
+> test browser, e dichiararli passati sarebbe la bugia che questo file vieta.
+>
+> La decisione vive in **`tests/runtime.py`**, fonte unica anche del percorso di Chromium — prima
+> ricopiato a mano in **cinque** file di `tests/web/`. Il meccanismo e' testato da
+> `tests/safety/test_runtime_severo.py` e il workflow da `tests/safety/test_ci.py`, che lo legge
+> dalla **struttura** e non dal testo: la prima versione di quella guardia cercava il nome della
+> variabile nel file e restava verde dopo averla tolta dal passo, perche' il commento in cima al
+> workflow la nomina.
+>
+> Chi dichiara i test passati deve comunque aver eseguito il comando e riportato l'output: adesso c'e'
+> anche il check, ma vale la regola di sempre — si legge l'esito, non il colore.
 > Il relay (`main.py`) ha i suoi test da `tests/relay/`, nati col passaggio a UTF-8 con BOM: sono i
 > primi test di `main.py` in questo repository e asseriscono i **byte** della risposta, non le stringhe.
 >
@@ -1383,7 +1405,7 @@ installate in posti diversi. Aspetta i loro check, leggi i loro commenti, fai il
 | ~~Secret delle API key~~ | **Configurati il 2026-08-11** come `BETRELAY_GPT`, `BETRELAY_FABLE`, `BETRELAY_FUGU`. Non erano configurati fino a quel giorno, e i tre workflow uscivano **verdi senza revisionare** (`::notice` nei log della PR #1): un check verde non prova che un modello abbia letto il diff. Adesso girano davvero. Attenzione ai nomi: sono quelli di questo repository, non quelli del Bridge. |
 | ~~Label `final-fable-review`, `final-fugu-review`~~ | **Create il 2026-08-11.** La creazione era azione del proprietario, una volta sola. **Applicarle** è invece ricorrente e spetta all'agente: rimuovere e riaggiungere a ogni head stabile. |
 | Workflow GLM 5.2 | non importato per scelta: i reviewer a API key qui sono tre. Non contarlo né aspettarlo. |
-| Workflow di build/test propri del repo | non esistono: `pytest` va eseguito localmente, nessun check CI lo esegue. |
+| ~~Workflow di build/test propri del repo~~ | **Creato il 12/08/2026**: `.github/workflows/test.yml` esegue `pytest -q` su ogni PR e sui push a `main`, con `TEST_RUNTIME_OBBLIGATORIO=1` perche' uno skip per runtime mancante non possa lasciarlo verde. Prima non esisteva e i test giravano solo in locale. |
 | ~~Test del relay (`main.py`)~~ | **Creati l'11/08/2026** in `tests/relay/test_csv_contract.py` col passaggio a UTF-8 con BOM: byte della risposta HTTP, `verify_csv()`, fail-closed di `store_signal`, esito del verificatore su `/health`. `tests/` ha ora quattro cartelle. |
 | `docs/` | i documenti del Bridge citati sopra non esistono qui e non vanno inventati. |
 | `AGENTS.md` | questo file è autosufficiente; se AGENTS.md verrà aggiunto, ha precedenza. |

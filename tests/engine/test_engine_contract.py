@@ -12,21 +12,31 @@ CLAUDE.md: mai dichiarare coperto un comportamento non eseguito.
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 RADICE = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(RADICE))
+
+from tests.runtime import esigi_node  # noqa: E402
+
 CASI_JS = Path(__file__).with_name('engine_cases.mjs')
 
-NODE = shutil.which('node')
+def _esegui_casi(node: str) -> list[dict]:
+    """Esegue i casi con l'interprete che `esigi_node()` ha trovato.
 
-
-def _esegui_casi() -> list[dict]:
+    Il percorso arriva come ARGOMENTO e non da una costante di modulo. Prima
+    c'erano due fonti — `NODE = shutil.which('node')` all'import piu' il gate
+    `esigi_node()` — e il valore restituito dal gate veniva scartato: due
+    risoluzioni della stessa cosa, che e' la duplicazione vietata dalla regola 3 e
+    che avrebbe potuto divergere (per esempio con un PATH modificato da una
+    fixture). Segnalato da Claude Fable 5 sulla PR #18.
+    """
     proc = subprocess.run(
-        [NODE, str(CASI_JS)],
+        [node, str(CASI_JS)],
         cwd=RADICE, capture_output=True, text=True, timeout=60,
     )
     if not proc.stdout.strip():
@@ -39,9 +49,7 @@ def _esegui_casi() -> list[dict]:
 
 @pytest.fixture(scope='module')
 def casi() -> list[dict]:
-    if NODE is None:
-        pytest.skip('node non disponibile in questo ambiente: il motore JS non e\' eseguibile')
-    return _esegui_casi()
+    return _esegui_casi(esigi_node())
 
 
 def test_i_casi_girano_e_ne_esistono_abbastanza(casi):
