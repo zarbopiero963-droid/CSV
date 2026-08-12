@@ -598,7 +598,12 @@ jobs:
           def call_model(system_prompt: str, user_prompt: str):
               payload = {
                   "model": MODEL_ID,
-                  "messages": [
+                  # `input`, NON `messages`: su `v1/responses` il campo che porta il
+                  # prompt si chiama cosi', e `messages` e- il nome di
+                  # chat/completions. Segnalato da GPT-5.5 come [REAL_FINDING] sulla
+                  # PR #20: era rimasto indietro nella sostituzione, e avrebbe dato 400
+                  # a OGNI armamento del gate finale.
+                  "input": [
                       {"role": "system", "content": system_prompt},
                       {"role": "user", "content": user_prompt},
                   ],

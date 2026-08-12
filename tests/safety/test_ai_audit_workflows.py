@@ -1484,6 +1484,21 @@ def test_la_richiesta_del_gate_usa_la_forma_di_v1_responses():
     perche' su chat/completions era legittima.
     """
     corpo = _blocco(SOL, 'call_model')
+    # IL CAMPO CHE PORTA IL PROMPT, e sta per primo perche' e- quello che mi era
+    # sfuggito. La prima versione di questo test asseriva `max_output_tokens`,
+    # l'assenza di `temperature`, l'endpoint e `store` — cioe' i campi che AVEVO
+    # cambiato — e non quello che doveva cambiare e non era cambiato: il payload
+    # spediva ancora `messages`, il nome di chat/completions, e ogni armamento del
+    # gate avrebbe dato 400. Trovato da GPT-5.5, non da qui. Un test che verifica le
+    # proprie modifiche invece del contratto passa e non protegge.
+    assert '"input"' in corpo, (
+        'il prompt non e- nel campo `input`: su v1/responses e- quello il nome, e '
+        '`messages` da- 400 sistematico'
+    )
+    assert '"messages"' not in _solo_codice(corpo), (
+        'residuo di chat/completions: `messages` invece di `input` fa fallire OGNI '
+        'chiamata con 400, cioe- il gate finale rosso a ogni armamento'
+    )
     assert '"max_output_tokens"' in corpo, 'il tetto di output non e- nella forma di v1/responses'
     assert '"max_tokens"' not in corpo, (
         'residuo di chat/completions: `max_tokens` su v1/responses viene ignorato e '
@@ -1577,3 +1592,138 @@ def test_il_gate_dichiara_il_modello_e_l_etichetta_separati():
     )
     assert env.get('PRICE_CACHE_READ_PER_MILLION') == '0.50', \
         'il prezzo dei token dalla cache non e- dichiarato'
+
+
+def _call_model_del_gate(risposta=None, errore=None):
+    """Esegue `call_model` del gate con una finta `urlopen`.
+
+    Chiesto da GPT-5.5 nei «test minimi» della PR #20, e la richiesta era giusta: i
+    test statici dicono che il payload ha la forma giusta, non che il codice sappia
+    leggere una risposta o reagire a un errore. `risposta` e' il corpo JSON che la
+    finta restituisce; `errore` un'eccezione da sollevare al suo posto.
+    """
+    import io
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    class RispostaFinta:
+        def __init__(self, corpo):
+            self._corpo = _json.dumps(corpo).encode('utf-8')
+
+        def read(self):
+            return self._corpo
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    chiamate = []
+
+    def finta_urlopen(req, timeout=None):
+        chiamate.append(req)
+        if errore is not None:
+            raise errore
+        return RispostaFinta(risposta)
+
+    spazio: dict = {
+        'MODEL_ID': 'gpt-5.6-sol',
+        'MAX_OUTPUT_TOKENS': 10_000,
+        'BETRELAY_GPT': 'chiave-finta-non-un-segreto',
+        'REVIEW_ID': 'gpt56-sol',
+        'redact': lambda t: t,
+        'json': _json,
+        'time': __import__('time'),
+        'urllib': urllib,
+        'io': io,
+    }
+    spazio['urllib'].request.urlopen = finta_urlopen  # type: ignore[assignment]
+    exec(_blocco(SOL, 'call_model'), spazio)  # noqa: S102 - sorgente del repo
+    return spazio['call_model'], chiamate
+
+
+def test_il_gate_legge_una_risposta_minimale_di_v1_responses():
+    """`output_text` e `usage` estratti da una risposta della forma nuova.
+
+    E la richiesta spedita viene ISPEZIONATA: e' l'unico modo di sapere che il
+    payload ha davvero `input` e non `messages`, perche' un `assert` sul sorgente
+    non prova che quel dizionario finisca nel corpo del POST.
+    """
+    import json as _json
+    vero_urlopen = __import__('urllib.request', fromlist=['request']).urlopen
+    try:
+        call_model, chiamate = _call_model_del_gate(risposta={
+            'output_text': 'nessun bloccante',
+            'status': 'completed',
+            'usage': {'input_tokens': 1_000, 'output_tokens': 10},
+        })
+        testo, usage = call_model('sistema', 'utente')
+    finally:
+        __import__('urllib.request', fromlist=['request']).urlopen = vero_urlopen
+
+    assert testo == 'nessun bloccante', f'testo non estratto: {testo!r}'
+    assert usage == {'input_tokens': 1_000, 'output_tokens': 10}
+
+    corpo = _json.loads(chiamate[0].data.decode('utf-8'))
+    assert 'input' in corpo, f'la richiesta spedita non ha `input`: {sorted(corpo)}'
+    assert 'messages' not in corpo, 'la richiesta spedita ha ancora `messages`'
+    assert corpo['model'] == 'gpt-5.6-sol'
+    assert corpo['max_output_tokens'] == 10_000
+    assert 'temperature' not in corpo
+
+
+def test_una_risposta_TRONCATA_non_passa_per_completa():
+    """`status=incomplete` deve mettere il banner che marca la review non completa.
+
+    Il banner in testa e' cio' che il chiamante controlla con `startswith` per non
+    pubblicare il `done_marker`: senza, una review interrotta a meta' verrebbe
+    deduplicata come completata e non rifatta mai piu'.
+    """
+    vero_urlopen = __import__('urllib.request', fromlist=['request']).urlopen
+    try:
+        call_model, _ = _call_model_del_gate(risposta={
+            'output_text': 'meta- review',
+            'status': 'incomplete',
+            'incomplete_details': {'reason': 'max_output_tokens'},
+            'usage': {},
+        })
+        testo, _ = call_model('sistema', 'utente')
+    finally:
+        __import__('urllib.request', fromlist=['request']).urlopen = vero_urlopen
+
+    assert testo.startswith('Output troncato'), (
+        f'una review troncata non porta il banner, quindi passerebbe per completa:\n{testo!r}'
+    )
+    assert 'meta- review' in testo, 'il testo parziale e- stato buttato via'
+
+
+def test_un_400_del_fornitore_fa_FALLIRE_e_non_restituisce_una_review():
+    """Chiesto da GPT-5.5: fail-closed sull'errore del fornitore.
+
+    Un 400 non e' un caso da ritentare — la richiesta e' malformata, e ritentarla
+    tre volte dara' tre volte 400. La cosa che conta e' che `call_model` **solleva**
+    invece di restituire una stringa: se restituisse testo, quel testo diventerebbe
+    la review, il gate a label la pubblicherebbe e uscirebbe verde su una chiamata
+    mai andata a buon fine.
+
+    E' il difetto che questa PR ha sfiorato per davvero: col payload sbagliato ogni
+    armamento avrebbe preso un 400.
+    """
+    import urllib.error
+    vero_urlopen = __import__('urllib.request', fromlist=['request']).urlopen
+    try:
+        call_model, chiamate = _call_model_del_gate(errore=urllib.error.HTTPError(
+            'https://api.openai.com/v1/responses', 400, 'Bad Request', {},
+            __import__('io').BytesIO(b'{"error": {"message": "Unknown parameter: messages."}}')))
+        with pytest.raises(RuntimeError) as esito:
+            call_model('sistema', 'utente')
+    finally:
+        __import__('urllib.request', fromlist=['request']).urlopen = vero_urlopen
+
+    assert 'HTTP 400' in str(esito.value), f'il motivo non arriva al chiamante: {esito.value}'
+    assert len(chiamate) == 1, (
+        f'un 400 e- stato ritentato {len(chiamate)} volte: la richiesta e- malformata, '
+        'ritentarla da- tre volte lo stesso errore e tre volte il costo'
+    )
