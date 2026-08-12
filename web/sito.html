@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BetRelay — i segnali del tuo canale Telegram, dentro XTrader</title>
+  <meta name="description" content="BetRelay legge i segnali del tuo canale Telegram e li serve a XTrader come feed CSV. Nessun programma da installare: XTrader legge un indirizzo, BetRelay lo tiene aggiornato.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232aabee'/%3E%3Ctext x='16' y='22' font-family='sans-serif' font-size='14' font-weight='700' fill='%2304121b' text-anchor='middle'%3EBR%3C/text%3E%3C/svg%3E">
+  <style>
+    /* Stessi token della web app (web/styles.css): una sola identita' visiva.
+       Sono ricopiati e non importati di proposito — la facciata deve restare una
+       pagina sola, senza una seconda richiesta di rete per mostrare il titolo. */
+    :root {
+      --bg: #0f1419;
+      --bg-2: #161d24;
+      --bg-3: #1d262f;
+      --line: #2a3540;
+      --txt: #e6edf3;
+      --txt-2: #93a3b1;
+      --txt-3: #667584;
+      --accent: #2aabee;
+      --accent-2: #1d8ec4;
+      --ok: #3fb950;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      --radius: 10px;
+    }
+    * { box-sizing: border-box; }
+
+    /* I figli di flex e grid hanno `min-width: auto`: un contenuto largo allarga
+       il contenitore invece di scorrere dentro il proprio. E' il difetto tornato
+       quattro volte nella web app (regola 2 di CLAUDE.md), e qui e' spento in
+       partenza su TUTTI i figli, non sui tre che me ne ricordo oggi. */
+    body > *, .griglia > *, .coppia > *, .righe > * { min-width: 0; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--txt);
+      font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      /* Ultima difesa contro lo scorrimento orizzontale: se un giorno un
+         contenuto sfonda, la pagina resta usabile sul telefono. */
+      overflow-x: hidden;
+    }
+    a { color: var(--accent); }
+
+    /* `.dentro` porta i margini laterali, e sta SEMPRE da sola sul proprio
+       elemento: la spaziatura verticale vive sul genitore.
+
+       Non e' pignoleria di stile. Nella prima versione l'apertura era
+       `<div class="dentro apertura">` — due classi sullo stesso elemento — e
+       `.apertura { padding: 72px 0 56px }` riportava a zero il padding laterale,
+       perche' la forma breve scrive tutti e quattro i lati. Titolo, sommario e
+       pulsanti finivano attaccati al bordo del telefono mentre le sezioni sotto
+       restavano rientrate. Rimettere il 20px dentro `.apertura` avrebbe corretto
+       il sito e lasciato viva la trappola; separare gli elementi la toglie,
+       perche' non esiste piu' una forma breve che possa sovrascrivere il margine.
+       Misurato da `tests/web/sito_flow.py` a 390 px e a 1280. */
+    .dentro { width: 100%; max-width: 960px; margin: 0 auto; padding: 0 20px; }
+
+    /* ---------- barra ---------- */
+    header {
+      border-bottom: 1px solid var(--line);
+      background: rgba(15, 20, 25, .9);
+      position: sticky; top: 0; z-index: 2;
+    }
+    .barra { display: flex; align-items: center; gap: 16px; height: 62px; }
+    .marchio {
+      display: flex; align-items: center; gap: 10px;
+      font-weight: 700; font-size: 19px; letter-spacing: -.2px;
+      color: var(--txt); text-decoration: none;
+    }
+    .segno {
+      width: 28px; height: 28px; border-radius: 7px; flex: 0 0 auto;
+      background: var(--accent); color: #04121b;
+      font: 700 13px/28px var(--mono); text-align: center;
+    }
+    .barra .spinta { margin-left: auto; }
+
+    /* ---------- pulsanti ---------- */
+    .bottone {
+      display: inline-block; text-decoration: none;
+      padding: 11px 20px; border-radius: var(--radius);
+      background: var(--accent); color: #04121b; font-weight: 600;
+      border: 1px solid var(--accent);
+    }
+    .bottone:hover { background: var(--accent-2); border-color: var(--accent-2); }
+    .bottone.calmo { background: transparent; color: var(--txt); border-color: var(--line); }
+    .bottone.calmo:hover { border-color: var(--txt-3); background: var(--bg-2); }
+
+    /* ---------- apertura ---------- */
+    .apertura { padding: 72px 0 56px; }
+    .stato {
+      display: inline-flex; align-items: center; gap: 8px;
+      font-size: 13px; color: var(--txt-2);
+      border: 1px solid var(--line); border-radius: 999px;
+      padding: 5px 13px; margin: 0 0 22px;
+    }
+    .pallino {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--ok); flex: 0 0 auto;
+    }
+    h1 {
+      margin: 0 0 18px;
+      font-size: clamp(30px, 6.2vw, 50px);
+      line-height: 1.12; letter-spacing: -1px; font-weight: 700;
+    }
+    h1 em { color: var(--accent); font-style: normal; }
+    .sommario {
+      margin: 0 0 30px; max-width: 620px;
+      font-size: clamp(16px, 2.4vw, 19px); color: var(--txt-2);
+    }
+    .azioni { display: flex; flex-wrap: wrap; gap: 12px; }
+
+    /* ---------- sezioni ---------- */
+    section { padding: 52px 0; border-top: 1px solid var(--line); }
+    h2 {
+      margin: 0 0 8px; font-size: clamp(21px, 3.4vw, 28px);
+      letter-spacing: -.4px; font-weight: 700;
+    }
+    .sotto { margin: 0 0 30px; color: var(--txt-2); max-width: 620px; }
+    .griglia { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+    .scheda {
+      background: var(--bg-2); border: 1px solid var(--line);
+      border-radius: var(--radius); padding: 20px;
+    }
+    .scheda h3 { margin: 0 0 6px; font-size: 16px; }
+    .scheda p { margin: 0; color: var(--txt-2); font-size: 15px; }
+    .numero {
+      display: block; font: 700 12px/1 var(--mono);
+      color: var(--accent); margin-bottom: 12px; letter-spacing: 1px;
+    }
+
+    /* ---------- dal messaggio alla riga ---------- */
+    .telaio {
+      background: var(--bg-2); border: 1px solid var(--line);
+      border-radius: var(--radius); overflow: hidden;
+    }
+    .telaio .titolo {
+      padding: 10px 16px; border-bottom: 1px solid var(--line);
+      font: 12px/1 var(--mono); color: var(--txt-3);
+      text-transform: uppercase; letter-spacing: 1px;
+    }
+    /* La riga del CSV e' larga per natura: scorre DENTRO il suo contenitore, e
+       non allarga la pagina. */
+    .telaio pre {
+      margin: 0; padding: 16px; overflow-x: auto;
+      font: 13px/1.7 var(--mono); color: var(--txt);
+      white-space: pre;
+    }
+    .telaio pre .campo { color: var(--accent); }
+    .messaggio {
+      margin: 0; padding: 16px; font: 14px/1.7 var(--mono);
+      color: var(--txt); white-space: pre-wrap; word-break: break-word;
+    }
+    .coppia { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+    .freccia { color: var(--txt-3); font-size: 13px; margin: 14px 0 0; }
+
+    /* ---------- chiusura ---------- */
+    footer {
+      border-top: 1px solid var(--line); padding: 30px 0 44px;
+      color: var(--txt-3); font-size: 14px;
+    }
+    .righe { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; }
+    footer a { color: var(--txt-2); }
+
+    @media (max-width: 520px) {
+      .apertura { padding: 46px 0 38px; }
+      section { padding: 40px 0; }
+      .azioni .bottone { flex: 1 1 100%; text-align: center; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="dentro">
+    <div class="barra">
+      <a class="marchio" href="/"><span class="segno">BR</span>BetRelay</a>
+      <a class="bottone calmo spinta" href="/app/">Entra</a>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="apertura">
+    <div class="dentro">
+      <p class="stato"><span class="pallino"></span>Servizio in avviamento · accesso su approvazione</p>
+      <h1>I segnali del tuo canale Telegram, <em>dentro XTrader</em>.</h1>
+      <p class="sommario">
+        BetRelay legge i messaggi della chat che gli indichi, ne ricava il segnale e lo
+        serve a XTrader come feed CSV. Niente da installare: XTrader legge un indirizzo,
+        BetRelay lo tiene aggiornato.
+      </p>
+      <div class="azioni">
+        <a class="bottone" href="/app/">Entra con Telegram</a>
+        <a class="bottone calmo" href="#come">Come funziona</a>
+      </div>
+    </div>
+  </div>
+
+  <section id="come">
+    <div class="dentro">
+      <h2>Come funziona</h2>
+      <p class="sotto">Tre passaggi, una volta sola. Poi il servizio lavora da solo.</p>
+      <div class="griglia">
+        <div class="scheda">
+          <span class="numero">01</span>
+          <h3>Colleghi la chat</h3>
+          <p>Indichi a BetRelay da quale chat Telegram arrivano i segnali e la verifichi
+             con un codice usa-e-getta. Le altre chat vengono ignorate.</p>
+        </div>
+        <div class="scheda">
+          <span class="numero">02</span>
+          <h3>Descrivi il messaggio</h3>
+          <p>Dici dove leggere squadre, mercato, selezione e quota. Provi la regola su un
+             messaggio vero e vedi subito la riga che ne esce.</p>
+        </div>
+        <div class="scheda">
+          <span class="numero">03</span>
+          <h3>Incolli l'indirizzo in XTrader</h3>
+          <p>Ricevi un indirizzo personale con il tuo token. Da quel momento ogni segnale
+             riconosciuto compare nel feed che XTrader sta già leggendo.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="dentro">
+      <h2>Dal messaggio alla riga</h2>
+      <p class="sotto">
+        Quello che arriva nella chat, e quello che XTrader legge: quattordici colonne
+        nell'ordine che si aspetta, virgolette su ogni campo, UTF-8 con BOM.
+      </p>
+      <div class="coppia">
+        <div class="telaio">
+          <div class="titolo">il messaggio</div>
+          <p class="messaggio">P.Bet. PREMACHT 0,5HT
+🆚 Juventus v Palermo
+⏰ 20:45</p>
+        </div>
+        <div class="telaio">
+          <div class="titolo">la riga nel feed</div>
+          <pre><span class="campo">"EventName"</span>,<span class="campo">"MarketType"</span>,<span class="campo">"SelectionName"</span>,<span class="campo">"BetType"</span>
+"Juventus - Palermo","OVER_UNDER_05HT","Over 0,5 goal","PUNTA"</pre>
+        </div>
+      </div>
+      <p class="freccia">
+        Le quattordici colonne ci sono tutte: qui sono mostrate le quattro obbligatorie.
+        Il segnale resta nel feed 90 secondi, poi il feed torna vuoto — così XTrader non
+        rilegge mai un segnale vecchio.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <div class="dentro">
+      <h2>Cosa ottieni</h2>
+      <div class="griglia">
+        <div class="scheda">
+          <h3>Un feed tuo</h3>
+          <p>Un indirizzo e un token personali. Nessun altro cliente può leggere il tuo
+             feed, e tu non vedi il suo.</p>
+        </div>
+        <div class="scheda">
+          <h3>Più parser insieme</h3>
+          <p>Regole diverse per canali diversi, tutte attive nello stesso momento, con
+             l'ordine di precedenza sotto il tuo controllo.</p>
+        </div>
+        <div class="scheda">
+          <h3>Log dei messaggi</h3>
+          <p>Vedi cosa è arrivato, cosa è stato riconosciuto e cosa no. Quando un segnale
+             non passa, sai perché.</p>
+        </div>
+        <div class="scheda">
+          <h3>Niente da installare</h3>
+          <p>Nessun programma sul tuo computer, nessuna finestra da tenere aperta. Il
+             servizio sta online e XTrader legge un indirizzo.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="dentro">
+      <h2>Come si entra</h2>
+      <p class="sotto">
+        L'accesso è su approvazione, non automatico. Entri con Telegram, chiedi l'accesso
+        e ricevi un messaggio dal bot quando è attivo: dalla dashboard vedi quanti giorni
+        ti restano.
+      </p>
+      <div class="azioni">
+        <a class="bottone" href="/app/">Entra con Telegram</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="dentro">
+    <div class="righe">
+      <span><strong style="color:var(--txt-2)">BetRelay</strong> · betrelay.net</span>
+      <a href="/app/">Applicazione</a>
+      <a href="/health">Stato del servizio</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

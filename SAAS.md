@@ -10,7 +10,7 @@ con dati finti.
 L'entità centrale è il **parser**, non il profilo. È il parser che possiede
 configurazione, token, feed CSV, timer dei 90 secondi e log.
 
-```
+```text
 utente (login Telegram)
  └── parser  (slug, token proprio, config propria, feed proprio, timer proprio)
       └── N chat Telegram   ←→   una chat può alimentare N parser dello stesso utente
@@ -18,7 +18,7 @@ utente (login Telegram)
 
 Il "profilo" si riduce allo slug dell'utente nell'URL del feed:
 
-```
+```text
 /profiles/PIERO/over-15-premacht.csv?token=...
 /profiles/PIERO/over-25-live.csv?token=...
 /profiles/MARCO/handicap-asiatico.csv?token=...
@@ -26,7 +26,7 @@ Il "profilo" si riduce allo slug dell'utente nell'URL del feed:
 
 ## Modello dati
 
-```
+```text
 users
   id, telegram_id (unique), username, first_name, slug (unique), status, created_at
 
@@ -224,7 +224,7 @@ mesi. **Un controllo che nessuno legge non è un controllo.**
 
 Implementato con dati finti in `web/api.js`, un commento per endpoint.
 
-```
+```text
 POST   /api/auth/telegram/widget      verifica HMAC del Login Widget → sessione
 POST   /api/auth/telegram/code        login con codice usa-e-getta dal bot
 GET    /api/me
@@ -510,14 +510,54 @@ senza doppio ruolo.
 | M3 | Login Telegram reale, sessioni, la web app collegata al backend |
 | M4 | Log persistenti, sospensione, suggerimento AI lato server, abbonamenti |
 
+## Facciata pubblica
+
+`GET /` serve `web/sito.html`: la pagina che vede chi scrive `betrelay.net`. Fino
+all'11/08/2026 l'apex restituiva `{"service": "xtrader-signal-relay", ...}` — corretto
+per una sonda, inutile per una persona.
+
+**Cosa contiene**, nell'ordine, perché la documentazione UI deve descrivere la pagina
+com'è e non come sarebbe comoda:
+
+| Fascia | Contenuto, verbatim dove è una scritta |
+|---|---|
+| Barra | marchio `BR` + «BetRelay», pulsante «Entra» → `/app/` |
+| Stato | pastiglia con pallino verde: «Servizio in avviamento · accesso su approvazione» |
+| Apertura | titolo «I segnali del tuo canale Telegram, **dentro XTrader**.», sommario, «Entra con Telegram» → `/app/` e «Come funziona» → `#come` |
+| Come funziona | tre schede numerate: «Colleghi la chat», «Descrivi il messaggio», «Incolli l'indirizzo in XTrader» |
+| Dal messaggio alla riga | il messaggio Telegram d'esempio accanto alle quattro colonne obbligatorie del CSV, e la nota dei 90 secondi |
+| Cosa ottieni | «Un feed tuo», «Più parser insieme», «Log dei messaggi», «Niente da installare» |
+| Come si entra | l'accesso su approvazione, e «Entra con Telegram» → `/app/` |
+| Chiusura | «BetRelay · betrelay.net», «Applicazione» → `/app/`, «Stato del servizio» → `/health` |
+
+**Invarianti che vincolano questa pagina**, non preferenze estetiche:
+
+- è servita da una **rotta esplicita**. Un catch-all `@app.get('/{resto:path}')`
+  coprirebbe `/feed/{utente}.csv` prima che quella rotta esista, e XTrader riceverebbe
+  `text/html` con stato 200 al posto di un CSV;
+- **nessun token** compare nella pagina: è pubblica e senza sessione, quindi qualunque
+  valore scritto lì è pubblicato;
+- **nessun `noindex`**, al contrario di `/app`: una landing che si esclude dai motori di
+  ricerca non è una landing. La differenza fra le due pagine è vincolata da un test;
+- **una pagina sola**: stile incorporato, nessun CDN, nessuna richiesta di rete oltre al
+  documento. Gli stessi token di colore di `web/styles.css`, ricopiati di proposito;
+- `.dentro` porta i margini laterali e **sta sempre da sola sul proprio elemento**. La
+  prima versione la combinava con `.apertura`, la cui forma breve `padding: 72px 0 56px`
+  azzerava il margine laterale: titolo e pulsanti attaccati al bordo del telefono.
+  Misurato a 390 px, non guardato a occhio.
+
+Il testo dice quello che il servizio fa **oggi**. La pastiglia «Servizio in avviamento»
+e la sezione «Come si entra» esistono perché l'accesso su approvazione non è ancora
+costruito: quando lo sarà, quella pastiglia va cambiata, non lasciata lì.
+
 ## Prototipo
 
-```
+```sh
 uvicorn main:app --reload
 ```
 
-Poi `http://127.0.0.1:8000/app/`. I dati vivono in `localStorage`, si azzerano da
-Impostazioni.
+Poi `http://127.0.0.1:8000/app/`, oppure `http://127.0.0.1:8000/` e il pulsante «Entra».
+I dati vivono in `localStorage`, si azzerano da Impostazioni.
 
 ### Vista «Feed CSV»
 
