@@ -126,11 +126,13 @@ deduplica in poi era falsa: le righe `chats` **duplicate** vengono rimosse, dopo
 ri-puntato su quella sopravvissuta chi le riferiva. Nessuna informazione se ne va —
 la riga rimossa era una copia — ma «niente» era la parola sbagliata, ed è il tipo di
 imprecisione che questo documento esiste per non avere. Segnalato da CodeRabbit.
-Le righe di `users` invece non si toccano mai: vedi sotto. Da quest'ultimo fatto viene il vincolo
-che ne governa la forma: **non può sollevare per dati che esistono**, perché sollevare
-lì significa 500 su ogni richiesta, feed di XTrader compreso, e nessun riavvio lo
-cambierebbe. Quattro stati dei dati veri lo avrebbero fatto, tutti trovati da review o
-da test e tutti chiusi con una disambiguazione deterministica invece di un errore:
+Le righe di `users` invece non si cancellano mai, perché possiedono dati: vedi sotto.
+
+Dal fatto che `migra()` sta sul percorso di `db()` viene il vincolo che ne governa la
+forma: **non può sollevare per dati che esistono**, perché sollevare lì significa 500 su
+ogni richiesta, feed di XTrader compreso, e nessun riavvio lo cambierebbe. **Cinque**
+stati dei dati veri lo avrebbero fatto, tutti trovati da review o da test e tutti chiusi
+con una disambiguazione deterministica invece di un errore:
 
 - due parser i cui nomi differiscono solo per maiuscole → `slug` uguale → `-2`, `-3`;
 - due profili nella stessa condizione → stesso trattamento su `users.slug`;
@@ -145,8 +147,8 @@ da test e tutti chiusi con una disambiguazione deterministica invece di un error
   duplicate produrrebbe altrimenti una riga che esiste già, cioè un altro modo di
   rendere la migrazione non attraversabile, dentro la correzione che ne chiudeva uno;
 - **due utenti con lo stesso `origin_profile`**, cioè lo stato che l'assenza di indice
-  sui database già migrati permetteva → l'etichetta resta all'`id` più basso e sugli
-  altri diventa NULL. Qui **non si cancella nessuna riga**, a differenza delle chat:
+  sui database già migrati permetteva → l'etichetta resta a **una sola** riga e sulle
+  altre diventa NULL. Qui **non si cancella nessuna riga**, a differenza delle chat:
   una riga di `users` possiede chat, parser e segnali, e cancellarla perderebbe dati di
   un cliente. Ma azzerare l'etichetta **non basta**: ciò che la riga perdente possiede
   — chat, segnali, parser — viene **trasferito al superstite** prima di togliergliela,
@@ -157,6 +159,20 @@ da test e tutti chiusi con una disambiguazione deterministica invece di un error
   legale sotto quel vincolo — quindi esiste, e uno `UPDATE` in blocco vi sbatterebbe
   contro. A cambiare nome è chi arriva, non chi era già del destinatario, che potrebbe
   avere quello slug in un URL già in uso.
+
+  **Chi vince** fra due righe con la stessa etichetta è chi ha un `telegram_id`, e solo a
+  parità l'`id` più basso: quella riga è l'identità con cui l'utente **accede**, mentre
+  la riga creata dal travaso è un segnaposto. Tenere l'id minimo a prescindere
+  sposterebbe i dati sul segnaposto e lascerebbe vuoto l'account del login, cioè
+  separerebbe proprietà e identità.
+
+  Ciò che si sposta è **tutto** ciò che riferisce l'utente, elencato in
+  `RIFERIMENTI_UTENTE`: `chats.owner_user_id`, `signals.user_id`,
+  `message_logs.user_id`, `chat_verifications.user_id`, `access_requests.user_id` e
+  `.decided_by`, `admin_audit.admin_user_id` e `.target_user_id` — più i parser, che
+  passano dalla funzione dedicata perché devono anche ri-disambiguare lo slug. Un test
+  confronta quell'elenco con lo schema reale, così una colonna nuova che riferisce un
+  utente non può restare fuori in silenzio.
 
 Il ri-puntamento di `parser_chats` sposta **solo** le associazioni dei parser che
 appartengono al proprietario della chat sopravvissuta. Con la stessa chat rivendicata da

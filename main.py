@@ -416,6 +416,31 @@ SCHEMA_MULTIUTENTE = (
 # vicenda. Sta qui, in UNA forma, perche' serve in tre punti — l'indice UNIQUE, il
 # controllo di esistenza del travaso, la deduplica — e ricopiarla sarebbe tre
 # occasioni di divergere su una sottigliezza che non solleva quando sbagli.
+# Ogni colonna che riferisce `users.id`, in UNA lista. Serve alla riconciliazione di due
+# utenti duplicati, che deve spostare TUTTO cio' che punta al perdente: dimenticarne una
+# lascia dati agganciati a un utente che non e' piu' quel profilo, cioe' dati che nessuno
+# rivendica. `[REAL_FINDING]` di GPT-5.6 Sol, che ne aveva viste quattro mancanti.
+#
+# `parsers.user_id` non e' qui perche' passa da `_trasferisci_parser`, che deve anche
+# ri-disambiguare lo slug. La convenzione di nome e' vincolata da un test: una colonna
+# nuova che si chiama come queste e non entra nell'elenco fa diventare rosso quel test,
+# che e' l'unico modo perche' la lista non resti indietro.
+RIFERIMENTI_UTENTE = (
+    ('chats', 'owner_user_id'),
+    ('signals', 'user_id'),
+    ('message_logs', 'user_id'),
+    ('chat_verifications', 'user_id'),
+    ('access_requests', 'user_id'),
+    ('access_requests', 'decided_by'),
+    ('admin_audit', 'admin_user_id'),
+    ('admin_audit', 'target_user_id'),
+)
+
+# I nomi che per convenzione riferiscono un utente. Il test li usa per trovare le colonne
+# che DOVREBBERO essere in `RIFERIMENTI_UTENTE`.
+NOMI_DI_RIFERIMENTO_UTENTE = ('user_id', 'owner_user_id', 'admin_user_id',
+                              'target_user_id', 'decided_by')
+
 TOPIC_CHAT = "IFNULL(message_thread_id, '')"
 CHIAVE_CHAT = f'telegram_chat_id, {TOPIC_CHAT}'
 
@@ -664,14 +689,20 @@ def _travasa_nel_multiutente(c):
     for (etichetta,) in c.execute(
             'SELECT origin_profile FROM users WHERE origin_profile IS NOT NULL'
             ' GROUP BY origin_profile HAVING COUNT(*) > 1').fetchall():
+        # Vince chi ha un `telegram_id`, e solo a parita' l'`id` piu' basso. La riga con
+        # `telegram_id` e' quella con cui l'utente ACCEDE: tenere l'id minimo a
+        # prescindere sposterebbe i dati su un segnaposto senza identita', staccandoli
+        # dall'account con cui il proprietario fa login. `[REAL_FINDING]` di GPT-5.6 Sol.
+        # `(telegram_id IS NULL)` vale 0 per chi ce l'ha e 1 per chi no, quindi
+        # l'ordinamento mette davanti l'identita' vera e resta deterministico.
         utenti = [r[0] for r in c.execute(
-            'SELECT id FROM users WHERE origin_profile=? ORDER BY id',
-            (etichetta,)).fetchall()]
+            'SELECT id FROM users WHERE origin_profile=?'
+            ' ORDER BY (telegram_id IS NULL), id', (etichetta,)).fetchall()]
         superstite, perdenti = utenti[0], utenti[1:]
         for perdente in perdenti:
-            c.execute('UPDATE chats SET owner_user_id=? WHERE owner_user_id=?',
-                      (superstite, perdente))
-            c.execute('UPDATE signals SET user_id=? WHERE user_id=?', (superstite, perdente))
+            for tabella, colonna in RIFERIMENTI_UTENTE:
+                c.execute(f'UPDATE {tabella} SET {colonna}=? WHERE {colonna}=?',
+                          (superstite, perdente))
             _trasferisci_parser(c, perdente, superstite)
             c.execute('UPDATE users SET origin_profile=NULL WHERE id=?', (perdente,))
     # `ORDER BY name` non e' decorazione: decide CHI vince quando due profili

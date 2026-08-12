@@ -1591,3 +1591,74 @@ def test_piu_slug_in_collisione_ricevono_suffissi_DETERMINISTICI(tmp_path):
     proprietari = dict(c.execute('SELECT name, user_id FROM parsers').fetchall())
     assert proprietari['Secondo_Parser'] == superstite, proprietari
     assert proprietari['Terzo_Parser'] == superstite, proprietari
+
+
+def test_RIFERIMENTI_UTENTE_elenca_ogni_colonna_che_riferisce_un_utente(tmp_path, monkeypatch):
+    """Il guardiano della lista: una colonna nuova non puo- restare fuori in silenzio.
+
+    `[REAL_FINDING]` di GPT-5.6 Sol: la riconciliazione di due utenti duplicati spostava
+    solo chat, segnali e parser, lasciando indietro `message_logs`, `chat_verifications`,
+    `access_requests` e `admin_audit`. Quelle tabelle oggi non sono scritte da nessun
+    codice, quindi non c'erano righe da perdere — ma il PR che le riempira- troverebbe la
+    migrazione che dimentica proprio le sue.
+
+    Correggere gli otto siti non basta: la lista resterebbe indietro al nono. Questo test
+    cerca nello SCHEMA REALE ogni colonna che per convenzione di nome riferisce un utente
+    e pretende che sia in `RIFERIMENTI_UTENTE` — o che sia `parsers.user_id`, che passa da
+    `_trasferisci_parser` perche- deve anche ri-disambiguare lo slug.
+    """
+    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'riferimenti.db'))
+    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    c = main.db()
+    tabelle = [r[0] for r in c.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+        " AND name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()]
+    trovate = {(t, r[1]) for t in tabelle for r in c.execute(f'PRAGMA table_info({t})')
+               if r[1] in main.NOMI_DI_RIFERIMENTO_UTENTE}
+    c.close()
+
+    # `parsers.user_id` e- gestita a parte, e la sua omissione dalla lista e- voluta.
+    attese = trovate - {('parsers', 'user_id')}
+    elencate = set(main.RIFERIMENTI_UTENTE)
+    assert attese == elencate, (
+        f'RIFERIMENTI_UTENTE non descrive piu- lo schema.\n'
+        f'  nello schema ma NON nella lista: {sorted(attese - elencate)}\n'
+        f'  nella lista ma NON nello schema: {sorted(elencate - attese)}\n'
+        'La riconciliazione di due utenti duplicati NON sposterebbe le prime, e i loro '
+        'dati resterebbero agganciati a un utente che non e- piu- quel profilo')
+
+
+def test_nella_riconciliazione_vince_chi_ha_il_TELEGRAM_ID(tmp_path):
+    """L'identita- vera batte il segnaposto, anche se ha l'`id` piu- alto.
+
+    `[REAL_FINDING]` di GPT-5.6 Sol. La riga con `telegram_id` e- quella con cui l'utente
+    ACCEDE; quella creata dal travaso ha `telegram_id` NULL. Tenendo l'`id` minimo a
+    prescindere, i dati passavano al segnaposto e l'account con cui il proprietario fa
+    login restava vuoto — proprieta- e identita- separate, che e- la definizione di
+    isolamento rotto.
+
+    Il difetto e- latente finche- non esiste il login (PR 6), e- questo test lo fissa
+    prima che quel PR ci arrivi sopra.
+    """
+    c = _database_di_produzione(tmp_path / 'identita.db')
+    _crea_users(c, con_origin_profile=True)
+    main.migra(c)
+    c.execute('DROP INDEX users_origin_profile')
+    segnaposto = c.execute('SELECT id FROM users WHERE origin_profile=?',
+                           (main.PIERO_PROFILE,)).fetchone()[0]
+    # L'utente fa login: nasce una riga con la sua identita- Telegram, `id` piu- ALTO.
+    c.execute("INSERT INTO users(origin_profile, telegram_id, first_name, slug)"
+              " VALUES (?, '123456789', 'Piero', 'piero-vero')", (main.PIERO_PROFILE,))
+    vero = c.execute('SELECT id FROM users WHERE telegram_id=?', ('123456789',)).fetchone()[0]
+    assert vero > segnaposto, 'il test ha senso solo se l-identita- vera ha l-id maggiore'
+
+    main.migra(c)
+
+    superstite = c.execute('SELECT id FROM users WHERE origin_profile=?',
+                           (main.PIERO_PROFILE,)).fetchone()[0]
+    assert superstite == vero, (
+        f'ha vinto il segnaposto ({superstite}) invece dell-identita- Telegram ({vero}): '
+        'i dati finiscono su un account senza login')
+    proprietario = c.execute('SELECT owner_user_id FROM chats WHERE telegram_chat_id=?',
+                             (CHAT_A,)).fetchone()[0]
+    assert proprietario == vero, (proprietario, vero)
