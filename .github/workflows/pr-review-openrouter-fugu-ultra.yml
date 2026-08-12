@@ -83,7 +83,19 @@ jobs:
       # vedono l'intera PR e non sollevano un falso "file non inviato". Solo input (più
       # token in ingresso, contenuti: succede solo su PR grandi, solo su trigger label);
       # l'output resta capato dal prompt ultra-corto.
-      MAX_PATCH_PER_FILE_CHARS_ESCALATED: "15000"
+      #
+      # PER-FILE a 30000, e il numero è misurato: la patch di `main.py` sulla PR #14 era
+      # 25.037 caratteri contro un tetto di 15.000, quindi i reviewer forti ne vedevano
+      # il 60% — e il 40% invisibile era il corpo dell'handler del webhook. Su nove
+      # bloccanti di quel gate, QUATTRO erano falsi e tutti dichiaratamente da
+      # troncamento: «il diff troncato non mostra se...», «impossibile validare». Tre
+      # giri di fila hanno chiesto verifica umana sullo stesso file.
+      #
+      # Il collo di bottiglia era il tetto PER-FILE, non il totale: `main.py` entra primo
+      # per PRIORITA_PAYLOAD, quindi con 30.000 prende i suoi 25k e ne restano 35k per
+      # tutto il resto dentro lo STESSO totale di 60.000. Costo per giro invariato,
+      # file critico completo. Alzare il totale invece avrebbe alzato la bolletta.
+      MAX_PATCH_PER_FILE_CHARS_ESCALATED: "30000"
       MAX_TOTAL_PATCH_CHARS_ESCALATED: "60000"
       # Tetto di output. È un CEILING, non il costo: si pagano solo i token
       # EFFETTIVAMENTE generati, quindi tenerlo basso non risparmia — fa pagare review
@@ -420,7 +432,7 @@ jobs:
               # tetto totale). NON conta il salto di un file binario/senza-patch (quello
               # non è recuperabile alzando il budget). Il chiamante lo usa per rifare la
               # build al tier-2 e far vedere al modello l'intera PR.
-              chunks, skipped, critical = [], [], []
+              chunks, skipped, critical, tagliati = [], [], [], []
               total = 0
               budget_truncated = False
 
@@ -455,6 +467,12 @@ jobs:
                   if len(patch) > max_per_file:
                       patch = patch[:max_per_file] + "\n...[PATCH FILE TRONCATO PER BUDGET TOKEN]..."
                       budget_truncated = True
+                      # Il file È nel payload ma INCOMPLETO. Va distinto da `skipped`
+                      # (non inviato affatto) perché è il caso peggiore dei due: il
+                      # modello vede codice vero e conclude su ciò che manca senza
+                      # accorgersene. Misurato sulla PR #14: 4 bloccanti falsi su 9,
+                      # tutti su un file tagliato a metà.
+                      tagliati.append(filename)
 
                   block = (
                       f"\n\n### FILE: {filename}\n"
@@ -465,12 +483,21 @@ jobs:
                   if total + len(block) > max_total:
                       skipped.append(filename)
                       budget_truncated = True
+                      # Se era anche stato tagliato dal tetto per-file, NON e' piu'
+                      # «inviato incompleto»: non e' stato inviato affatto. I due stati
+                      # sono esclusivi e «non inviato» vince, o il preambolo direbbe al
+                      # modello di aver ricevuto codice che non ha ricevuto — la stessa
+                      # confusione che il preambolo esiste per togliere, un livello piu'
+                      # sotto. Segnalato da GPT-5.5 sulla PR #16 e misurato.
+                      if filename in tagliati:
+                          tagliati.remove(filename)
                       continue
 
                   chunks.append(block)
                   total += len(block)
 
-              return "\n".join(chunks), sorted(set(skipped)), sorted(set(critical)), budget_truncated
+              return ("\n".join(chunks), sorted(set(skipped)), sorted(set(critical)),
+                      budget_truncated, sorted(set(tagliati)))
 
           def try_add_label():
               try:
@@ -751,7 +778,7 @@ jobs:
           # falso "file non inviato". Il modello viene chiamato UNA sola volta, con
           # l'input già dimensionato giusto (niente review troncata + ripetizione). Su PR
           # piccole il tetto alto non serve mai → nessun costo extra.
-          diff_text, skipped_files, critical_files, budget_truncated = build_patch_payload(
+          diff_text, skipped_files, critical_files, budget_truncated, file_tagliati = build_patch_payload(
               files, MAX_PATCH_PER_FILE_CHARS, MAX_TOTAL_PATCH_CHARS)
           patch_budget_used = MAX_TOTAL_PATCH_CHARS
           if budget_truncated and (
@@ -760,7 +787,7 @@ jobs:
               print(f"::notice::{REVIEW_ID}: diff troncato dal budget basso "
                     f"({MAX_TOTAL_PATCH_CHARS} char) → ricostruisco al budget alto "
                     f"({MAX_TOTAL_PATCH_CHARS_ESCALATED} char) per non perdere file.")
-              diff_text, skipped_files, critical_files, budget_truncated = build_patch_payload(
+              diff_text, skipped_files, critical_files, budget_truncated, file_tagliati = build_patch_payload(
                   files, MAX_PATCH_PER_FILE_CHARS_ESCALATED, MAX_TOTAL_PATCH_CHARS_ESCALATED)
               patch_budget_used = MAX_TOTAL_PATCH_CHARS_ESCALATED
 
@@ -883,6 +910,50 @@ jobs:
                   sys.exit(1)
               sys.exit(0)
 
+
+          def blocco_contesto_mancante(file_tagliati, skipped_files):
+              """Cosa il modello NON ha visto, detto AL MODELLO e non solo nel commento.
+
+              Il payload conteneva gia' il marcatore inline sui file tagliati e il
+              commento elencava i non inviati, ma il PROMPT non diceva niente: il
+              modello riceveva codice incompleto senza saperlo e concludeva su cio'
+              che mancava. Misurato sulla PR #14: nove bloccanti dai gate finali,
+              QUATTRO falsi, tutti su `main.py` tagliato al 60%, tutti nella forma
+              «non verificabile dal diff troncato» — cioe' il modello dichiarava il
+              proprio limite come se fosse un difetto del codice. Ogni giro cosi'
+              costa ~$1 e produce una correzione che non serve.
+
+              E' una funzione e non codice inline perche' un test la ESEGUE: la
+              regola di questo repository e' che cio' che non e' osservabile non e'
+              vincolato.
+              """
+              if not file_tagliati and not skipped_files:
+                  return ""
+              elenchi = []
+              if file_tagliati:
+                  elenchi.append(
+                      "File inviati INCOMPLETI (patch tagliata dal budget, il codice "
+                      "che vedi non e' tutto):\n"
+                      + "\n".join(f"- {n}" for n in file_tagliati[:20]))
+              if skipped_files:
+                  elenchi.append(
+                      "File NON inviati affatto:\n"
+                      + "\n".join(f"- {n}" for n in skipped_files[:20]))
+              return (
+                  "\nCONTESTO INCOMPLETO — leggi prima di concludere:\n"
+                  + "\n\n".join(elenchi)
+                  + "\n\nRegola: l'assenza di codice dal tuo input NON autorizza nessuna "
+                    "conclusione sulla sua esistenza, correttezza o assenza. Non dedurre "
+                    "un difetto da cio' che non hai potuto leggere.\n"
+                    "Etichetta OGNI bloccante col suo primo token:\n"
+                    "- [REAL_FINDING] verificato sul codice che hai ricevuto;\n"
+                    "- [INSUFFICIENT_CONTEXT] sospetto, ma il file che serve e' fra "
+                    "quelli qui sopra.\n"
+                    "Un [INSUFFICIENT_CONTEXT] non e' un difetto: e' una richiesta di "
+                    "verifica umana. Non gonfiare la lista con essi.\n")
+
+          contesto_mancante = blocco_contesto_mancante(file_tagliati, skipped_files)
+
           system_prompt = """
           Sei un principal software engineer e security reviewer per XTrader Signal Relay.
           Devi fare una review tecnica profonda in italiano.
@@ -918,6 +989,7 @@ jobs:
           ## Bloccanti
           ## Verdetto finale
 
+          {contesto_mancante}
           Diff del range appena pushato:
           {diff_text}
           """

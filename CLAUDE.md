@@ -501,6 +501,36 @@ fanno checkout e non possono importare un modulo comune; `tests/safety/test_ai_a
 verifica la parità ed **esegue** il costruttore del payload su una lista di file finti, invece di
 controllarne la forma.
 
+### Due stati diversi, e il peggiore non era «non inviato»
+
+«Non inviato» non è l'unico modo di non vedere un file. Un file può arrivare al modello **tagliato a
+metà** dal tetto per-file: lui riceve codice vero, incompleto, e conclude su ciò che manca senza
+accorgersene. È il caso peggiore dei due, perché l'assenza totale almeno si nota.
+
+*Misurato sulla PR #14:* la patch di `main.py` era **25.037 caratteri** contro un tetto per-file di
+15.000 — il **60%** inviato, e il 40% invisibile era il corpo dell'handler del webhook. Su **nove**
+bloccanti dei gate finali, **quattro erano falsi**, tutti su quel file, tutti nella forma «non
+verificabile dal diff troncato». Il modello dichiarava il proprio limite come se fosse un difetto del
+codice, e ogni giro così costa ~$1 più una correzione che non serve.
+
+Da qui tre cambiamenti, tutti vincolati da guardie che **eseguono** il codice dei workflow:
+
+1. **Tetto per-file a 30.000**, totale invariato a 60.000. Il collo di bottiglia era il per-file, non
+   il totale: `main.py` entra primo per `PRIORITA_PAYLOAD`, quindi prende i suoi 25k e ne restano 35k
+   per il resto dentro lo stesso totale. **Costo per giro identico, file critico completo.** Alzare il
+   totale invece avrebbe alzato la bolletta.
+2. Il prompt **dice al modello** cosa non ha visto — file incompleti e file non inviati, elencati
+   separatamente — con la regola scritta: *l'assenza di codice dall'input non autorizza nessuna
+   conclusione sulla sua esistenza o correttezza*.
+3. Ogni bloccante va **etichettato**: `[REAL_FINDING]` se verificato sul codice ricevuto,
+   `[INSUFFICIENT_CONTEXT]` se il file che servirebbe è fra quelli mancanti. Un
+   `[INSUFFICIENT_CONTEXT]` **non è un difetto**: è una richiesta di verifica umana, e va triato come
+   tale — si verifica col codice in mano, non si patcha e non si archivia.
+
+Quello che **non** cambia: un `[INSUFFICIENT_CONTEXT]` non autorizza ad archiviare. Vale la regola qui
+sopra — si verifica coi mezzi che ci sono. L'etichetta dice *da dove viene il dubbio*, non che il
+dubbio sia infondato.
+
 **Quanto costano davvero.** Misurato sulla PR #8, sette head, 15 review addebitate: **$2,6247** in
 totale. La distribuzione conta più del totale, perché decide dove risparmiare:
 
