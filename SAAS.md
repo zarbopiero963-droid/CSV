@@ -499,7 +499,18 @@ Il proprietario entra in due modi, e il secondo non è un vezzo:
    (regola 3) — le azzera il `telegram_id`, che è UNIQUE, e scrive una riga in
    `admin_audit`: una riparazione silenziosa sarebbe indistinguibile da
    un'appropriazione di account. La riga perdente **non** viene cancellata, perché un
-   `NULL` è reversibile e una `DELETE` no.
+   `NULL` è reversibile e una `DELETE` no, e le sue sessioni muoiono con un incremento di
+   `session_version`.
+
+   **E cambiare `TELEGRAM_ADMIN_ID` revoca le sessioni dell'identità precedente.** Il cookie
+   è legato all'`id` della riga e a `session_version`, non al `telegram_id`: senza
+   l'incremento, chi era entrato con l'identità vecchia conserverebbe **accesso
+   amministrativo** sulla riga che possiede i parser — e non scadrebbe, perché `GET /api/me`
+   rinnova il cookie a ogni richiesta valida, quindi una sessione tenuta attiva è immortale.
+   Il caso non è ipotetico: se in quella variabile fosse finito l'ID sbagliato — un estraneo,
+   o un account compromesso — correggerla non gli toglierebbe il pannello. La revoca scatta
+   al **cambio** e non a ogni login, altrimenti entrare dal computer chiuderebbe la sessione
+   sul telefono. Bloccante di GPT-5.6 Sol sulla PR #24.
 
    *Fino al 12/08/2026 il collegamento viveva dentro `if riga is None`, quindi valeva solo
    al primo login.* Un login fatto prima che la variabile fosse **arrivata nel processo** —

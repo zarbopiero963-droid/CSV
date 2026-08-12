@@ -323,6 +323,13 @@ TELEGRAM_ADMIN_ID: l'ID Telegram numerico del proprietario. Collega il suo login
   variabile, il login SUCCESSIVO ripara — travasa quello che l'account sbagliato aveva
   accumulato, gli toglie il telegram_id e lo scrive sulla riga PIERO, con una riga in
   admin_audit. Quindi l'ordine fra variabile e login non conta.
+  E CAMBIARE il valore REVOCA le sessioni della vecchia identita': il cookie e' legato
+  alla riga e a session_version, non al telegram_id, quindi senza la revoca chi era
+  entrato con l'identita' precedente conserverebbe ACCESSO AMMINISTRATIVO — e non
+  scadrebbe, perche' GET /api/me rinnova il cookie a ogni richiesta valida, quindi una
+  sessione tenuta attiva e' immortale. Se in quella variabile fosse finito l'ID di un
+  estraneo, correggerla ora glielo toglie. La revoca scatta al CAMBIO e non a ogni
+  login: altrimenti entrare dal computer chiuderebbe la sessione sul telefono.
   Fino al 12/08/2026 non era cosi': il collegamento viveva dentro «if riga is None»,
   quindi valeva solo al PRIMO login, e un login fatto troppo presto lasciava il
   proprietario fuori dal proprio account IN MODO IRREVERSIBILE — nessun endpoint
