@@ -1549,3 +1549,45 @@ def test_il_trasferimento_dei_parser_regge_uno_SLUG_in_collisione(tmp_path):
     assert righe[main.DEFAULT_PARSER] == 'condiviso', (
         f'lo slug del parser che era GIA- del superstite e- stato cambiato: {righe}')
     assert righe['Secondo_Parser'].startswith('condiviso-'), righe
+
+
+def test_piu_slug_in_collisione_ricevono_suffissi_DETERMINISTICI(tmp_path):
+    """Collisioni multiple in un solo trasferimento: `-2`, `-3`, sempre gli stessi.
+
+    Chiesto da GPT-5.5 dopo la correzione sullo slug singolo. Il rischio che copre e- il
+    conflitto INTERMEDIO: disambiguando `x` in `x-2` mentre un altro parser in arrivo si
+    chiama gia- `x-2`, un'implementazione che calcolasse i suffissi in blocco prima di
+    scrivere li farebbe collidere fra loro. Qui `presi` viene riletto dal database a ogni
+    giro, quindi ogni nome scelto e- immediatamente visibile al successivo.
+
+    E- deterministico perche- il ciclo e- `ORDER BY name`: due esecuzioni sulla stessa
+    situazione assegnano gli stessi suffissi, che e- cio- che serve a non rinominare le
+    cose dei clienti a ogni riavvio.
+    """
+    c = _database_di_produzione(tmp_path / 'collisioni.db')
+    _crea_users(c, con_origin_profile=True)
+    main.migra(c)
+    c.execute('DROP INDEX users_origin_profile')
+    superstite = c.execute('SELECT id FROM users WHERE origin_profile=?',
+                           (main.PIERO_PROFILE,)).fetchone()[0]
+    c.execute("INSERT INTO users(origin_profile, first_name, slug)"
+              " VALUES (?, 'P', 'piero-2')", (main.PIERO_PROFILE,))
+    perdente = c.execute('SELECT id FROM users WHERE slug=?', ('piero-2',)).fetchone()[0]
+    # Il superstite ha `x`. La perdente porta DUE parser: uno con slug `x` e uno con
+    # slug `x-2`, cioe- il nome che la disambiguazione del primo vorrebbe usare.
+    c.execute('UPDATE parsers SET user_id=?, slug=? WHERE name=?',
+              (superstite, 'x', main.DEFAULT_PARSER))
+    c.execute('UPDATE parsers SET user_id=?, slug=? WHERE name=?',
+              (perdente, 'x', 'Secondo_Parser'))
+    c.execute('INSERT INTO parsers(name, header, user_id, slug) VALUES (?,?,?,?)',
+              ('Terzo_Parser', 'H', perdente, 'x-2'))
+
+    main.migra(c)
+
+    slug = dict(c.execute('SELECT name, slug FROM parsers').fetchall())
+    assert slug[main.DEFAULT_PARSER] == 'x', f'lo slug del superstite e- cambiato: {slug}'
+    assert len({slug[n] for n in (main.DEFAULT_PARSER, 'Secondo_Parser', 'Terzo_Parser')}) == 3, (
+        f'due parser hanno lo stesso slug: {slug}')
+    proprietari = dict(c.execute('SELECT name, user_id FROM parsers').fetchall())
+    assert proprietari['Secondo_Parser'] == superstite, proprietari
+    assert proprietari['Terzo_Parser'] == superstite, proprietari
