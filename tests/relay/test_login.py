@@ -1596,3 +1596,114 @@ def test_le_sessioni_dell_account_SVUOTATO_muoiono_con_la_riparazione(tmp_path, 
     assert main.utente_dalla_sessione(RichiestaFinta()) is None, (
         'il cookie emesso per l-account svuotato vale ancora dopo la riparazione: chi lo '
         'presenta continua a vedere la dashboard vuota che questa PR chiude')
+
+
+def test_cambiare_TELEGRAM_ADMIN_ID_REVOCA_le_sessioni_della_vecchia_identita(tmp_path, monkeypatch):
+    """**Bloccante di GPT-5.6 Sol sulla PR #24**, ed e' il piu' grave di questa PR.
+
+    Scenario: la riga `PIERO` possiede gia' `telegram_id = X`, il proprietario cambia
+    `TELEGRAM_ADMIN_ID` in `Y`, e `Y` fa login. Il codice scriveva `Y` su quella riga e
+    **non toccava `session_version`** — quindi le sessioni aperte come `X` restavano valide
+    **con accesso amministrativo**, perche' il cookie e' legato all'`id` della riga e alla
+    versione, non al `telegram_id`.
+
+    E non scadevano nemmeno: `/api/me` **rinnova** il cookie a ogni richiesta valida, quindi
+    una sessione tenuta attiva e' immortale. Il caso concreto e' quello che fa paura: se in
+    quella variabile fosse finito l'ID sbagliato — un estraneo, o un account compromesso —
+    quell'estraneo avrebbe una sessione da amministratore sulla riga che possiede i parser, e
+    **correggere la variabile non gliela toglierebbe**.
+
+    Cambiare l'identita' Telegram del proprietario e' esattamente il caso per cui
+    `session_version` esiste: «invalidare subito, senza aspettare la scadenza».
+
+    Il test misura anche il rovescio, che e' la trappola della correzione: il cookie **del
+    login che sta avvenendo** deve restare valido. Incrementare la versione nel database
+    senza firmare il cookie con quella nuova produrrebbe un login che riesce e una sessione
+    morta all'istante.
+    """
+    percorso = str(tmp_path / 'identita.db')
+    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    monkeypatch.setattr(main, 'BOT_TOKEN', BOT_FINTO)
+    monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
+
+    def cookie_di(risposta):
+        for pezzo in (risposta.headers.get('set-cookie') or '').split(';'):
+            chiave, _, valore = pezzo.strip().partition('=')
+            if chiave == main.NOME_COOKIE:
+                return valore
+        return None
+
+    class Richiesta:
+        def __init__(self, cookie):
+            self.cookies = {main.NOME_COOKIE: cookie}
+
+    # L'identita' VECCHIA entra e ottiene una sessione da amministratore.
+    vecchia = '111111111'
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', vecchia)
+    prima = main.login_telegram(main.LoginTelegramIn(**_dati_login(id=vecchia)))
+    cookie_vecchio = cookie_di(prima)
+    assert cookie_vecchio
+    io = main.utente_dalla_sessione(Richiesta(cookie_vecchio))
+    assert io is not None and io['is_admin'] is True, (
+        'la vecchia identita- non ha una sessione da amministratore: il test non misura la '
+        'posta in gioco')
+    piero = _riga_utente(percorso, 'origin_profile', main.PIERO_PROFILE)
+    assert piero[1] == vecchia and io['id'] == piero[0]
+
+    # Il proprietario corregge la variabile e la NUOVA identita' entra.
+    nuova = '222222222'
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', nuova)
+    dopo = main.login_telegram(main.LoginTelegramIn(**_dati_login(id=nuova)))
+    assert dopo.status_code == 200
+
+    dopo_piero = _riga_utente(percorso, 'origin_profile', main.PIERO_PROFILE)
+    assert dopo_piero[1] == nuova, f'la riga PIERO non ha la nuova identita-: {dopo_piero}'
+
+    assert main.utente_dalla_sessione(Richiesta(cookie_vecchio)) is None, (
+        'la sessione della VECCHIA identita- vale ancora, con accesso amministrativo, dopo '
+        'che il proprietario ha cambiato TELEGRAM_ADMIN_ID. Se in quella variabile era '
+        'finito l-ID di un estraneo, correggerla non gli toglie il pannello — e siccome '
+        '/api/me rinnova il cookie, la sua sessione non scade nemmeno')
+
+    # Il rovescio: il cookie del login appena avvenuto deve funzionare.
+    cookie_nuovo = cookie_di(dopo)
+    assert cookie_nuovo, 'nessun cookie dal login della nuova identita-'
+    adesso = main.utente_dalla_sessione(Richiesta(cookie_nuovo))
+    assert adesso is not None, (
+        'il cookie del login appena avvenuto e- gia- morto: la versione firmata non e- '
+        'quella scritta nel database')
+    assert adesso['id'] == dopo_piero[0] and adesso['is_admin'] is True
+
+
+def test_un_login_RIPETUTO_con_lo_stesso_id_non_butta_fuori_gli_altri_dispositivi(tmp_path, monkeypatch):
+    """La revoca deve scattare al CAMBIO di identita', non a ogni login.
+
+    E' il verso opposto del test qui sopra, e serve: incrementare `session_version` a ogni
+    login del proprietario gli chiuderebbe la sessione sul telefono ogni volta che entra dal
+    computer. Sarebbe un difetto introdotto dalla correzione di un difetto — e questa PR ne
+    ha gia' visti tre.
+    """
+    percorso = str(tmp_path / 'ripetuto.db')
+    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    monkeypatch.setattr(main, 'BOT_TOKEN', BOT_FINTO)
+    monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', ADMIN_FINTO)
+
+    prima = main.login_telegram(main.LoginTelegramIn(**_dati_login()))
+    cookie = None
+    for pezzo in (prima.headers.get('set-cookie') or '').split(';'):
+        chiave, _, valore = pezzo.strip().partition('=')
+        if chiave == main.NOME_COOKIE:
+            cookie = valore
+
+    class Richiesta:
+        cookies = {main.NOME_COOKIE: cookie}
+
+    assert main.utente_dalla_sessione(Richiesta()) is not None
+
+    # Secondo login, stesso ID: e' il proprietario che entra da un altro dispositivo.
+    main.login_telegram(main.LoginTelegramIn(**_dati_login()))
+    assert main.utente_dalla_sessione(Richiesta()) is not None, (
+        'un secondo login con lo STESSO id ha invalidato la sessione precedente: il '
+        'proprietario si troverebbe buttato fuori dal telefono ogni volta che entra dal '
+        'computer')

@@ -585,10 +585,16 @@ TELEGRAM_ADMIN_ID = os.getenv('TELEGRAM_ADMIN_ID', '').strip()
 # Le forme sbagliate sono tutte silenziose: virgolette o apici incollati col valore, un `+`
 # davanti, uno spazio in mezzo. Lo `strip()` perdona solo i bordi.
 #
-# Quindi almeno lo si dice all'avvio. `re.fullmatch(r'[0-9]+')` e NON `.isdigit()`: quel
+# Quindi almeno lo si dice all'avvio, con una regex e NON con `.isdigit()`: quel
 # metodo accetta anche le cifre di altri alfabeti — `'\u0669\u0668\u0667'.isdigit()` e' `True` — che
 # non combaciano con nessun id Telegram, cioe' proprio il caso che questo controllo esiste
 # per nominare. Segnalato da GPT-5.5 sulla PR #24.
+#
+# Questo commento nominava `[0-9]+`, cioe' la regex di UN GIRO PRIMA: la forma effettiva
+# e' `[1-9][0-9]*` e il docstring qui sotto spiega perche'. Un commento che nomina un
+# codice diverso da quello che gli sta accanto e' la forma piu' piccola del difetto che
+# `CLAUDE.md` racconta due volte — l'affermazione e la sua smentita nello stesso file — e
+# resta un difetto anche quando e' piccola. Segnalato da Claude Fable 5 sulla PR #24.
 def admin_id_malformato():
     """Vero se `TELEGRAM_ADMIN_ID` e' impostato ma non puo' combaciare con un id Telegram.
 
@@ -1865,7 +1871,8 @@ def login_telegram(data: LoginTelegramIn):
     # precedente.
     proprietario = None
     if TELEGRAM_ADMIN_ID and data.id == TELEGRAM_ADMIN_ID:
-        proprietario = c.execute('SELECT id, session_version FROM users'
+        # `telegram_id` nella SELECT perche' serve a sapere se l'identita' CAMBIA: vedi sotto.
+        proprietario = c.execute('SELECT id, session_version, telegram_id FROM users'
                                  ' WHERE origin_profile=?', (PIERO_PROFILE,)).fetchone()
 
     if proprietario and (riga is None or riga[0] != proprietario[0]):
@@ -1883,11 +1890,34 @@ def login_telegram(data: LoginTelegramIn):
         # telegram_reachable`, che riscrive la colonna col proprio valore e non fa
         # niente. Suggeriva un'intenzione che il codice non porta. Segnalato da
         # CodeRabbit sulla PR #23.
-        c.execute('UPDATE users SET telegram_id=?, username=?, first_name=?,'
-                  ' is_admin=1 WHERE id=?',
+        # Se l'identita' Telegram del proprietario CAMBIA, le sessioni aperte con quella
+        # vecchia vanno revocate. Il cookie e' legato all'`id` della riga e a
+        # `session_version`, non al `telegram_id`: senza l'incremento, chi era entrato con
+        # l'identita' precedente conserva **accesso amministrativo** sulla riga che possiede
+        # i parser. E non scade: `/api/me` rinnova il cookie a ogni richiesta valida, quindi
+        # una sessione tenuta attiva e' immortale.
+        #
+        # Il caso che fa paura non e' ipotetico: se in quella variabile fosse finito l'ID
+        # sbagliato — un estraneo, o un account compromesso — correggerla non gli toglierebbe
+        # il pannello. Cambiare identita' e' esattamente il caso per cui `session_version`
+        # esiste. Bloccante di GPT-5.6 Sol sulla PR #24.
+        #
+        # Solo al CAMBIO, non a ogni login: incrementarla sempre chiuderebbe al proprietario
+        # la sessione sul telefono ogni volta che entra dal computer.
+        cambia_identita = proprietario[2] is not None and proprietario[2] != data.id
+        c.execute('UPDATE users SET telegram_id=?, username=?, first_name=?, is_admin=1'
+                  + (', session_version=session_version+1' if cambia_identita else '')
+                  + ' WHERE id=?',
                   (data.id, data.username or None, data.first_name or None,
                    proprietario[0]))
-        riga = proprietario
+        if cambia_identita:
+            _annota_admin(c, proprietario[0], 'identita_telegram_sostituita')
+        # RILETTA dal database, non calcolata: il cookie che sta per essere emesso viene
+        # firmato con questa versione, e se non fosse quella scritta il login riuscirebbe
+        # emettendo una sessione morta all'istante. Una riga in piu' invece di un `+ 1`
+        # a mano, perche' il valore giusto e' quello che il database ha.
+        riga = c.execute('SELECT id, session_version FROM users WHERE id=?',
+                         (proprietario[0],)).fetchone()
     elif riga is None:
         # Un cliente nuovo: l'account nasce e non puo' fare niente. L'accesso lo
         # concede il PR sull'approvazione (#7), non questo.
