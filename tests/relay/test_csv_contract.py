@@ -269,6 +269,14 @@ def test_il_feed_degradato_lascia_una_traccia(tmp_path, monkeypatch):
     # sua vita dopo ogni deploy normale — un allarme sempre acceso, che e- il modo
     # piu- rapido per insegnare a ignorarlo. Il segnale utile e- il RITMO del
     # contatore, non il fatto che sia diverso da zero.
+    #
+    # L'asse del webhook va neutralizzato per poterlo osservare: da quando «nessun
+    # bot» fa scattare `degraded` (segnalato da Fugu Ultra, vedi
+    # `test_senza_bot_health_dice_DEGRADED_non_ok`), in processo `SEGRETO_WEBHOOK`
+    # e- vuoto e `status` sarebbe degradato per un motivo che non c'entra con lo
+    # scarto. Questo test parla di UN asse: gli altri si isolano, non si ignorano.
+    monkeypatch.setattr(main, 'SEGRETO_WEBHOOK', 'segreto-di-prova-non-un-bot-vero')
+    salute = main.health()
     assert salute['status'] == 'ok', (
         f'uno scarto atteso e autorisolvente non deve marcare il processo come '
         f'degradato: {salute}'

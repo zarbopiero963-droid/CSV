@@ -286,6 +286,53 @@ def test_health_dichiara_lo_stato_del_webhook(servizio_con_bot, servizio_senza_b
         assert dati.get('webhook') == atteso, f'{base}: {dati}'
 
 
+def test_senza_bot_health_dice_DEGRADED_non_ok(servizio_senza_bot):
+    """Un'istanza che non puo- ricevere nessun segnale non e- sana.
+
+    `webhook_registrato` vale `None` quando non c'e- bot — nessun tentativo — e
+    `sano` chiedeva `_WEBHOOK_REGISTRATO is not False`, che per `None` e- vero:
+    `status: ok` su un servizio che rifiuta OGNI consegna con 403. Su Railway
+    sarebbe un'istanza incapace di ricevere segnali con la spia verde.
+
+    E- lo stesso difetto che `auth` aveva gia- chiuso — `TELEGRAM_BOT_TOKEN`
+    mancante e- una variabile mancante, non si ripara da se- — solo sul fratello
+    che nessuno aveva guardato. Segnalato da Fugu Ultra sulla review finale
+    della PR #14.
+
+    Il valore diagnostico resta: `webhook` dice *perche-* e- degradato, cosi- chi
+    guarda non deve indovinare quale dei tre assi e- rotto.
+    """
+    with urllib.request.urlopen(f'{servizio_senza_bot}/health', timeout=10) as r:  # noqa: S310
+        dati = json.loads(r.read())
+    assert dati.get('webhook') == 'chiuso senza bot', dati
+    assert dati.get('status') == 'degraded', (
+        f'un-istanza senza bot rifiuta ogni consegna e si dichiarava sana: {dati}'
+    )
+    # E l'asse che invece funziona non deve essere accusato: il token del feed c'e-.
+    assert dati.get('auth') == 'ok', dati
+
+
+def test_con_tutti_e_tre_gli_assi_a_posto_health_dice_ok(monkeypatch):
+    """L'altra faccia: la spia non deve restare accesa per sempre.
+
+    Una spia sempre accesa e- il modo piu- rapido per insegnare a ignorarla, ed e-
+    il rischio di ogni asse aggiunto a `sano`. Questa verifica sta in processo e
+    non sul servizio perche- `webhook_registrato: true` richiede una `setWebhook`
+    riuscita verso Telegram: un sottoprocesso di test non ce l'ha e non deve
+    averla, quindi l'aggregato «tutto a posto» e- osservabile solo qui.
+    """
+    monkeypatch.setattr(main, 'SEGRETO_WEBHOOK', main.webhook_secret(BOT_FINTO))
+    monkeypatch.setattr(main, '_WEBHOOK_REGISTRATO', True)
+    salute = main.health()
+    assert salute['auth'] == 'ok', salute
+    assert salute['csv'] == 'ok', salute
+    assert salute['webhook'] == 'protetto', salute
+    assert salute['webhook_registrato'] is True, salute
+    assert salute['status'] == 'ok', (
+        f'con i tre assi a posto la spia resta accesa: {salute}'
+    )
+
+
 def test_health_non_contiene_il_segreto(servizio_con_bot):
     """`/health` e- senza autenticazione: dice lo stato, mai il valore."""
     with urllib.request.urlopen(f'{servizio_con_bot}/health', timeout=10) as r:  # noqa: S310

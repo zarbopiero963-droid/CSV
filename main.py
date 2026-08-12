@@ -609,7 +609,16 @@ def health():
     # attivo? e Telegram sa il segreto? Sono cose diverse, e la seconda e' quella
     # che puo' fermare i segnali in silenzio (vedi `_WEBHOOK_REGISTRATO`).
     webhook_state = 'protetto' if SEGRETO_WEBHOOK else 'chiuso senza bot'
-    sano = csv_state == 'ok' and auth_state == 'ok' and _WEBHOOK_REGISTRATO is not False
+    # «Chiuso senza bot» fa scattare `degraded` come `auth`, e per la stessa
+    # ragione scritta qui sopra: `TELEGRAM_BOT_TOKEN` mancante e' una variabile
+    # mancante, non si ripara da se', e un'istanza senza bot RIFIUTA ogni consegna
+    # con 403 — cioe' non riceve nessun segnale. Prima diceva `status: ok` perche'
+    # `_WEBHOOK_REGISTRATO` vale `None` quando non c'e' bot, e `None is not False`:
+    # su Railway un'istanza incapace di ricevere segnali sarebbe apparsa sana.
+    # Segnalato da Fugu Ultra sulla review finale della PR #14, ed era il fratello
+    # non corretto della classe che `auth` aveva gia' chiuso due righe sopra.
+    sano = (csv_state == 'ok' and auth_state == 'ok'
+            and webhook_state == 'protetto' and _WEBHOOK_REGISTRATO is not False)
     stato = {'status': 'ok' if sano else 'degraded',
              'csv': csv_state, 'auth': auth_state, 'webhook': webhook_state,
              'feed_scartati': scarti}

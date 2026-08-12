@@ -92,10 +92,16 @@ registrazione c'e' stato. "csv" e' l'esito del verificatore di formato;
 "auth" vale "ok" oppure "non configurato" e in quel caso "status" diventa
 "degraded" — a differenza degli scarti, una variabile mancante non si ripara da
 se'. /health non ha token, quindi dice se il token c'e', mai quale;
-"webhook" vale "protetto" (l'header viene preteso) o "chiuso senza bot"
-(e in quel caso ogni consegna viene rifiutata);
+"webhook" vale "protetto" (l'header viene preteso) o "chiuso senza bot", e in
+quel caso ogni consegna viene rifiutata e "status" diventa "degraded": un'istanza
+che non puo' ricevere nessun segnale non e' sana, e TELEGRAM_BOT_TOKEN mancante e'
+una variabile mancante come CSV_ACCESS_TOKEN - non si ripara da se'.
 "webhook_registrato" e' l'esito dell'ULTIMO tentativo di registrazione - all'avvio
 o da una consegna rifiutata - e se e' false "status" diventa "degraded".
+
+"status" e' "ok" solo con TUTTI E TRE gli assi a posto: formato CSV valido, token
+del feed configurato, webhook protetto e registrato. Quando e' "degraded", il
+campo che lo spiega e' sempre presente: non serve indovinare quale asse e' rotto.
 
 "feed_scartati" conta le RIGHE DISTINTE salvate che non hanno passato la verifica
 e sono state servite come feed vuoto - non le richieste che le incontrano, perche'

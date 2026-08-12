@@ -428,8 +428,23 @@ direzione.
 
 `/health` espone i due assi separatamente: `webhook` dice se l'enforcement è
 attivo, `webhook_registrato` l'esito dell'**ultimo tentativo** di registrazione —
-all'avvio o da una consegna rifiutata. Il secondo fa scattare `degraded`, perché
-resti diagnosticabile — non perché governi l'enforcement.
+all'avvio o da una consegna rifiutata. **Entrambi** fanno scattare `degraded`,
+perché resti diagnosticabile — non perché governino l'enforcement.
+
+Che `webhook: chiuso senza bot` degradi lo `status` è una correzione: prima
+`status` restava `ok`, perché `webhook_registrato` vale `None` quando non c'è bot e
+la condizione chiedeva `is not False`. Un'istanza che rifiuta **ogni** consegna con
+403 appariva sana, e su Railway sarebbe stata una spia verde su un servizio
+incapace di ricevere segnali. Era il fratello non corretto della classe che `auth`
+aveva già chiuso: `TELEGRAM_BOT_TOKEN` mancante è una variabile mancante, non si
+ripara da sé, e va trattata come `CSV_ACCESS_TOKEN` mancante. Segnalato da Fugu
+Ultra.
+
+`status` è `ok` solo con **tutti e tre** gli assi a posto — formato CSV, token del
+feed, webhook protetto e registrato — e quando è `degraded` il campo che lo spiega è
+sempre nella risposta. L'altra faccia è vincolata da un test: una spia che resta
+accesa anche quando tutto va bene insegna a ignorarla, ed è il rischio di ogni asse
+aggiunto alla condizione.
 
 Nel modello multiutente questo non cambia: **un solo bot serve tutti gli utenti**,
 quindi c'è un solo segreto, derivato dallo stesso token. Ciò che cambia per utente
