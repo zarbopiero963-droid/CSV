@@ -385,6 +385,23 @@ Il ritentativo da richiesta ha un freno di 60 secondi, perché quel percorso lo
 raggiunge chiunque: senza freno una raffica di POST forgiati diventerebbe una
 raffica di chiamate verso `api.telegram.org` fatte da noi.
 
+**Quello che limita la frequenza è il freno, non il flag.** La prima versione
+usciva subito quando `webhook_registrato` era già `true`, col ragionamento
+«Telegram sa il segreto, non c'è niente da riparare» — e così l'autoriparazione
+era morta esattamente nel caso in cui una registrazione riuscita può diventare
+stantia: qualcuno chiama `setWebhook` sullo stesso bot **senza** segreto (un altro
+strumento, un deploy vecchio) e da quel momento Telegram consegna senza header.
+Segnali fermi, `/health` che dice `true`, e nessun posto dove vederlo. Una consegna
+rifiutata che arriva mentre il flag dice `true` è l'unica informazione che
+**contraddice** il valore in cache, e veniva buttata via. Segnalato da Fugu Ultra.
+
+Le chiamate a `setWebhook` girano sempre **in un thread**, sia all'avvio sia dalla
+richiesta: hanno un timeout di dieci secondi e l'avvio le ripete tre volte, quindi
+eseguite sull'event loop una rete lenta terrebbe fermo il servizio per decine di
+secondi — e su Railway l'healthcheck interroga `/health` proprio in quella
+finestra, per poi dichiarare guasto un deploy in cui il webhook sta soltanto
+ritentando. Segnalato da Fable 5 e Fugu Ultra.
+
 Una registrazione conta come riuscita solo se **entrambe** le condizioni valgono:
 la risposta è arrivata **e** contiene `{"ok": true}`. Il codice HTTP da solo non
 basta, e non basta in due direzioni diverse: Telegram segnala parte dei rifiuti con

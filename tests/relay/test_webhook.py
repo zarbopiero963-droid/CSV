@@ -376,6 +376,73 @@ async def _senza_attesa(_secondi):
     return None
 
 
+def test_l_avvio_non_BLOCCA_il_loop_mentre_chiama_telegram():
+    """La chiamata di rete dell'avvio non deve girare sull'event loop.
+
+    `setWebhook` ha un timeout di dieci secondi e l'avvio la ritenta tre volte con
+    pause in mezzo: eseguita sul loop, un container che parte con la rete lenta
+    tiene il loop fermo fino a mezzo minuto. Su Railway l'healthcheck interroga
+    `/health` in quella finestra, non riceve risposta, e il deploy risulta guasto
+    per un webhook che sta soltanto ritentando. Segnalato da Claude Fable 5 come
+    bloccante sulla review finale della PR #14 — verificato: la chiamata era sul
+    loop, `main.py` la faceva diretta invece che in un thread come fa l'handler.
+
+    Il test non guarda il tempo — sarebbe una misura fragile — ma **su quale thread
+    gira la chiamata**: se e- il thread principale, e- il thread dell'event loop, e
+    per i dieci secondi del timeout il servizio non risponde a nessuno. E- questa
+    l'asserzione che decide l'esito, e sul codice difettoso e- quella che scatta.
+
+    La finta si fa comunque sbloccare da un'altra coroutine, e `wait_for` sta a
+    guardia: se un domani il blocco durasse oltre l'attesa della finta, il test
+    fallirebbe invece di appendere la suite. Sono due reti per la stessa
+    proprieta', non due asserzioni diverse.
+    """
+    import os as _os
+    sbloccami = threading.Event()
+    thread_della_finta = []
+
+    def finta(bot, url):
+        thread_della_finta.append(threading.current_thread())
+        sbloccami.wait(10)
+        return True
+
+    async def prova():
+        vecchio_chiama = main._chiama_set_webhook
+        vecchio_token = _os.environ.get('TELEGRAM_BOT_TOKEN')
+        main._chiama_set_webhook = finta
+        _os.environ['TELEGRAM_BOT_TOKEN'] = BOT_FINTO
+        try:
+            avvio = asyncio.create_task(main.register_telegram_webhook())
+
+            async def sblocca():
+                # Gira solo se il loop e- libero: e- l'intera asserzione.
+                sbloccami.set()
+
+            await asyncio.wait_for(asyncio.gather(avvio, sblocca()), timeout=15)
+        finally:
+            main._chiama_set_webhook = vecchio_chiama
+            if vecchio_token is None:
+                _os.environ.pop('TELEGRAM_BOT_TOKEN', None)
+            else:
+                _os.environ['TELEGRAM_BOT_TOKEN'] = vecchio_token
+
+    try:
+        asyncio.run(prova())
+    except (TimeoutError, asyncio.TimeoutError):
+        sbloccami.set()
+        raise AssertionError(
+            'l-avvio ha bloccato l-event loop durante la chiamata a Telegram: '
+            'nessun-altra coroutine ha potuto girare. Su Railway questo e- '
+            'l-healthcheck che non riceve risposta mentre il webhook ritenta.'
+        ) from None
+
+    assert thread_della_finta, 'la finta non e- stata chiamata'
+    assert thread_della_finta[0] is not threading.main_thread(), (
+        f'la chiamata di rete e- girata su {thread_della_finta[0].name}, cioe- sul '
+        f'thread dell-event loop'
+    )
+
+
 def test_una_consegna_rifiutata_RITENTA_la_registrazione_ma_col_freno(monkeypatch):
     """L'autoriparazione, e il suo freno.
 
@@ -408,17 +475,65 @@ def test_una_consegna_rifiutata_RITENTA_la_registrazione_ma_col_freno(monkeypatc
     assert len(tentativi) == 2, 'scaduto il freno il ritentativo deve ripartire'
 
 
-def test_una_registrazione_riuscita_non_viene_ripetuta(monkeypatch):
-    """Se Telegram sa il segreto non si richiama nessuno a ogni consegna."""
+def test_una_raffica_di_consegne_rifiutate_produce_UN_tentativo(monkeypatch):
+    """Non si richiama Telegram a ogni consegna — ma il limite e- il FRENO.
+
+    Questo test asseriva prima che con `_WEBHOOK_REGISTRATO = True` non partisse
+    **nessun** tentativo, perche- `assicura_registrazione` usciva subito sul flag.
+    Era la formulazione sbagliata dell'invariante giusta: quello che serve e- che
+    una raffica non diventi una raffica di chiamate verso Telegram, e a questo
+    basta il freno. Uscire sul flag faceva di piu-, e quel di piu- era il difetto
+    corretto in `test_una_registrazione_riuscita_NON_rende_morta_l_autoriparazione`.
+    """
     monkeypatch.setenv('TELEGRAM_BOT_TOKEN', BOT_FINTO)
     monkeypatch.setattr(main, '_WEBHOOK_REGISTRATO', True)
-    monkeypatch.setattr(main, '_ULTIMO_TENTATIVO', 0.0)
+    monkeypatch.setattr(main, '_ULTIMO_TENTATIVO', main.time.monotonic())
     tentativi = []
     monkeypatch.setattr(main, '_chiama_set_webhook',
                         lambda bot, url: tentativi.append(bot) or True)
     for _ in range(10):
         assert main.assicura_registrazione() is True
-    assert tentativi == [], f'ha richiamato Telegram {len(tentativi)} volte per niente'
+    assert tentativi == [], (
+        f'col freno appena armato ha richiamato Telegram {len(tentativi)} volte'
+    )
+
+
+def test_una_registrazione_riuscita_NON_rende_morta_l_autoriparazione(monkeypatch):
+    """Il bloccante: dopo un successo, il ritentativo non partiva **mai piu-**.
+
+    `assicura_registrazione` usciva subito quando `_WEBHOOK_REGISTRATO` era `True`,
+    con il ragionamento «Telegram sa il segreto, non c'e- niente da riparare». Ma
+    una consegna RIFIUTATA che arriva mentre il flag dice `True` e- precisamente la
+    prova che il flag non e- piu- vero: e- l'unica informazione che contraddice il
+    valore in cache, e veniva buttata.
+
+    Lo scenario e- concreto: qualcuno chiama `setWebhook` sullo stesso bot senza
+    segreto — un altro strumento, un deploy vecchio, il Bridge — e da quel momento
+    Telegram consegna senza header. Il relay rifiuta ogni consegna legittima,
+    l'autoriparazione non parte perche- il flag dice `True`, e `/health` continua a
+    dire `webhook_registrato: true`. Segnali fermi, e nessun posto dove vederlo.
+    Cioe- il blackout che questa PR esiste per evitare, sopravvissuto nell'unico
+    caso in cui il rimedio si spegneva. Segnalato da Fugu Ultra come bloccante
+    sulla review finale.
+
+    Il limite giusto e- il freno, non il flag: una raffica costa un tentativo al
+    minuto (`test_una_raffica_di_consegne_rifiutate_produce_UN_tentativo`).
+    """
+    monkeypatch.setenv('TELEGRAM_BOT_TOKEN', BOT_FINTO)
+    monkeypatch.setattr(main, '_WEBHOOK_REGISTRATO', True)
+    # Freno scaduto: un tentativo DEVE poter partire.
+    monkeypatch.setattr(main, '_ULTIMO_TENTATIVO',
+                        main.time.monotonic() - main.ATTESA_FRA_TENTATIVI_S - 1)
+    tentativi = []
+    monkeypatch.setattr(main, '_chiama_set_webhook',
+                        lambda bot, url: tentativi.append(bot) or True)
+
+    main.assicura_registrazione()
+    assert len(tentativi) == 1, (
+        'con il flag a True e il freno scaduto, una consegna rifiutata non ha '
+        'ritentato la registrazione: l-autoriparazione e- morta proprio dopo un '
+        'successo, cioe- nel caso in cui una registrazione puo- diventare stantia'
+    )
 
 
 def test_il_segreto_non_finisce_nell_URL_ma_nel_CORPO(monkeypatch):

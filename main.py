@@ -148,6 +148,21 @@ def assicura_registrazione(forza=False):
     era forgiata costa un tentativo, che il freno di `ATTESA_FRA_TENTATIVI_S`
     limita a uno per minuto. Rifiutare, in entrambi i casi.
 
+    **Un successo passato non spegne il ritentativo**, e la prima versione di questa
+    funzione lo spegneva: usciva subito se `_WEBHOOK_REGISTRATO` era `True`, col
+    ragionamento «Telegram sa il segreto, non c'e' niente da riparare». Ma una
+    consegna rifiutata che arriva mentre il flag dice `True` e' l'unica informazione
+    che CONTRADDICE il valore in cache, e veniva buttata via — cioe' l'autoriparazione
+    era morta esattamente nel caso in cui una registrazione riuscita puo' diventare
+    stantia: qualcuno chiama `setWebhook` sullo stesso bot senza segreto (un altro
+    strumento, un deploy vecchio) e da quel momento Telegram consegna senza header.
+    Segnali fermi, `/health` che dice `webhook_registrato: true`, e nessun posto dove
+    vederlo. Segnalato da Fugu Ultra.
+
+    Quello che deve limitare la frequenza e' il FRENO, non il flag: una raffica di
+    POST forgiati costa un tentativo al minuto, che e' il motivo per cui il freno
+    esiste. Il flag serve a `/health`, non a decidere se riprovare.
+
     Bloccante alzato insieme da GPT-5.5 e Claude Fable 5 sulla PR #14.
     """
     global _WEBHOOK_REGISTRATO, _ULTIMO_TENTATIVO
@@ -156,8 +171,6 @@ def assicura_registrazione(forza=False):
     if not token:
         return None
     with _WEBHOOK_LOCK:
-        if _WEBHOOK_REGISTRATO is True and not forza:
-            return True
         adesso = time.monotonic()
         if not forza and adesso - _ULTIMO_TENTATIVO < ATTESA_FRA_TENTATIVI_S:
             return _WEBHOOK_REGISTRATO
@@ -185,11 +198,20 @@ async def register_telegram_webhook():
     lascerebbe l'istanza con l'enforcement attivo e Telegram che non conosce il
     segreto. Un fallimento persistente non impedisce l'avvio: il servizio deve
     continuare a servire il feed, e `/health` dice com'e' andata.
+
+    In un THREAD, non sul loop, come fa l'handler del webhook: `setWebhook` ha un
+    timeout di dieci secondi e qui si ritenta tre volte con pause in mezzo, quindi
+    eseguita sul loop una rete lenta terrebbe l'event loop fermo per decine di
+    secondi. Su Railway l'healthcheck interroga `/health` proprio in quella
+    finestra, non riceve risposta, e il deploy risulta guasto per un webhook che
+    sta soltanto ritentando. Bloccante alzato da Claude Fable 5 e Fugu Ultra sulla
+    review finale della PR #14; lo vincola
+    `test_l_avvio_non_BLOCCA_il_loop_mentre_chiama_telegram`.
     """
     if not os.getenv('TELEGRAM_BOT_TOKEN', ''):
         return
     for tentativo in range(3):
-        if assicura_registrazione(forza=True):
+        if await asyncio.to_thread(assicura_registrazione, True):
             return
         if tentativo < 2:
             await asyncio.sleep(1 + tentativo)
