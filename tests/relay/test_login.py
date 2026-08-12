@@ -302,3 +302,331 @@ def test_un_cookie_SPAZZATURA_rifiuta_invece_di_sollevare(spazzatura, monkeypatc
     """
     monkeypatch.setattr(main, 'SEGRETO_SESSIONE', 'un-segreto-di-prova')
     assert main.leggi_sessione(spazzatura) is None
+
+
+# ============================================================ il flusso, via HTTP
+#
+# Da qui i test parlano al servizio vero attraverso HTTP, perche' cio' che verificano
+# non e' una funzione ma il comportamento composto: il cookie che il browser riceve, la
+# sessione che apre, e — soprattutto — cio' che la sessione **non** deve toccare.
+
+import json          # noqa: E402 - gli import del blocco HTTP, tenuti accanto al blocco
+import urllib.error  # noqa: E402
+import urllib.request  # noqa: E402
+
+from tests.ambiente import TOKEN_DI_PROVA  # noqa: E402
+from tests.servizio import relay_avviato  # noqa: E402
+
+# Nessuna uscita verso Internet: con `TELEGRAM_BOT_TOKEN` nell'ambiente lo startup
+# registra il webhook, e senza un proxy morto la chiamata partirebbe davvero verso
+# `PUBLIC_URL`. Stesso accorgimento di `tests/relay/test_parse_message.py`, e lo stesso
+# motivo: un test non deve toccare il bot vero di nessuno.
+PROXY_MORTO = 'http://127.0.0.1:1'
+
+AMBIENTE_DEL_SERVIZIO = {
+    'CSV_ACCESS_TOKEN': TOKEN_DI_PROVA,
+    'TELEGRAM_BOT_TOKEN': BOT_FINTO,
+    'TELEGRAM_ADMIN_ID': ADMIN_FINTO,
+    'PUBLIC_URL': 'https://non-esiste.invalid',
+    'HTTPS_PROXY': PROXY_MORTO,
+    'https_proxy': PROXY_MORTO,
+}
+
+# Il segreto delle sessioni ricalcolato con la stessa formula del servizio: serve per
+# FIRMARE in-processo un cookie che il sottoprocesso accettera'. Ricalcolarlo qui invece
+# di importarlo e' deliberato — se lo importassi, un cambio di formula resterebbe
+# invisibile perche' i due lati cambierebbero insieme.
+SEGRETO_ATTESO = hashlib.sha256(('betrelay-sessione-v1:' + BOT_FINTO).encode()).hexdigest()
+
+
+@pytest.fixture
+def servizio(tmp_path, monkeypatch):
+    """Un relay per test, col bot e con l'ID admin, senza uscite verso l'esterno."""
+    monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
+    with relay_avviato(tmp_path, **AMBIENTE_DEL_SERVIZIO) as base:
+        yield base
+
+
+def _chiama(base, metodo, path, corpo=None, cookie=None, token=None):
+    """Richiesta HTTP che restituisce `(stato, corpo, intestazioni)` senza sollevare."""
+    url = f'{base}{path}'
+    if token:
+        url += ('&' if '?' in path else '?') + 'token=' + token
+    dati = json.dumps(corpo).encode() if corpo is not None else None
+    intestazioni = {}
+    if dati:
+        intestazioni['Content-Type'] = 'application/json'
+    if token:
+        # Le rotte `/api/` leggono `X-Admin-Token`, il feed legge la query string:
+        # mandarlo in entrambi i posti evita di dover sapere quale rotta e- quale.
+        intestazioni['X-Admin-Token'] = token
+    if cookie:
+        intestazioni['Cookie'] = f'{main.NOME_COOKIE}={cookie}'
+    req = urllib.request.Request(url, data=dati, headers=intestazioni, method=metodo)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:  # noqa: S310 - loopback
+            return r.status, r.read(), dict(r.headers)
+    except urllib.error.HTTPError as e:
+        return e.code, e.read(), dict(e.headers)
+
+
+def _cookie_dalla_risposta(intestazioni):
+    """Il valore del cookie di sessione dall'header `Set-Cookie`."""
+    grezzo = intestazioni.get('set-cookie') or intestazioni.get('Set-Cookie') or ''
+    for pezzo in grezzo.split(';'):
+        chiave, _, valore = pezzo.strip().partition('=')
+        if chiave == main.NOME_COOKIE:
+            return valore
+    return None
+
+
+def test_il_login_telegram_apre_una_sessione_e_api_me_risponde(servizio):
+    """Il flusso completo: firma valida → cookie → `/api/me` dice chi sono."""
+    stato, corpo, intestazioni = _chiama(servizio, 'POST', '/api/login/telegram',
+                                         corpo=_dati_login())
+    assert stato == 200, corpo
+    cookie = _cookie_dalla_risposta(intestazioni)
+    assert cookie, f'nessun cookie di sessione nella risposta: {intestazioni}'
+
+    stato, corpo, _ = _chiama(servizio, 'GET', '/api/me', cookie=cookie)
+    assert stato == 200, corpo
+    io = json.loads(corpo)
+    assert io['nome'] == 'Piero'
+    assert io['admin'] is True, (
+        f'il proprietario non risulta admin: {io}. Con TELEGRAM_ADMIN_ID impostato, il '
+        'suo login deve attaccarsi alla riga che possiede i suoi parser')
+
+
+def test_il_login_del_proprietario_NON_crea_un_secondo_account(servizio, tmp_path):
+    """Il difetto che TELEGRAM_ADMIN_ID esiste per evitare.
+
+    Senza il collegamento, il login creerebbe un utente nuovo e vuoto: il proprietario
+    entrerebbe in una dashboard senza i suoi parser, e nessun errore comparirebbe da
+    nessuna parte. Qui si verifica che l'utente in cui entra sia **lo stesso** che
+    possiede il parser di default.
+    """
+    stato, _, intestazioni = _chiama(servizio, 'POST', '/api/login/telegram',
+                                     corpo=_dati_login())
+    assert stato == 200
+    cookie = _cookie_dalla_risposta(intestazioni)
+    io = json.loads(_chiama(servizio, 'GET', '/api/me', cookie=cookie)[1])
+
+    # Il proprietario del parser di default, letto dal database del servizio.
+    import sqlite3
+    c = sqlite3.connect(tmp_path / 'signals.db')
+    proprietario = c.execute('SELECT user_id FROM parsers WHERE name=?',
+                             (main.DEFAULT_PARSER,)).fetchone()[0]
+    quanti = c.execute('SELECT COUNT(*) FROM users').fetchone()[0]
+    c.close()
+    assert io['utente'] == proprietario, (
+        f"il login e- entrato nell'utente {io['utente']} ma i parser sono "
+        f'dell-utente {proprietario}: sono due account, e la dashboard sarebbe vuota')
+    assert quanti == 1, f'{quanti} utenti nel database invece di 1: ne e- nato uno in piu-'
+
+
+def test_una_firma_non_valida_NON_apre_nessuna_sessione(servizio):
+    dati = _dati_login()
+    dati['id'] = '111'      # cambiato dopo la firma
+    stato, corpo, intestazioni = _chiama(servizio, 'POST', '/api/login/telegram', corpo=dati)
+    assert stato == 401, corpo
+    assert _cookie_dalla_risposta(intestazioni) is None, 'cookie emesso su un login rifiutato'
+
+
+def test_un_cookie_MANOMESSO_non_apre_api_me(servizio):
+    stato, _, intestazioni = _chiama(servizio, 'POST', '/api/login/telegram',
+                                     corpo=_dati_login())
+    cookie = _cookie_dalla_risposta(intestazioni)
+    manomesso = cookie[:-4] + ('0000' if not cookie.endswith('0000') else '1111')
+    stato, corpo, _ = _chiama(servizio, 'GET', '/api/me', cookie=manomesso)
+    assert stato == 401, corpo
+
+
+def test_il_cookie_e_HttpOnly_e_SameSite(servizio):
+    """Un cookie leggibile da JavaScript e' un cookie che un XSS porta via."""
+    _, _, intestazioni = _chiama(servizio, 'POST', '/api/login/telegram', corpo=_dati_login())
+    grezzo = (intestazioni.get('set-cookie') or intestazioni.get('Set-Cookie') or '').lower()
+    assert 'httponly' in grezzo, grezzo
+    assert 'samesite=lax' in grezzo, grezzo
+    assert 'secure' in grezzo, grezzo
+
+
+def test_dopo_il_logout_il_cookie_non_vale_piu(servizio):
+    _, _, intestazioni = _chiama(servizio, 'POST', '/api/login/telegram', corpo=_dati_login())
+    cookie = _cookie_dalla_risposta(intestazioni)
+    assert _chiama(servizio, 'GET', '/api/me', cookie=cookie)[0] == 200
+
+    stato, _, uscita = _chiama(servizio, 'POST', '/api/logout', cookie=cookie)
+    assert stato == 200
+    grezzo = (uscita.get('set-cookie') or uscita.get('Set-Cookie') or '')
+    assert main.NOME_COOKIE in grezzo, f'il logout non ha cancellato il cookie: {grezzo}'
+
+
+def test_senza_ADMIN_PASSWORD_HASH_il_login_a_password_risponde_503(servizio):
+    """L'ambiente del test non porta quella variabile: percorso disabilitato."""
+    stato, corpo, intestazioni = _chiama(
+        servizio, 'POST', '/api/login/password',
+        corpo={'username': 'administrator', 'password': 'qualunque'})
+    assert stato == 503, corpo
+    assert b'ADMIN_PASSWORD_HASH' in corpo, corpo
+    assert _cookie_dalla_risposta(intestazioni) is None
+
+
+def test_il_login_a_password_funziona_e_finisce_in_admin_audit(tmp_path, monkeypatch):
+    """Il percorso di emergenza, con la variabile configurata, e la sua traccia."""
+    monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
+    hash_salvato = main.hash_password('la password del proprietario')
+    ambiente = dict(AMBIENTE_DEL_SERVIZIO, ADMIN_PASSWORD_HASH=hash_salvato)
+    with relay_avviato(tmp_path, **ambiente) as base:
+        sbagliata = _chiama(base, 'POST', '/api/login/password',
+                            corpo={'username': 'administrator', 'password': 'sbagliata'})
+        assert sbagliata[0] == 401, sbagliata[1]
+        assert _cookie_dalla_risposta(sbagliata[2]) is None
+
+        stato, corpo, intestazioni = _chiama(
+            base, 'POST', '/api/login/password',
+            corpo={'username': 'administrator', 'password': 'la password del proprietario'})
+        assert stato == 200, corpo
+        cookie = _cookie_dalla_risposta(intestazioni)
+        assert cookie
+        io = json.loads(_chiama(base, 'GET', '/api/me', cookie=cookie)[1])
+        assert io['admin'] is True
+
+        # La traccia: senza, «non sono stato io» non e- dimostrabile.
+        import sqlite3
+        c = sqlite3.connect(tmp_path / 'signals.db')
+        azioni = [r[0] for r in c.execute('SELECT action FROM admin_audit').fetchall()]
+        c.close()
+        assert 'accesso_con_password' in azioni, azioni
+
+
+def test_un_utente_SBAGLIATO_non_entra_nemmeno_con_la_password_giusta(tmp_path, monkeypatch):
+    """`administrator` e' l'unico nome ammesso: la password sola non basta."""
+    monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
+    ambiente = dict(AMBIENTE_DEL_SERVIZIO,
+                    ADMIN_PASSWORD_HASH=main.hash_password('giusta'))
+    with relay_avviato(tmp_path, **ambiente) as base:
+        stato, corpo, intestazioni = _chiama(base, 'POST', '/api/login/password',
+                                             corpo={'username': 'piero', 'password': 'giusta'})
+        assert stato == 401, corpo
+        assert _cookie_dalla_risposta(intestazioni) is None
+
+
+def test_dopo_troppi_tentativi_il_percorso_a_password_si_FRENA(tmp_path, monkeypatch):
+    """Il freno: senza, una password scelta da un umano si rompe provandola in serie.
+
+    E- globale e non per IP, e il baratto e' dichiarato in `main.py`: per IP non
+    frenerebbe nulla, perche' chi prova in automatico cambia indirizzo. Il prezzo — un
+    estraneo puo' tenere occupato il percorso a password per qualche minuto — e'
+    accettabile **perche' esistono due porte**: il proprietario entra col login Telegram
+    mentre quella a password e' frenata.
+    """
+    monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
+    ambiente = dict(AMBIENTE_DEL_SERVIZIO,
+                    ADMIN_PASSWORD_HASH=main.hash_password('giusta'))
+    with relay_avviato(tmp_path, **ambiente) as base:
+        stati = [_chiama(base, 'POST', '/api/login/password',
+                         corpo={'username': 'administrator', 'password': 'sbagliata'})[0]
+                 for _ in range(main.TENTATIVI_PRIMA_DEL_FRENO + 2)]
+        assert stati[:main.TENTATIVI_PRIMA_DEL_FRENO] == [401] * main.TENTATIVI_PRIMA_DEL_FRENO, stati
+        assert stati[-1] == 429, (
+            f'dopo {main.TENTATIVI_PRIMA_DEL_FRENO} tentativi falliti il percorso non si '
+            f'e- frenato: {stati}')
+        # E il freno vale anche per la password GIUSTA: altrimenti non frenerebbe nulla,
+        # perche' chi indovina al tentativo numero mille entrerebbe comunque.
+        stato, corpo, _ = _chiama(base, 'POST', '/api/login/password',
+                                  corpo={'username': 'administrator', 'password': 'giusta'})
+        assert stato == 429, corpo
+
+
+def test_la_sessione_scaduta_NON_tocca_il_feed(servizio):
+    """**Il test per cui questo PR esiste.** Sessione e feed non si toccano.
+
+    E- la trappola 2 della Issue #7, e non protegge una funzione: protegge una
+    NON-relazione. XTrader interroga il feed con un token nell'URL — non ha una
+    sessione, non fa login, non «resta attivo». Se i due meccanismi venissero collegati,
+    ogni cliente perderebbe i segnali venti minuti dopo aver chiuso il browser, e
+    **nessun test di login lo troverebbe**, perche' il login funzionerebbe benissimo.
+
+    Nessuno scriverebbe spontaneamente un test che verifica che due cose NON sono
+    collegate. E- l'unico motivo per cui va scritto adesso, mentre il collegamento non
+    c'e': dopo, sarebbe un test che nasce da un guasto in produzione.
+
+        sessione = cookie del sito, scade per inattivita' (20 min)
+        token    = accesso al feed, scade solo se revocato
+    """
+    # Un segnale nel feed, messo dalla API con il token del feed.
+    messo = _chiama(servizio, 'POST', f'/api/parsers/{main.DEFAULT_PARSER}/test',
+                    corpo={'message': 'P.Bet. PREMACHT 0,5HT\nSQUADRA-A 🆚 SQUADRA-B'},
+                    token=TOKEN_DI_PROVA)
+    assert messo[0] == 200, messo[1]
+
+    def feed():
+        return _chiama(servizio, 'GET', '/xtrader.csv', token=TOKEN_DI_PROVA)
+
+    stato, prima, _ = feed()
+    assert stato == 200
+    # Due righe: l'intestazione e il segnale. Non si asserisce il NOME della squadra,
+    # perche' come il parser compone `EventName` e- l'argomento di
+    # `tests/relay/test_parse_message.py`, non di questo: qui serve solo che nel feed ci
+    # sia un segnale vivo, e che resti identico a se stesso.
+    righe_prima = [r for r in prima.split(b'\r\n') if r]
+    assert len(righe_prima) == 2, prima
+
+    # Una sessione SCADUTA per inattivita', firmata correttamente ma vecchia.
+    scaduta = main.firma_sessione(utente=1, versione=1,
+                                  emessa=time.time() - main.INATTIVITA_MASSIMA - 60)
+    assert _chiama(servizio, 'GET', '/api/me', cookie=scaduta)[0] == 401, (
+        'la sessione scaduta e- stata accettata: il resto del test non misurerebbe niente')
+
+    # E il feed risponde ANCORA, identico. Questa e' l'asserzione che conta.
+    stato, dopo, _ = feed()
+    assert stato == 200, (
+        f'il feed risponde {stato} con una sessione scaduta: sessione e token sono stati '
+        'collegati, e ogni cliente perdera- i segnali 20 minuti dopo aver chiuso il browser')
+    assert dopo == prima, (
+        'il contenuto del feed e- cambiato per via di una sessione scaduta:\n'
+        f'  prima: {prima!r}\n  dopo : {dopo!r}')
+
+    # E anche presentando il cookie scaduto direttamente al feed: il feed non deve
+    # nemmeno GUARDARE il cookie.
+    stato, con_cookie, _ = _chiama(servizio, 'GET', '/xtrader.csv',
+                                   cookie=scaduta, token=TOKEN_DI_PROVA)
+    assert stato == 200 and con_cookie == prima, (stato, con_cookie)
+
+
+def test_incrementare_session_version_INVALIDA_i_cookie_gia_emessi(servizio, tmp_path):
+    """L'unico modo di buttare fuori una sessione SUBITO, e non era protetto da niente.
+
+    Trovato per sabotaggio mentre scrivevo questo file: togliendo il confronto fra la
+    `versione` del cookie e `users.session_version` la suite dava **67 passed**. Il
+    meccanismo c'era — la colonna nello schema, il valore firmato nel cookie, il
+    confronto nel codice — e nessun test lo esercitava. E' la stessa forma di difetto che
+    questa sessione ha incontrato dieci volte: copertura dichiarata e assente, e il
+    sabotaggio l'unico modo di scoprirla.
+
+    Perche' serve: senza, un cookie rubato resta valido fino alla scadenza naturale e non
+    c'e- niente da fare per annullarlo. Con l'incremento, ogni sessione di quell'utente
+    muore alla richiesta successiva. Il PR sull'amministrazione lo usera- per «entra come
+    cliente» e per chiudere un accesso sospetto.
+    """
+    import sqlite3
+    _, _, intestazioni = _chiama(servizio, 'POST', '/api/login/telegram', corpo=_dati_login())
+    cookie = _cookie_dalla_risposta(intestazioni)
+    assert _chiama(servizio, 'GET', '/api/me', cookie=cookie)[0] == 200, (
+        'la sessione non e- valida nemmeno appena emessa: il resto non misura niente')
+
+    # Il gesto che il pannello fara': incrementare la versione nel database.
+    c = sqlite3.connect(tmp_path / 'signals.db')
+    c.execute('UPDATE users SET session_version = session_version + 1')
+    c.commit()
+    c.close()
+
+    stato, corpo, _ = _chiama(servizio, 'GET', '/api/me', cookie=cookie)
+    assert stato == 401, (
+        f'il cookie vale ancora dopo l-incremento di session_version (risposta {stato}): '
+        'una sessione non si puo- piu- invalidare, e un cookie rubato resta buono fino '
+        f'alla scadenza naturale. Corpo: {corpo[:200]!r}')
+
+    # E un login nuovo funziona: l'incremento chiude le sessioni vecchie, non l'utente.
+    _, _, nuove = _chiama(servizio, 'POST', '/api/login/telegram', corpo=_dati_login())
+    assert _chiama(servizio, 'GET', '/api/me', cookie=_cookie_dalla_risposta(nuove))[0] == 200

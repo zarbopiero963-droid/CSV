@@ -47,6 +47,65 @@ POST /api/test-message?parser=Parser_Telegram_XTrader_v1
 Header: X-Admin-Token: TOKEN
 Body JSON: {"message":"testo completo del messaggio"}
 
+LOGIN E SESSIONI (dal PR 6)
+Due porte, e averne due non e' ridondanza: se Telegram non e' disponibile o se il
+proprietario perde quell'account, la seconda lo fa entrare comunque.
+
+POST /api/login/telegram
+Body JSON: i campi del Login Widget di Telegram, compreso "hash".
+La firma HMAC-SHA256 viene verificata con una chiave derivata da TELEGRAM_BOT_TOKEN:
+Telegram non manda un token, manda i campi in chiaro piu' la firma, quindi chi non la
+verifica accetta un "id" scritto da chiunque. auth_date viene controllato in ENTRAMBE
+le direzioni (max 300 secondi): troppo vecchio significa che una firma vale per
+sempre, nel futuro significa che un auth_date messo a mano vale per sempre.
+Firma non valida o scaduta: 401, senza distinguere i due casi.
+
+POST /api/login/password
+Body JSON: {"username":"administrator","password":"..."}
+L'accesso di emergenza. Senza ADMIN_PASSWORD_HASH risponde 503 (percorso
+DISABILITATO, non aperto). Dopo 5 tentativi falliti si frena per 300 secondi e
+risponde 429 — anche alla password giusta, altrimenti non frenerebbe nulla. Il freno
+e' globale e non per IP: per IP non fermerebbe chi prova in automatico, che cambia
+indirizzo. Il prezzo — un estraneo puo' tenere occupato questo percorso per qualche
+minuto — e' accettabile perche' il login Telegram resta disponibile.
+Ogni accesso riuscito finisce in admin_audit.
+
+GET /api/me
+Chi e' l'utente della sessione: {"utente","nome","stato","admin","accesso_scade"}.
+401 se il cookie manca, non e' firmato, e' scaduto, o se session_version e' cambiata.
+Non restituisce mai un token, ne' l'hash della password, ne' il telegram_id.
+
+POST /api/logout
+Cancella il cookie. Riesce sempre, anche senza sessione: chiudere una sessione che
+non esiste ha ottenuto cio' che voleva. NON incrementa session_version, che
+butterebbe fuori tutti i dispositivi.
+
+IL COOKIE E IL FEED NON SI TOCCANO
+Il cookie di sessione (betrelay_sessione) e' HttpOnly, Secure, SameSite=Lax, e scade
+dopo 20 MINUTI DI INATTIVITA' — viene riemesso a ogni richiesta valida.
+Quei 20 minuti riguardano SOLO il sito. Il feed CSV non ha sessione: XTrader lo
+interroga con un token nell'URL, non fa login e non "resta attivo". Collegare le due
+cose farebbe perdere i segnali a ogni cliente 20 minuti dopo aver chiuso il browser,
+e nessun test di login lo troverebbe perche' il login funzionerebbe benissimo.
+  sessione = cookie del sito, scade per inattivita'
+  token    = accesso al feed, scade solo se revocato
+Lo vincola tests/relay/test_login.py::test_la_sessione_scaduta_NON_tocca_il_feed.
+
+Il cookie e' FIRMATO con un segreto derivato da TELEGRAM_BOT_TOKEN, come quello del
+webhook e per la stessa ragione: esiste sempre dove esiste il bot, e non serve una
+variabile in piu' con la sua finestra di configurazione. Senza bot nessuna sessione
+e' valida. Il prefisso lo separa dal segreto del webhook, cosi' un valore rubato da
+un canale non serve nell'altro.
+session_version nel database invalida SUBITO tutti i cookie di un utente: e' il modo
+di chiudere un accesso sospetto senza aspettare i 20 minuti.
+
+COSA IL PR 6 NON FA
+La web app in web/ resta con dati finti: collegarla al backend e' un PR successivo.
+Questi endpoint si esercitano via HTTP, e i test lo fanno.
+L'accesso su approvazione (stati registrato/attivo/scaduto, giorni rimasti, pannello
+richieste) e' la Issue #7 e non e' qui: un utente nuovo nasce con status "registrato"
+e non puo' ancora fare nulla.
+
 AUTENTICAZIONE
 CSV_ACCESS_TOKEN protegge dieci rotte: i due feed CSV (/xtrader.csv e
 /profiles/NOME.csv, col parametro ?token=) e le otto API di gestione (con
@@ -232,6 +291,28 @@ TELEGRAM_ALLOWED_CHAT_IDS: chat_id iniziali del profilo PIERO, separati da virgo
   esiste gia' e modificare la variabile non cambia piu' nulla — per cambiare i
   chat_id si usa POST /api/profiles. Non replicarla per altri utenti: popola solo
   il profilo PIERO, e una variabile per cliente imporrebbe un rideploy.
+TELEGRAM_ADMIN_ID: l'ID Telegram numerico del proprietario. Collega il suo login
+  all'utente che possiede i suoi parser: quella riga ha origin_profile='PIERO' e
+  nessun telegram_id, perche' nessuno lo aveva mai saputo. SENZA questa variabile il
+  primo login del proprietario crea un secondo account VUOTO, e la sua dashboard
+  risulta vuota senza nessun errore da nessuna parte. Si trova scrivendo al bot e
+  aprendo https://api.telegram.org/bot<TOKEN>/getUpdates: e' message.from.id.
+  Non e' un segreto — chiunque riceva un suo messaggio lo conosce — ma decide chi e'
+  l'amministratore.
+ADMIN_PASSWORD_HASH: facoltativa. L'accesso di emergenza, utente 'administrator',
+  per entrare nel pannello quando Telegram non e' disponibile. Contiene l'HASH e mai
+  la password: la dashboard di Railway e' leggibile da chi ha accesso al progetto, e
+  con la password in chiaro chi la legge entra nel pannello — da cui si cancellano
+  parser, si cambiano le chat autorizzate e si inietta un segnale nel feed che
+  XTrader legge. Si genera con:
+    python3 -c "import hashlib,os,base64,getpass; p=getpass.getpass('password: ').encode(); s=os.urandom(16); print('scrypt$'+base64.b64encode(s).decode()+'$'+base64.b64encode(hashlib.scrypt(p,salt=s,n=16384,r=8,p=1,dklen=32)).decode())"
+  getpass e non input(): la password non deve comparire sullo schermo, e con input()
+  resta scritta li' — davanti a chiunque guardi, o dentro la registrazione di una
+  condivisione schermo. Il comando e' stato ESEGUITO in questa forma e stampa
+  scrypt$sale$derivata: i $ dentro le doppie virgolette restano letterali perche'
+  seguiti da un apice, e non serve nessun escape.
+  Per cambiare password si rigenera l'hash e si sostituisce la variabile.
+  ASSENTE = percorso a password DISABILITATO (503), non aperto.
 DB_PATH: facoltativo; su Railway usare un volume per conservare i dati tra riavvii.
   Il default del codice e' sotto /tmp, che su Railway si perde a ogni deploy. In
   questo servizio vale /data/signals.db, dentro il volume montato su /data

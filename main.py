@@ -1517,6 +1517,241 @@ def xtrader_csv(token: str | None = Query(None)):
 def named_profile_csv(profile: str, token: str | None = Query(None)):
     return profile_csv(profile, token)
 
+# Il nome del cookie di sessione, in un posto solo perche' lo leggono in quattro.
+NOME_COOKIE = 'betrelay_sessione'
+
+# I tentativi falliti sul percorso a password, con il momento dell'ultimo. In memoria
+# e non nel database: e' un freno, non un dato, e il servizio gira in un processo solo
+# (`Procfile` senza `--workers`, misurato).
+#
+# Il freno e' GLOBALE e non per IP, ed e' una scelta con un baratto dichiarato. Per IP
+# non frenerebbe nulla: chi prova una password in automatico cambia indirizzo. Globale
+# invece si', al prezzo che un estraneo puo' tenere occupato il percorso a password per
+# qualche minuto. Il prezzo e' accettabile **perche' esistono due porte**: il
+# proprietario entra col login Telegram mentre quella a password e' frenata. E' la
+# ragione tecnica per cui averne due non e' ridondanza.
+_TENTATIVI_PASSWORD = {'falliti': 0, 'ultimo': 0.0}
+_LOCK_TENTATIVI = threading.Lock()
+
+# Dopo quanti tentativi falliti il percorso si chiude, e per quanto.
+TENTATIVI_PRIMA_DEL_FRENO = 5
+DURATA_FRENO = 300
+
+
+def _freno_password():
+    """Secondi da aspettare prima di poter ritentare, 0 se la strada e' libera."""
+    with _LOCK_TENTATIVI:
+        if _TENTATIVI_PASSWORD['falliti'] < TENTATIVI_PRIMA_DEL_FRENO:
+            return 0
+        resto = DURATA_FRENO - (time.time() - _TENTATIVI_PASSWORD['ultimo'])
+        if resto <= 0:
+            # Finestra scaduta: si ricomincia a contare, altrimenti il primo blocco
+            # sarebbe definitivo e servirebbe un riavvio per rientrare.
+            _TENTATIVI_PASSWORD['falliti'] = 0
+            return 0
+        return int(resto) + 1
+
+
+def _registra_tentativo(riuscito):
+    with _LOCK_TENTATIVI:
+        if riuscito:
+            _TENTATIVI_PASSWORD['falliti'] = 0
+        else:
+            _TENTATIVI_PASSWORD['falliti'] += 1
+            _TENTATIVI_PASSWORD['ultimo'] = time.time()
+
+
+def _annota_admin(c, chi, azione, bersaglio=None):
+    """Una riga in `admin_audit`. Senza, «non sono stato io» non e' dimostrabile."""
+    c.execute('INSERT INTO admin_audit(admin_user_id, target_user_id, action)'
+              ' VALUES (?,?,?)', (chi, bersaglio, azione))
+
+
+def utente_dalla_sessione(request):
+    """L'utente della sessione, o `None`. **`user_id` viene DA QUI e mai dalla richiesta.**
+
+    E' la regola non negoziabile di `CLAUDE.md` sull'isolamento, e questa funzione e' il
+    solo posto da cui deve arrivare l'identita' di chi chiama: un `user_id` letto da un
+    parametro o da un header e' un `user_id` scelto dal mittente.
+
+    Tre controlli, e ognuno serve:
+
+    - la **firma** del cookie (in `leggi_sessione`): senza, `utente=7` diventa
+      `utente=8` con un editor di testo;
+    - la **scadenza** per inattivita' (anche in `leggi_sessione`);
+    - `session_version` confrontata con quella nel database: e' il modo di invalidare
+      una sessione **subito**, senza aspettare i venti minuti. Serve per «entra come
+      cliente» e per buttare fuori un accesso sospetto. Senza questo confronto, un
+      cookie rubato resterebbe valido fino alla scadenza naturale e non ci sarebbe
+      niente da fare.
+    """
+    sessione = leggi_sessione(request.cookies.get(NOME_COOKIE))
+    if not sessione:
+        return None
+    c = db()
+    riga = c.execute('SELECT id, session_version, status, is_admin, first_name,'
+                     ' access_expires_at FROM users WHERE id=?',
+                     (sessione['utente'],)).fetchone()
+    c.close()
+    if not riga or riga[1] != sessione['versione']:
+        return None
+    return {'id': riga[0], 'status': riga[2], 'is_admin': bool(riga[3]),
+            'first_name': riga[4], 'access_expires_at': riga[5]}
+
+
+def _rispondi_con_sessione(utente, versione, corpo):
+    """La risposta che apre una sessione, col cookie impostato come si deve.
+
+    `httponly` perche' un cookie leggibile da JavaScript e' un cookie che un XSS porta
+    via. `samesite='lax'` perche' una POST da un altro sito non deve portarsi dietro la
+    sessione. `secure` perche' il servizio sta su HTTPS e il cookie non deve mai
+    viaggiare in chiaro — betrelay.net e' dietro TLS, quindi non c'e' niente da perdere.
+    """
+    risposta = JSONResponse(corpo)
+    risposta.set_cookie(NOME_COOKIE, firma_sessione(utente, versione),
+                        httponly=True, samesite='lax', secure=True,
+                        max_age=INATTIVITA_MASSIMA, path='/')
+    return risposta
+
+
+class LoginTelegramIn(BaseModel):
+    """I campi che il Login Widget consegna. `hash` e' la firma, non un dato."""
+    id: str
+    auth_date: str
+    hash: str
+    first_name: str = ''
+    last_name: str = ''
+    username: str = ''
+    photo_url: str = ''
+
+
+class LoginPasswordIn(BaseModel):
+    username: str
+    password: str
+
+
+@app.post('/api/login/telegram')
+def login_telegram(data: LoginTelegramIn):
+    """Apre una sessione a chi presenta una firma valida del Login Widget.
+
+    I campi vuoti vengono **esclusi** dal calcolo: Telegram firma soltanto quelli che
+    manda, e il modello Pydantic riempie di stringhe vuote quelli assenti. Includerli
+    cambierebbe la `data_check_string` e farebbe fallire ogni login vero — un difetto
+    che si vedrebbe solo in produzione, perche' un test che costruisce i campi a mano
+    li manderebbe tutti.
+    """
+    campi = {k: v for k, v in data.model_dump().items() if v != ''}
+    if not verifica_login_telegram(campi, BOT_TOKEN):
+        # Il messaggio non distingue «firma sbagliata» da «scaduta»: per differenza si
+        # impara, e chi prova non deve sapere quale dei due muri ha toccato.
+        raise HTTPException(401, 'login non valido')
+
+    c = db()
+    riga = c.execute('SELECT id, session_version FROM users WHERE telegram_id=?',
+                     (data.id,)).fetchone()
+    if riga is None:
+        # Il proprietario: il suo account esiste gia' e possiede i suoi parser, ma non
+        # ha `telegram_id` perche' nessuno lo aveva mai saputo. Si ATTACCA a quella
+        # riga invece di crearne una nuova, altrimenti resterebbero due account — uno
+        # con tutta la sua roba e nessun modo di entrarci, e uno vuoto in cui entra.
+        proprietario = None
+        if TELEGRAM_ADMIN_ID and data.id == TELEGRAM_ADMIN_ID:
+            proprietario = c.execute('SELECT id, session_version FROM users'
+                                     ' WHERE origin_profile=?', (PIERO_PROFILE,)).fetchone()
+        if proprietario:
+            c.execute('UPDATE users SET telegram_id=?, username=?, first_name=?,'
+                      ' telegram_reachable=telegram_reachable, is_admin=1 WHERE id=?',
+                      (data.id, data.username or None, data.first_name or None,
+                       proprietario[0]))
+            riga = proprietario
+        else:
+            # Un cliente nuovo: l'account nasce e non puo' fare niente. L'accesso lo
+            # concede il PR sull'approvazione (#7), non questo.
+            c.execute('INSERT INTO users(telegram_id, username, first_name, status)'
+                      " VALUES (?,?,?,'registrato')",
+                      (data.id, data.username or None, data.first_name or None))
+            riga = c.execute('SELECT id, session_version FROM users WHERE telegram_id=?',
+                             (data.id,)).fetchone()
+    else:
+        # Login successivi: il nome su Telegram puo' essere cambiato.
+        c.execute('UPDATE users SET username=?, first_name=? WHERE id=?',
+                  (data.username or None, data.first_name or None, riga[0]))
+    c.commit()
+    utente, versione = riga[0], riga[1]
+    c.close()
+    return _rispondi_con_sessione(utente, versione, {'ok': True, 'utente': utente})
+
+
+@app.post('/api/login/password')
+def login_password(data: LoginPasswordIn):
+    """L'accesso di emergenza: `administrator` piu' la password il cui hash sta nella
+    variabile.
+
+    Esiste perche' con il solo login Telegram un guasto di Telegram, o la perdita di
+    quell'account, chiuderebbero il proprietario fuori dal proprio pannello.
+
+    Ogni accesso riuscito finisce in `admin_audit`: e' l'unico modo per cui un accesso
+    non suo sia visibile, e per cui «non sono stato io» sia dimostrabile.
+    """
+    attesa = _freno_password()
+    if attesa:
+        # 429 e non 401: chi legge deve sapere che il muro e' il freno e non la
+        # password, altrimenti prova a cambiare password quando deve solo aspettare.
+        raise HTTPException(429, f'troppi tentativi: riprova fra {attesa} secondi')
+    if not ADMIN_PASSWORD_HASH:
+        # Variabile assente → percorso disabilitato. 503 e non 401, per la stessa
+        # ragione di `auth()`: chi lo vede deve andare a configurare, non a cercare la
+        # password giusta.
+        raise HTTPException(503, 'accesso con password non configurato: manca ADMIN_PASSWORD_HASH')
+    giusta = (hmac.compare_digest(data.username, ADMIN_USERNAME)
+              and verifica_password_admin(data.password, ADMIN_PASSWORD_HASH))
+    _registra_tentativo(giusta)
+    if not giusta:
+        raise HTTPException(401, 'credenziali non valide')
+
+    c = db()
+    riga = c.execute('SELECT id, session_version FROM users WHERE origin_profile=?',
+                     (PIERO_PROFILE,)).fetchone()
+    if riga is None:
+        c.close()
+        raise HTTPException(503, 'nessun utente amministratore nel database')
+    _annota_admin(c, riga[0], 'accesso_con_password')
+    c.commit()
+    utente, versione = riga[0], riga[1]
+    c.close()
+    return _rispondi_con_sessione(utente, versione, {'ok': True, 'utente': utente})
+
+
+@app.post('/api/logout')
+def logout():
+    """Chiude la sessione cancellando il cookie.
+
+    Non incrementa `session_version`: quello butta fuori **tutte** le sessioni di
+    quell'utente da tutti i dispositivi, e non e' ciò che chiede chi preme «esci» su un
+    computer. L'incremento serve altrove — accesso sospetto, «entra come cliente» — e
+    arriva col PR sull'amministrazione.
+    """
+    risposta = JSONResponse({'ok': True})
+    risposta.delete_cookie(NOME_COOKIE, path='/')
+    return risposta
+
+
+@app.get('/api/me')
+def chi_sono(request: Request):
+    """Chi e' l'utente della sessione. `401` se non c'e' una sessione valida.
+
+    Non restituisce mai un token, ne' l'hash della password, ne' il `telegram_id`: il
+    primo e' un segreto, il secondo pure, il terzo non serve al browser e finirebbe nei
+    log di qualunque proxy davanti al servizio.
+    """
+    utente = utente_dalla_sessione(request)
+    if not utente:
+        raise HTTPException(401, 'sessione assente o scaduta')
+    return {'utente': utente['id'], 'nome': utente['first_name'],
+            'stato': utente['status'], 'admin': utente['is_admin'],
+            'accesso_scade': utente['access_expires_at']}
+
+
 @app.get('/api/parsers')
 def list_parsers(x_admin_token: str | None = Header(None)):
     auth(x_admin_token)
