@@ -343,8 +343,11 @@ dove esiste il bot, non sta nel repository, e Telegram lo riceve alla
 registrazione all'avvio.
 
 **Senza bot il webhook rifiuta tutto**, non accetta. Senza `TELEGRAM_BOT_TOKEN` non
-esiste una registrazione presso Telegram, quindi nessuna consegna legittima può
-arrivare e rifiutare non costa niente. La prima versione accettava, e quello
+c'è modo di validare nessuna consegna, quindi **questa istanza non ne accetta
+nessuna**. Non che non possano arrivarne: Telegram può consegnare attraverso una
+registrazione fatta da un deploy precedente, e la prima versione di questa frase
+diceva il contrario — segnalato da CodeRabbit. Ma un'istanza che non sa
+riconoscerle non ha niente da guadagnare ad accettarle. La prima versione accettava, e quello
 riapriva il difetto in un ramo: `TELEGRAM_ALLOWED_CHAT_IDS` popola il profilo
 `PIERO` **indipendentemente** dal bot, quindi un'istanza senza bot ma con i
 `chat_id` configurati restava iniettabile. Nessuna variabile di override per lo
@@ -365,20 +368,31 @@ quello riaprirebbe la scrittura non autenticata ogni volta che la rete fa i
 capricci, in silenzio, cioè il difetto originale. La soluzione è **ritentare**:
 
 1. all'avvio, tre tentativi;
-2. e poi da **ogni consegna rifiutata** — una consegna senza header, con
-   l'enforcement attivo, è essa stessa la prova che Telegram non conosce il
-   segreto. Si rifiuta comunque e si rimette a posto la registrazione; Telegram
-   ritenta le consegne, quindi il segnale arriva col giro dopo invece di non
-   arrivare mai.
+2. e poi da **ogni consegna rifiutata**.
+
+**Cosa dimostra una consegna rifiutata**, perché la prima versione di questa
+sezione diceva di più di quello che si sa: dimostra **solo** che la validazione
+dell'header è fallita. Non che la richiesta venga da Telegram, e non che Telegram
+non conosca il segreto — può essere un POST forgiato da chiunque. Segnalato da
+CodeRabbit.
+
+Sono due ipotesi, e il ritentativo le copre entrambe senza doverle distinguere: se
+la registrazione era **stantia** la rimette a posto e il segnale arriva col giro
+dopo, perché Telegram ritenta le consegne; se la richiesta era **forgiata** costa
+un tentativo. In entrambi i casi la richiesta viene rifiutata.
 
 Il ritentativo da richiesta ha un freno di 60 secondi, perché quel percorso lo
 raggiunge chiunque: senza freno una raffica di POST forgiati diventerebbe una
 raffica di chiamate verso `api.telegram.org` fatte da noi.
 
-Una registrazione conta come riuscita **solo** se Telegram risponde `{"ok": true}`.
-Telegram risponde `HTTP 200` anche quando rifiuta — token sbagliato, URL non
-valido — e dirlo solo nel corpo: fidarsi del codice HTTP farebbe dire «registrato»
-proprio nei casi in cui non lo è.
+Una registrazione conta come riuscita solo se **entrambe** le condizioni valgono:
+la risposta è arrivata **e** contiene `{"ok": true}`. Il codice HTTP da solo non
+basta, e non basta in due direzioni diverse: Telegram segnala parte dei rifiuti con
+`HTTP 200` e `{"ok": false, "description": ...}` nel corpo, mentre altri arrivano
+come errore HTTP — un token inesistente dà `404`, un `secret_token` con caratteri
+non ammessi dà `400`. La prima versione di questa frase attribuiva a Telegram un
+`HTTP 200` per tutti i rifiuti: segnalato da CodeRabbit, e nel codice non cambia
+niente perché un errore HTTP arriva come eccezione e produce comunque `false`.
 
 Il `secret_token` viaggia nel **corpo** del POST verso `api.telegram.org`, non in
 un parametro di query: un URL non è un posto riservato, finisce nei log di ogni

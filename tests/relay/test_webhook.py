@@ -32,10 +32,13 @@ codice non faceva, segnalato insieme da GPT-5.5, Claude Fable 5 e CodeRabbit:
   capricci, cioe- il difetto originale, in silenzio;
 - e' condizionato alla presenza del bot: `SEGRETO_WEBHOOK` derivabile;
 - il blackout si evita RITENTANDO. All'avvio tre volte, e poi da ogni consegna
-  rifiutata: una consegna senza header, con l'enforcement attivo, e- essa stessa
-  la prova che Telegram non conosce il segreto. Si rifiuta comunque e si rimette a
-  posto la registrazione; Telegram ritenta le consegne, quindi il segnale arriva
-  col giro dopo invece di non arrivare mai.
+  rifiutata. Una consegna rifiutata dimostra **solo** che la validazione
+  dell'header e- fallita: non che venga da Telegram, e non che Telegram non
+  conosca il segreto — puo- essere un POST forgiato (segnalato da CodeRabbit).
+  Sono due ipotesi e il ritentativo le copre entrambe senza distinguerle: se la
+  registrazione era stantia la rimette a posto e il segnale arriva col giro dopo,
+  perche- Telegram ritenta le consegne; se era forgiata costa un tentativo, che il
+  freno limita a uno al minuto. In entrambi i casi si rifiuta.
 
 `/health` riporta l'esito della registrazione perche- resti diagnosticabile, non
 perche- governi l'enforcement.
@@ -117,10 +120,13 @@ def test_il_segreto_non_e_il_token_del_bot():
 def test_senza_token_del_bot_non_c_e_segreto():
     """Nessun bot, nessun segreto — e nessun segreto significa RIFIUTARE tutto.
 
-    Il valore vuoto non spegne l'enforcement: lo rende totale. Senza bot non esiste
-    una registrazione presso Telegram, quindi nessuna consegna legittima puo-
-    arrivare, e rifiutare non costa niente. Il comportamento sul servizio e-
-    verificato da `test_senza_bot_ogni_consegna_e_RIFIUTATA`.
+    Il valore vuoto non spegne l'enforcement: lo rende totale. Senza il token non
+    c'e- modo di validare nessuna consegna, quindi questa istanza non ne accetta
+    nessuna — non perche- non possano arrivarne (Telegram puo- consegnare
+    attraverso una registrazione fatta da un deploy precedente), ma perche-
+    un'istanza che non sa riconoscerle non guadagna niente ad accettarle. Il
+    comportamento sul servizio e- verificato da
+    `test_senza_bot_ogni_consegna_e_RIFIUTATA`.
     """
     assert main.webhook_secret('') == ''
     assert main.webhook_secret(None) == ''
@@ -247,7 +253,7 @@ def servizio_senza_bot(tmp_path_factory):
 
 
 def test_senza_bot_ogni_consegna_e_RIFIUTATA(servizio_senza_bot):
-    """Senza bot non arriva nessuna consegna legittima, quindi si rifiuta tutto.
+    """Senza bot non si sa validare nessuna consegna, quindi si rifiuta tutto.
 
     La prima versione di questa patch ACCETTAVA in questo caso, col ragionamento
     che senza bot non c'e- superficie da chiudere. Era sbagliato, e il controesempio
@@ -291,13 +297,17 @@ def test_health_non_contiene_il_segreto(servizio_con_bot):
 # ------------------------- la registrazione: cosa la fa risultare riuscita
 
 def test_telegram_dice_200_ma_ok_false_NON_e_una_registrazione(monkeypatch):
-    """Telegram rifiuta con HTTP 200 e `{"ok": false}` nel corpo.
+    """Il codice HTTP non basta: parte dei rifiuti arriva con `200` e `ok: false`.
 
-    Token sbagliato, URL non valido, HTTPS assente: la risposta e- `200` e il
-    rifiuto sta solo nel corpo. Fidandosi del codice HTTP il flag direbbe
-    «registrato» proprio nei casi in cui non lo e-, cioe- mentirebbe nella
-    direzione pericolosa — e il flag esiste per essere creduto. Segnalato da
-    Sourcery.
+    Solo parte, ed e- la precisazione di CodeRabbit: un token inesistente da- `404`
+    e un `secret_token` con caratteri non ammessi da- `400`, e quelli non arrivano
+    come corpo ma come eccezione. Servono **entrambe** le condizioni — risposta
+    ricevuta e `ok` vero — e questo test esercita tutte e tre le forme di rifiuto:
+    `200` con `ok: false`, corpo non interpretabile, ed errore HTTP.
+
+    Fidandosi del solo codice HTTP il flag direbbe «registrato» in un caso in cui
+    non lo e-, cioe- mentirebbe nella direzione pericolosa — e il flag esiste per
+    essere creduto. Segnalato da Sourcery.
     """
     class RispostaFinta:
         def __init__(self, corpo):
@@ -309,16 +319,33 @@ def test_telegram_dice_200_ma_ok_false_NON_e_una_registrazione(monkeypatch):
         def __exit__(self, *a):
             return False
 
-    for corpo, atteso in (
-        ('{"ok": true, "result": true}', True),
-        ('{"ok": false, "description": "Bad Request: bad webhook: invalid URL"}', False),
-        ('{"ok": false, "error_code": 401, "description": "Unauthorized"}', False),
-        ('non e- json', False),
+    def risposta(corpo):
+        return lambda *a, **k: RispostaFinta(corpo)
+
+    def errore_http(codice, motivo):
+        def solleva(*a, **k):
+            raise urllib.error.HTTPError(
+                'https://api.telegram.org/botFINTO/setWebhook', codice, motivo,
+                {}, None)
+        return solleva
+
+    for descrizione, finta, atteso in (
+        ('ok true', risposta('{"ok": true, "result": true}'), True),
+        ('200 con ok false',
+         risposta('{"ok": false, "description": "Bad Request: bad webhook: invalid URL"}'),
+         False),
+        ('200 con ok false e error_code',
+         risposta('{"ok": false, "error_code": 401, "description": "Unauthorized"}'),
+         False),
+        ('corpo non interpretabile', risposta('non e- json'), False),
+        # I due rifiuti che NON sono 200: token inesistente e segreto con
+        # caratteri non ammessi. Arrivano come eccezione, non come corpo.
+        ('404 token inesistente', errore_http(404, 'Not Found'), False),
+        ('400 secret_token non valido', errore_http(400, 'Bad Request'), False),
     ):
-        monkeypatch.setattr(urllib.request, 'urlopen',
-                            lambda *a, corpo=corpo, **k: RispostaFinta(corpo))
+        monkeypatch.setattr(urllib.request, 'urlopen', finta)
         esito = main._chiama_set_webhook(BOT_FINTO, 'https://esempio.invalid')
-        assert esito is atteso, f'corpo {corpo!r} -> {esito}, atteso {atteso}'
+        assert esito is atteso, f'{descrizione} -> {esito}, atteso {atteso}'
 
 
 def test_l_avvio_RITENTA_la_registrazione(monkeypatch):

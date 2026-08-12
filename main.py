@@ -22,8 +22,11 @@ def webhook_secret(bot_token):
     qualunque proxy davanti al servizio.
 
     Senza bot restituisce stringa vuota, e in quel caso il webhook **rifiuta
-    tutto**: senza bot non esiste una registrazione presso Telegram, quindi nessuna
-    consegna legittima puo' arrivare, e rifiutare non costa niente. La prima
+    tutto**: senza il token non c'e' modo di validare nessuna consegna, quindi
+    questa istanza non ne accetta nessuna. Non che non possano arrivarne — Telegram
+    puo' consegnare attraverso una registrazione fatta da un deploy precedente, e
+    la distinzione l'ha segnalata CodeRabbit — ma un'istanza che non sa
+    riconoscerle non ha niente da guadagnare ad accettarle. La prima
     versione accettava — riaprendo il difetto in un ramo, perche'
     `TELEGRAM_ALLOWED_CHAT_IDS` popola il profilo indipendentemente dal bot e
     un'istanza senza bot ma coi chat_id era iniettabile. Segnalato da CodeRabbit.
@@ -72,11 +75,14 @@ ATTESA_FRA_TENTATIVI_S = 60
 def _chiama_set_webhook(bot_token, public_url):
     """Registra il webhook col segreto. True solo se Telegram dice `ok`.
 
-    Il controllo su `ok` non e' pedanteria: Telegram risponde **HTTP 200 anche
-    quando rifiuta** — token sbagliato, URL non valido, HTTPS assente — e lo dice
-    solo nel corpo con `{"ok": false, "description": ...}`. Fidandosi del codice
-    HTTP il flag direbbe «registrato» proprio nei casi in cui non lo e', cioe'
-    mentirebbe nella direzione pericolosa. Segnalato da Sourcery.
+    Il controllo su `ok` non e' pedanteria: **il codice HTTP non basta**. Telegram
+    segnala parte dei rifiuti con `HTTP 200` e `{"ok": false, "description": ...}`
+    nel corpo — non tutti: un token inesistente da' 404 e un `secret_token` con
+    caratteri non ammessi da' 400, e quelli arrivano qui come eccezione. Servono
+    entrambe le condizioni, risposta ricevuta **e** `ok` vero, o il flag direbbe
+    «registrato» in un caso in cui non lo e', cioe' mentirebbe nella direzione
+    pericolosa. Segnalato da Sourcery; la precisazione su quali rifiuti sono 200 e
+    quali no e' di CodeRabbit.
 
     Il segreto viaggia nel CORPO del POST, non nell'URL: un URL non e' un posto
     riservato, finisce nei log di ogni intermediario che lo tocca, e questa
@@ -130,10 +136,17 @@ def assicura_registrazione(forza=False):
 
     Il rimedio non e' rinunciare all'enforcement quando la registrazione
     fallisce — quello riaprirebbe la scrittura non autenticata, in silenzio, che
-    e' il difetto originale. Il rimedio e' RITENTARE: una consegna senza header,
-    con l'enforcement attivo, e' essa stessa la prova che Telegram non conosce il
-    segreto. La si rifiuta comunque (Telegram ritenta le consegne, quindi il
-    segnale arriva col giro dopo) e si rimette a posto la registrazione.
+    e' il difetto originale. Il rimedio e' RITENTARE.
+
+    Attenzione a cosa dimostra una consegna rifiutata, perche' la prima versione di
+    questo docstring diceva di piu' di quello che si sa: dimostra **solo** che la
+    validazione dell'header e' fallita. Non che venga da Telegram, e non che
+    Telegram non conosca il segreto — puo' benissimo essere un POST forgiato.
+    Segnalato da CodeRabbit. Sono due ipotesi e il ritentativo le copre entrambe
+    senza doverle distinguere: se la registrazione era stantia la rimette a posto e
+    il segnale arriva col giro dopo (Telegram ritenta le consegne); se la richiesta
+    era forgiata costa un tentativo, che il freno di `ATTESA_FRA_TENTATIVI_S`
+    limita a uno per minuto. Rifiutare, in entrambi i casi.
 
     Bloccante alzato insieme da GPT-5.5 e Claude Fable 5 sulla PR #14.
     """

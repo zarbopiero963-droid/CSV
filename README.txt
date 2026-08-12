@@ -59,17 +59,22 @@ entrava nel feed, mentre leggere lo stesso feed dava 401.
 Il segreto e' DERIVATO da TELEGRAM_BOT_TOKEN, non e' una variabile da impostare:
 esiste sempre dove esiste il bot, non sta nel repository, e Telegram lo riceve
 alla registrazione all'avvio.
-Senza TELEGRAM_BOT_TOKEN il webhook RIFIUTA TUTTO: senza bot non esiste una
-registrazione presso Telegram, quindi nessuna consegna legittima puo' arrivare e
-rifiutare non costa niente. Non c'e' variabile di override per lo sviluppo locale,
+Senza TELEGRAM_BOT_TOKEN il webhook RIFIUTA TUTTO: senza il token non c'e' modo di
+validare nessuna consegna, quindi questa istanza non ne accetta nessuna. Non che
+non possano arrivarne - Telegram puo' consegnare attraverso una registrazione fatta
+da un deploy precedente - ma un'istanza che non sa riconoscerle non ha niente da
+guadagnare ad accettarle. Non c'e' variabile di override per lo sviluppo locale,
 di proposito: sarebbe una scorciatoia che un domani finisce impostata in
 produzione. Chi prova in locale imposta un TELEGRAM_BOT_TOKEN finto.
 Se la registrazione fallisce l'enforcement RESTA attivo - legarlo all'esito
 riaprirebbe la scrittura non autenticata ogni volta che la rete fa i capricci - e
 il blackout si evita ritentando: tre volte all'avvio, e poi a ogni consegna
-rifiutata, perche' una consegna senza header e' essa stessa la prova che Telegram
-non conosce il segreto. Telegram ritenta le consegne, quindi il segnale arriva col
-giro dopo. Il ritentativo da richiesta ha un freno di 60 secondi: quel percorso lo
+rifiutata. Attenzione a cosa dimostra una consegna rifiutata: SOLO che la
+validazione dell'header e' fallita, non che venga da Telegram. Puo' essere un POST
+forgiato, oppure Telegram con una registrazione stantia, e il ritentativo copre il
+secondo caso senza dover distinguere - se la registrazione era vecchia la rimette
+a posto e il segnale arriva col giro dopo, perche' Telegram ritenta le consegne.
+Il ritentativo da richiesta ha un freno di 60 secondi: quel percorso lo
 raggiunge chiunque, e senza freno una raffica di POST forgiati diventerebbe una
 raffica di chiamate verso Telegram fatte da noi.
 
@@ -126,6 +131,10 @@ CSV_ACCESS_TOKEN: token segreto che protegge i due feed CSV E tutte le API di
   gestione. OBBLIGATORIA: senza, il servizio risponde 503 a tutte le rotte
   protette (vedi AUTENTICAZIONE).
 TELEGRAM_BOT_TOKEN: token del bot; se presente il webhook viene registrato all'avvio.
+  OBBLIGATORIA per ricevere i segnali: da essa si deriva il segreto del webhook,
+  quindi senza, /telegram/webhook rifiuta OGNI consegna con 403 (vedi
+  AUTENTICAZIONE). Chi legge solo questo elenco non deve poterla credere
+  facoltativa: segnalato da CodeRabbit.
 PUBLIC_URL: URL pubblico del servizio, usato per registrare il webhook. Se manca,
   il codice usa un default cablato sull'URL Railway: impostarla sempre, perche' un
   secondo deploy senza questa variabile ripunterebbe il webhook del bot vero.
