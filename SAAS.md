@@ -320,6 +320,176 @@ Dopo il passo 1 la variabile è comunque **inerte**: la riga `PIERO` esiste già
 `INSERT OR IGNORE` non la aggiorna, quindi modificarla non cambia più nulla. Per
 cambiare i `chat_id` si usa l'API.
 
+### Autenticazione del webhook
+
+Il webhook non può usare `CSV_ACCESS_TOKEN` — a chiamarlo è Telegram — ma non è
+per questo aperto: pretende l'header `X-Telegram-Bot-Api-Secret-Token` e risponde
+`403` senza.
+
+**Il filtro dei `chat_id` non è la protezione**, e la distinzione è il difetto che
+questa parte chiude: quel filtro fa *instradamento* — decide a quale feed
+appartiene un messaggio — e non può autenticare, perché il `chat_id` arriva nel
+corpo della richiesta e quindi lo scrive il mittente. Prima del `secret_token`,
+`POST /telegram/webhook` era un percorso di **scrittura non autenticato** verso i
+segnali che XTrader legge: misurato, un POST forgiato senza alcun token rispondeva
+`200` e la riga entrava nel feed, mentre leggere lo stesso feed dava `401`.
+Segnalato da Fugu Ultra sulla PR #12, Issue #13.
+
+Il segreto è **derivato** da `TELEGRAM_BOT_TOKEN` con un digest, non è una
+variabile a sé. Una variabile nuova lascerebbe una finestra fra il deploy e la sua
+configurazione, e in quella finestra bisognerebbe scegliere fra un webhook muto e
+un webhook aperto: due modi di sbagliare. Derivandolo, il valore esiste sempre
+dove esiste il bot, non sta nel repository, e Telegram lo riceve alla
+registrazione all'avvio.
+
+**Senza bot il webhook rifiuta tutto**, non accetta. Senza `TELEGRAM_BOT_TOKEN` non
+c'è modo di validare nessuna consegna, quindi **questa istanza non ne accetta
+nessuna**. Non che non possano arrivarne: Telegram può consegnare attraverso una
+registrazione fatta da un deploy precedente, e la prima versione di questa frase
+diceva il contrario — segnalato da CodeRabbit. Ma un'istanza che non sa
+riconoscerle non ha niente da guadagnare ad accettarle. La prima versione accettava, e quello
+riapriva il difetto in un ramo: `TELEGRAM_ALLOWED_CHAT_IDS` popola il profilo
+`PIERO` **indipendentemente** dal bot, quindi un'istanza senza bot ma con i
+`chat_id` configurati restava iniettabile. Nessuna variabile di override per lo
+sviluppo locale, di proposito: sarebbe una scorciatoia che un domani finisce
+impostata in produzione.
+
+### Il blackout, e perché non si risolve rinunciando all'enforcement
+
+Il guasto da temere è preciso: se `setWebhook` fallisce e Telegram conserva una
+registrazione vecchia **senza** segreto, continua a consegnare senza header e il
+relay rifiuta tutto — i segnali si fermano in silenzio, che è peggio del difetto
+che l'enforcement chiude. È lo stato del **primo deploy** dopo l'introduzione del
+segreto, quando la registrazione precedente non ne aveva uno: scenario concreto,
+non teorico.
+
+La soluzione **non** è condizionare l'enforcement all'esito della registrazione:
+quello riaprirebbe la scrittura non autenticata ogni volta che la rete fa i
+capricci, in silenzio, cioè il difetto originale. La soluzione è **ritentare**:
+
+1. all'avvio, tre tentativi;
+2. e poi da **ogni consegna rifiutata**.
+
+**Cosa dimostra una consegna rifiutata**, perché la prima versione di questa
+sezione diceva di più di quello che si sa: dimostra **solo** che la validazione
+dell'header è fallita. Non che la richiesta venga da Telegram, e non che Telegram
+non conosca il segreto — può essere un POST forgiato da chiunque. Segnalato da
+CodeRabbit.
+
+Sono due ipotesi, e il ritentativo le copre entrambe senza doverle distinguere: se
+la registrazione era **stantia** la rimette a posto e il segnale arriva col giro
+dopo, perché Telegram ritenta le consegne; se la richiesta era **forgiata** costa
+un tentativo. In entrambi i casi la richiesta viene rifiutata.
+
+Il ritentativo da richiesta ha un freno di 60 secondi, perché quel percorso lo
+raggiunge chiunque: senza freno una raffica di POST forgiati diventerebbe una
+raffica di chiamate verso `api.telegram.org` fatte da noi.
+
+**Quello che limita la frequenza è il freno, non il flag.** La prima versione
+usciva subito quando `webhook_registrato` era già `true`, col ragionamento
+«Telegram sa il segreto, non c'è niente da riparare» — e così l'autoriparazione
+era morta esattamente nel caso in cui una registrazione riuscita può diventare
+stantia: qualcuno chiama `setWebhook` sullo stesso bot **senza** segreto (un altro
+strumento, un deploy vecchio) e da quel momento Telegram consegna senza header.
+Segnali fermi, `/health` che dice `true`, e nessun posto dove vederlo. Una consegna
+rifiutata che arriva mentre il flag dice `true` è l'unica informazione che
+**contraddice** il valore in cache, e veniva buttata via. Segnalato da Fugu Ultra.
+
+Le chiamate a `setWebhook` girano sempre **in un thread**, sia all'avvio sia dalla
+richiesta: hanno un timeout di dieci secondi e l'avvio le ripete tre volte, quindi
+eseguite sull'event loop una rete lenta terrebbe fermo il servizio per decine di
+secondi. Segnalato da Fable 5 e Fugu Ultra.
+
+E all'avvio la registrazione parte **dietro**, non davanti: l'handler di `startup`
+crea un task e termina subito. Il thread non basta, ed è la distinzione che la prima
+correzione aveva mancato — `asyncio.to_thread` libera l'**event loop**, ma un handler
+di `startup` ASGI deve *terminare* perché uvicorn cominci a servire. Finché non
+termina il processo non è pronto e `/health` non risponde affatto: non lentamente,
+per niente. Con tre tentativi da dieci secondi sono oltre trenta secondi di
+indisponibilità a ogni deploy con la rete lenta. Segnalato da Fugu Ultra.
+
+Conseguenza operativa, scritta anche in `README.txt`: nei primi secondi dopo un
+deploy lo `status` è `degraded` perché la registrazione è ancora in corso — e in
+quella finestra il relay davvero non può ricevere niente, quindi è la risposta
+onesta. Non è un guasto; lo diventa se non passa a `ok` entro **un minuto**.
+
+Un minuto e non trenta secondi, perché nel caso peggiore i tre tentativi durano
+**~33 secondi** — 10 di timeout, 1 di pausa, 10, 2 di pausa, 10 — più l'avvio del
+processo: a trenta secondi il terzo tentativo può essere ancora in volo, e un
+`degraded` a quel punto non dice ancora niente. La prima versione di questa frase
+diceva «mezzo minuto», che è un errore di aritmetica sulla sequenza di attese
+descritta qui sopra e avrebbe fatto rincorrere un non-guasto. Segnalato da
+CodeRabbit.
+
+`sano` chiede `webhook_registrato is True`, non `is not False`: `None` con un bot
+configurato significa **«non ancora»**, non «sano», e un'istanza col bot che non ha
+mai completato la registrazione non riceve nessun segnale. Dichiararla sana a tempo
+indeterminato era la metà non corretta della stessa classe chiusa per il caso
+«nessun bot». Segnalato da GPT-5.5.
+
+Il riferimento al task è tenuto in una variabile di modulo: un `Task` senza
+riferimenti può essere raccolto dal garbage collector prima di finire, e la
+registrazione non avverrebbe in silenzio. E se il task muore per un'eccezione
+inattesa il fallimento viene **registrato** (`webhook_registrato: false`), perché
+muore fuori dal flusso di avvio dove nessuno lo vedrebbe: «non tentato» e «tentato e
+fallito» sono stati diversi, e solo il secondo dice che c'è un guasto da guardare.
+Il fallimento del task non sovrascrive il `true` di un tentativo riuscito.
+
+Il valore di `webhook_registrato` si legge **una volta e sotto lock**
+(`_stato_registrazione`). Con tre letture separate e fuori dal lock — com'era — una
+registrazione che completa nel mezzo faceva uscire `status: ok` accanto a
+`webhook_registrato: false`: un endpoint diagnostico che si contraddice non è
+diagnostico. Segnalato da Fable 5.
+
+Una registrazione conta come riuscita solo se **entrambe** le condizioni valgono:
+la risposta è arrivata **e** contiene `{"ok": true}`. Il codice HTTP da solo non
+basta, e non basta in due direzioni diverse: Telegram segnala parte dei rifiuti con
+`HTTP 200` e `{"ok": false, "description": ...}` nel corpo, mentre altri arrivano
+come errore HTTP — un token inesistente dà `404`, un `secret_token` con caratteri
+non ammessi dà `400`. La prima versione di questa frase attribuiva a Telegram un
+`HTTP 200` per tutti i rifiuti: segnalato da CodeRabbit, e nel codice non cambia
+niente perché un errore HTTP arriva come eccezione e produce comunque `false`.
+
+Il `secret_token` viaggia nel **corpo** del POST verso `api.telegram.org`, non in
+un parametro di query: un URL non è un posto riservato, finisce nei log di ogni
+intermediario che lo tocca, e questa chiamata si ripete a ogni deploy e a ogni
+autoriparazione. Il token del bot resta nel percorso perché l'API di Telegram lo
+mette lì e non c'è modo di spostarlo.
+
+Poiché la chiamata di rete avviene **fuori** dal lock — deve, o una `setWebhook`
+lenta bloccherebbe ogni consegna — i tentativi sono numerati e l'esito ricorda da
+quale tentativo viene: vince il più **recente**, non l'ultimo a finire. Senza, un
+tentativo partito prima e andato in timeout scriveva `false` sopra il `true` di uno
+partito dopo e riuscito. Il rimedio non è rendere `true` appiccicoso: un
+fallimento vero — bot cambiato, registrazione sovrascritta da un altro deploy —
+diventerebbe invisibile per sempre, e questo flag non deve mentire in quella
+direzione.
+
+`/health` espone i due assi separatamente: `webhook` dice se l'enforcement è
+attivo, `webhook_registrato` l'esito dell'**ultimo tentativo** di registrazione —
+all'avvio o da una consegna rifiutata. **Entrambi** fanno scattare `degraded`,
+perché resti diagnosticabile — non perché governino l'enforcement.
+
+Che `webhook: chiuso senza bot` degradi lo `status` è una correzione: prima
+`status` restava `ok`, perché `webhook_registrato` vale `None` quando non c'è bot e
+la condizione chiedeva `is not False`. Un'istanza che rifiuta **ogni** consegna con
+403 appariva sana, e su Railway sarebbe stata una spia verde su un servizio
+incapace di ricevere segnali. Era il fratello non corretto della classe che `auth`
+aveva già chiuso: `TELEGRAM_BOT_TOKEN` mancante è una variabile mancante, non si
+ripara da sé, e va trattata come `CSV_ACCESS_TOKEN` mancante. Segnalato da Fugu
+Ultra.
+
+`status` è `ok` solo con **tutti e tre** gli assi a posto — formato CSV, token del
+feed, webhook protetto e registrato — e quando è `degraded` il campo che lo spiega è
+sempre nella risposta. L'altra faccia è vincolata da un test: una spia che resta
+accesa anche quando tutto va bene insegna a ignorarla, ed è il rischio di ogni asse
+aggiunto alla condizione.
+
+Nel modello multiutente questo non cambia: **un solo bot serve tutti gli utenti**,
+quindi c'è un solo segreto, derivato dallo stesso token. Ciò che cambia per utente
+è l'instradamento — `chat_id` → parser — che resta la funzione del filtro, ora
+senza doppio ruolo.
+
 ## Note operative su Telegram
 
 - Nei **gruppi** il bot con privacy mode attiva vede solo i comandi. Va

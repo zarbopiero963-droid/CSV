@@ -432,7 +432,7 @@ def test_senza_token_configurato_il_feed_e_CHIUSO(servizio_senza_token):
     for url in ('/xtrader.csv', '/xtrader.csv?token=qualunque-cosa'):
         stato = None
         try:
-            with urllib.request.urlopen(f'{servizio_senza_token}{url}', timeout=10) as r:
+            with urllib.request.urlopen(f'{servizio_senza_token}{url}', timeout=10) as r:  # noqa: S310 - loopback
                 stato = r.status
         except urllib.error.HTTPError as e:
             stato = e.code
@@ -461,27 +461,39 @@ def test_health_dichiara_che_il_token_non_e_configurato(servizio_senza_token):
     E `status` diventa `degraded`, a differenza degli scarti di consegna: quelli
     si risolvono da se- col TTL, questo no. Non si ripara senza un intervento.
     """
-    with urllib.request.urlopen(f'{servizio_senza_token}/health', timeout=10) as r:
+    with urllib.request.urlopen(f'{servizio_senza_token}/health', timeout=10) as r:  # noqa: S310 - loopback
         dati = json.loads(r.read())
     assert dati.get('auth') == 'non configurato', f'/health non lo segnala: {dati}'
     assert dati.get('status') == 'degraded', f'status dovrebbe essere degraded: {dati}'
 
 
-def test_health_dice_ok_quando_il_token_c_e(servizio_con_token):
-    """L'altra faccia: la spia non deve essere sempre accesa.
+def test_health_non_accusa_l_auth_quando_il_token_c_e(servizio_con_token):
+    """L'altra faccia: la spia non deve accendersi per un asse che sta bene.
 
-    Una spia che sta accesa anche quando tutto va bene e- il modo piu- rapido per
-    insegnare a ignorarla — la stessa ragione per cui gli scarti di consegna non
-    fanno scattare `degraded`.
+    Questo test asseriva `status == 'ok'`. Non lo puo- piu- fare, e la ragione e-
+    corretta: da quando «nessun bot» fa scattare `degraded` — segnalato da Fugu
+    Ultra, perche- un'istanza che rifiuta ogni consegna non e- sana — un servizio
+    di test non ha un bot e quindi e- degradato **per quel motivo**. L'aggregato
+    «tutti gli assi a posto» richiede una `setWebhook` riuscita verso Telegram, che
+    un sottoprocesso di test non ha e non deve avere: quell'asserzione vive in
+    processo, in `test_con_tutti_e_tre_gli_assi_a_posto_health_dice_ok`.
+
+    Quello che questo test puo- e deve ancora dimostrare e- che l'asse `auth` non
+    viene accusato quando il token c'e-. Riscriverlo cosi- e- piu- preciso di
+    prima, non meno: guarda l'asse di cui parla il file, invece dell'aggregato.
     """
-    with urllib.request.urlopen(f'{servizio_con_token}/health', timeout=10) as r:
+    with urllib.request.urlopen(f'{servizio_con_token}/health', timeout=10) as r:  # noqa: S310 - loopback
         dati = json.loads(r.read())
     assert dati.get('auth') == 'ok', dati
-    assert dati.get('status') == 'ok', dati
+    # E il motivo della degradazione, se c'e-, non deve essere l'autenticazione.
+    if dati.get('status') == 'degraded':
+        assert dati.get('webhook') == 'chiuso senza bot', (
+            f'degradato per un motivo che non e- il bot mancante: {dati}'
+        )
 
 
 def test_health_non_contiene_il_token(servizio_con_token):
     """`/health` e- senza autenticazione: non puo- dire piu- di «configurato o no»."""
-    with urllib.request.urlopen(f'{servizio_con_token}/health', timeout=10) as r:
+    with urllib.request.urlopen(f'{servizio_con_token}/health', timeout=10) as r:  # noqa: S310 - loopback
         corpo = r.read()
     assert TOKEN_DI_PROVA.encode() not in corpo, f'il token e- in /health: {corpo!r}'
