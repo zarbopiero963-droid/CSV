@@ -95,7 +95,15 @@ def _chiama_set_webhook(bot_token, public_url):
         'secret_token': webhook_secret(bot_token),
     }).encode('utf-8')
     url = f'https://api.telegram.org/bot{bot_token}/setWebhook'
-    richiesta = urllib.request.Request(url, data=parametri, method='POST')
+    # Il `Content-Type` e' dichiarato qui e non lasciato all'impostazione implicita
+    # di `urllib`: se il corpo non e' dichiarato per come e' codificato Telegram non
+    # lo interpreta, il segreto non arriva, e la registrazione fallisce con la
+    # stessa faccia di un problema di rete. Esplicito perche' un test possa
+    # vincolarlo — il valore che `urllib` aggiunge da se' compare solo al momento
+    # dell'invio e non e' osservabile sulla richiesta. Segnalato da GPT-5.5.
+    richiesta = urllib.request.Request(
+        url, data=parametri, method='POST',
+        headers={'Content-Type': 'application/x-www-form-urlencoded'})
     try:
         with urllib.request.urlopen(richiesta, timeout=10) as r:
             risposta = json.loads(r.read().decode('utf-8'))

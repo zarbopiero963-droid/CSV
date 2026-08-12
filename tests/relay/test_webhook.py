@@ -439,6 +439,17 @@ def test_il_segreto_non_finisce_nell_URL_ma_nel_CORPO(monkeypatch):
         'il segreto non e- nel corpo: se non e- ne- qui ne- nell-URL, Telegram non '
         'lo riceve affatto e ogni consegna verrebbe rifiutata'
     )
+    # Il corpo deve essere DICHIARATO per come e- codificato, o Telegram non lo
+    # interpreta e il segreto non arriva: la registrazione fallirebbe con la stessa
+    # faccia di un problema di rete. Senza questa riga il test passerebbe anche
+    # spedendo JSON senza intestazione. Segnalato da GPT-5.5.
+    assert richiesta.get_header('Content-type') == 'application/x-www-form-urlencoded', (
+        f'Content-Type: {richiesta.get_header("Content-type")!r}'
+    )
+    assert urllib.parse.parse_qs(corpo.decode('utf-8')) == {
+        'url': ['https://esempio.invalid/telegram/webhook'],
+        'secret_token': [segreto],
+    }
     # E l-URL deve comunque contenere quello che serve per arrivare a destinazione.
     assert richiesta.full_url.endswith('/setWebhook')
 
