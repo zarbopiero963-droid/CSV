@@ -960,19 +960,43 @@ def test_ogni_rotta_che_usa_la_SESSIONE_rinnova_anche_il_cookie():
     sfuggirebbe. Il giorno che quella forma servira', questa guardia va estesa a
     riconoscerla, e questo paragrafo e' il promemoria. Il caso dei commenti e delle
     stringhe invece **e' chiuso**, perche' l'AST non li vede.
+
+    Il caso «sorgente non leggibile» e' chiuso in un terzo modo: non viene scartato, viene
+    **elencato e fatto fallire**. Oggi tutte le rotte sono ispezionabili, quindi
+    l'asserzione e' silenziosa; il giorno che una non lo fosse, il calo di copertura si
+    vede invece di succedere.
     """
     inadempienti = []
     guardate = []
+    non_ispezionabili = []
     for rotta in main.app.routes:
         funzione = getattr(rotta, 'endpoint', None)
         if funzione is None:
             continue
         chiamate = _funzioni_chiamate(funzione)
-        if chiamate is None or 'utente_dalla_sessione' not in chiamate:
+        if chiamate is None:
+            # Tenuta a parte e NON scartata: `None` significa «non ho potuto guardare»,
+            # non «non usa la sessione». Confonderli riduce la copertura senza far
+            # fallire niente — la guardia resterebbe verde su una rotta che non ha
+            # ispezionato. Segnalato da GPT-5.5 sulla PR #23, e il docstring di
+            # `_funzioni_chiamate` prometteva gia' questa distinzione mentre il codice
+            # qui la buttava via: la quarta promessa non mantenuta di questo PR.
+            non_ispezionabili.append(f'{sorted(getattr(rotta, "methods", []))} {rotta.path}')
+            continue
+        if 'utente_dalla_sessione' not in chiamate:
             continue
         guardate.append(rotta.path)
         if '_rispondi_con_sessione' not in chiamate:
             inadempienti.append(f'{sorted(getattr(rotta, "methods", []))} {rotta.path}')
+
+    assert not non_ispezionabili, (
+        'il sorgente di queste rotte non e- leggibile, quindi questa guardia non puo- '
+        f'dire se rinnovano il cookie: {non_ispezionabili}. Oggi tutte le rotte sono '
+        'ispezionabili, e questa asserzione esiste perche- il giorno che una non lo fosse '
+        '— un endpoint generato, avvolto da un decoratore che perde il sorgente, o '
+        'importato da un modulo compilato — il calo di copertura sia RUMOROSO invece che '
+        'silenzioso. Se la forma diventa legittima, va insegnato alla guardia come '
+        'guardarla, non aggiunta all-elenco delle eccezioni.')
 
     assert not inadempienti, (
         'queste rotte leggono la sessione e NON riemettono il cookie, quindi per chi le '
