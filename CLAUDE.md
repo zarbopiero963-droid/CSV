@@ -24,6 +24,7 @@ Il merge resta sempre manuale del repository owner.
 | Cosa | Dove |
 |---|---|
 | Servizio FastAPI (relay, API, webhook Telegram, feed CSV) | `main.py` |
+| Facciata pubblica del sito, servita sull'apex | `web/sito.html` |
 | Prototipo web app multiutente (moduli ES, nessun build step) | `web/index.html`, `web/app.js`, `web/api.js`, `web/engine.js`, `web/styles.css` |
 | Motore di parsing configurabile — specifica eseguibile | `web/engine.js` |
 | Generatore della copia a file unico del prototipo | `tools/build_single_file.py` |
@@ -35,6 +36,7 @@ Il merge resta sempre manuale del repository owner.
 | Test del relay: contratto CSV sui byte della risposta HTTP | `tests/relay/test_csv_contract.py` |
 | Test del motore e del contratto CSV (casi eseguiti in node) | `tests/engine/engine_cases.mjs`, `tests/engine/test_engine_contract.py` |
 | Test del prototipo in browser (Playwright/Chromium) | `tests/web/prototype_flow.py`, `tests/web/mobile_layout.py`, `tests/web/test_prototype_flow.py` |
+| Test della facciata: HTTP e browser | `tests/relay/test_facciata.py`, `tests/web/sito_flow.py`, `tests/web/test_sito.py` |
 | Ambiente dei sottoprocessi di test (whitelist) + sua guardia | `tests/ambiente.py`, `tests/safety/test_ambiente_dei_test.py` |
 | Dipendenze dei soli test | `requirements-dev.txt` |
 
@@ -1064,7 +1066,10 @@ restare disallineata da com'è davvero. Perciò:
   eliminazione), palette e sua semantica, copy e microcopy, architettura dell'informazione, o le
   invarianti di sicurezza che vincolano la UI (il token mostrato una volta sola, il codice di
   verifica usa-e-getta).
-- Oggi la documentazione UI di riferimento è la sezione «Prototipo» di `SAAS.md`. Se un task
+- Oggi la documentazione UI di riferimento è in `SAAS.md`, in **due** sezioni: «Facciata
+  pubblica» per la pagina servita sull'apex (`web/sito.html`) e «Prototipo» per
+  l'applicazione servita su `/app`. Sono due facce con regole diverse — la prima è
+  indicizzabile e senza sessione, la seconda è `noindex` — e il gate vale per entrambe. Se un task
   richiede un handoff design vero e proprio, si crea `docs/design/design_handoff.md` e da quel
   momento è quello il bersaglio del gate — dichiarandolo nel PR body.
 - L'aggiornamento deve essere veritiero e coerente col codice: etichette **verbatim**, stati e

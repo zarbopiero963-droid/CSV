@@ -162,9 +162,25 @@ Il parser attuale riconosce un messaggio contenente "P.Bet. PREMACHT 0,5HT", cer
 CSV: 14 colonne, virgola, campi tra virgolette, terminatore CRLF, UTF-8 con BOM,
      colonna finale Points. Verificato da verify_csv() prima di ogni scrittura.
 
+FACCIATA DEL SITO
+GET / restituisce la pagina pubblica di BetRelay (web/sito.html), non piu' l'oggetto
+JSON {"service","status","csv"}. Chi sonda il servizio in automatico usa /health, che
+resta JSON: la facciata e' per le persone. Se web/sito.html manca — un deploy senza la
+cartella web/ — la rotta torna al JSON di prima invece di rispondere 500.
+
+E' una ROTTA ESPLICITA, non un mount di file statici sulla radice, e non deve
+diventarlo: un catch-all in stile SPA (@app.get('/{resto:path}')) trasformerebbe ogni
+percorso sconosciuto in una pagina, e il giorno che nasce /feed/NOME.csv XTrader
+riceverebbe text/html con stato 200 al posto di un CSV. Lo vincola
+tests/relay/test_facciata.py, che prova anche la variante sbagliata.
+
+La pagina e' indicizzabile di proposito (nessun noindex): un sito che nessuno trova
+non e' un sito. /app resta noindex, perche' non ha niente da indicizzare.
+
 PROTOTIPO WEB APP
 Il prototipo dell'interfaccia multiutente e' servito su /app (file statici in web/).
 Usa dati finti nel browser, non tocca il relay. Architettura e contratto API in SAAS.md.
+Il pulsante «Entra» della facciata porta qui.
 
 VARIABILI RAILWAY
 CSV_ACCESS_TOKEN: token segreto che protegge i due feed CSV E tutte le API di

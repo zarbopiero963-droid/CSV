@@ -1,7 +1,7 @@
 import asyncio, csv, hashlib, io, json, logging, os, re, secrets, sqlite3, threading, time
 from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -308,6 +308,13 @@ async def register_telegram_webhook():
                 _WEBHOOK_REGISTRATO = False
 
 DB_PATH = os.getenv('DB_PATH', '/tmp/signals.db')
+# La cartella pubblica, definita qui e non in fondo al file perche' adesso la
+# leggono in due: il mount di `/app` (ultima riga del modulo, dove deve restare
+# per non intercettare le rotte del relay) e la facciata su `/`. Ricomporre
+# `Path(__file__).parent / 'web'` una seconda volta sarebbe la duplicazione che
+# la regola 3 vieta, e `tests/safety/test_static_mount.py` conta le occorrenze.
+WEB_DIR = Path(__file__).parent / 'web'
+SITO = WEB_DIR / 'sito.html'
 TOKEN = os.getenv('CSV_ACCESS_TOKEN', '')
 # Il segreto del webhook, calcolato una volta all'import come `TOKEN`: `health()` e
 # l'handler del webhook lo leggevano entrambi da `os.environ` a ogni chiamata, e
@@ -639,9 +646,35 @@ def profile_csv(profile, token):
     return Response(body, media_type='text/csv', headers={'Cache-Control': 'no-store'})
 
 
-@app.get('/')
+@app.get('/', include_in_schema=False)
 def root():
-    return {'service': 'xtrader-signal-relay', 'status': 'online', 'csv': '/xtrader.csv'}
+    """La facciata di BetRelay: una pagina, non un oggetto JSON.
+
+    Fino a questa versione l'apex rispondeva
+    `{'service': 'xtrader-signal-relay', ...}`. Corretto per una sonda, inutile
+    per una persona: chi apriva betrelay.net vedeva il JSON e non un sito.
+
+    **Rotta esplicita, e non un catch-all** `@app.get('/{resto:path}')` — la forma
+    che si scrive di solito per servire un sito. Quella trasforma ogni percorso
+    sconosciuto in una risposta valida: il giorno che nasce `/feed/{utente}.csv`,
+    XTrader riceverebbe `text/html` con stato 200 al posto di un CSV, senza un
+    errore da nessuna parte. Misurato: con quel catch-all al posto di questa
+    rotta, quattro casi di `tests/relay/test_facciata.py` diventano rossi con
+    «risponde 200 invece di 404».
+
+    Se il file manca — un deploy senza `web/` — si torna al JSON di prima invece
+    di rispondere 500: `/` e' la prima cosa che si prova quando qualcosa non va,
+    ed e' la peggiore su cui restituire un errore del server.
+
+    `no-store` perche' il sito e' in avviamento e cambia a ogni deploy: una cache
+    di pochi minuti qui si paga in «ho pubblicato e non vedo la modifica», che e'
+    il modo piu' rapido di inseguire un guasto che non esiste.
+    """
+    if SITO.is_file():
+        return FileResponse(SITO, media_type='text/html',
+                            headers={'Cache-Control': 'no-store'})
+    return JSONResponse({'service': 'xtrader-signal-relay', 'status': 'online',
+                         'csv': '/xtrader.csv'})
 
 @app.get('/health')
 def health():
@@ -908,7 +941,8 @@ async def telegram_webhook(request: Request):
     return {'ok': True, 'profile': profile['name'], 'event': parsed['event']}
 
 # Prototipo della web app SaaS: file statici, nessuna dipendenza aggiuntiva.
-# Montato per ultimo per non intercettare gli endpoint del relay.
-WEB_DIR = Path(__file__).parent / 'web'
+# Montato per ultimo per non intercettare gli endpoint del relay. `WEB_DIR` e'
+# definita in cima al modulo, insieme alle altre costanti, perche' la legge anche
+# la facciata su `/`.
 if WEB_DIR.is_dir():
     app.mount('/app', StaticFiles(directory=WEB_DIR, html=True), name='app')
