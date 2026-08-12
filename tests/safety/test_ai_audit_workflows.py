@@ -25,7 +25,7 @@ WORKFLOWS = Path(__file__).resolve().parents[2] / '.github' / 'workflows'
 
 GPT = WORKFLOWS / 'pr-review-gpt55.yml'
 FABLE = WORKFLOWS / 'pr-review-claude-fable5.yml'
-FUGU = WORKFLOWS / 'pr-review-openrouter-fugu-ultra.yml'
+SOL = WORKFLOWS / 'pr-review-gpt56-sol.yml'
 
 # File il cui cambiamento DEVE far spendere il reviewer forte su un push.
 # main.py e' il relay; web/ e' la superficie multiutente e ospita il motore di
@@ -110,14 +110,14 @@ def _tocca_core(nomi: list[str]) -> bool:
 # --------------------------------------------------------------- esistenza
 
 def test_i_tre_workflow_esistono():
-    for path in (GPT, FABLE, FUGU):
+    for path in (GPT, FABLE, SOL):
         assert path.is_file(), f'workflow mancante: {path.name}'
 
 
 def test_yaml_valido_e_nome_atteso():
     assert _carica(GPT)['name'] == 'PR Review GPT-5.5'
     assert _carica(FABLE)['name'] == 'PR Review Claude Fable 5'
-    assert _carica(FUGU)['name'] == 'PR Review OpenRouter Fugu Ultra'
+    assert _carica(SOL)['name'] == 'PR Review GPT-5.6 Sol'
 
 
 # ------------------------------------------------------------- gate costo
@@ -180,7 +180,7 @@ TOKEN_FEED = 'xt_' + '7f3a91' * 6
 TOKEN_FEED_CORTO = 'xt_' + 'a1b2c3d4e5f6'
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
 def test_il_token_di_feed_nudo_viene_redatto(path):
     """Un token di feed senza la keyword `token=` accanto non deve uscire.
 
@@ -203,7 +203,7 @@ def test_il_token_di_feed_nudo_viene_redatto(path):
     )
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
 def test_il_prefisso_di_9_caratteri_sopravvive_alla_redazione(path):
     """`token_prefix` e' fatto per essere mostrato: redigerlo renderebbe muta la UI.
 
@@ -239,32 +239,32 @@ def _funzione_gate(path: Path, nome: str = 'decisione_gate'):
 
 
 def test_fugu_la_label_finale_dell_evento_fa_revisionare():
-    gate = _funzione_gate(FUGU)
+    gate = _funzione_gate(SOL)
     assert gate('labeled', [], 'final-fugu-review', 'final-fugu-review') == 'revisiona'
 
 
 def test_fugu_una_label_qualsiasi_non_arma_il_gate():
     """Aggiungere manual-review-required a una PR gia' etichettata non deve
     rieseguire la review su un head gia' revisionato."""
-    gate = _funzione_gate(FUGU)
+    gate = _funzione_gate(SOL)
     assert gate('labeled', ['final-fugu-review'], 'final-fugu-review',
                 'manual-review-required') == 'salta'
 
 
 def test_fugu_pr_aperta_con_label_gia_presente_revisiona():
     """GitHub non emette `labeled` per una PR aperta con la label applicata."""
-    gate = _funzione_gate(FUGU)
+    gate = _funzione_gate(SOL)
     assert gate('opened', ['final-fugu-review'], 'final-fugu-review') == 'revisiona'
 
 
 def test_fugu_push_dopo_armamento_e_stantio():
     """Il caso della #274: un verde su un head che nessuno ha letto."""
-    gate = _funzione_gate(FUGU)
+    gate = _funzione_gate(SOL)
     assert gate('synchronize', ['final-fugu-review'], 'final-fugu-review') == 'stantio'
 
 
 def test_fugu_push_senza_label_non_spende():
-    gate = _funzione_gate(FUGU)
+    gate = _funzione_gate(SOL)
     assert gate('synchronize', [], 'final-fugu-review') == 'salta'
 
 
@@ -299,7 +299,7 @@ def test_fable_push_dopo_armamento_e_stantio():
 
 def test_entrambi_i_gate_coprono_i_quattro_esiti():
     """Nessun esito resta senza test: se un domani se ne aggiunge uno, qui si vede."""
-    fugu = _funzione_gate(FUGU)
+    fugu = _funzione_gate(SOL)
     fable = _funzione_gate(FABLE)
     esiti_fugu = {
         fugu('labeled', [], 'final-fugu-review', 'final-fugu-review'),
@@ -319,7 +319,7 @@ def test_entrambi_i_gate_coprono_i_quattro_esiti():
 # ------------------------------------------------------------ gate label
 
 def test_fable_e_fugu_reagiscono_alla_label():
-    for path in (FABLE, FUGU):
+    for path in (FABLE, SOL):
         tipi = _trigger(path)['pull_request']['types']
         assert 'labeled' in tipi, f'{path.name} non reagisce agli eventi labeled'
 
@@ -333,7 +333,7 @@ def test_il_gate_si_arma_solo_con_la_propria_label():
     """La condizione del job filtra sulla label DELL'EVENTO, non sulla presenza
     della label nell'elenco: altrimenti aggiungere una label qualsiasi a una PR
     gia' etichettata rieseguirebbe la review su un head gia' revisionato."""
-    attese = {FABLE: 'final-fable-review', FUGU: 'final-fugu-review'}
+    attese = {FABLE: 'final-fable-review', SOL: 'final-fugu-review'}
     for path, label in attese.items():
         cond = _carica(path)['jobs']['review']['if']
         assert 'github.event.label.name' in cond, (
@@ -344,9 +344,9 @@ def test_il_gate_si_arma_solo_con_la_propria_label():
 
 def test_le_due_label_finali_sono_distinte():
     assert 'final-fable-review' in _script(FABLE)
-    assert 'final-fugu-review' in _script(FUGU)
+    assert 'final-fugu-review' in _script(SOL)
     assert 'final-fugu-review' not in _carica(FABLE)['jobs']['review']['if']
-    assert 'final-fable-review' not in _carica(FUGU)['jobs']['review']['if']
+    assert 'final-fable-review' not in _carica(SOL)['jobs']['review']['if']
 
 
 # --------------------------------------------------------------- segreti
@@ -358,7 +358,7 @@ def test_nessuna_api_key_in_chiaro():
         re.compile(r'sk-or-v1-[A-Za-z0-9_\-]{20,}'),
         re.compile(r'\b\d{8,12}:[A-Za-z0-9_\-]{30,}\b'),  # bot token Telegram
     ]
-    for path in (GPT, FABLE, FUGU):
+    for path in (GPT, FABLE, SOL):
         testo = path.read_text(encoding='utf-8')
         for pat in perdite:
             # Le stesse regex compaiono nella tabella REDACTIONS del workflow:
@@ -377,11 +377,16 @@ def test_le_chiavi_vengono_dai_secret():
     Un workflow che leggesse `secrets.OPENAI_API_KEY` troverebbe una stringa
     vuota e uscirebbe verde senza revisionare: nessun errore, nessun check
     rosso, e una PR con tre spunte e zero righe lette.
+
+    **DUE workflow leggono `BETRELAY_GPT`,** e non e' un errore: dal 12/08/2026
+    `gpt-5.6-sol` ha sostituito `sakana/fugu-ultra` al gate finale, e sta sulla
+    stessa API di GPT-5.5. Una chiave in meno da gestire. `BETRELAY_FUGU` non e'
+    piu' letto da nessuno, e il test accanto lo vieta come residuo.
     """
     coppie = {
         GPT: 'secrets.BETRELAY_GPT',
         FABLE: 'secrets.BETRELAY_FABLE',
-        FUGU: 'secrets.BETRELAY_FUGU',
+        SOL: 'secrets.BETRELAY_GPT',
     }
     for path, atteso in coppie.items():
         assert atteso in path.read_text(encoding='utf-8'), f'{path.name}: manca {atteso}'
@@ -394,8 +399,14 @@ def test_nessun_riferimento_ai_secret_del_bridge():
     la review in silenzio. E' la stessa classe di difetto del punto sopra, per
     questo va cercata su tutto il file e non solo sulla riga `env:`.
     """
-    vecchi = ('OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'OPENROUTER_API_KEY')
-    for path in (GPT, FABLE, FUGU):
+    # `BETRELAY_FUGU` e' nella lista dal 12/08/2026: dopo la sostituzione di Fugu con
+    # `gpt-5.6-sol` non lo legge piu' nessun workflow, quindi un riferimento
+    # dimenticato leggerebbe vuoto e salterebbe la review in silenzio — la stessa
+    # classe di difetto dei nomi del Bridge. Un ritorno deliberato a Fugu dovrebbe
+    # togliere questa voce, ed e' giusto che sia una scelta esplicita.
+    vecchi = ('OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'OPENROUTER_API_KEY',
+              'BETRELAY_FUGU')
+    for path in (GPT, FABLE, SOL):
         testo = path.read_text(encoding='utf-8')
         for nome in vecchi:
             assert nome not in testo, (
@@ -408,7 +419,7 @@ def test_nessun_riferimento_ai_secret_del_bridge():
 
 def test_permessi_minimi_sul_codice():
     """I workflow commentano le PR ma non devono poter scrivere il codice."""
-    for path in (GPT, FABLE, FUGU):
+    for path in (GPT, FABLE, SOL):
         perm = _carica(path)['permissions']
         assert perm['contents'] == 'read', f'{path.name}: contents non e\' read'
         assert perm['pull-requests'] == 'write'
@@ -416,7 +427,7 @@ def test_permessi_minimi_sul_codice():
 
 def test_nessun_auto_merge():
     """Il merge resta manuale del proprietario: nessun workflow lo automatizza."""
-    for path in (GPT, FABLE, FUGU):
+    for path in (GPT, FABLE, SOL):
         testo = path.read_text(encoding='utf-8').lower()
         for vietato in ('enable-pull-request-automerge', 'gh pr merge', 'automerge'):
             assert vietato not in testo, f'{path.name}: contiene {vietato}'
@@ -475,7 +486,7 @@ FILE_COME_LA_PR_8 = [
 ]
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
 def test_i_file_core_entrano_nel_payload_anche_col_budget_stretto(path):
     """Il motore non deve mai finire fra i file saltati per budget.
 
@@ -520,7 +531,7 @@ def test_i_file_core_entrano_nel_payload_anche_col_budget_stretto(path):
         )
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
 def test_i_file_core_precedono_i_documenti_nel_payload(path):
     """L'ordine, non solo la presenza: il core va letto prima.
 
@@ -623,7 +634,7 @@ YAML_CON_SEGRETO = (
 )
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
 def test_un_riferimento_a_secrets_non_viene_maciullato(path):
     """`${{ secrets.X }}` e- un PUNTATORE a un segreto, non un segreto.
 
@@ -654,7 +665,7 @@ def test_un_riferimento_a_secrets_non_viene_maciullato(path):
     )
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
 def test_l_esenzione_copre_solo_l_espressione_COMPLETA(path):
     """Segnalato da CodeRabbit, ed e- la direzione pericolosa dell'esenzione.
 
@@ -737,7 +748,7 @@ def test_l_esenzione_copre_solo_l_espressione_COMPLETA(path):
         )
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
 def test_un_valore_di_segreto_VERO_resta_redatto(path):
     """L'altra faccia: esentare `${{ … }}` non deve aprire un varco.
 
@@ -869,7 +880,7 @@ def _funzione_contesto(path: Path):
     return spazio['blocco_contesto_mancante']
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
 def test_il_prompt_DICE_al_modello_cosa_non_ha_visto(path):
     """Il modello deve sapere di avere un contesto incompleto, non dedurlo.
 
@@ -926,7 +937,7 @@ def test_le_tre_copie_del_preambolo_dicono_LA_STESSA_COSA():
     """
     casi = ([], ['solo/saltato.py']), (['solo/tagliato.py'], []), (['a.py'], ['b.py'])
     for tagliati, saltati in casi:
-        uscite = {p.name: _funzione_contesto(p)(tagliati, saltati) for p in (GPT, FABLE, FUGU)}
+        uscite = {p.name: _funzione_contesto(p)(tagliati, saltati) for p in (GPT, FABLE, SOL)}
         distinte = set(uscite.values())
         assert len(distinte) == 1, (
             f'le tre copie divergono su tagliati={tagliati} saltati={saltati}:\n'
@@ -934,7 +945,7 @@ def test_le_tre_copie_del_preambolo_dicono_LA_STESSA_COSA():
         )
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
 def test_il_preambolo_del_contesto_e_davvero_nel_prompt(path):
     """Una funzione corretta e mai chiamata non serve a niente.
 
@@ -954,7 +965,7 @@ def test_il_preambolo_del_contesto_e_davvero_nel_prompt(path):
     )
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
 def test_un_file_TAGLIATO_a_meta_non_si_confonde_con_uno_non_inviato(path):
     """Due stati diversi, e il peggiore dei due era invisibile.
 
@@ -992,7 +1003,7 @@ def test_un_file_TAGLIATO_a_meta_non_si_confonde_con_uno_non_inviato(path):
     )
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
 def test_un_file_tagliato_e_POI_scartato_e_solo_NON_INVIATO(path):
     """I due stati sono esclusivi: «non inviato» vince su «inviato incompleto».
 
@@ -1016,7 +1027,7 @@ def test_un_file_tagliato_e_POI_scartato_e_solo_NON_INVIATO(path):
     )
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
 def test_ogni_workflow_ha_un_tier_di_escalation_del_budget(path):
     """Se il diff risulta troncato, il job deve poter ricostruire piu- largo.
 
@@ -1076,7 +1087,7 @@ def _script_python(path: Path) -> tuple[str, str]:
     return trovati[0]
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
 def test_lo_script_del_workflow_ha_sintassi_valida(path):
     """Il Python incorporato deve compilare, e va compilato qui perche' non lo fa nessuno."""
     import ast
@@ -1097,7 +1108,7 @@ def test_lo_script_del_workflow_ha_sintassi_valida(path):
         ) from e
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
 def test_la_lista_di_priorita_e_identica_nei_tre_workflow(path):
     """Regola 3 dove una fonte unica non e' possibile.
 
@@ -1117,7 +1128,7 @@ def test_la_lista_di_priorita_e_identica_nei_tre_workflow(path):
     )
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
 def test_lo_script_non_contiene_espressioni_di_actions_letterali(path):
     """Dentro lo script non si scrive la forma dollaro-graffa-graffa, nemmeno nei commenti.
 
@@ -1157,7 +1168,7 @@ INIZI_PLAUSIBILI = ('CODA-INCOLLATA', '.coda-segreta', '/coda', '+coda', '=coda'
                     ':coda', '_coda', '9coda')
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
 @pytest.mark.parametrize('chiusura', CHIUSURE)
 def test_una_chiusura_dopo_un_espressione_NON_viene_mangiata(path, chiusura):
     """Il difetto che ha prodotto tre bloccanti falsi su una PR sola.
@@ -1200,7 +1211,7 @@ def test_una_chiusura_dopo_un_espressione_NON_viene_mangiata(path, chiusura):
         f'{path.name}: la {chiusura!r} finale e- sparita: {fuori!r}'
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
 @pytest.mark.parametrize('coda', INIZI_PLAUSIBILI)
 def test_una_coda_che_POTREBBE_essere_un_segreto_resta_redatta(path, coda):
     """Il rovescio del test sopra, e senza di lui quello sarebbe un indebolimento.
@@ -1225,7 +1236,7 @@ def test_una_coda_che_POTREBBE_essere_un_segreto_resta_redatta(path, coda):
     )
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
 def test_la_prosa_attorno_a_un_espressione_resta_leggibile(path):
     """Quello che il reviewer deve poter leggere: la frase, non un buco.
 
@@ -1254,7 +1265,7 @@ def test_la_tabella_di_redazione_e_identica_nei_tre_workflow():
         return textwrap.dedent(m.group(0))
 
     riferimento = tabella(FABLE)
-    for p in (GPT, FUGU):
+    for p in (GPT, SOL):
         assert tabella(p) == riferimento, (
             f'{p.name}: la tabella di redazione differisce da {FABLE.name}. Tre policy '
             f'diverse sono un segreto redatto verso un modello e in chiaro verso un altro.'
@@ -1267,8 +1278,18 @@ def test_la_tabella_di_redazione_e_identica_nei_tre_workflow():
 TETTO_MINIMO_OUTPUT = {
     'pr-review-gpt55.yml': 3000,
     'pr-review-claude-fable5.yml': 3000,
-    # Fugu ragiona molto e non si puo' abbassare: `low` non e' fra i suoi
-    # supported_efforts (`max`/`xhigh`/`high`), quindi `high` e- il minimo. Misurato
+    # `gpt-5.6-sol`, dal 12/08/2026 al posto di Fugu. La soglia resta 10000 e va detto
+    # cosa la sostiene e cosa no: la MISURA sotto e' di Fugu, non di Sol, perche' su
+    # Sol non ho ancora un giro del gate. Su Sol l'effort va da `none` a `max` e il
+    # workflow chiede `high`, quindi la stessa dinamica — reasoning che mangia il
+    # budget prima del testo — e' possibile e non dimostrata. Tenere il tetto alto e'
+    # la scelta prudente: il tetto non e' il costo, si pagano i token generati, quindi
+    # abbassarlo non risparmia — fa pagare review incomplete. Le prime review del gate
+    # stampano i token di reasoning a parte: da quelle si decide, non a occhio.
+    'pr-review-gpt56-sol.yml': 10000,
+    # Storia, dal reviewer precedente: Fugu ragionava molto e non si poteva abbassare,
+    # perche' `low` non era fra i suoi supported_efforts (`max`/`xhigh`/`high`) e
+    # `high` era il pavimento imposto dal modello. Misurato
     # sulla PR #9: con il tetto a 3000 ha speso 3000 token di completion di cui
     # **3000 di reasoning (100%)** e ha prodotto ZERO righe di review, a $0.168.
     # Un tetto che non lascia spazio al testo dopo il ragionamento fa pagare una
@@ -1283,11 +1304,10 @@ TETTO_MINIMO_OUTPUT = {
     # completion di cui 2588 di reasoning (35%) e una review vera, a $0.5065. Con 8000
     # ci sarebbe stato ancora spazio, con 3000 no: il margine utile e- sopra 8000, e
     # abbassare la soglia sotto il valore misurato non compra niente.
-    'pr-review-openrouter-fugu-ultra.yml': 10000,
 }
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
 def test_il_tetto_di_output_lascia_spazio_al_testo_dopo_il_reasoning(path):
     """I token di reasoning sono fatturati come output E contano nel tetto.
 
@@ -1375,7 +1395,7 @@ FILE_PR_MISTA = [
 ]
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
 def test_su_una_PR_mista_il_relay_precede_i_workflow(path):
     """Il codice che serve i clienti prima dell'impianto che lo revisiona.
 
@@ -1420,3 +1440,140 @@ def test_su_una_PR_mista_il_relay_precede_i_workflow(path):
         f'un workflow precede il codice di produzione nel payload:\n'
         f'  relay    = {relay}\n  workflow = {workflow}'
     )
+
+
+# ---------------------------------------------------- il gate finale su `v1/responses`
+#
+# Dal 12/08/2026 il gate finale e' `gpt-5.6-sol` sull'endpoint OpenAI `v1/responses`,
+# al posto di `sakana/fugu-ultra` via OpenRouter. Cambia la FORMA di richiesta e
+# risposta, e ogni pezzo lasciato indietro fallisce in un modo diverso e silenzioso.
+# Questi test coprono i tre modi.
+
+def _blocco(path: Path, nome: str) -> str:
+    """Il sorgente di una funzione dello script incorporato, dedentato."""
+    sorgente = _script(path)
+    trovato = re.search(rf'^(\s*)def {nome}\(.*?(?=\n\1[A-Za-z_@])', sorgente, re.S | re.M)
+    assert trovato, f'{path.name}: {nome} non trovata'
+    return textwrap.dedent(trovato.group(0))
+
+
+def _solo_codice(corpo: str) -> str:
+    """Il blocco senza le righe di commento.
+
+    Serve per asserire l'ASSENZA di un nome: un commento che spiega di non usare
+    `finish_reason` contiene `finish_reason`, e cercarlo nel testo grezzo rende il
+    test rosso proprio grazie alla documentazione che lo giustifica. Ci sono cascato
+    scrivendolo — la prima versione faceva `corpo.replace('# ', '')`, che toglie il
+    prefisso e lascia il testo.
+    """
+    return '\n'.join(r for r in corpo.splitlines() if not r.strip().startswith('#'))
+
+
+def test_la_richiesta_del_gate_usa_la_forma_di_v1_responses():
+    """`max_output_tokens`, e NIENTE `temperature`.
+
+    I due errori possibili qui non si somigliano:
+
+    - `max_tokens` invece di `max_output_tokens`: l'endpoint lo ignora, il tetto non
+      viene applicato, e il primo diff grosso paga un output senza freno;
+    - `temperature`: i modelli reasoning su `v1/responses` la RIFIUTANO. Sarebbe un
+      400 al primo tentativo, cioe' un gate rosso per un parametro e non per un
+      difetto del codice — e su un gate a label quel rosso costa un riarmo.
+
+    Il secondo e' un residuo plausibile: il workflow di Fugu la mandava (`0.05`),
+    perche' su chat/completions era legittima.
+    """
+    corpo = _blocco(SOL, 'call_model')
+    assert '"max_output_tokens"' in corpo, 'il tetto di output non e- nella forma di v1/responses'
+    assert '"max_tokens"' not in corpo, (
+        'residuo di chat/completions: `max_tokens` su v1/responses viene ignorato e '
+        'il tetto non viene applicato'
+    )
+    assert '"temperature"' not in corpo, (
+        '`temperature` su un modello reasoning di v1/responses da- 400: gate rosso '
+        'per un parametro, non per un difetto'
+    )
+    assert 'api.openai.com/v1/responses' in corpo, 'endpoint non aggiornato'
+    assert 'openrouter.ai' not in corpo, 'chiama ancora OpenRouter'
+    assert '"store": False' in corpo, (
+        'la richiesta contiene il diff della PR: senza `store: False` resta '
+        'memorizzato lato fornitore'
+    )
+
+
+def test_il_gate_riconosce_il_troncamento_nella_forma_GIUSTA():
+    """`status=incomplete` + `incomplete_details`, non `finish_reason`.
+
+    E' il difetto piu' insidioso della sostituzione: `finish_reason` e' un campo di
+    chat/completions e su `v1/responses` non esiste. Leggerlo ancora non solleva
+    niente — restituisce `None`, `truncated` resta falso, e una review TRONCATA
+    verrebbe pubblicata come completa, col `done_marker` che impedisce di rifarla.
+    Cioe' il gate finale direbbe «nessun bloccante» su una review interrotta a meta'.
+    """
+    corpo = _blocco(SOL, 'call_model')
+    assert 'incomplete_details' in corpo, 'il troncamento non e- piu- rilevato'
+    assert '"status") == "incomplete"' in corpo or "'status') == 'incomplete'" in corpo, \
+        'manca il controllo su status=incomplete'
+    assert 'finish_reason' not in _solo_codice(corpo), (
+        'legge ancora `finish_reason`, che su v1/responses non esiste: una review '
+        'troncata passerebbe per completa'
+    )
+
+
+def test_il_rendiconto_del_gate_legge_i_campi_di_v1_responses():
+    """Esegue `usage_note` del gate: cache scontata e reasoning visibile.
+
+    Due nomi cambiano fra i due endpoint, e sbagliarli da' sempre ZERO invece di un
+    errore: `input_tokens_details.cached_tokens` per la cache e
+    `output_tokens_details.reasoning_tokens` per il ragionamento. Uno zero silenzioso
+    sul reasoning e' esattamente il modo in cui l'effort sbagliato di Fugu e'
+    sopravvissuto per tre PR.
+    """
+    spazio: dict = {'PRICE_INPUT_PER_MILLION': 5.0,
+                    'PRICE_OUTPUT_PER_MILLION': 30.0,
+                    'PRICE_CACHE_READ_PER_MILLION': 0.5}
+    exec(_blocco(SOL, 'usage_note'), spazio)  # noqa: S102 - sorgente del repo
+    usage_note = spazio['usage_note']
+
+    # 100.000 input di cui 80.000 dalla cache, 1.000 output di cui 700 di reasoning.
+    #   20.000*5 + 80.000*0.5 + 1.000*30 = 100 + 40 + 30 = $0.170 /M
+    fuori = usage_note(
+        {'input_tokens': 100_000, 'output_tokens': 1_000,
+         'input_tokens_details': {'cached_tokens': 80_000},
+         'output_tokens_details': {'reasoning_tokens': 700}},
+        'sys', 'usr', 'review')
+    assert '~$0.1700' in fuori, f'aritmetica della cache sbagliata:\n{fuori}'
+    assert '80000' in fuori, f'i token dalla cache non sono dichiarati:\n{fuori}'
+    assert '700' in fuori and 'reasoning' in fuori, (
+        f'i token di reasoning non compaiono: un ragionamento che esplode sarebbe '
+        f'indistinguibile da una review lunga.\n{fuori}'
+    )
+    assert 'OpenAI usage' in fuori, f'la fonte dichiarata e- ancora quella vecchia:\n{fuori}'
+
+    # Difesa: cached > input non deve far scendere il costo sotto il vero.
+    assurdo = usage_note(
+        {'input_tokens': 1_000, 'output_tokens': 0,
+         'input_tokens_details': {'cached_tokens': 999_999}},
+        'sys', 'usr', 'review')
+    assert '-' not in assurdo.split('Costo stimato base')[1], \
+        f'un cached_tokens assurdo ha prodotto un costo negativo:\n{assurdo}'
+
+
+def test_il_gate_dichiara_il_modello_e_l_etichetta_separati():
+    """`MODEL_ID` nella richiesta, `MODEL_LABEL` nel commento.
+
+    Prima erano la stessa variabile, e un cambio di modello obbligava a scegliere fra
+    una richiesta valida e un commento leggibile. La label del gate invece NON cambia
+    con il modello: `final-fugu-review` esiste nel repo, e rinominarla senza che il
+    proprietario crei la nuova renderebbe il gate non armabile (404 sull'API).
+    """
+    doc = _carica(SOL)
+    env = {**(doc.get('env') or {}), **(doc['jobs']['review'].get('env') or {})}
+    assert env.get('MODEL_ID') == 'gpt-5.6-sol', f'MODEL_ID inatteso: {env.get("MODEL_ID")}'
+    assert env.get('MODEL_LABEL') == 'GPT-5.6 Sol'
+    assert env.get('FINAL_LABEL') == 'final-fugu-review', (
+        'la label del gate e- cambiata: se la nuova non esiste nel repository, '
+        'aggiungerla via API da- 404 e il gate finale non e- armabile'
+    )
+    assert env.get('PRICE_CACHE_READ_PER_MILLION') == '0.50', \
+        'il prezzo dei token dalla cache non e- dichiarato'

@@ -31,7 +31,7 @@ Il merge resta sempre manuale del repository owner.
 | Architettura SaaS, modello dati, contratto API | `SAAS.md` |
 | Documentazione operativa endpoint e variabili | `README.txt` |
 | Deploy | `Procfile`, `railway.json`, `requirements.txt` |
-| Workflow di review AI (GPT-5.5, Fable 5, Fugu Ultra) | `.github/workflows/pr-review-*.yml` |
+| Workflow di review AI (GPT-5.5, Fable 5, GPT-5.6 Sol) | `.github/workflows/pr-review-*.yml` |
 | Guardia sui workflow di review | `tests/safety/test_ai_audit_workflows.py` |
 | Workflow che esegue i test (ogni PR, e i push a `main`) | `.github/workflows/test.yml` |
 | Runtime esterni dei test (node, Chromium) e modalita' severa | `tests/runtime.py` |
@@ -286,13 +286,15 @@ review/inline/thread triage · final hard verify.
 
 > **Stato in questo repository.** I workflow di review sono stati importati dal Bridge e vivono in
 > `.github/workflows/`: **GPT-5.5** (`pr-review-gpt55.yml`), **Claude Fable 5**
-> (`pr-review-claude-fable5.yml`) e **OpenRouter Fugu Ultra**
-> (`pr-review-openrouter-fugu-ultra.yml`). **GLM 5.2 non è stato importato**, quindi qui i reviewer
+> (`pr-review-claude-fable5.yml`) e **GPT-5.6 Sol** (`pr-review-gpt56-sol.yml`, che dal 12/08/2026
+> ha sostituito OpenRouter Fugu Ultra). **GLM 5.2 non è stato importato**, quindi qui i reviewer
 > a API key sono tre, non quattro.
 >
 > Perché funzionino servono due cose, **azione del proprietario una volta sola**:
 >
-> 1. i Secret del repo — **`BETRELAY_GPT`, `BETRELAY_FABLE`, `BETRELAY_FUGU`**. Sono i nomi scelti dal
+> 1. i Secret del repo — **`BETRELAY_GPT`** (letto da DUE workflow: GPT-5.5 e GPT-5.6 Sol, che
+>    stanno sulla stessa API) e **`BETRELAY_FABLE`**. `BETRELAY_FUGU` non è più letto da nessuno dal
+>    12/08/2026 e la guardia lo vieta come residuo: il proprietario può eliminarlo. Sono i nomi scelti dal
 >    proprietario per questo repository: **non** `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` /
 >    `OPENROUTER_API_KEY`, che sono i nomi del Bridge. Un workflow che leggesse i nomi del Bridge
 >    troverebbe una stringa vuota e uscirebbe **verde senza chiamare il modello** — nessun errore,
@@ -309,7 +311,8 @@ review/inline/thread triage · final hard verify.
 > |---|---|
 > | Label `final-fable-review`, `final-fugu-review` | **misurato**: `GET /labels/{name}` risponde 200, non più 404 |
 > | Secret `BETRELAY_GPT` | **misurato**: il job GPT-5.5 su `7e86517` ha chiamato il modello e riportato 4572 token di uso |
-> | Secret `BETRELAY_FABLE`, `BETRELAY_FUGU` | **riferito dal proprietario**, non ancora provato da un log: su un push non-core i due job escono senza spendere, quindi il primo log che lo dimostrerà è quello del gate finale a label |
+> | Secret `BETRELAY_FABLE` | **misurato dal 12/08/2026**: sulle PR #16, #17, #18 e #19 il job Fable ha riportato `Fonte token: Anthropic usage` con i conteggi e il costo — una review vera, non un `::notice`. Era «riferito dal proprietario» fino a quel giorno |
+> | Secret dell'ex reviewer via OpenRouter | **non più letto da nessun workflow** dal 12/08/2026: `gpt-5.6-sol` usa `BETRELAY_GPT`. Il proprietario può eliminarlo; la guardia vieta il nome come residuo |
 >
 > Regola che ne segue, e vale per chiunque legga: **un check verde non è prova di review.** Va letto il
 > log e cercata la riga d'uso token. Se compare un `::notice` «non configurato», quel reviewer non ha
@@ -320,21 +323,22 @@ review/inline/thread triage · final hard verify.
 > si configurano una volta e valgono per sempre; le label si creano una volta e restano nel repo. Ma
 > *applicarle* va rifatto a ogni head stabile: rimuovere e riaggiungere `final-fable-review` e
 > `final-fugu-review` dopo ogni push (vedi «Un push dopo l'armamento rende il gate STANTIO»). Il
-> riarmo gata **solo** le due review finali Fable/Fugu — GPT-5.5 gira comunque a ogni push, e i
+> riarmo gata **solo** le due review finali Fable/Sol — GPT-5.5 gira comunque a ogni push, e i
 > reviewer GitHub App non dipendono dalle label.
 >
 > Finché Secret o label mancano, l'agente lo dichiara invece di sostenere che le review finali sono
 > state fatte. Il set di file core è vincolato da `tests/safety/test_ai_audit_workflows.py`.
 
-Due reviewer AI forti e costosi (Claude Fable 5, Fugu Ultra) non girano a ogni push come
+Due reviewer AI forti e costosi (Claude Fable 5, GPT-5.6 Sol) non girano a ogni push come
 GPT-5.5/GLM. Partono:
 
 - automaticamente su un push che tocca **file core** di questo repository
   (`main.py`, `web/**`, `requirements.txt`, `Procfile`, `railway.json`) — analizza il
-  push-range. Solo Claude Fable 5: Fugu Ultra su un push esce senza spendere;
+  push-range. Solo Claude Fable 5: GPT-5.6 Sol su un push esce senza spendere;
 - oppure quando l'agente aggiunge la label finale (gate pre-merge sull'intera PR):
   - `final-fable-review` → PR Review Claude Fable 5
-  - `final-fugu-review` → PR Review OpenRouter Fugu Ultra
+  - `final-fugu-review` → PR Review GPT-5.6 Sol *(il nome della label non cambia col modello: è
+    il nome del GATE, e rinominarla richiede che il proprietario crei quella nuova)*
 
 Su push che toccano solo workflow/CI, docs o test, i due job partono ma escono senza chiamare il
 modello (costo zero); quei cambiamenti restano coperti da GPT-5.5, che gira su ogni push.
@@ -382,7 +386,7 @@ ciascuna, i job gatano su `github.event.label.name`, l'evento della label che no
 viene rifiutato dalla condizione e — col gruppo di concorrenza della PR — i job buoni finiscono
 `skipped`. Il sintomo è «ho messo le label e i reviewer non partono», e non è deducibile dai log.
 
-Poi aspetta i workflow *PR Review Claude Fable 5* e *PR Review OpenRouter Fugu Ultra* (rientrano
+Poi aspetta i workflow *PR Review Claude Fable 5* e *PR Review GPT-5.6 Sol* (rientrano
 nel CHECK COMPLETION GATE). Se una delle due review segnala bloccanti, security issue, rischi
 contratto CSV, rischi di isolamento fra utenti, rischi workflow, rischi gestione segreti o
 `manual-review-required`, non dichiarare la PR pronta e non proporre merge automatico: lascia la
@@ -429,7 +433,7 @@ solo perché stai aspettando.
 **Attenzione a cosa manca e cosa no.** Codacy, DeepSource, CodeRabbit e Codex sono GitHub App
 installate sull'account e compaiono su ogni PR: i loro check e commenti vanno attesi e letti come
 su qualunque altra PR. I workflow di review a API key **esistono** in `.github/workflows/` e sono
-**tre**: GPT-5.5, Claude Fable 5, OpenRouter Fugu Ultra. **GLM 5.2 non è importato.** Se mancano i
+**tre**: GPT-5.5, Claude Fable 5, GPT-5.6 Sol. **GLM 5.2 non è importato.** Se mancano i
 Secret del repo o le due label finali, quei tre workflow **escono verdi senza chiamare il modello**
 (un `::notice` nei log, non un errore): in quel caso la PR ha tre spunte verdi e zero righe
 revisionate, e la condizione va dichiarata, non taciuta.
@@ -457,13 +461,13 @@ pubblicano commenti o annotation solo a check completato.
 >   quando non è rate-limited). Aprendo una PR compaiono. I loro check vanno attesi e i loro
 >   commenti letti, esattamente come nel Bridge.
 > - **Workflow a API key, importati dal Bridge e presenti in `.github/workflows/`:** GPT-5.5,
->   Claude Fable 5, OpenRouter Fugu Ultra. Usano i Secret del repo, che il proprietario deve
+>   Claude Fable 5, GPT-5.6 Sol. Usano i Secret del repo, che il proprietario deve
 >   aggiungere. **GLM 5.2 non è stato importato:** qui i reviewer a API key sono tre, e questa
 >   differenza rispetto al Bridge va detta, non taciuta.
 
 I reviewer che coprono davvero una PR sono quindi i tre workflow GitHub Actions con API key nei
-Secret del repo — GPT-5.5, Claude Fable 5, OpenRouter Fugu Ultra — più CodeRabbit. GPT-5.5 gira a
-ogni push; Fable parte da solo sui push che toccano file core; Fugu solo con la label finale;
+Secret del repo — GPT-5.5, Claude Fable 5, GPT-5.6 Sol — più CodeRabbit. GPT-5.5 gira a
+ogni push; Fable parte da solo sui push che toccano file core; Sol solo con la label finale;
 entrambi partono con le label finali; CodeRabbit rivede l'intera PR dal suo base.
 
 **Codex NON è un gate** — non aspettarlo. È installato e comparirà sulle PR, ma l'abbonamento
@@ -560,13 +564,22 @@ totale. La distribuzione conta più del totale, perché decide dove risparmiare:
 | Reviewer | Review | Costo | Note |
 |---|---:|---:|---|
 | Claude Fable 5 | 7 | $1,6477 | ~$0,36 per review finale sull'intera PR |
-| OpenRouter Fugu Ultra | 1 | $0,7013 | **17,8× la media di GPT-5.5 per review**, e quella era troncata |
+| OpenRouter Fugu Ultra | 1 | $0,7013 | **17,8× la media di GPT-5.5 per review**, e quella era troncata — **sostituito da `gpt-5.6-sol` il 12/08/2026**, vedi sotto |
 | GPT-5.5 | 7 | $0,2757 | media $0,0394 per giro |
 | **totale** | **15** | **$2,6247** | |
 
+**Fugu Ultra è stato sostituito da `gpt-5.6-sol` il 12/08/2026** (punto 4 della Issue #10). Le
+righe qui sopra restano perché sono misure di quello che è successo, non descrizioni di com'è
+configurato il servizio adesso. Tre ragioni, tutte misurate su questo repository: il costo
+($0,7013 per una review, troncata); i bloccanti su codice non visto — un `SyntaxError` inventato
+sulla PR #14 e tre bloccanti falsi sulla #18, tutti dalla redazione del nostro payload; e una API
+key in meno, perché Sol sta sulla stessa API di GPT-5.5 e legge `BETRELAY_GPT`. Il baratto
+dichiarato: al gate finale restano due famiglie di modelli invece di tre, e Fable 5 è l'unica voce
+non-OpenAI.
+
 Ne seguono due regole pratiche. **Il gate a label è la voce grossa** — un armamento completo costa
-~$1,06 (Fable finale + Fugu) — quindi si arma **una volta sola**, quando il lavoro è davvero finito:
-ogni push successivo lo rende stantio e il riarmo ripaga tutto. E **Fugu si tiene per l'ultimo head
+~$1,06 (Fable finale + il gate forte) — quindi si arma **una volta sola**, quando il lavoro è davvero finito:
+ogni push successivo lo rende stantio e il riarmo ripaga tutto. E **il gate forte si tiene per l'ultimo head
 stabile**, non per i giri intermedi.
 
 **CI minutes.** Ogni push e ogni re-run consumano minuti GitHub Actions. Questo repository non ha
@@ -601,7 +614,7 @@ Flusso pre-merge:
    merge sì/no.
 
 **Oggi, in questo repository:** i passi 2 e 3 valgono, con tre reviewer sincroni invece di quattro
-(GPT-5.5, Fable 5, Fugu Ultra — GLM non è importato). Se mancano i Secret o le label, il passo 2 va
+(GPT-5.5, Fable 5, GPT-5.6 Sol — GLM non è importato). Se mancano i Secret o le label, il passo 2 va
 dichiarato non eseguibile con quel motivo, non spuntato. I passi 4 e 5 valgono comunque, perché
 CodeRabbit è installato sull'account e commenta anche qui: l'attesa del suo completamento è in
 vigore, con il cap anti-stallo qui sotto. Lo stesso per i check di Codacy e DeepSource e per
@@ -1278,7 +1291,7 @@ Unresolved threads checked:
 - YES / NO
 
 Label finali fatte partire + i tre reviewer a API key hanno risposto
-(GPT-5.5, Fable 5, Fugu Ultra — GLM non è importato in questo repository):
+(GPT-5.5, Fable 5, GPT-5.6 Sol — GLM non è importato in questo repository):
 - YES / NO / bloccato perché mancano i Secret o le label, con quale
 
 CodeRabbit COMPLETATO (commenti azionabili o «No actionable comments»):
