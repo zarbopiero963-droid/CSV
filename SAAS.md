@@ -36,9 +36,15 @@ ri-misurato ogni volta che lo schema cambia.
 
 ```text
 users
-  id, telegram_id (unique), username, first_name, slug (unique),
-  token_hash, token_prefix, status, access_expires_at, telegram_reachable,
-  session_version, is_admin, created_at
+  id, origin_profile (unique), telegram_id (unique), username, first_name,
+  slug (unique), token_hash, token_prefix, status, access_expires_at,
+  telegram_reachable, session_version, is_admin, created_at
+                           `origin_profile` è il profilo da cui la migrazione ha
+                           creato l'utente, e serve come chiave stabile per
+                           ritrovarlo ai riavvii. NULL per chi non viene da un
+                           profilo, che è il caso di tutti i prossimi utenti.
+                           Non `first_name`: non è univoco (i nomi Telegram non lo
+                           sono affatto) e il login lo sovrascrive col nome vero
 
 parsers            ← tabella PREESISTENTE, estesa con ALTER additivo
   name (primary key), header, market_name, market_type, selection_name,
@@ -114,6 +120,17 @@ test e tutti chiusi con una disambiguazione deterministica invece di un errore:
   puntava alla riga scartata viene **ri-puntato** su quella sopravvissuta, perché
   cancellare senza ri-puntare lascerebbe un `parser_chats.chat_id` che riferisce un
   `id` inesistente — un parser che smette di ricevere in silenzio.
+
+Le colonne aggiunte a `parsers` sono riempite da `_completa_colonne_nuove()`, che la
+migrazione chiama **e** che chiama `POST /api/parsers`. Le due chiamate non sono un
+duplicato: `migra()` gira una volta per processo, quindi senza la seconda un parser
+creato dopo l'avvio resterebbe senza `user_id`, `slug`, `ordine` e `id` fino al riavvio
+successivo — cioè fuori dall'indice `UNIQUE (user_id, slug)`, che con `user_id` NULL
+non vincola niente, e non riferibile da `parser_chats`.
+
+Per la stessa ragione quell'endpoint fa un **UPSERT** e non un `INSERT OR REPLACE`:
+`REPLACE` cancella la riga e la reinserisce, quindi cambiare l'header di un parser lo
+staccherebbe dal suo utente azzerandone l'`id`.
 
 A quale dei due utenti debba appartenere una chat che entrambi rivendicano *davvero*
 è una decisione del PR sul dispatch multi-parser, dove il webhook deve sceglierne uno;

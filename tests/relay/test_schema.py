@@ -684,3 +684,178 @@ def test_una_seconda_migrazione_non_TENTA_di_reinserire_le_chat(tmp_path):
     assert dopo == prima, (
         f'la seconda migrazione ha bruciato un id ({prima} -> {dopo}): sta tentando '
         'di reinserire una chat che esiste gia-, a ogni avvio del processo')
+
+
+# ------------------------------------- i CONSUMATORI delle tabelle che ho esteso
+#
+# Regola 2-bis, e questa volta contro di me. Il messaggio del commit precedente
+# diceva che le colonne nuove «non cambiano nessuna SELECT esistente, perche' tutte
+# nominano le colonne che leggono». Vero, e insufficiente: ho cercato le SELECT e
+# non le INSERT. `POST /api/parsers` inseriva SETTE valori senza elencare le
+# colonne, e con quattordici colonne quell'INSERT non e' piu' valido.
+#
+# Trovato da Claude Fable 5 come «`parsers.id` NULL sui parser nuovi» — cioe' il
+# sintomo piu' lieve dei due. Misurando il piu' grave si e' visto per primo:
+#
+#     OperationalError: table parsers has 14 columns but 7 values were supplied
+
+@pytest.fixture
+def servizio(tmp_path, monkeypatch):
+    """Il relay in processo, con un database vuoto solo suo e il token noto."""
+    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'api.db'))
+    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    monkeypatch.setattr(main, 'TOKEN', 'token-di-prova')
+    return 'token-di-prova'
+
+
+def _parser_salvato(nome, header='UN HEADER'):
+    return main.ParserIn(name=nome, header=header)
+
+
+def test_creare_un_parser_via_API_FUNZIONA_ancora(servizio):
+    """La regressione piu- grave di questo PR, introdotta da me.
+
+    `INSERT OR REPLACE INTO parsers VALUES (?,?,?,?,?,?,?)` non elencava le colonne,
+    quindi dipendeva dal loro NUMERO. Aggiungerne sette lo ha rotto: ogni creazione
+    o modifica di parser dalla API rispondeva 500. Misurato sul codice precedente:
+
+        OperationalError: table parsers has 14 columns but 7 values were supplied
+
+    E- un endpoint che funzionava prima di questo PR: senza questo test la
+    migrazione sarebbe arrivata in produzione rompendolo.
+    """
+    main.save_parser(_parser_salvato('Nuovo_Parser'), x_admin_token=servizio)
+
+    c = main.db()
+    riga = c.execute('SELECT header FROM parsers WHERE name=?', ('Nuovo_Parser',)).fetchone()
+    c.close()
+    assert riga == ('UN HEADER',), riga
+
+
+def test_un_parser_creato_via_API_ha_SUBITO_utente_slug_ordine_e_id(servizio):
+    """Il secondo bloccante di Fable 5, e non e- cosmetico.
+
+    `UPDATE parsers SET id=rowid` gira in `migra()`, cioe- una volta per processo. Un
+    parser creato dopo l'avvio restava con `id`, `user_id`, `slug` e `ordine` a NULL
+    fino al riavvio successivo. Conseguenze reali, non estetiche:
+
+    - `parser_chats.chat_id` riferisce `parsers.id`: con `id` NULL quel parser non
+      puo- essere associato a nessuna chat;
+    - l'indice `UNIQUE (user_id, slug)` non vincola le righe con `user_id` NULL
+      (`NULL != NULL`, la stessa semantica di `TOPIC_CHAT`), quindi la riga sfugge
+      al vincolo che dovrebbe proteggere l'isolamento. Osservato anche da GPT-5.5.
+    """
+    main.save_parser(_parser_salvato('Parser_Nuovo'), x_admin_token=servizio)
+
+    c = main.db()
+    riga = c.execute('SELECT user_id, slug, ordine, id FROM parsers WHERE name=?',
+                     ('Parser_Nuovo',)).fetchone()
+    c.close()
+    utente, slug, ordine, identificativo = riga
+    assert utente is not None, 'user_id NULL: la riga sfugge a UNIQUE (user_id, slug)'
+    assert slug == 'parser_nuovo', slug
+    assert ordine is not None, 'ordine NULL: il tie-break fra parser resta indeciso'
+    assert identificativo is not None, 'id NULL: parser_chats non puo- riferirlo'
+
+
+def test_modificare_un_parser_NON_lo_stacca_dal_suo_utente(servizio):
+    """`INSERT OR REPLACE` cancella la riga e la reinserisce: le colonne non
+    nominate tornano al default.
+
+    Misurato sul codice precedente, sul parser di default dopo la migrazione:
+
+        prima : ('Parser_Telegram_XTrader_v1', 1, 'parser_telegram_xtrader_v1', 0, 1)
+        dopo  : ('Parser_Telegram_XTrader_v1', None, None, None, None)
+
+    Cioe- cambiare l'header di un parser dalla API lo staccava dal suo proprietario
+    e ne azzerava l'`id`. Su un servizio multiutente e- una perdita di isolamento
+    provocata da una modifica di routine.
+    """
+    c = main.db()
+    prima = c.execute('SELECT user_id, slug, ordine, id FROM parsers WHERE name=?',
+                      (main.DEFAULT_PARSER,)).fetchone()
+    c.close()
+    assert all(v is not None for v in prima), f'il test non parte da uno stato utile: {prima}'
+
+    main.save_parser(_parser_salvato(main.DEFAULT_PARSER, header='HEADER CAMBIATO'),
+                     x_admin_token=servizio)
+
+    c = main.db()
+    dopo = c.execute('SELECT user_id, slug, ordine, id FROM parsers WHERE name=?',
+                     (main.DEFAULT_PARSER,)).fetchone()
+    header = c.execute('SELECT header FROM parsers WHERE name=?',
+                       (main.DEFAULT_PARSER,)).fetchone()[0]
+    c.close()
+    assert header == 'HEADER CAMBIATO', 'la modifica non e- stata applicata'
+    assert dopo == prima, (
+        f'la modifica ha azzerato le colonne nuove: {prima} -> {dopo}')
+
+
+def test_il_travaso_NON_attribuisce_un_profilo_a_un_utente_Telegram_omonimo(tmp_path):
+    """Il primo bloccante di Fable 5: `first_name` non e- univoco.
+
+    Il travaso cercava l'utente del profilo con `SELECT id FROM users WHERE
+    first_name=?`. I nomi Telegram non sono univoci per niente: al primo login di un
+    utente che si chiama come un profilo, chat, `signals.user_id` e parser sarebbero
+    stati attribuiti a LUI. Violazione di isolamento silenziosa, e la peggiore
+    specie: nessun errore, dati che finiscono nell'account sbagliato.
+
+    Il lookup passa ora da `origin_profile`, che e- il profilo di provenienza e non
+    cambia quando l'utente fa login — `first_name` invece verrebbe sovrascritto dal
+    nome vero di Telegram, che e- esattamente cio- che rende quel lookup instabile.
+
+    **L'ORDINE di questo test e- la sua sostanza, e la prima versione ce l'aveva
+    sbagliato.** Inseriva l'omonimo DOPO l'utente del profilo, e cosi- il lookup per
+    `first_name` trovava comunque quello giusto — la riga legittima ha il `rowid` piu-
+    basso e la scansione la incontra per prima. Rimettendo `first_name` il test
+    restava VERDE: copertura zero, e la quinta volta in questa sessione che un
+    sabotaggio smentisce un test che sembrava buono.
+
+    L'ordine che rompe davvero e- quello opposto, e non e- artificioso: l'omonimo
+    esiste GIA- — ha fatto login prima — e il profilo nasce dopo, da
+    `POST /api/profiles`. Al riavvio successivo il travaso incontra un profilo nuovo e
+    un utente omonimo piu- vecchio, e con `first_name` gli consegna le chat.
+    """
+    c = _database_di_produzione(tmp_path / 'omonimi.db')
+    main.migra(c)
+
+    # 1. Un utente qualunque entra dal login Telegram. Si chiama MARCO.
+    c.execute("INSERT INTO users(telegram_id, first_name, slug, status)"
+              " VALUES ('99999', 'MARCO', 'marco', 'registrato')")
+    estraneo = c.execute('SELECT id FROM users WHERE telegram_id=?', ('99999',)).fetchone()[0]
+    # 2. Solo DOPO nasce un profilo con quel nome, e con una chat sua.
+    c.execute('INSERT INTO profiles VALUES (?,?,?)', ('MARCO', '-1003333333333', 'X'))
+
+    main.migra(c)  # 3. il riavvio successivo
+
+    proprietario = c.execute('SELECT owner_user_id FROM chats WHERE telegram_chat_id=?',
+                             ('-1003333333333',)).fetchone()[0]
+    assert proprietario != estraneo, (
+        f'la chat del profilo MARCO e- stata consegnata all-utente Telegram omonimo '
+        f'(id {estraneo}): e- una perdita di isolamento, silenziosa')
+    suo = c.execute('SELECT id FROM users WHERE origin_profile=?', ('MARCO',)).fetchone()
+    assert suo is not None, 'nessun utente creato per il profilo MARCO'
+    assert proprietario == suo[0], (proprietario, suo[0])
+
+
+def test_ogni_campo_di_ParserIn_e_una_colonna_di_parsers(tmp_path, monkeypatch):
+    """Il guardiano della lista derivata in `save_parser`.
+
+    Quella funzione costruisce l'INSERT da `ParserIn.model_fields`, cioe- dal modello,
+    per non tenere una seconda lista che divergerebbe. Il patto che regge quella scelta
+    e- che ogni campo del modello sia anche una colonna della tabella: un campo nuovo
+    senza colonna darebbe «no such column» a runtime, sull'endpoint, in produzione.
+
+    Qui diventa rosso in CI, che e- il posto giusto.
+    """
+    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'campi.db'))
+    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    c = main.db()
+    colonne = {r[1] for r in c.execute('PRAGMA table_info(parsers)')}
+    c.close()
+
+    campi = set(main.ParserIn.model_fields)
+    assert campi <= colonne, (
+        f'campi di ParserIn senza colonna in parsers: {sorted(campi - colonne)}. '
+        'save_parser costruisce l-INSERT dal modello, quindi questi campi darebbero '
+        '«no such column» sull-endpoint')

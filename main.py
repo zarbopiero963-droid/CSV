@@ -370,7 +370,15 @@ SCHEMA_ORIGINALE = (
 # timer appartengono all'utente, il parser possiede solo configurazione e log. E'
 # la correzione del modello sbagliato del prototipo, registrata in #2.
 SCHEMA_MULTIUTENTE = (
+    # `origin_profile` e' il profilo da cui la migrazione ha creato questo utente, e
+    # serve come CHIAVE STABILE per ritrovarlo ai riavvii successivi. Prima il
+    # travaso cercava per `first_name`, che non e' univoco: al primo login Telegram di
+    # un omonimo, chat, segnali e parser sarebbero passati a lui. `first_name` non va
+    # nemmeno bene come chiave in se', perche' il login lo SOVRASCRIVE col nome vero.
+    # NULL per chi non viene da un profilo, ed e' il caso normale dei prossimi utenti.
+    # Segnalato da Claude Fable 5 sulla PR #22.
     'CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT,'
+    ' origin_profile TEXT UNIQUE,'
     ' telegram_id TEXT UNIQUE, username TEXT, first_name TEXT, slug TEXT UNIQUE,'
     ' token_hash TEXT, token_prefix TEXT,'
     " status TEXT NOT NULL DEFAULT 'registrato', access_expires_at INTEGER,"
@@ -431,6 +439,10 @@ COLONNE_MULTIUTENTE = (
     # I segnali passano da per-PROFILO a per-UTENTE. La colonna vecchia `profile`
     # resta e continua a governare il feed: qui si aggiunge solo la destinazione.
     ('signals', 'user_id', 'INTEGER'),
+    # Per i database creati da una versione intermedia di QUESTO ramo, dove `users`
+    # esiste gia' senza `origin_profile`. Sulla tabella creata da zero l'ALTER trova
+    # la colonna e l'errore «duplicate column name» viene ingoiato, come per le altre.
+    ('users', 'origin_profile', 'TEXT'),
 )
 
 # I percorsi gia' migrati in QUESTO processo. Prima la migrazione girava a ogni
@@ -536,6 +548,30 @@ def _assegna_slug_e_ordine(c):
             prossimo += 1
 
 
+def _completa_colonne_nuove(c):
+    """Riempie `user_id`, `id`, `slug` e `ordine` di ogni parser che ne e' senza.
+
+    Chiamata dalla migrazione **e** dal salvataggio di un parser, e la ragione di
+    quest'ultimo e' un bloccante di Claude Fable 5 sulla PR #22: `migra()` gira una
+    volta per PROCESSO, quindi un parser creato via API dopo l'avvio restava con
+    quelle quattro colonne a NULL fino al riavvio successivo. Non e' cosmetico —
+    `parser_chats.chat_id` riferisce `parsers.id`, e l'indice `UNIQUE (user_id, slug)`
+    non vincola le righe con `user_id` NULL, perche' in SQL `NULL != NULL`: la riga
+    sfuggiva al vincolo che protegge l'isolamento (visto anche da GPT-5.5).
+
+    Una fonte unica e non due chiamate copiate: la regola 3, sulla parte del codice
+    dove una divergenza fra i due percorsi sarebbe invisibile.
+    """
+    piero = c.execute('SELECT id FROM users WHERE origin_profile=?',
+                      (PIERO_PROFILE,)).fetchone()
+    if piero:
+        c.execute('UPDATE parsers SET user_id=? WHERE user_id IS NULL', (piero[0],))
+    # `id` dal `rowid`, in una colonna vera: il `rowid` puo' cambiare con un VACUUM,
+    # quindi memorizzarlo e' l'unico modo perche' un riferimento resti valido.
+    c.execute('UPDATE parsers SET id=rowid WHERE id IS NULL')
+    _assegna_slug_e_ordine(c)
+
+
 def _travasa_nel_multiutente(c):
     """I dati esistenti nello schema nuovo, senza toccare quelli vecchi.
 
@@ -554,15 +590,15 @@ def _travasa_nel_multiutente(c):
         # UNIQUE, quindi l'INSERT solleverebbe e il servizio non partirebbe. Cercata
         # perche' era la stessa forma, non perche' qualcuno l'avesse segnalata come
         # bloccante (GPT-5.5 l'aveva vista come rischio manuale).
-        riga = c.execute('SELECT id FROM users WHERE first_name=?', (profilo,)).fetchone()
+        riga = c.execute('SELECT id FROM users WHERE origin_profile=?', (profilo,)).fetchone()
         if riga is None:
             presi = {r[0] for r in c.execute('SELECT slug FROM users').fetchall()}
-            c.execute('INSERT INTO users(slug, first_name, status, is_admin)'
-                      ' VALUES (?,?,?,?)',
-                      (_slug_libero(profilo.lower(), presi), profilo,
+            c.execute('INSERT INTO users(origin_profile, slug, first_name, status, is_admin)'
+                      ' VALUES (?,?,?,?,?)',
+                      (profilo, _slug_libero(profilo.lower(), presi), profilo,
                        'attivo' if profilo == PIERO_PROFILE else 'registrato',
                        1 if profilo == PIERO_PROFILE else 0))
-            riga = c.execute('SELECT id FROM users WHERE first_name=?', (profilo,)).fetchone()
+            riga = c.execute('SELECT id FROM users WHERE origin_profile=?', (profilo,)).fetchone()
         if not riga:
             continue
         utente = riga[0]
@@ -583,16 +619,9 @@ def _travasa_nel_multiutente(c):
                           ' VALUES (?,?)', (chat, utente))
         c.execute('UPDATE signals SET user_id=? WHERE profile=? AND user_id IS NULL',
                   (utente, profilo))
-    # Ogni parser al proprietario, che oggi e' l'unico utente. `slug` dal nome, e
-    # `ordine` per nome: deterministico, che e' cio' che #2 pretende perche' decide
-    # chi vince fra due parser dello stesso utente.
-    piero = c.execute('SELECT id FROM users WHERE first_name=?', (PIERO_PROFILE,)).fetchone()
-    if piero:
-        c.execute('UPDATE parsers SET user_id=? WHERE user_id IS NULL', (piero[0],))
-    # `id` dal `rowid`, in una colonna vera: il `rowid` puo' cambiare con un VACUUM,
-    # quindi memorizzarlo e' l'unico modo perche' un riferimento resti valido.
-    c.execute('UPDATE parsers SET id=rowid WHERE id IS NULL')
-    _assegna_slug_e_ordine(c)
+    # Utente, `id`, `slug` e `ordine` dei parser: vedi `_completa_colonne_nuove`, che
+    # e' la stessa funzione chiamata dal salvataggio di un parser.
+    _completa_colonne_nuove(c)
     # I parser di uno stesso utente non possono avere due volte lo stesso slug:
     # e' il vincolo `UNIQUE (user_id, slug)` di #2, che su una tabella esistente
     # non si puo' aggiungere con ALTER e si esprime come indice.
@@ -1108,7 +1137,37 @@ def list_parsers(x_admin_token: str | None = Header(None)):
 def save_parser(data: ParserIn, x_admin_token: str | None = Header(None)):
     auth(x_admin_token)
     c = db()
-    c.execute('INSERT OR REPLACE INTO parsers VALUES (?,?,?,?,?,?,?)', tuple(data.model_dump().values()))
+    # Le colonne sono ELENCATE, e l'aggiornamento e' un UPSERT invece di un `INSERT OR
+    # REPLACE`. Le due cose chiudono due difetti distinti introdotti dalla migrazione
+    # dello schema, entrambi misurati:
+    #
+    # 1. senza elenco, l'INSERT dipendeva dal NUMERO di colonne, e con le sette
+    #    aggiunte da `COLONNE_MULTIUTENTE` non era piu' valido:
+    #    «table parsers has 14 columns but 7 values were supplied». Cioe' questo
+    #    endpoint rispondeva 500 a ogni creazione o modifica di parser;
+    # 2. `REPLACE` cancella la riga e la reinserisce, quindi le colonne non nominate
+    #    tornano a NULL: cambiare l'header di un parser lo STACCAVA dal suo utente e
+    #    ne azzerava l'`id`. Misurato: (1, 'parser_...', 0, 1) -> (None, None, None, None).
+    #
+    # `ON CONFLICT` nomina solo i campi del modello: tutto il resto della riga resta
+    # com'era, che e' esattamente cio' che serve.
+    #
+    # I nomi vengono DAL MODELLO invece di essere ricopiati qui: una seconda lista
+    # sarebbe una lista che divergera', e la divergenza sarebbe silenziosa nel verso
+    # peggiore — un campo aggiunto a `ParserIn` e non qui verrebbe accettato dalla API
+    # e non salvato. Che i nomi siano anche colonne di `parsers` e' vincolato da un
+    # test, cosi' un campo nuovo senza colonna diventa rosso invece di dare 500.
+    campi = tuple(ParserIn.model_fields)
+    aggiornabili = [x for x in campi if x != 'name']
+    c.execute(
+        f'INSERT INTO parsers({", ".join(campi)})'
+        f' VALUES ({", ".join("?" * len(campi))})'
+        ' ON CONFLICT(name) DO UPDATE SET '
+        + ', '.join(f'{x}=excluded.{x}' for x in aggiornabili),
+        tuple(getattr(data, x) for x in campi))
+    # Le colonne del multiutente subito, non al prossimo riavvio: vedi
+    # `_completa_colonne_nuove`.
+    _completa_colonne_nuove(c)
     c.commit()
     c.close()
     return {'ok': True, 'parser': data.name}
