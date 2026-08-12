@@ -226,6 +226,35 @@ def servizio(tmp_path):
         yield base
 
 
+def test_il_servizio_NON_ha_raggiunto_telegram(servizio, tmp_path):
+    """La prova end-to-end: il log dice `URLError`, non `HTTPError`.
+
+    Il test qui sotto verifica che la porta del proxy sia chiusa, che e- una
+    condizione necessaria e non sufficiente: non dice che il processo usi davvero
+    quel proxy, ne- che non abbia altre vie di rete. Segnalato da GPT-5.5 sulla PR
+    #21, ed era una lacuna reale — la garanzia si appoggiava al fatto che `urllib`
+    onori `HTTPS_PROXY`, che e- vero e non era vincolato da niente.
+
+    Qui si legge l'esito vero. `_chiama_set_webhook` registra il solo NOME del tipo
+    di eccezione (mai il messaggio, perche- conterrebbe il token del bot nell'URL), e
+    quel nome distingue esattamente i due mondi:
+
+        HTTPError  ->  Telegram HA risposto: la richiesta e- uscita dalla macchina
+        URLError   ->  connessione rifiutata dal proxy morto: non e- uscita
+
+    Misurato senza il proxy: `HTTPError` in 0,83 s. Con il proxy: `URLError`.
+    """
+    log = (tmp_path / 'uvicorn.log').read_text(encoding='utf-8')
+    righe = [r for r in log.splitlines() if 'registrazione webhook' in r]
+    assert righe, f'il servizio non ha nemmeno tentato la registrazione:\n{log[-800:]}'
+    assert any('URLError' in r for r in righe), (
+        'atteso URLError (connessione rifiutata dal proxy morto). '
+        f'Righe trovate:\n' + '\n'.join(f'  {r}' for r in righe))
+    assert not any('HTTPError' in r for r in righe), (
+        'HTTPError significa che TELEGRAM HA RISPOSTO: la richiesta e- uscita dalla '
+        'macchina e il proxy non ha protetto niente.\n' + '\n'.join(f'  {r}' for r in righe))
+
+
 def test_il_servizio_di_prova_non_puo_chiamare_telegram():
     """La porta del proxy deve essere CHIUSA, non solo scritta nell'ambiente.
 
