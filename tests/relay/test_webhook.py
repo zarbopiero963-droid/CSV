@@ -312,6 +312,59 @@ def test_senza_bot_health_dice_DEGRADED_non_ok(servizio_senza_bot):
     assert dati.get('auth') == 'ok', dati
 
 
+def test_health_legge_lo_stato_della_registrazione_UNA_VOLTA(monkeypatch):
+    """`status` e `webhook_registrato` non possono contraddirsi.
+
+    `health()` leggeva `_WEBHOOK_REGISTRATO` **tre volte** — una per `sano`, una per
+    decidere se includere la chiave, una per il valore — e fuori dal
+    `_WEBHOOK_LOCK`, mentre gli altri thread lo scrivono sotto lock. Su CPython non
+    si legge un valore corrotto, ma fra la prima e la terza lettura una
+    registrazione puo- completare: la risposta uscirebbe con `status: ok` e
+    `webhook_registrato: false`, oppure il contrario. Un endpoint diagnostico che si
+    contraddice non e- diagnostico — ed e- l'unico stato condiviso che quella
+    funzione leggeva senza il suo lock, mentre gli scarti di consegna lo prendono
+    (`_SCARTI_LOCK`) dieci righe sopra. Segnalato da Claude Fable 5.
+
+    Il test rende osservabile la proprieta- invece di rincorrere la race: lo stato
+    si legge attraverso una funzione, e qui si conta quante volte `health()` la
+    chiama. Una lettura sola non puo- contraddirsi con se- stessa.
+    """
+    monkeypatch.setattr(main, 'SEGRETO_WEBHOOK', main.webhook_secret(BOT_FINTO))
+    letture = []
+
+    def spia():
+        letture.append(True)
+        return False
+
+    monkeypatch.setattr(main, '_stato_registrazione', spia)
+    salute = main.health()
+
+    assert len(letture) == 1, (
+        f'health() ha letto lo stato della registrazione {len(letture)} volte: fra '
+        f'una lettura e l-altra il valore puo- cambiare, e la risposta uscirebbe '
+        f'con campi che si contraddicono'
+    )
+    # E i due campi concordano, che e- la ragione per cui la lettura e- una sola.
+    assert salute['status'] == 'degraded', salute
+    assert salute['webhook_registrato'] is False, salute
+
+
+def test_lo_stato_della_registrazione_si_legge_sotto_lock(monkeypatch):
+    """La lettura prende `_WEBHOOK_LOCK`, come le scritture.
+
+    Guardia strutturale, per la stessa ragione di
+    `test_il_confronto_del_segreto_e_a_tempo_costante`: non c'e- comportamento
+    osservabile da cui dedurre la presa del lock, e «coerente col modello di
+    locking dichiarato» era precisamente il rilievo di Fable 5. Un lock preso da
+    tutte le scritture e da nessuna lettura non e- un modello, e- una decorazione.
+    """
+    import inspect
+    sorgente = inspect.getsource(main._stato_registrazione)
+    assert 'with _WEBHOOK_LOCK' in sorgente, sorgente
+    # E la funzione e- davvero quella usata da `health`, non un doppione morto.
+    assert '_stato_registrazione()' in inspect.getsource(main.health)
+
+
 def test_con_tutti_e_tre_gli_assi_a_posto_health_dice_ok(monkeypatch):
     """L'altra faccia: la spia non deve restare accesa per sempre.
 
@@ -421,6 +474,68 @@ def test_l_avvio_RITENTA_la_registrazione(monkeypatch):
 async def _senza_attesa(_secondi):
     """Sostituisce `asyncio.sleep` nei test: l'attesa vera renderebbe la suite lenta."""
     return None
+
+
+def test_l_avvio_non_RITARDA_la_disponibilita_del_servizio():
+    """L'avvio ASGI deve COMPLETARE subito, non solo lasciare libero il loop.
+
+    Questa e- l'altra meta- del bloccante precedente, e la prima correzione l'aveva
+    mancata: `asyncio.to_thread` libera l'event loop, ma un handler di `startup`
+    ASGI deve **terminare** prima che uvicorn cominci a servire. Finche- non
+    termina il processo non e- pronto: `/health` non risponde affatto — non
+    lentamente, per niente. Con tre tentativi da dieci secondi e le pause in mezzo
+    sono oltre trenta secondi di indisponibilita- a ogni deploy con la rete lenta,
+    ed e- una regressione introdotta da questa PR: prima il tentativo era uno.
+    Segnalato da Fugu Ultra, che ha visto precisamente la differenza fra «il loop
+    e- libero» e «il processo e- pronto».
+
+    Il test interroga gli handler registrati su `app`, non una funzione per nome:
+    quello che deve valere e- la proprieta- del **cablaggio**, cioe- che l'avvio del
+    servizio non aspetti la rete, non che una certa funzione si chiami in un certo
+    modo.
+    """
+    sbloccami = threading.Event()
+
+    def finta(bot, url):
+        # Piu- lunga del timeout del test, di proposito: se l'avvio l'aspettasse,
+        # il test scadrebbe. Rilasciata dentro la coroutine e non nel `finally`,
+        # perche- alla chiusura del loop `asyncio.run` attende l'executor: un
+        # thread ancora bloccato la- diventerebbe mezzo minuto di suite.
+        sbloccami.wait(20)
+        return True
+
+    async def prova():
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*(h() for h in main.app.router.on_startup)), timeout=3)
+        finally:
+            sbloccami.set()
+            compito = main._COMPITO_REGISTRAZIONE
+            if compito is not None:
+                await asyncio.wait_for(compito, timeout=15)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(main, '_chiama_set_webhook', finta)
+        mp.setattr(main, '_WEBHOOK_REGISTRATO', None)
+        mp.setattr(main, '_COMPITO_REGISTRAZIONE', None, raising=False)
+        mp.setenv('TELEGRAM_BOT_TOKEN', BOT_FINTO)
+        try:
+            asyncio.run(prova())
+        except (TimeoutError, asyncio.TimeoutError):
+            sbloccami.set()
+            raise AssertionError(
+                'l-avvio del servizio ha atteso la registrazione del webhook: fino '
+                'a che non termina, uvicorn non serve e /health non risponde. La '
+                'registrazione deve proseguire DIETRO l-avvio, non davanti.'
+            ) from None
+
+        # E la registrazione e- comunque avvenuta: metterla dietro l'avvio non
+        # deve significare non farla. Dentro il contesto, o `monkeypatch` avrebbe
+        # gia- ripristinato il valore e l'asserzione guarderebbe il vecchio stato.
+        assert main._WEBHOOK_REGISTRATO is True, (
+            'l-avvio non aspetta piu- la registrazione, ma la registrazione non e- '
+            'avvenuta: il compito e- stato perso invece che eseguito dietro'
+        )
 
 
 def test_l_avvio_non_BLOCCA_il_loop_mentre_chiama_telegram():

@@ -123,6 +123,23 @@ def _chiama_set_webhook(bot_token, public_url):
         return False
 
 
+def _stato_registrazione():
+    """L'esito dell'ultima registrazione, letto sotto lock e una volta sola.
+
+    Esiste perche' `health()` lo usava TRE volte — per `sano`, per decidere se
+    includere la chiave, per il valore — e fuori dal lock, mentre gli altri thread
+    lo scrivono dentro. Su CPython non si legge un valore corrotto, ma fra la prima
+    e la terza lettura una registrazione puo' completare, e la risposta uscirebbe
+    con `status: ok` e `webhook_registrato: false`: un endpoint diagnostico che si
+    contraddice non e' diagnostico. Era anche l'unico stato condiviso che `health()`
+    leggeva senza il suo lock, mentre per gli scarti prendeva `_SCARTI_LOCK` poche
+    righe sopra — un lock preso da tutte le scritture e da nessuna lettura e' una
+    decorazione, non un modello. Segnalato da Claude Fable 5 sulla PR #14.
+    """
+    with _WEBHOOK_LOCK:
+        return _WEBHOOK_REGISTRATO
+
+
 def assicura_registrazione(forza=False):
     """Registra il webhook se non risulta registrato. Restituisce l'esito noto.
 
@@ -189,9 +206,39 @@ def assicura_registrazione(forza=False):
         return _WEBHOOK_REGISTRATO
 
 
+_COMPITO_REGISTRAZIONE = None
+
+
 @app.on_event('startup')
+async def avvia_la_registrazione_del_webhook():
+    """Fa partire la registrazione DIETRO l'avvio, e lascia completare l'avvio.
+
+    Un handler di `startup` ASGI deve terminare prima che uvicorn cominci a
+    servire: finche' non termina il processo non e' pronto, e `/health` non
+    risponde affatto — non lentamente, per niente. `register_telegram_webhook`
+    ritenta tre volte con timeout di dieci secondi e pause in mezzo, quindi
+    attenderla qui significherebbe oltre trenta secondi di indisponibilita' a ogni
+    deploy con la rete lenta.
+
+    Metterla in un thread non basta: quello libera l'event loop, non la readiness
+    del processo. Sono due cose diverse, e la prima correzione di questo bloccante
+    aveva sistemato solo la prima. La distinzione l'ha vista Fugu Ultra sulla
+    review finale della PR #14; lo vincola
+    `test_l_avvio_non_RITARDA_la_disponibilita_del_servizio`.
+
+    Il riferimento al compito e' tenuto in una variabile di modulo perche' un
+    `Task` senza riferimenti puo' essere raccolto dal garbage collector prima di
+    finire — e in quel caso la registrazione non avverrebbe, in silenzio, che e'
+    il genere di guasto che questa PR passa il tempo a chiudere.
+    """
+    global _COMPITO_REGISTRAZIONE
+    if not os.getenv('TELEGRAM_BOT_TOKEN', ''):
+        return
+    _COMPITO_REGISTRAZIONE = asyncio.create_task(register_telegram_webhook())
+
+
 async def register_telegram_webhook():
-    """Registra il webhook all'avvio, ritentando qualche volta.
+    """Registra il webhook, ritentando qualche volta.
 
     I tentativi ripetuti coprono il caso banale e piu' probabile — un errore di
     rete momentaneo mentre il container si avvia — che senza ritentativi
@@ -617,16 +664,21 @@ def health():
     # su Railway un'istanza incapace di ricevere segnali sarebbe apparsa sana.
     # Segnalato da Fugu Ultra sulla review finale della PR #14, ed era il fratello
     # non corretto della classe che `auth` aveva gia' chiuso due righe sopra.
+    #
+    # Letto UNA volta e sotto lock (vedi `_stato_registrazione`): con tre letture
+    # separate una registrazione che completa nel mezzo faceva uscire `status: ok`
+    # accanto a `webhook_registrato: false`.
+    registrato = _stato_registrazione()
     sano = (csv_state == 'ok' and auth_state == 'ok'
-            and webhook_state == 'protetto' and _WEBHOOK_REGISTRATO is not False)
+            and webhook_state == 'protetto' and registrato is not False)
     stato = {'status': 'ok' if sano else 'degraded',
              'csv': csv_state, 'auth': auth_state, 'webhook': webhook_state,
              'feed_scartati': scarti}
-    if _WEBHOOK_REGISTRATO is not None:
+    if registrato is not None:
         # Solo quando un tentativo c'e' stato: su un'istanza senza bot la chiave
         # sarebbe rumore, e una chiave che c'e' sempre e non dice niente e' peggio
         # di una assente.
-        stato['webhook_registrato'] = _WEBHOOK_REGISTRATO
+        stato['webhook_registrato'] = registrato
     if scarti:
         stato['ultimo_scarto'] = motivo
     return stato

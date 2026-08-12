@@ -398,9 +398,28 @@ rifiutata che arriva mentre il flag dice `true` è l'unica informazione che
 Le chiamate a `setWebhook` girano sempre **in un thread**, sia all'avvio sia dalla
 richiesta: hanno un timeout di dieci secondi e l'avvio le ripete tre volte, quindi
 eseguite sull'event loop una rete lenta terrebbe fermo il servizio per decine di
-secondi — e su Railway l'healthcheck interroga `/health` proprio in quella
-finestra, per poi dichiarare guasto un deploy in cui il webhook sta soltanto
-ritentando. Segnalato da Fable 5 e Fugu Ultra.
+secondi. Segnalato da Fable 5 e Fugu Ultra.
+
+E all'avvio la registrazione parte **dietro**, non davanti: l'handler di `startup`
+crea un task e termina subito. Il thread non basta, ed è la distinzione che la prima
+correzione aveva mancato — `asyncio.to_thread` libera l'**event loop**, ma un handler
+di `startup` ASGI deve *terminare* perché uvicorn cominci a servire. Finché non
+termina il processo non è pronto e `/health` non risponde affatto: non lentamente,
+per niente. Con tre tentativi da dieci secondi sono oltre trenta secondi di
+indisponibilità a ogni deploy con la rete lenta. Segnalato da Fugu Ultra.
+
+Conseguenza operativa, scritta anche in `README.txt`: nei primi secondi dopo un
+deploy `webhook_registrato` può mancare o essere `false` perché la registrazione è
+ancora in corso. Non è un guasto; lo diventa se resta `false` dopo mezzo minuto. Il
+riferimento al task è tenuto in una variabile di modulo: un `Task` senza riferimenti
+può essere raccolto dal garbage collector prima di finire, e la registrazione non
+avverrebbe in silenzio.
+
+Il valore di `webhook_registrato` si legge **una volta e sotto lock**
+(`_stato_registrazione`). Con tre letture separate e fuori dal lock — com'era — una
+registrazione che completa nel mezzo faceva uscire `status: ok` accanto a
+`webhook_registrato: false`: un endpoint diagnostico che si contraddice non è
+diagnostico. Segnalato da Fable 5.
 
 Una registrazione conta come riuscita solo se **entrambe** le condizioni valgono:
 la risposta è arrivata **e** contiene `{"ok": true}`. Il codice HTTP da solo non

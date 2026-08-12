@@ -117,7 +117,19 @@ Il motivo non contiene mai il contenuto del segnale, e nemmeno lo stato in memor
 lo conserva (la riga si riconosce da un digest): /health e' un endpoint senza token.
 
 DA CONTROLLARE DOPO UN DEPLOY, e non e' una formalita': verifica che /health dica
-webhook_registrato true, poi manda un segnale di prova dal canale. Se fosse false,
+status ok e webhook_registrato true, poi manda un segnale di prova dal canale.
+
+ASPETTA QUALCHE SECONDO PRIMA DI GUARDARE. La registrazione del webhook parte
+DIETRO l'avvio, non davanti: il servizio risponde subito e la registrazione
+prosegue in parallelo, ritentando fino a tre volte. Nei primi secondi /health puo'
+quindi non avere ancora la chiave webhook_registrato, o averla false: non e' un
+guasto, e' una registrazione ancora in corso. Se dopo mezzo minuto e' ancora false,
+allora e' un guasto e sotto c'e' scritto dove guardare.
+Prima questa attesa stava DAVANTI all'avvio: uvicorn non serviva finche' la
+registrazione non era finita, quindi con la rete lenta /health non rispondeva per
+oltre trenta secondi dopo ogni deploy. Un handler di startup ASGI deve terminare
+perche' il processo sia pronto, e metterlo in un thread libera l'event loop ma non
+la readiness: sono due cose diverse. Se fosse false,
 Telegram puo' conservare una registrazione vecchia SENZA segreto e consegnare senza
 header: il relay rifiuta, ritenta la registrazione da se' (freno di 60 secondi) e i
 segnali riprendono col giro dopo. Se resta false, il problema e' PUBLIC_URL, la
