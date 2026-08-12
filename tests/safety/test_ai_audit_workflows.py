@@ -1810,7 +1810,43 @@ def _prefissi_guard(path: Path) -> list:
 
 
 def _e_marcata_non_completa(testo: str, path: Path) -> bool:
+    """Vero se il chiamante di quel workflow tratterebbe `testo` come review incompleta."""
     return any(testo.lstrip().startswith(g) for g in _prefissi_guard(path))
+
+
+def test_la_premessa_della_whitelist_di_fable_resta_vera():
+    """Fable dichiara completo solo `end_turn`, e quella scelta ha una PREMESSA.
+
+    Su Anthropic ci sono altri due modi legittimi di finire bene: `tool_use`, se al
+    modello si danno strumenti, e `stop_sequence`, se si passano `stop_sequences`.
+    Trattarli come troncamento e- corretto **solo** perche- questo workflow non fa
+    ne- l'una ne- l'altra cosa: chiede una review di testo e nient'altro.
+
+    Segnalato da GPT-5.5 come rischio manuale sulla PR #20, e la segnalazione era
+    giusta: la premessa viveva in un commento, quindi aggiungere `tools` al payload
+    un domani non avrebbe fatto diventare rosso niente — ogni review con
+    `stop_reason=tool_use` sarebbe stata marcata troncata, il `done_marker` non
+    sarebbe mai stato pubblicato, e la review si sarebbe ripagata a ogni push. Un
+    guasto silenzioso e costoso, non un errore.
+
+    Questo test lega la premessa alla whitelist: se un giorno il payload guadagna
+    strumenti o sequenze di arresto, questo diventa rosso e obbliga a riguardare
+    `MOTIVI_COMPLETI` invece di scoprirlo dalla bolletta.
+    """
+    corpo = _solo_codice(_blocco(FABLE, 'call_model'))
+    assert '"tools"' not in corpo, (
+        'il payload di Fable ora passa `tools`: `stop_reason=tool_use` diventa un modo '
+        'LEGITTIMO di finire, e la whitelist `MOTIVI_COMPLETI` va aggiornata o ogni '
+        'review verra- marcata troncata e ripagata a ogni push'
+    )
+    assert '"stop_sequences"' not in corpo, (
+        'il payload di Fable ora passa `stop_sequences`: `stop_reason=stop_sequence` '
+        'diventa un esito atteso e va aggiunto a `MOTIVI_COMPLETI`'
+    )
+    assert 'MOTIVI_COMPLETI = ("end_turn",)' in corpo, (
+        'la whitelist e- cambiata: se ha guadagnato valori, le due asserzioni qui sopra '
+        'non descrivono piu- la premessa su cui si regge'
+    )
 
 
 def _call_model_di_fable(monkeypatch, risposta):
