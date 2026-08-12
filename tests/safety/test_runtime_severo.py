@@ -49,6 +49,11 @@ def test_i_valori_che_NON_accendono_la_modalita_severa(monkeypatch, valore):
 
 @pytest.mark.parametrize('valore', ['1', 'true', 'si', 'qualunque-cosa'])
 def test_i_valori_che_la_accendono(monkeypatch, valore):
+    """Qualunque valore diverso dai quattro spenti la accende, non solo `1`.
+
+    Deliberato: chi scrive `true` o `si` intende accenderla, e una lettura che
+    accettasse solo `1` gliela lascerebbe spenta senza dirlo.
+    """
     monkeypatch.setenv(runtime.VARIABILE_SEVERA, valore)
     assert runtime.severa() is True
 
@@ -67,6 +72,11 @@ def test_senza_la_variabile_e_spenta(monkeypatch):
 # ------------------------------------------------------- le due uscite di `_manca`
 
 def test_in_locale_un_runtime_mancante_SALTA(monkeypatch):
+    """E il motivo arriva intero nello skip: il nome del runtime e il dettaglio.
+
+    Uno skip senza motivo scritto e' vietato da CLAUDE.md, e sarebbe indistinguibile
+    da un test disabilitato per pigrizia.
+    """
     monkeypatch.delenv(runtime.VARIABILE_SEVERA, raising=False)
     with pytest.raises(Skipped) as esito:
         runtime._manca('cosa-finta', 'motivo di prova')
@@ -106,6 +116,8 @@ def test_esigi_node_restituisce_un_percorso_dove_node_esiste():
 
 
 def test_senza_node_e_in_CI_esigi_node_FALLISCE(monkeypatch):
+    """`which` finto a `None`: su un runner senza node i 24 casi del motore JS
+    devono diventare rossi, non sparire dal conteggio."""
     monkeypatch.setenv(runtime.VARIABILE_SEVERA, '1')
     monkeypatch.setattr(runtime.shutil, 'which', lambda _: None)
     with pytest.raises(Failed):
@@ -133,6 +145,7 @@ def _import_rotto(monkeypatch):
     vero = builtins.__import__
 
     def finto(nome, *resto, **chiavi):
+        """Import di rimpiazzo: solleva su playwright, delega su tutto il resto."""
         if nome.startswith('playwright'):
             raise ImportError('playwright non installato (finto)')
         return vero(nome, *resto, **chiavi)
@@ -156,6 +169,11 @@ def test_senza_playwright_e_in_locale_esigi_browser_SALTA(monkeypatch):
 
 
 def test_senza_playwright_e_in_CI_esigi_browser_FALLISCE(monkeypatch):
+    """Il gemello severo del precedente, e il messaggio deve nominare la variabile.
+
+    Chi legge questo fallimento su un runner deve capire in una riga che il test
+    non e' rotto: manca un pacchetto, e la CI ha scelto di non nasconderlo.
+    """
     monkeypatch.setenv(runtime.VARIABILE_SEVERA, '1')
     _import_rotto(monkeypatch)
     with pytest.raises(Failed) as esito:
@@ -259,19 +277,31 @@ def test_senza_chromium_pinnato_NE_avviabile_e_in_CI_FALLISCE(monkeypatch):
     monkeypatch.setattr(runtime, 'CHROMIUM_PINNATO', INESISTENTE)
 
     class ChromiumRotto:
+        """Il Chromium di un runner dove `playwright install` non e' passato."""
+
         def launch(self, **_):
+            """Solleva come farebbe Playwright con l'eseguibile assente."""
             raise RuntimeError('eseguibile non trovato')
 
     class ContestoFinto:
+        """Il gestore di contesto di `sync_playwright()`, ridotto all'osso."""
+
         chromium = ChromiumRotto()
 
         def __enter__(self):
+            """Restituisce se stesso, come fa il vero `sync_playwright()`."""
             return self
 
         def __exit__(self, *_):
+            """Non ingoia le eccezioni: `esigi_browser` deve poterle vedere."""
             return False
 
-    import playwright.sync_api as vero
+    # Senza questo, su una macchina senza Playwright il test ERRORE invece di
+    # saltare — cioe' esattamente il difetto che questo file esiste per vincolare,
+    # riprodotto nel file stesso. Segnalato da CodeRabbit.
+    vero = pytest.importorskip(
+        'playwright.sync_api',
+        reason='playwright non installato: questo caso monkeypatcha il suo modulo')
     monkeypatch.setattr(vero, 'sync_playwright', lambda: ContestoFinto())
 
     with pytest.raises(Failed) as esito:
@@ -285,11 +315,15 @@ class PlaywrightFinto:
     """Registra come `apri_chromium` ha chiamato `launch`, e niente altro."""
 
     def __init__(self):
+        """Prepara la lista delle chiamate osservate e il finto `chromium`."""
         self.chiamate = []
         madre = self
 
         class Chromium:
+            """Registra gli argomenti di `launch` invece di aprire un browser."""
+
             def launch(self, **kwargs):
+                """Annota come e' stata chiamata e restituisce un segnaposto."""
                 madre.chiamate.append(kwargs)
                 return 'browser-finto'
 
@@ -297,6 +331,11 @@ class PlaywrightFinto:
 
 
 def test_col_pinnaggio_locale_passa_il_percorso(monkeypatch, tmp_path):
+    """Il ramo locale: se il binario pinnato esiste, `launch` lo riceve.
+
+    Il file finto basta che esista — non viene mai eseguito, perche' qui si
+    osserva COME `apri_chromium` chiama `launch`, non cosa fa il browser.
+    """
     finto_binario = tmp_path / 'chrome'
     finto_binario.write_text('non e- un eseguibile, basta che esista')
     monkeypatch.setattr(runtime, 'CHROMIUM_PINNATO', finto_binario)

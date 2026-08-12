@@ -51,7 +51,17 @@ jobs:
         python: ['3.11']
 
     steps:
+      # `persist-credentials: false` non e' pignoleria: `actions/checkout@v4`
+      # lascia per default il token di installazione nel git config locale, e il
+      # codice dei test — che su una PR arriva da un contributore — potrebbe
+      # leggerlo da li'. `permissions: contents: read` NON disattiva quel
+      # comportamento: limita cosa il token puo- fare, non chi lo puo- leggere.
+      # Questa suite non fa nessuna operazione git dopo il checkout, quindi il
+      # token non serve a niente. Segnalato da CodeRabbit, e da zizmor come
+      # `artipacked`.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:

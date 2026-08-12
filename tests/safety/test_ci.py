@@ -42,6 +42,11 @@ WORKFLOW = RADICE / '.github' / 'workflows' / 'test.yml'
 
 @pytest.fixture(scope='module')
 def testo() -> str:
+    """Il workflow come testo, e il fallimento se non esiste affatto.
+
+    E' il primo controllo di tutti, e il messaggio dice perche' importa: senza
+    quel file, un check verde su una PR non dice niente sull'esito dei test.
+    """
     assert WORKFLOW.is_file(), (
         f'{WORKFLOW.relative_to(RADICE)} non esiste: nessun workflow esegue i test, '
         'quindi un check verde su una PR non dice niente sul loro esito'
@@ -77,6 +82,26 @@ def _comandi(dati):
     return fuori
 
 
+def _invocazioni(dati, comando):
+    """Le righe che ESEGUONO `comando`, non quelle che lo nominano.
+
+    `echo "playwright install chromium"` contiene la stringa e non installa
+    niente: una guardia che cerca sottostringhe nel `run:` resterebbe verde su un
+    workflow che ha smesso di fare il suo lavoro. Segnalato da CodeRabbit, ed e' la
+    stessa classe — testo invece di comportamento — del commento che ingannava il
+    controllo sulla variabile severa.
+    """
+    trovate = []
+    for blocco in _comandi(dati):
+        for riga in blocco.splitlines():
+            riga = riga.strip()
+            if riga.startswith('#') or riga.startswith(('echo ', 'echo"', "echo'")):
+                continue
+            if comando in riga:
+                trovate.append(riga)
+    return trovate
+
+
 def test_il_workflow_esegue_pytest(dati):
     """Il minimo: che il comando ci sia, e sull'intera suite.
 
@@ -84,8 +109,8 @@ def test_il_workflow_esegue_pytest(dati):
     spunta identica, e questo controllo esiste perche' quella differenza non si
     vede guardando il colore del check.
     """
-    comandi = [c for c in _comandi(dati) if 'pytest' in c]
-    assert comandi, 'il workflow non esegue pytest da nessuna parte'
+    comandi = _invocazioni(dati, 'pytest')
+    assert comandi, 'il workflow non ESEGUE pytest da nessuna parte'
 
     interi = [c for c in comandi if 'tests/' not in c]
     assert interi, (
@@ -143,7 +168,7 @@ def test_il_workflow_installa_il_browser_che_i_test_pretendono(dati):
     esiste, quindi il browser va installato, o `esigi_browser()` fallisce in
     modalita' severa a ogni esecuzione.
     """
-    installa = [c for c in _comandi(dati) if 'playwright install' in c]
+    installa = _invocazioni(dati, 'playwright install')
     assert installa, \
         'il workflow non installa Chromium: i test browser fallirebbero sempre'
     assert any('chromium' in c for c in installa), \
@@ -171,13 +196,39 @@ def test_il_workflow_NON_riceve_segreti(dati):
             f'permesso di scrittura non necessario: {chiave}: {valore}'
 
 
+def test_il_checkout_NON_lascia_il_token_nel_git_config(dati):
+    """`persist-credentials: false`, e `contents: read` non lo sostituisce.
+
+    `actions/checkout@v4` per default scrive il token di installazione nel git
+    config locale del checkout. Il codice dei test — che su una pull request puo'
+    arrivare da un contributore — puo' leggerlo da li'. `permissions: contents:
+    read` limita cosa quel token PUO' FARE, non chi lo puo' LEGGERE: sono due
+    controlli diversi, e confonderli e' il motivo per cui questo test esiste
+    accanto a quello sui permessi invece che dentro.
+
+    Questa suite non esegue nessuna operazione git dopo il checkout, quindi il
+    token non serve. Segnalato da CodeRabbit, e da zizmor come `artipacked`.
+    """
+    checkout = [p for job in (dati.get('jobs') or {}).values()
+                for p in job.get('steps') or []
+                if str(p.get('uses', '')).startswith('actions/checkout@')]
+    assert checkout, 'nessun passo di checkout: il workflow non vedrebbe il codice'
+    for passo in checkout:
+        con = passo.get('with') or {}
+        assert con.get('persist-credentials') is False, (
+            'il checkout persiste il token nel git config locale: il codice dei '
+            'test potrebbe leggerlo. Metti `persist-credentials: false` '
+            f'(valore attuale: {con.get("persist-credentials")!r})'
+        )
+
+
 def test_il_workflow_installa_le_dipendenze_DEI_TEST(dati):
     """`requirements.txt` non basta: pytest e playwright stanno in quello dei test.
 
     Senza, la CI fallirebbe all'import — rosso onesto, ma per il motivo sbagliato,
     e chi lo legge perde tempo su un guasto di configurazione credendo a un test.
     """
-    assert any('requirements-dev.txt' in c for c in _comandi(dati)), (
+    assert _invocazioni(dati, 'requirements-dev.txt'), (
         'il workflow non installa requirements-dev.txt: pytest e playwright stanno '
         'la- dentro, e senza la CI fallirebbe all-import'
     )
