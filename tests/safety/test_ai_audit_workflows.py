@@ -1942,6 +1942,40 @@ INDENTATO = '[\n  "manual-review-required",\n  "{finale}"\n]'
 
 
 @pytest.mark.parametrize('path', CON_GATE_FINALE, ids=lambda p: p.name)
+def test_le_variabili_che_il_guard_bash_legge_sono_DICHIARATE(path):
+    """Il guard funziona date le variabili. Questo verifica che ci siano.
+
+    Trovato da Claude Fable 5 come `[INSUFFICIENT_CONTEXT]` sulla PR #20: il guard
+    legge `${LABEL_EVENTO}` e `${LABELS_PRESENTI}` con la sostituzione `:-`, quindi se
+    non fossero dichiarate nell'`env` del job diventerebbero **vuote** invece di dare
+    errore, e una chiave assente su un gate armato tornerebbe a uscire VERDE —
+    riaprendo in silenzio la falla che il fix chiude.
+
+    Sul codice attuale l'affermazione e' SMENTITA: tutte e tre sono dichiarate in
+    entrambi i workflow, verificato leggendo l'env dello YAML. Ma la domanda ha
+    scoperto un buco vero, e non nel workflow: nel test. `_esegui_guard_bash`
+    fornisce l'ambiente da se-, quindi dimostra che la logica bash e' giusta DATE le
+    variabili, non che il workflow le passi. Cancellarle dall'`env` avrebbe lasciato
+    quel test verde e la produzione fail-open.
+    """
+    doc = _carica(path)
+    env = {**(doc.get('env') or {}), **(doc['jobs']['review'].get('env') or {})}
+    for variabile in ('FINAL_LABEL', 'LABELS_PRESENTI', 'LABEL_EVENTO'):
+        assert variabile in env, (
+            f'{path.name}: {variabile} non e- dichiarata nell-env del job. Il guard '
+            'in bash la legge con `:-`, quindi diventerebbe una stringa VUOTA senza '
+            'errore: un Secret assente su gate armato uscirebbe VERDE'
+        )
+    # E devono venire dal payload dell'evento, non da un valore fisso: una costante
+    # scritta a mano direbbe sempre la stessa cosa e il guard deciderebbe sul nulla.
+    for variabile in ('LABELS_PRESENTI', 'LABEL_EVENTO'):
+        assert 'github.event' in str(env[variabile]), (
+            f'{path.name}: {variabile} non viene dal payload dell-evento '
+            f'({env[variabile]!r}): il guard deciderebbe su un valore fisso'
+        )
+
+
+@pytest.mark.parametrize('path', CON_GATE_FINALE, ids=lambda p: p.name)
 @pytest.mark.parametrize('etichette, label_evento, atteso', (
     (COMPATTO, '', 1),
     (INDENTATO, '', 1),
