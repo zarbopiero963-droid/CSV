@@ -36,10 +36,20 @@ AUTENTICAZIONE
 CSV_ACCESS_TOKEN protegge dieci rotte: i due feed CSV (/xtrader.csv e
 /profiles/NOME.csv, col parametro ?token=) e le otto API di gestione (con
 l'header X-Admin-Token). Quattro sono in lettura, sei in scrittura.
-Restano pubbliche soltanto /, /health, /telegram/webhook (protetta dal filtro
-delle chat) e /app, che serve i file statici del prototipo: e' un mount, non una
-rotta, e non ha ne' puo' avere un token perche' e' la pagina che si apre nel
-browser. Nulla di sensibile deve finire in web/: lo vincola la guardia
+Restano pubbliche soltanto /, /health, /telegram/webhook e /app.
+
+ATTENZIONE su /telegram/webhook: NON e' autenticata. Il filtro dei chat_id fa
+INSTRADAMENTO — decide a quale feed appartiene un messaggio — non autenticazione,
+perche' il chat_id arriva dal corpo della richiesta e quindi lo scrive il mittente.
+Il servizio non distingue una consegna vera di Telegram da una costruita da altri,
+quindi oggi esiste un percorso di SCRITTURA non autenticato verso i segnali, che
+aggira CSV_ACCESS_TOKEN. Misurato: GET /xtrader.csv senza token da' 401, POST
+/telegram/webhook senza alcun token da' 200 e la riga finisce nel feed.
+La correzione e' il secret_token di Telegram: vedi Issue #13. Fino a quel momento
+questa riga descrive un rischio noto, non una protezione.
+
+/app serve i file statici del prototipo: e' un mount, non una rotta, e non ha ne'
+puo' avere un token perche' e' la pagina che si apre nel browser. Nulla di sensibile deve finire in web/: lo vincola la guardia
 tests/safety/test_static_mount.py, che controlla il tipo dei file E il loro
 contenuto (token dalla forma nota, chat_id non dichiarati finti).
 Il controllo e' FAIL-CLOSED: se CSV_ACCESS_TOKEN non e' configurato il servizio

@@ -188,9 +188,13 @@ def auth(token):
     di risposta racconta quanti caratteri iniziali erano giusti. Su un token unico
     e condiviso l'attacco e' poco praticabile attraverso Internet, ma il confronto
     a tempo costante e' gratuito e non richiede di stimare quanto sia praticabile.
-    Il confronto avviene sui BYTE: `compare_digest` solleva `TypeError` su una
-    stringa non ASCII, e un token con un accento diventerebbe un 500 invece di un
-    401 — c'e' un test che lo verifica.
+    Il confronto avviene sui BYTE, e il perche' e' un «se» non un «e'»: passando
+    le STRINGHE, `compare_digest` solleverebbe `TypeError` su una non ASCII, e un
+    token con un accento diventerebbe un 500 invece di un 401 — un modo per far
+    scrivere una traccia nei log con un solo parametro di query. Codificando
+    entrambi i lati quel caso non esiste piu', e un test lo verifica. Riformulato
+    perche' la versione precedente si poteva leggere come se il TypeError avvenisse
+    ancora: segnalato da Fugu Ultra.
     """
     if not TOKEN:
         raise HTTPException(503, 'servizio non configurato: manca CSV_ACCESS_TOKEN')

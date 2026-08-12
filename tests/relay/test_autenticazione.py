@@ -51,7 +51,14 @@ from tests.servizio import relay_avviato  # noqa: E402
 ROTTE_PUBBLICHE = {
     ('GET', '/'),                    # pagina di cortesia
     ('GET', '/health'),              # deve rispondere anche a servizio guasto
-    ('POST', '/telegram/webhook'),   # la chiama Telegram: la protegge il filtro chat
+    # La chiama Telegram, quindi non puo' pretendere `CSV_ACCESS_TOKEN`. Ma
+    # «pubblica» qui vuol dire NON AUTENTICATA, non «protetta da altro»: il filtro
+    # dei chat_id fa instradamento, non autenticazione, perche' il chat_id arriva
+    # dal corpo della richiesta. Misurato: un POST forgiato senza alcun token
+    # inserisce una riga nel feed che XTrader legge, mentre leggerlo senza token
+    # da- 401. La correzione e- il secret_token di Telegram — Issue #13 — e finche-
+    # non c'e- questa voce elenca un rischio noto, non una difesa.
+    ('POST', '/telegram/webhook'),
 }
 
 # I MOUNT sono un'altra cosa dalle rotte, e vanno dichiarati a parte: non hanno
