@@ -69,6 +69,55 @@ def test_ogni_caso_singolarmente(casi, subtests=None):
         assert c['ok'], f'{c["nome"]}: {c.get("errore")}'
 
 
+def test_le_due_implementazioni_RIFIUTANO_lo_stesso_evento_vuoto(casi):
+    """Regola 3 sul caso corretto in `main.py` il 12/08/2026.
+
+    Il motore JS era gia' giusto: `EventName` sta fra le colonne obbligatorie e
+    `missing` si calcola dopo il `trim`, quindi un evento vuoto da' `complete: false`
+    e nessuna riga. Il relay no: `''.splitlines()[0]` sollevava `IndexError`, cioe'
+    un 500 sul webhook pubblico e Telegram che riconsegna lo stesso messaggio.
+
+    Le due implementazioni erano quindi **divergenti su un ingresso reale**, e
+    nessun test lo vedeva perche' ciascuna passava i propri. Questo confronto e' il
+    posto dove quella divergenza diventa rossa: gli stessi quattro messaggi, e
+    l'unica cosa che si pretende e' che entrambe rifiutino.
+
+    Non si confrontano i valori di ritorno — uno e' `{complete, missing}` e l'altro
+    e' `None` — ma la DECISIONE, che e' l'unica cosa che il contratto vincola.
+    """
+    import importlib
+    import sys
+    sys.path.insert(0, str(RADICE))
+    main = importlib.import_module('main')
+
+    esportato = next((c for c in casi if 'marcatore senza evento' in c['nome']), None)
+    assert esportato and esportato['ok'], \
+        'il caso JS sull\'evento vuoto non e\' passato: ' + str(esportato and esportato.get('errore'))
+
+    # La stessa config del caso JS, nella forma che `parse_message` si aspetta.
+    cfg = {'name': 'confronto', 'header': 'P.Bet. PREMACHT 0,5HT',
+           'market_name': 'Over/Under 1,5 gol', 'market_type': 'OVER_UNDER_15',
+           'selection_name': 'Over 1,5 goal', 'handicap': '0', 'bet_type': 'PUNTA'}
+
+    divergenti = []
+    for esito in esportato['dettaglio']:
+        messaggio = esito['messaggio']
+        js_rifiuta = esito['complete'] is False
+        try:
+            py_rifiuta = main.parse_message(messaggio, cfg) is None
+        except Exception as e:  # noqa: BLE001 - un'eccezione E' la divergenza in prova
+            divergenti.append(f'{messaggio!r}: JS rifiuta, Python SOLLEVA {type(e).__name__}')
+            continue
+        if js_rifiuta != py_rifiuta:
+            divergenti.append(
+                f'{messaggio!r}: JS rifiuta={js_rifiuta}, Python rifiuta={py_rifiuta}')
+
+    assert not divergenti, (
+        'le due implementazioni dello stesso contratto non concordano:\n'
+        + '\n'.join(f'  - {r}' for r in divergenti)
+    )
+
+
 def test_il_motore_js_e_il_relay_producono_lo_STESSO_formato(casi):
     """Guardiano della regola 3: due implementazioni, un contratto.
 

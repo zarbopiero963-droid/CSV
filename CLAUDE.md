@@ -37,6 +37,7 @@ Il merge resta sempre manuale del repository owner.
 | Runtime esterni dei test (node, Chromium) e modalita' severa | `tests/runtime.py` |
 | Guardie sulla CI e sul suo meccanismo | `tests/safety/test_ci.py`, `tests/safety/test_runtime_severo.py` |
 | Test del relay: contratto CSV sui byte della risposta HTTP | `tests/relay/test_csv_contract.py` |
+| Test del relay: autenticazione, webhook, parser | `tests/relay/test_autenticazione.py`, `tests/relay/test_webhook.py`, `tests/relay/test_parse_message.py` |
 | Test del motore e del contratto CSV (casi eseguiti in node) | `tests/engine/engine_cases.mjs`, `tests/engine/test_engine_contract.py` |
 | Test del prototipo in browser (Playwright/Chromium) | `tests/web/prototype_flow.py`, `tests/web/mobile_layout.py`, `tests/web/test_prototype_flow.py` |
 | Test della facciata: HTTP e browser | `tests/relay/test_facciata.py`, `tests/web/sito_flow.py`, `tests/web/test_sito.py` |

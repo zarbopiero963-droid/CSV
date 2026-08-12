@@ -249,6 +249,29 @@ caso('parser: il trim della config non e- l-unica difesa (EventName con trim)', 
   return r.missing;
 });
 
+caso('parser: marcatore senza evento, confronto col motore Python', () => {
+  // Regola 3, sul caso corretto in main.py il 12/08/2026. Il motore JS era gia-
+  // giusto e il relay no: `''.splitlines()[0]` sollevava IndexError, quindi 500 sul
+  // webhook. Questo caso esporta gli esiti del JS sui quattro ingressi misurati, e
+  // il wrapper pytest li confronta con `parse_message`: se una delle due torna ad
+  // accettare un evento vuoto, la divergenza diventa rossa invece di restare
+  // invisibile perche- ciascuna passa i propri test.
+  const ingressi = [
+    `P.Bet. PREMACHT 0,5HT\n${VS}`,
+    `P.Bet. PREMACHT 0,5HT\n${VS}   `,
+    `P.Bet. PREMACHT 0,5HT\n${VS}\t`,
+    `P.Bet. PREMACHT 0,5HT\nSQUADRA-A v SQUADRA-B ${VS}`,
+  ];
+  const esiti = ingressi.map(m => {
+    const r = runParser(m, configProduzione());
+    return { messaggio: m, complete: r.complete, mancanti: r.missing };
+  });
+  for (const e of esiti) {
+    eq(e.complete, false, `evento vuoto non deve essere completo: ${JSON.stringify(e.messaggio)}`);
+  }
+  return esiti;
+});
+
 caso('parser: Provider di soli spazi vale come mancante', () => {
   const cfg = configProduzione();
   // Stessa classe di difetto su una colonna alimentata da una costante: una

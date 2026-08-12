@@ -26,6 +26,21 @@ PROVA DI UN PARSER
 POST /api/parsers/NOME/test
 Header: X-Admin-Token: TOKEN
 Body JSON: {"message":"testo completo del messaggio"}
+Un messaggio che il parser non riconosce da' 422, non 500.
+
+QUANDO UN MESSAGGIO NON VIENE RICONOSCIUTO
+Il parser cerca l'header del parser nel testo e poi la riga che contiene il
+marcatore. Se l'header manca, se nessuna riga ha il marcatore, o se dopo il
+marcatore non c'e' niente, il messaggio e' NON RICONOSCIUTO: il feed non viene
+toccato e il webhook risponde 200 con {"ignored":"parser_no_match"}.
+Il 200 e' deliberato: Telegram RITENTA le consegne fallite, quindi rispondere con
+un errore su un messaggio che sarebbe storto anche al secondo tentativo fa tornare
+lo stesso messaggio in loop.
+Fino al 12/08/2026 il terzo caso rispondeva 500. Un messaggio con il marcatore in
+CODA alla riga - "SQUADRA-A v SQUADRA-B (marcatore)", che e' come scrive chi mette
+le squadre prima - lasciava l'evento vuoto e faceva sollevare il parser. Se un
+canale era scritto cosi', ogni suo messaggio dava 500 e nessun segnale arrivava
+mai: il sintomo era il servizio che risponde e il feed che resta vuoto.
 
 INSERIMENTO MANUALE (usa il parser predefinito o quello indicato)
 POST /api/test-message?parser=Parser_Telegram_XTrader_v1
