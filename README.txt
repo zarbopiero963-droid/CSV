@@ -38,23 +38,6 @@ CSV_ACCESS_TOKEN protegge dieci rotte: i due feed CSV (/xtrader.csv e
 l'header X-Admin-Token). Quattro sono in lettura, sei in scrittura.
 Restano pubbliche soltanto /, /health, /telegram/webhook e /app.
 
-/telegram/webhook non usa CSV_ACCESS_TOKEN — la chiama Telegram, non un client
-nostro — ma NON e' aperta: pretende l'header X-Telegram-Bot-Api-Secret-Token e
-risponde 403 senza. Il filtro dei chat_id NON e' quella protezione: fa
-instradamento, decide a quale feed appartiene un messaggio, e non puo' autenticare
-perche' il chat_id arriva dal corpo e quindi lo scrive il mittente. Prima del
-secret_token questo endpoint era un percorso di SCRITTURA non autenticato verso i
-segnali: misurato, un POST forgiato senza alcun token rispondeva 200 e la riga
-entrava nel feed, mentre leggere lo stesso feed dava 401.
-Il segreto e' DERIVATO da TELEGRAM_BOT_TOKEN, non e' una variabile da impostare:
-esiste sempre dove esiste il bot, non sta nel repository, e Telegram lo riceve
-alla registrazione all'avvio. Senza TELEGRAM_BOT_TOKEN non c'e' webhook registrato
-e l'enforcement non si attiva - e' lo stato dello sviluppo locale.
-
-/app serve i file statici del prototipo: e' un mount, non una rotta, e non ha ne'
-puo' avere un token perche' e' la pagina che si apre nel browser. Nulla di sensibile deve finire in web/: lo vincola la guardia
-tests/safety/test_static_mount.py, che controlla il tipo dei file E il loro
-contenuto (token dalla forma nota, chat_id non dichiarati finti).
 Il controllo e' FAIL-CLOSED: se CSV_ACCESS_TOKEN non e' configurato il servizio
 risponde 503 "servizio non configurato" a tutte le rotte protette, e NON le
 lascia aperte. Un token sbagliato o assente nella richiesta da' invece 401: i due
@@ -65,6 +48,37 @@ rispondeva 200, feed e API di scrittura compresi, senza alcun errore nei log.
 Cancellare quella variabile dalla dashboard rendeva il servizio scrivibile da
 Internet. Non farlo: si controlla su /health.
 
+/telegram/webhook non usa CSV_ACCESS_TOKEN — la chiama Telegram, non un client
+nostro — ma NON e' aperta: pretende l'header X-Telegram-Bot-Api-Secret-Token e
+risponde 403 senza. Il filtro dei chat_id NON e' quella protezione: fa
+instradamento, decide a quale feed appartiene un messaggio, e non puo' autenticare
+perche' il chat_id arriva dal corpo e quindi lo scrive il mittente. Prima del
+secret_token questo endpoint era un percorso di SCRITTURA non autenticato verso i
+segnali: misurato, un POST forgiato senza alcun token rispondeva 200 e la riga
+entrava nel feed, mentre leggere lo stesso feed dava 401.
+Il segreto e' DERIVATO da TELEGRAM_BOT_TOKEN, non e' una variabile da impostare:
+esiste sempre dove esiste il bot, non sta nel repository, e Telegram lo riceve
+alla registrazione all'avvio.
+Senza TELEGRAM_BOT_TOKEN il webhook RIFIUTA TUTTO: senza bot non esiste una
+registrazione presso Telegram, quindi nessuna consegna legittima puo' arrivare e
+rifiutare non costa niente. Non c'e' variabile di override per lo sviluppo locale,
+di proposito: sarebbe una scorciatoia che un domani finisce impostata in
+produzione. Chi prova in locale imposta un TELEGRAM_BOT_TOKEN finto.
+Se la registrazione fallisce l'enforcement RESTA attivo - legarlo all'esito
+riaprirebbe la scrittura non autenticata ogni volta che la rete fa i capricci - e
+il blackout si evita ritentando: tre volte all'avvio, e poi a ogni consegna
+rifiutata, perche' una consegna senza header e' essa stessa la prova che Telegram
+non conosce il segreto. Telegram ritenta le consegne, quindi il segnale arriva col
+giro dopo. Il ritentativo da richiesta ha un freno di 60 secondi: quel percorso lo
+raggiunge chiunque, e senza freno una raffica di POST forgiati diventerebbe una
+raffica di chiamate verso Telegram fatte da noi.
+
+/app serve i file statici del prototipo: e' un mount, non una rotta, e non ha ne'
+puo' avere un token perche' e' la pagina che si apre nel browser. Nulla di
+sensibile deve finire in web/: lo vincola la guardia
+tests/safety/test_static_mount.py, che controlla il tipo dei file E il loro
+contenuto (token dalla forma nota, chat_id non dichiarati finti).
+
 CONTROLLO
 GET /health
 Risponde {"status","csv","auth","webhook","feed_scartati"}, piu' "ultimo_scarto"
@@ -73,16 +87,11 @@ registrazione c'e' stato. "csv" e' l'esito del verificatore di formato;
 "auth" vale "ok" oppure "non configurato" e in quel caso "status" diventa
 "degraded" — a differenza degli scarti, una variabile mancante non si ripara da
 se'. /health non ha token, quindi dice se il token c'e', mai quale;
-"webhook" vale "protetto" (l'header viene pretesso) o "nessun bot";
+"webhook" vale "protetto" (l'header viene preteso) o "chiuso senza bot"
+(e in quel caso ogni consegna viene rifiutata);
 "webhook_registrato" e' l'esito dell'ultima setWebhook all'avvio, e se e' false
 "status" diventa "degraded".
 
-DA CONTROLLARE DOPO UN DEPLOY, e non e' una formalita': se webhook_registrato e'
-false, Telegram puo' conservare una registrazione vecchia SENZA segreto, continuare
-a consegnare senza header, e il relay rifiuta tutto — i segnali si fermano in
-silenzio. E' il motivo per cui quell'esito e' esposto qui e fa scattare degraded.
-Rimedio: un nuovo deploy, che ritenta la registrazione. Verifica dopo ogni deploy
-che /health dica webhook_registrato true, poi manda un segnale di prova.
 "feed_scartati" conta le RIGHE DISTINTE salvate che non hanno passato la verifica
 e sono state servite come feed vuoto - non le richieste che le incontrano, perche'
 XTrader interroga il feed a raffica e una sola riga guasta resterebbe tale per
@@ -95,6 +104,13 @@ Il valore e' PER PROCESSO e si azzera al riavvio: con piu' worker o piu' istanze
 ogni risposta riporta solo la propria quota, non un totale globale.
 Il motivo non contiene mai il contenuto del segnale, e nemmeno lo stato in memoria
 lo conserva (la riga si riconosce da un digest): /health e' un endpoint senza token.
+
+DA CONTROLLARE DOPO UN DEPLOY, e non e' una formalita': verifica che /health dica
+webhook_registrato true, poi manda un segnale di prova dal canale. Se fosse false,
+Telegram puo' conservare una registrazione vecchia SENZA segreto e consegnare senza
+header: il relay rifiuta, ritenta la registrazione da se' (freno di 60 secondi) e i
+segnali riprendono col giro dopo. Se resta false, il problema e' PUBLIC_URL, la
+rete, o il token del bot - e li' serve guardare.
 
 Il parser attuale riconosce un messaggio contenente "P.Bet. PREMACHT 0,5HT", cerca la riga con 🆚, prende il testo successivo e converte " v " in " - ".
 

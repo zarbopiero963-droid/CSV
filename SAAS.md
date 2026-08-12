@@ -342,12 +342,48 @@ un webhook aperto: due modi di sbagliare. Derivandolo, il valore esiste sempre
 dove esiste il bot, non sta nel repository, e Telegram lo riceve alla
 registrazione all'avvio.
 
-`/health` espone due cose diverse: `webhook` dice se l'enforcement è attivo,
-`webhook_registrato` se l'ultima `setWebhook` è riuscita. La seconda esiste per un
-caso preciso — se Telegram conserva una registrazione vecchia senza segreto e la
-nuova chiamata fallisce, continua a consegnare senza header e il relay rifiuta
-tutto, fermando i segnali in silenzio. È un guasto più grave del difetto che
-l'enforcement chiude, quindi fa scattare `degraded` invece di restare invisibile.
+**Senza bot il webhook rifiuta tutto**, non accetta. Senza `TELEGRAM_BOT_TOKEN` non
+esiste una registrazione presso Telegram, quindi nessuna consegna legittima può
+arrivare e rifiutare non costa niente. La prima versione accettava, e quello
+riapriva il difetto in un ramo: `TELEGRAM_ALLOWED_CHAT_IDS` popola il profilo
+`PIERO` **indipendentemente** dal bot, quindi un'istanza senza bot ma con i
+`chat_id` configurati restava iniettabile. Nessuna variabile di override per lo
+sviluppo locale, di proposito: sarebbe una scorciatoia che un domani finisce
+impostata in produzione.
+
+### Il blackout, e perché non si risolve rinunciando all'enforcement
+
+Il guasto da temere è preciso: se `setWebhook` fallisce e Telegram conserva una
+registrazione vecchia **senza** segreto, continua a consegnare senza header e il
+relay rifiuta tutto — i segnali si fermano in silenzio, che è peggio del difetto
+che l'enforcement chiude. È lo stato del **primo deploy** dopo l'introduzione del
+segreto, quando la registrazione precedente non ne aveva uno: scenario concreto,
+non teorico.
+
+La soluzione **non** è condizionare l'enforcement all'esito della registrazione:
+quello riaprirebbe la scrittura non autenticata ogni volta che la rete fa i
+capricci, in silenzio, cioè il difetto originale. La soluzione è **ritentare**:
+
+1. all'avvio, tre tentativi;
+2. e poi da **ogni consegna rifiutata** — una consegna senza header, con
+   l'enforcement attivo, è essa stessa la prova che Telegram non conosce il
+   segreto. Si rifiuta comunque e si rimette a posto la registrazione; Telegram
+   ritenta le consegne, quindi il segnale arriva col giro dopo invece di non
+   arrivare mai.
+
+Il ritentativo da richiesta ha un freno di 60 secondi, perché quel percorso lo
+raggiunge chiunque: senza freno una raffica di POST forgiati diventerebbe una
+raffica di chiamate verso `api.telegram.org` fatte da noi.
+
+Una registrazione conta come riuscita **solo** se Telegram risponde `{"ok": true}`.
+Telegram risponde `HTTP 200` anche quando rifiuta — token sbagliato, URL non
+valido — e dirlo solo nel corpo: fidarsi del codice HTTP farebbe dire «registrato»
+proprio nei casi in cui non lo è.
+
+`/health` espone i due assi separatamente: `webhook` dice se l'enforcement è
+attivo, `webhook_registrato` se l'ultima `setWebhook` è riuscita. Il secondo fa
+scattare `degraded`, perché resti diagnosticabile — non perché governi
+l'enforcement.
 
 Nel modello multiutente questo non cambia: **un solo bot serve tutti gli utenti**,
 quindi c'è un solo segreto, derivato dallo stesso token. Ciò che cambia per utente

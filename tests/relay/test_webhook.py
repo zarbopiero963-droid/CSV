@@ -19,13 +19,26 @@ La correzione e' il meccanismo di Telegram: `setWebhook` accetta un
 `secret_token`, e da quel momento ogni consegna porta l'header
 `X-Telegram-Bot-Api-Secret-Token`.
 
-**Il pericolo della correzione e' maggiore del difetto, se scritta male.** Se il
-servizio pretendesse l'header senza essere sicuro di averlo comunicato a
-Telegram, e la registrazione fallisse — l'handler di avvio ingoia ogni eccezione —
-Telegram continuerebbe a consegnare senza header e il relay rifiuterebbe TUTTO:
-i segnali si fermerebbero in silenzio, che e' peggio del difetto che si vuole
-chiudere. Per questo l'enforcement e' condizionato ad aver **davvero** registrato
-il segreto, e `/health` lo dice.
+**Il pericolo della correzione e' maggiore del difetto, se scritta male.** Se
+`setWebhook` fallisce e Telegram conserva una registrazione vecchia SENZA segreto,
+continua a consegnare senza header e il relay rifiuta TUTTO: i segnali si fermano
+in silenzio, che e' peggio del difetto che si vuole chiudere.
+
+Come e' risolto — e qui la prima versione di questo file diceva una cosa che il
+codice non faceva, segnalato insieme da GPT-5.5, Claude Fable 5 e CodeRabbit:
+
+- l'enforcement **non** e' condizionato all'esito della registrazione. Legarlo a
+  quello riaprirebbe la scrittura non autenticata ogni volta che la rete fa i
+  capricci, cioe- il difetto originale, in silenzio;
+- e' condizionato alla presenza del bot: `SEGRETO_WEBHOOK` derivabile;
+- il blackout si evita RITENTANDO. All'avvio tre volte, e poi da ogni consegna
+  rifiutata: una consegna senza header, con l'enforcement attivo, e- essa stessa
+  la prova che Telegram non conosce il segreto. Si rifiuta comunque e si rimette a
+  posto la registrazione; Telegram ritenta le consegne, quindi il segnale arriva
+  col giro dopo invece di non arrivare mai.
+
+`/health` riporta l'esito della registrazione perche- resti diagnosticabile, non
+perche- governi l'enforcement.
 """
 
 from __future__ import annotations
@@ -100,12 +113,12 @@ def test_il_segreto_non_e_il_token_del_bot():
 
 
 def test_senza_token_del_bot_non_c_e_segreto():
-    """E- il caso che decide se il rimedio e- peggiore del male.
+    """Nessun bot, nessun segreto — e nessun segreto significa RIFIUTARE tutto.
 
-    Senza bot non esiste webhook, quindi non c'e' niente da proteggere: qui il
-    segreto e- vuoto e l'enforcement non si attiva. Se invece si pretendesse
-    l'header comunque, un'istanza senza `TELEGRAM_BOT_TOKEN` — cioe- ogni test e
-    ogni sviluppo locale — non potrebbe piu- esercitare il webhook.
+    Il valore vuoto non spegne l'enforcement: lo rende totale. Senza bot non esiste
+    una registrazione presso Telegram, quindi nessuna consegna legittima puo-
+    arrivare, e rifiutare non costa niente. Il comportamento sul servizio e-
+    verificato da `test_senza_bot_ogni_consegna_e_RIFIUTATA`.
     """
     assert main.webhook_secret('') == ''
     assert main.webhook_secret(None) == ''
@@ -231,16 +244,25 @@ def servizio_senza_bot(tmp_path_factory):
         yield base
 
 
-def test_senza_bot_il_webhook_resta_utilizzabile(servizio_senza_bot):
-    """Senza bot non c'e- niente da proteggere, e chiudere sarebbe un danno netto.
+def test_senza_bot_ogni_consegna_e_RIFIUTATA(servizio_senza_bot):
+    """Senza bot non arriva nessuna consegna legittima, quindi si rifiuta tutto.
 
-    Un'istanza senza `TELEGRAM_BOT_TOKEN` non ha un webhook registrato: nessuna
-    consegna vera potra- mai arrivarle. Pretendere l'header renderebbe solo
-    impossibile provare il relay in locale, senza chiudere alcuna superficie.
+    La prima versione di questa patch ACCETTAVA in questo caso, col ragionamento
+    che senza bot non c'e- superficie da chiudere. Era sbagliato, e il controesempio
+    e- preciso: `TELEGRAM_ALLOWED_CHAT_IDS` popola il profilo PIERO
+    **indipendentemente** dal token del bot, quindi un'istanza senza bot ma coi
+    chat_id configurati restava iniettabile da chiunque — il difetto riaperto in un
+    ramo. Segnalato da CodeRabbit.
+
+    Nessuna variabile di override per lo sviluppo locale: sarebbe una scorciatoia
+    che un domani finisce impostata in produzione. Chi prova in locale imposta un
+    token finto, come fa la fixture qui sopra.
     """
+    prima = _feed(servizio_senza_bot)
     stato, corpo = _consegna(servizio_senza_bot, segreto=None)
-    assert stato == 200, f'{stato}: {corpo[:200]!r}'
-    assert b'SQUADRA-A' in _feed(servizio_senza_bot)
+    assert stato == 403, f'{stato}: {corpo[:200]!r}'
+    assert _feed(servizio_senza_bot) == prima
+    assert b'SQUADRA-A' not in _feed(servizio_senza_bot)
 
 
 def test_health_dichiara_lo_stato_del_webhook(servizio_con_bot, servizio_senza_bot):
@@ -250,7 +272,7 @@ def test_health_dichiara_lo_stato_del_webhook(servizio_con_bot, servizio_senza_b
     bot non c'e- — sarebbe indistinguibile da una protetta, e la differenza e- se
     chiunque puo- scrivere nel feed.
     """
-    for base, atteso in ((servizio_con_bot, 'protetto'), (servizio_senza_bot, 'nessun bot')):
+    for base, atteso in ((servizio_con_bot, 'protetto'), (servizio_senza_bot, 'chiuso senza bot')):
         with urllib.request.urlopen(f'{base}/health', timeout=10) as r:  # noqa: S310
             dati = json.loads(r.read())
         assert dati.get('webhook') == atteso, f'{base}: {dati}'
@@ -262,3 +284,109 @@ def test_health_non_contiene_il_segreto(servizio_con_bot):
         corpo = r.read()
     assert main.webhook_secret(BOT_FINTO).encode() not in corpo
     assert BOT_FINTO.encode() not in corpo
+
+
+# ------------------------- la registrazione: cosa la fa risultare riuscita
+
+def test_telegram_dice_200_ma_ok_false_NON_e_una_registrazione(monkeypatch):
+    """Telegram rifiuta con HTTP 200 e `{"ok": false}` nel corpo.
+
+    Token sbagliato, URL non valido, HTTPS assente: la risposta e- `200` e il
+    rifiuto sta solo nel corpo. Fidandosi del codice HTTP il flag direbbe
+    «registrato» proprio nei casi in cui non lo e-, cioe- mentirebbe nella
+    direzione pericolosa — e il flag esiste per essere creduto. Segnalato da
+    Sourcery.
+    """
+    class RispostaFinta:
+        def __init__(self, corpo):
+            self._corpo = corpo.encode('utf-8')
+        def read(self):
+            return self._corpo
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    for corpo, atteso in (
+        ('{"ok": true, "result": true}', True),
+        ('{"ok": false, "description": "Bad Request: bad webhook: invalid URL"}', False),
+        ('{"ok": false, "error_code": 401, "description": "Unauthorized"}', False),
+        ('non e- json', False),
+    ):
+        monkeypatch.setattr(urllib.request, 'urlopen',
+                            lambda *a, corpo=corpo, **k: RispostaFinta(corpo))
+        esito = main._chiama_set_webhook(BOT_FINTO, 'https://esempio.invalid')
+        assert esito is atteso, f'corpo {corpo!r} -> {esito}, atteso {atteso}'
+
+
+def test_l_avvio_RITENTA_la_registrazione(monkeypatch):
+    """Tre tentativi, perche- il caso piu- probabile e- un errore di rete transitorio.
+
+    Senza ritentativi un blip mentre il container si avvia lascerebbe l'istanza con
+    l'enforcement attivo e Telegram che non conosce il segreto — lo stato che il
+    ritentativo da richiesta poi ripara, ma tardi.
+    """
+    monkeypatch.setenv('TELEGRAM_BOT_TOKEN', BOT_FINTO)
+    monkeypatch.setattr(main, '_WEBHOOK_REGISTRATO', None)
+    tentativi = []
+
+    def finta(bot, url):
+        tentativi.append(bot)
+        return len(tentativi) >= 3   # i primi due falliscono
+
+    monkeypatch.setattr(main, '_chiama_set_webhook', finta)
+    monkeypatch.setattr(main.asyncio, 'sleep', _senza_attesa)
+    import asyncio as _a
+    _a.run(main.register_telegram_webhook())
+    assert len(tentativi) == 3, f'tentativi: {len(tentativi)}'
+    assert main._WEBHOOK_REGISTRATO is True
+
+
+async def _senza_attesa(_secondi):
+    """Sostituisce `asyncio.sleep` nei test: l'attesa vera renderebbe la suite lenta."""
+    return None
+
+
+def test_una_consegna_rifiutata_RITENTA_la_registrazione_ma_col_freno(monkeypatch):
+    """L'autoriparazione, e il suo freno.
+
+    Una consegna senza header con l'enforcement attivo e- la prova che Telegram non
+    conosce il segreto: si rifiuta e si ritenta la registrazione, cosi- il segnale
+    arriva col giro dopo invece di non arrivare mai.
+
+    Il freno esiste perche- quel percorso lo raggiunge CHIUNQUE: senza, una raffica
+    di POST forgiati diventerebbe una raffica di chiamate verso api.telegram.org
+    fatte da noi, cioe- un amplificatore offerto gratis.
+    """
+    monkeypatch.setenv('TELEGRAM_BOT_TOKEN', BOT_FINTO)
+    monkeypatch.setattr(main, '_WEBHOOK_REGISTRATO', False)
+    monkeypatch.setattr(main, '_ULTIMO_TENTATIVO', 0.0)
+    tentativi = []
+    monkeypatch.setattr(main, '_chiama_set_webhook',
+                        lambda bot, url: tentativi.append(bot) or False)
+
+    assert main.assicura_registrazione() is False
+    assert len(tentativi) == 1, 'il primo tentativo deve partire'
+    # Subito dopo, il freno tiene.
+    for _ in range(5):
+        main.assicura_registrazione()
+    assert len(tentativi) == 1, f'il freno non ha tenuto: {len(tentativi)} tentativi'
+
+    # Passato l'intervallo, si ritenta.
+    monkeypatch.setattr(main, '_ULTIMO_TENTATIVO',
+                        main.time.monotonic() - main.ATTESA_FRA_TENTATIVI_S - 1)
+    main.assicura_registrazione()
+    assert len(tentativi) == 2, 'scaduto il freno il ritentativo deve ripartire'
+
+
+def test_una_registrazione_riuscita_non_viene_ripetuta(monkeypatch):
+    """Se Telegram sa il segreto non si richiama nessuno a ogni consegna."""
+    monkeypatch.setenv('TELEGRAM_BOT_TOKEN', BOT_FINTO)
+    monkeypatch.setattr(main, '_WEBHOOK_REGISTRATO', True)
+    monkeypatch.setattr(main, '_ULTIMO_TENTATIVO', 0.0)
+    tentativi = []
+    monkeypatch.setattr(main, '_chiama_set_webhook',
+                        lambda bot, url: tentativi.append(bot) or True)
+    for _ in range(10):
+        assert main.assicura_registrazione() is True
+    assert tentativi == [], f'ha richiamato Telegram {len(tentativi)} volte per niente'

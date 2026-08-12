@@ -1,4 +1,4 @@
-import csv, hashlib, io, logging, os, re, secrets, sqlite3, threading
+import asyncio, csv, hashlib, io, json, logging, os, re, secrets, sqlite3, threading, time
 from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import Response
@@ -21,10 +21,12 @@ def webhook_secret(bot_token):
     ogni consegna di Telegram lo porterebbe in un header, e da li' nei log di
     qualunque proxy davanti al servizio.
 
-    Senza bot restituisce stringa vuota, e quello NON attiva l'enforcement: senza
-    bot non esiste un webhook registrato, quindi non arrivera' mai una consegna
-    vera e non c'e' superficie da chiudere. Pretendere l'header comunque
-    renderebbe soltanto impossibile provare il relay in locale.
+    Senza bot restituisce stringa vuota, e in quel caso il webhook **rifiuta
+    tutto**: senza bot non esiste una registrazione presso Telegram, quindi nessuna
+    consegna legittima puo' arrivare, e rifiutare non costa niente. La prima
+    versione accettava — riaprendo il difetto in un ramo, perche'
+    `TELEGRAM_ALLOWED_CHAT_IDS` popola il profilo indipendentemente dal bot e
+    un'istanza senza bot ma coi chat_id era iniettabile. Segnalato da CodeRabbit.
     """
     if not bot_token:
         return ''
@@ -34,40 +36,112 @@ def webhook_secret(bot_token):
 # Esito dell'ultimo tentativo di registrazione: None = non tentato (nessun bot),
 # True = Telegram conosce il segreto, False = tentativo fallito.
 #
-# Serve perche' l'handler qui sotto INGOIA le eccezioni, e senza questo stato un
-# fallimento sarebbe invisibile. Il caso da temere e' preciso: se Telegram
-# conserva una registrazione VECCHIA senza segreto e la nuova chiamata fallisce,
-# continua a consegnare senza header e il relay rifiuta tutto — i segnali si
-# fermano, ed e' un guasto piu' grave del difetto che l'enforcement chiude. Per
-# questo `/health` lo espone e lo fa diventare `degraded`.
+# Serve perche' l'handler INGOIA le eccezioni, e senza questo stato un fallimento
+# sarebbe invisibile. Sotto lock insieme al momento dell'ultimo tentativo, perche'
+# da quando la ri-registrazione avviene anche da una richiesta (vedi
+# `assicura_registrazione`) due consegne concorrenti scriverebbero entrambe:
+# segnalato da Sourcery. Stessa forma del lock sugli scarti di consegna.
 _WEBHOOK_REGISTRATO = None
+_ULTIMO_TENTATIVO = 0.0
+_WEBHOOK_LOCK = threading.Lock()
+
+# Quanto attendere prima di ritentare una registrazione a partire da una consegna
+# rifiutata. Serve perche' quel percorso e' raggiungibile da CHIUNQUE: senza
+# freno, una raffica di POST forgiati diventerebbe una raffica di chiamate verso
+# api.telegram.org fatte da noi.
+ATTESA_FRA_TENTATIVI_S = 60
+
+
+def _chiama_set_webhook(bot_token, public_url):
+    """Registra il webhook col segreto. True solo se Telegram dice `ok`.
+
+    Il controllo su `ok` non e' pedanteria: Telegram risponde **HTTP 200 anche
+    quando rifiuta** — token sbagliato, URL non valido, HTTPS assente — e lo dice
+    solo nel corpo con `{"ok": false, "description": ...}`. Fidandosi del codice
+    HTTP il flag direbbe «registrato» proprio nei casi in cui non lo e', cioe'
+    mentirebbe nella direzione pericolosa. Segnalato da Sourcery.
+
+    Il segreto viaggia in un parametro di query verso api.telegram.org su HTTPS, e
+    non viene mai loggato da qui — ne' lo e' la `description` di un errore, che
+    Telegram fa eco all'URL inviato.
+    """
+    import urllib.parse
+    import urllib.request
+    parametri = urllib.parse.urlencode({
+        'url': f'{public_url}/telegram/webhook',
+        'secret_token': webhook_secret(bot_token),
+    })
+    url = f'https://api.telegram.org/bot{bot_token}/setWebhook?{parametri}'
+    try:
+        with urllib.request.urlopen(url, timeout=10) as r:
+            risposta = json.loads(r.read().decode('utf-8'))
+        return risposta.get('ok') is True
+    except Exception:
+        return False
+
+
+def assicura_registrazione(forza=False):
+    """Registra il webhook se non risulta registrato. Restituisce l'esito noto.
+
+    Chiamata all'avvio e — questo e' il punto — anche da una consegna RIFIUTATA.
+    Senza il secondo percorso il fail-closed avrebbe un guasto peggiore del
+    difetto che chiude: se `setWebhook` fallisce all'avvio e Telegram conserva una
+    registrazione vecchia SENZA segreto, ogni consegna legittima prende 403 e i
+    segnali si fermano finche' qualcuno non rideploya. Scenario concreto, non
+    teorico: e' esattamente lo stato del primo deploy dopo l'introduzione del
+    segreto, quando la registrazione precedente non ne aveva uno.
+
+    Il rimedio non e' rinunciare all'enforcement quando la registrazione
+    fallisce — quello riaprirebbe la scrittura non autenticata, in silenzio, che
+    e' il difetto originale. Il rimedio e' RITENTARE: una consegna senza header,
+    con l'enforcement attivo, e' essa stessa la prova che Telegram non conosce il
+    segreto. La si rifiuta comunque (Telegram ritenta le consegne, quindi il
+    segnale arriva col giro dopo) e si rimette a posto la registrazione.
+
+    Bloccante alzato insieme da GPT-5.5 e Claude Fable 5 sulla PR #14.
+    """
+    global _WEBHOOK_REGISTRATO, _ULTIMO_TENTATIVO
+    token = os.getenv('TELEGRAM_BOT_TOKEN', '')
+    if not token:
+        return None
+    with _WEBHOOK_LOCK:
+        if _WEBHOOK_REGISTRATO is True and not forza:
+            return True
+        adesso = time.monotonic()
+        if not forza and adesso - _ULTIMO_TENTATIVO < ATTESA_FRA_TENTATIVI_S:
+            return _WEBHOOK_REGISTRATO
+        _ULTIMO_TENTATIVO = adesso
+    public_url = os.getenv('PUBLIC_URL', 'https://csv-production-b04e.up.railway.app')
+    esito = _chiama_set_webhook(token, public_url)
+    with _WEBHOOK_LOCK:
+        _WEBHOOK_REGISTRATO = esito
+    return esito
 
 
 @app.on_event('startup')
 async def register_telegram_webhook():
-    global _WEBHOOK_REGISTRATO
-    token = os.getenv('TELEGRAM_BOT_TOKEN', '')
-    public_url = os.getenv('PUBLIC_URL', 'https://csv-production-b04e.up.railway.app')
-    if token:
-        import urllib.parse
-        import urllib.request
-        # Il segreto va in un parametro di query verso api.telegram.org, su HTTPS,
-        # e non viene mai loggato da qui.
-        parametri = urllib.parse.urlencode({
-            'url': f'{public_url}/telegram/webhook',
-            'secret_token': webhook_secret(token),
-        })
-        url = f'https://api.telegram.org/bot{token}/setWebhook?{parametri}'
-        try:
-            urllib.request.urlopen(url, timeout=10).read()
-            _WEBHOOK_REGISTRATO = True
-        except Exception:
-            # Si continua ad avviare: un errore di rete all'avvio non deve
-            # impedire al servizio di servire il feed. Ma lo stato resta scritto.
-            _WEBHOOK_REGISTRATO = False
+    """Registra il webhook all'avvio, ritentando qualche volta.
+
+    I tentativi ripetuti coprono il caso banale e piu' probabile — un errore di
+    rete momentaneo mentre il container si avvia — che senza ritentativi
+    lascerebbe l'istanza con l'enforcement attivo e Telegram che non conosce il
+    segreto. Un fallimento persistente non impedisce l'avvio: il servizio deve
+    continuare a servire il feed, e `/health` dice com'e' andata.
+    """
+    if not os.getenv('TELEGRAM_BOT_TOKEN', ''):
+        return
+    for tentativo in range(3):
+        if assicura_registrazione(forza=True):
+            return
+        if tentativo < 2:
+            await asyncio.sleep(1 + tentativo)
 
 DB_PATH = os.getenv('DB_PATH', '/tmp/signals.db')
 TOKEN = os.getenv('CSV_ACCESS_TOKEN', '')
+# Il segreto del webhook, calcolato una volta all'import come `TOKEN`: `health()` e
+# l'handler del webhook lo leggevano entrambi da `os.environ` a ogni chiamata, e
+# due letture separate possono divergere. Segnalato da Sourcery.
+SEGRETO_WEBHOOK = webhook_secret(os.getenv('TELEGRAM_BOT_TOKEN', ''))
 HEADERS = ['Provider','EventId','EventName','MarketId','MarketName','MarketType','SelectionId','SelectionName','Handicap','Price','MinPrice','MaxPrice','BetType','Points']
 DEFAULT_PARSER = 'Parser_Telegram_XTrader_v1'
 PIERO_PROFILE = 'PIERO'
@@ -454,7 +528,7 @@ def health():
     # Lo stato del webhook, sulle stesse due domande di `auth`: l'enforcement e'
     # attivo? e Telegram sa il segreto? Sono cose diverse, e la seconda e' quella
     # che puo' fermare i segnali in silenzio (vedi `_WEBHOOK_REGISTRATO`).
-    webhook_state = 'protetto' if webhook_secret(os.getenv('TELEGRAM_BOT_TOKEN', '')) else 'nessun bot'
+    webhook_state = 'protetto' if SEGRETO_WEBHOOK else 'chiuso senza bot'
     sano = csv_state == 'ok' and auth_state == 'ok' and _WEBHOOK_REGISTRATO is not False
     stato = {'status': 'ok' if sano else 'degraded',
              'csv': csv_state, 'auth': auth_state, 'webhook': webhook_state,
@@ -568,12 +642,32 @@ async def telegram_webhook(request: Request):
     ricevuto — e il confronto e' a tempo costante, perche' questo valore arriva su
     OGNI consegna ed e' quindi il piu' confrontato del servizio.
     """
-    atteso = webhook_secret(os.getenv('TELEGRAM_BOT_TOKEN', ''))
-    if atteso:
-        ricevuto = request.headers.get('X-Telegram-Bot-Api-Secret-Token', '')
-        if not ricevuto or not secrets.compare_digest(
-                ricevuto.encode('utf-8'), atteso.encode('utf-8')):
-            raise HTTPException(403, 'Forbidden')
+    if not SEGRETO_WEBHOOK:
+        # Nessun bot configurato: non esiste una registrazione presso Telegram,
+        # quindi NESSUNA consegna legittima puo' arrivare qui e rifiutare non
+        # costa niente. La prima versione accettava, e quello riapriva il difetto
+        # in un ramo: `TELEGRAM_ALLOWED_CHAT_IDS` popola il profilo PIERO
+        # indipendentemente dal bot, quindi un'istanza senza bot ma con i chat_id
+        # configurati era iniettabile da chiunque. Segnalato da CodeRabbit.
+        #
+        # Niente variabile di override per lo sviluppo locale: sarebbe una
+        # scorciatoia che un domani finisce impostata in produzione. Chi prova in
+        # locale imposta un `TELEGRAM_BOT_TOKEN` finto e calcola il segreto con
+        # `webhook_secret()`, che e' quello che fanno i test.
+        raise HTTPException(403, 'Forbidden')
+    ricevuto = request.headers.get('X-Telegram-Bot-Api-Secret-Token', '')
+    if not ricevuto or not secrets.compare_digest(
+            ricevuto.encode('utf-8'), SEGRETO_WEBHOOK.encode('utf-8')):
+        # Una consegna senza header (o con quello sbagliato) mentre l'enforcement
+        # e' attivo e' essa stessa un indizio: o e' forgiata, o Telegram non
+        # conosce il segreto. Nel dubbio si rifiuta E si rimette a posto la
+        # registrazione, cosi' il caso «Telegram consegna senza header perche' la
+        # registrazione era fallita» si autoripara invece di fermare i segnali
+        # fino al prossimo deploy. Telegram ritenta le consegne: il segnale arriva
+        # col giro dopo. In un thread per non bloccare il loop, e con il freno di
+        # `ATTESA_FRA_TENTATIVI_S` perche' questo percorso lo raggiunge chiunque.
+        await asyncio.to_thread(assicura_registrazione)
+        raise HTTPException(403, 'Forbidden')
     payload = await request.json()
     msg = payload.get('message') or payload.get('channel_post') or {}
     chat = msg.get('chat') or {}
