@@ -443,6 +443,11 @@ def test_il_segreto_non_finisce_nell_URL_ma_nel_CORPO(monkeypatch):
     # interpreta e il segreto non arriva: la registrazione fallirebbe con la stessa
     # faccia di un problema di rete. Senza questa riga il test passerebbe anche
     # spedendo JSON senza intestazione. Segnalato da GPT-5.5.
+    #
+    # `urllib` metterebbe comunque questo valore da se- per un `data=` di byte, ma
+    # lo fa dentro il proprio handler al momento dell-invio: non e- osservabile qui,
+    # e quello che non e- osservabile non e- vincolato. Per questo `main.py` lo
+    # dichiara esplicitamente — e- l-unico modo di avere questa asserzione.
     assert richiesta.get_header('Content-type') == 'application/x-www-form-urlencoded', (
         f'Content-Type: {richiesta.get_header("Content-type")!r}'
     )

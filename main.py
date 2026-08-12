@@ -95,12 +95,17 @@ def _chiama_set_webhook(bot_token, public_url):
         'secret_token': webhook_secret(bot_token),
     }).encode('utf-8')
     url = f'https://api.telegram.org/bot{bot_token}/setWebhook'
-    # Il `Content-Type` e' dichiarato qui e non lasciato all'impostazione implicita
-    # di `urllib`: se il corpo non e' dichiarato per come e' codificato Telegram non
-    # lo interpreta, il segreto non arriva, e la registrazione fallisce con la
-    # stessa faccia di un problema di rete. Esplicito perche' un test possa
-    # vincolarlo — il valore che `urllib` aggiunge da se' compare solo al momento
-    # dell'invio e non e' osservabile sulla richiesta. Segnalato da GPT-5.5.
+    # Il `Content-Type` e' dichiarato qui, non lasciato al default di `urllib`.
+    # Non e' una correzione: `urllib` metterebbe comunque
+    # `application/x-www-form-urlencoded` per un `data=` di byte, e l'invio
+    # funzionava. E' che lo mette dentro il proprio handler al momento dell'invio,
+    # quindi il valore non e' osservabile sulla richiesta e **nessun test puo'
+    # vincolarlo**: e senza vincolo, il giorno in cui questo corpo diventasse JSON
+    # senza intestazione, Telegram non lo interpreterebbe, il segreto non
+    # arriverebbe, e la registrazione fallirebbe con la stessa faccia di un
+    # problema di rete. Il test chiesto da GPT-5.5 esiste perche' questa riga
+    # esiste; l'imprecisione della prima versione di questo commento — che
+    # raccontava una correzione dove c'era un irrigidimento — l'ha vista Fable 5.
     richiesta = urllib.request.Request(
         url, data=parametri, method='POST',
         headers={'Content-Type': 'application/x-www-form-urlencoded'})
