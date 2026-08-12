@@ -432,7 +432,7 @@ def test_senza_token_configurato_il_feed_e_CHIUSO(servizio_senza_token):
     for url in ('/xtrader.csv', '/xtrader.csv?token=qualunque-cosa'):
         stato = None
         try:
-            with urllib.request.urlopen(f'{servizio_senza_token}{url}', timeout=10) as r:
+            with urllib.request.urlopen(f'{servizio_senza_token}{url}', timeout=10) as r:  # noqa: S310 - loopback
                 stato = r.status
         except urllib.error.HTTPError as e:
             stato = e.code
@@ -461,7 +461,7 @@ def test_health_dichiara_che_il_token_non_e_configurato(servizio_senza_token):
     E `status` diventa `degraded`, a differenza degli scarti di consegna: quelli
     si risolvono da se- col TTL, questo no. Non si ripara senza un intervento.
     """
-    with urllib.request.urlopen(f'{servizio_senza_token}/health', timeout=10) as r:
+    with urllib.request.urlopen(f'{servizio_senza_token}/health', timeout=10) as r:  # noqa: S310 - loopback
         dati = json.loads(r.read())
     assert dati.get('auth') == 'non configurato', f'/health non lo segnala: {dati}'
     assert dati.get('status') == 'degraded', f'status dovrebbe essere degraded: {dati}'
@@ -482,7 +482,7 @@ def test_health_non_accusa_l_auth_quando_il_token_c_e(servizio_con_token):
     viene accusato quando il token c'e-. Riscriverlo cosi- e- piu- preciso di
     prima, non meno: guarda l'asse di cui parla il file, invece dell'aggregato.
     """
-    with urllib.request.urlopen(f'{servizio_con_token}/health', timeout=10) as r:
+    with urllib.request.urlopen(f'{servizio_con_token}/health', timeout=10) as r:  # noqa: S310 - loopback
         dati = json.loads(r.read())
     assert dati.get('auth') == 'ok', dati
     # E il motivo della degradazione, se c'e-, non deve essere l'autenticazione.
@@ -494,6 +494,6 @@ def test_health_non_accusa_l_auth_quando_il_token_c_e(servizio_con_token):
 
 def test_health_non_contiene_il_token(servizio_con_token):
     """`/health` e- senza autenticazione: non puo- dire piu- di «configurato o no»."""
-    with urllib.request.urlopen(f'{servizio_con_token}/health', timeout=10) as r:
+    with urllib.request.urlopen(f'{servizio_con_token}/health', timeout=10) as r:  # noqa: S310 - loopback
         corpo = r.read()
     assert TOKEN_DI_PROVA.encode() not in corpo, f'il token e- in /health: {corpo!r}'

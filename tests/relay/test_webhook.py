@@ -710,7 +710,6 @@ def test_l_avvio_non_BLOCCA_il_loop_mentre_chiama_telegram():
     fallirebbe invece di appendere la suite. Sono due reti per la stessa
     proprieta', non due asserzioni diverse.
     """
-    import os as _os
     sbloccami = threading.Event()
     thread_della_finta = []
 
@@ -720,27 +719,23 @@ def test_l_avvio_non_BLOCCA_il_loop_mentre_chiama_telegram():
         return True
 
     async def prova():
-        vecchio_chiama = main._chiama_set_webhook
-        vecchio_token = _os.environ.get('TELEGRAM_BOT_TOKEN')
-        main._chiama_set_webhook = finta
-        _os.environ['TELEGRAM_BOT_TOKEN'] = BOT_FINTO
-        try:
-            avvio = asyncio.create_task(main.register_telegram_webhook())
+        avvio = asyncio.create_task(main.register_telegram_webhook())
 
-            async def sblocca():
-                # Gira solo se il loop e- libero: e- l'intera asserzione.
-                sbloccami.set()
+        async def sblocca():
+            # Gira solo se il loop e- libero: e- l'intera asserzione.
+            sbloccami.set()
 
-            await asyncio.wait_for(asyncio.gather(avvio, sblocca()), timeout=15)
-        finally:
-            main._chiama_set_webhook = vecchio_chiama
-            if vecchio_token is None:
-                _os.environ.pop('TELEGRAM_BOT_TOKEN', None)
-            else:
-                _os.environ['TELEGRAM_BOT_TOKEN'] = vecchio_token
+        await asyncio.wait_for(asyncio.gather(avvio, sblocca()), timeout=15)
 
+    # `MonkeyPatch.context()` e non salvataggio a mano: era l'unico posto del file
+    # che ripristinava lo stato da se-, e il ripristino a mano dentro una coroutine
+    # e- proprio dove si dimentica un ramo. Il test gemello qui sopra usa gia- questa
+    # forma. Segnalato da CodeRabbit.
     try:
-        asyncio.run(prova())
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(main, '_chiama_set_webhook', finta)
+            mp.setenv('TELEGRAM_BOT_TOKEN', BOT_FINTO)
+            asyncio.run(prova())
     except (TimeoutError, asyncio.TimeoutError):
         sbloccami.set()
         raise AssertionError(

@@ -411,7 +411,15 @@ indisponibilità a ogni deploy con la rete lenta. Segnalato da Fugu Ultra.
 Conseguenza operativa, scritta anche in `README.txt`: nei primi secondi dopo un
 deploy lo `status` è `degraded` perché la registrazione è ancora in corso — e in
 quella finestra il relay davvero non può ricevere niente, quindi è la risposta
-onesta. Non è un guasto; lo diventa se non passa a `ok` entro mezzo minuto.
+onesta. Non è un guasto; lo diventa se non passa a `ok` entro **un minuto**.
+
+Un minuto e non trenta secondi, perché nel caso peggiore i tre tentativi durano
+**~33 secondi** — 10 di timeout, 1 di pausa, 10, 2 di pausa, 10 — più l'avvio del
+processo: a trenta secondi il terzo tentativo può essere ancora in volo, e un
+`degraded` a quel punto non dice ancora niente. La prima versione di questa frase
+diceva «mezzo minuto», che è un errore di aritmetica sulla sequenza di attese
+descritta qui sopra e avrebbe fatto rincorrere un non-guasto. Segnalato da
+CodeRabbit.
 
 `sano` chiede `webhook_registrato is True`, non `is not False`: `None` con un bot
 configurato significa **«non ancora»**, non «sano», e un'istanza col bot che non ha

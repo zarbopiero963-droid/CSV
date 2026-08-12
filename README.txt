@@ -124,8 +124,15 @@ DIETRO l'avvio, non davanti: il servizio risponde subito e la registrazione
 prosegue in parallelo, ritentando fino a tre volte. Nei primi secondi /health dice
 quindi status degraded, senza la chiave webhook_registrato: non e' un guasto, e' una
 registrazione ancora in corso, e in quella finestra il relay davvero non puo'
-ricevere niente. Se dopo mezzo minuto non e' diventato ok, allora e' un guasto e
-sotto c'e' scritto dove guardare.
+ricevere niente.
+QUANTO ASPETTARE: fino a un MINUTO, non trenta secondi. Nel caso peggiore i tre
+tentativi durano ~33 secondi - 10 di timeout, 1 di pausa, 10, 2 di pausa, 10 - piu'
+l'avvio del processo. A trenta secondi il terzo tentativo puo' essere ancora in
+volo, quindi un degraded a quel punto non dice ancora niente. Se dopo un minuto non
+e' diventato ok, allora e' un guasto e sotto c'e' scritto dove guardare.
+(Qui c'era scritto "mezzo minuto": era un errore di aritmetica su una sequenza di
+attese scritta due paragrafi piu' su, e avrebbe fatto rincorrere un non-guasto.
+Segnalato da CodeRabbit.)
 Come distinguere i tre casi, guardando insieme "webhook" e "webhook_registrato":
   webhook "chiuso senza bot"            -> manca TELEGRAM_BOT_TOKEN
   webhook "protetto", chiave assente    -> registrazione in corso, o mai tentata
