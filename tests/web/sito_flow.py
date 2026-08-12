@@ -23,6 +23,7 @@ Uso:  python tests/web/sito_flow.py <url-di-base> [cartella-screenshot]
 import pathlib
 import sys
 import tempfile
+from urllib.parse import urlparse
 
 from playwright.sync_api import sync_playwright
 
@@ -158,13 +159,24 @@ with sync_playwright() as pw:
         # Adesso il click e' OSSERVABILE: si parte da un URL diverso — l'ancora
         # `#come`, raggiunta cliccando il secondo pulsante, che e' anch'essa
         # navigazione da verificare — e si pretende di tornare all'apex nudo.
+        # I due selettori nominano il DESTINO, non la posizione: `a[href="#come"]`
+        # invece del secondo pulsante della fila. Un selettore posizionale
+        # continuerebbe a passare dopo uno scambio d'ordine dei due pulsanti,
+        # verificando il comportamento sbagliato. Segnalato da GPT-5.5.
         pagina.goto(BASE, wait_until='load')
-        pagina.click('.azioni a.bottone.calmo')
-        assert pagina.url.endswith('#come'), \
+        pagina.click('.azioni a[href="#come"]')
+        assert urlparse(pagina.url).fragment == 'come', \
             f'{nome}: «Come funziona» non porta all\'ancora, sono su {pagina.url}'
+
+        # Il confronto e' sul PERCORSO, non sulla stringa intera: `== BASE`
+        # dipenderebbe da come browser e server normalizzano lo slash finale, e
+        # sarebbe un test che fallisce per un dettaglio di forma su un requisito
+        # — «si torna all'apex» — che quel dettaglio non riguarda. Segnalato da
+        # GPT-5.5 e Fable 5 nello stesso giro, sulla stessa riga.
         pagina.click('.marchio')
-        pagina.wait_for_url(BASE)
-        assert pagina.url == BASE, \
+        pagina.wait_for_url(lambda u: urlparse(u).path == '/' and not urlparse(u).fragment)
+        indirizzo = urlparse(pagina.url)
+        assert indirizzo.path == '/' and not indirizzo.fragment, \
             f'{nome}: il marchio non riporta all\'apex, sono su {pagina.url}'
         pagina.wait_for_selector('h1')
         print(f'  {nome}: #come -> marchio -> {pagina.url}')
