@@ -1,8 +1,25 @@
-name: PR Review OpenRouter Fugu Ultra
+name: PR Review GPT-5.6 Sol
 
-# Review AI FORTE con Sakana Fugu Ultra via OpenRouter (endpoint chat/completions
-# stile OpenAI). È il PIÙ CARO dei tre reviewer — da solo il 73% della spesa
-# misurata sulle PR #279/#280/#281 — quindi chiama il modello in UN SOLO caso:
+# Review AI FORTE con gpt-5.6-sol sull'endpoint OpenAI `v1/responses`.
+#
+# Sostituisce `sakana/fugu-ultra` via OpenRouter (12/08/2026, punto 4 della Issue
+# #10). Tre ragioni, tutte misurate su questo repository:
+#   - COSTO: Fugu ha fatturato $0,7013 per una sola review sulla PR #8 — 17,8x la
+#     media di GPT-5.5 — e quella review era troncata. Sol ha le stesse tariffe
+#     per input e output ($5/M e $30/M) ma aggiunge i token dalla CACHE a $0,50/M,
+#     che su una PR rivista piu' volte e' la voce che si ripete.
+#   - AFFIDABILITA': su input imperfetto Fugu produceva bloccanti su cio' che NON
+#     aveva visto — un `SyntaxError` inventato sulla PR #14, tre bloccanti falsi
+#     sulla #18, tutti dalla redazione del nostro stesso payload.
+#   - UN SOLO FORNITORE IN MENO: una API key in meno da gestire, perche' Sol usa
+#     lo stesso Secret `BETRELAY_GPT` di GPT-5.5.
+#
+# Il baratto dichiarato: al gate finale restano due famiglie (OpenAI + Anthropic)
+# invece di tre. Modelli della stessa famiglia condividono punti ciechi, e Fable 5
+# resta l'unica voce non-OpenAI del gate.
+#
+# È il piu' caro dei due reviewer del gate finale, quindi chiama il modello in UN
+# SOLO caso:
 # - quando viene aggiunta la label `final-fugu-review`, oppure quando quella label è
 #   GIÀ presente e arriva `opened`/`reopened`/`ready_for_review` — GitHub non emette
 #   `labeled` per una PR aperta con le label addosso (gate finale pre-merge)
@@ -28,12 +45,12 @@ permissions:
   issues: write
 
 concurrency:
-  group: pr-review-fugu-ultra-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+  group: pr-review-gpt56-sol-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
   cancel-in-progress: false
 
 jobs:
   review:
-    name: Fugu Ultra final review
+    name: GPT-5.6 Sol final review
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -49,8 +66,21 @@ jobs:
         github.event.label.name == 'final-fugu-review' )
 
     env:
-      BETRELAY_FUGU: ${{ secrets.BETRELAY_FUGU }}
-      OPENROUTER_MODEL: sakana/fugu-ultra
+      # Lo STESSO Secret di GPT-5.5: `gpt-5.6-sol` sta sull'API OpenAI, quindi non
+      # serve una chiave in piu'. Il Secret dell'ex reviewer via OpenRouter non viene
+      # piu' letto da nessun workflow, e `tests/safety/test_ai_audit_workflows.py` lo
+      # vieta come residuo: un riferimento dimenticato leggerebbe vuoto e salterebbe
+      # la review in silenzio, che e' la stessa classe di difetto dei nomi del Bridge.
+      # Il nome preciso sta in `CLAUDE.md` — qui non si scrive, perche' la guardia
+      # cerca su TUTTO il file di proposito e non distingue un commento da un uso.
+      BETRELAY_GPT: ${{ secrets.BETRELAY_GPT }}
+
+      # ID del modello e nome mostrato, separati: il primo va nella richiesta, il
+      # secondo nel commento. Prima erano la stessa variabile, e un cambio di
+      # modello obbligava a scegliere fra una richiesta valida e un commento
+      # leggibile.
+      MODEL_ID: gpt-5.6-sol
+      MODEL_LABEL: GPT-5.6 Sol
 
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       REPO: ${{ github.repository }}
@@ -72,8 +102,10 @@ jobs:
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
 
-      REVIEW_ID: fugu-ultra
-      MODEL_LABEL: Sakana Fugu Ultra
+      # Entra nei marcatori HTML di deduplica dei commenti. Cambiandolo, i commenti
+      # di Fugu sulle PR vecchie non vengono piu' riconosciuti come propri: e'
+      # corretto, sono di un altro reviewer, e la deduplica deve valere per reviewer.
+      REVIEW_ID: gpt56-sol
 
       MAX_PATCH_PER_FILE_CHARS: "4000"
       MAX_TOTAL_PATCH_CHARS: "14000"
@@ -120,14 +152,25 @@ jobs:
 
       PRICE_INPUT_PER_MILLION: "5.00"
       PRICE_OUTPUT_PER_MILLION: "30.00"
+      # Token serviti dalla CACHE, che su OpenRouter non erano prezzati a parte. Il
+      # caching di OpenAI e' automatico sopra i ~1024 token e `input_tokens` LI
+      # INCLUDE: prezzarli tutti a tariffa piena gonfia il costo dichiarato, ed e'
+      # su quei numeri che il proprietario decide quando armare il gate.
+      PRICE_CACHE_READ_PER_MILLION: "0.50"
 
       MANUAL_REVIEW_LABEL: manual-review-required
       # La label che ARMA questo gate. Serve allo script per riconoscere un push arrivato
       # DOPO l'armamento (gate stantio) e fallire invece di lasciare un verde bugiardo.
+      # La label conserva il nome `final-fugu-review` anche se il modello e' cambiato,
+      # e NON e' una dimenticanza. Le label si creano una volta sola e la creazione e'
+      # azione del proprietario: rinominarla qui, senza che la nuova esista nel repo,
+      # renderebbe il gate finale NON ARMABILE — aggiungerla via API darebbe 404. Il
+      # nome identifica il GATE, non il fornitore. Se il proprietario crea
+      # `final-sol-review`, il cambio e' una riga qui piu' una in `CLAUDE.md`.
       FINAL_LABEL: final-fugu-review
 
     steps:
-      - name: Review pushed commit range with Fugu Ultra
+      - name: Review pushed commit range with GPT-5.6 Sol
         shell: bash
         run: |
           set -euo pipefail
@@ -136,16 +179,27 @@ jobs:
           # fallire la PR. MA sul gate finale via LABEL (obbligatorio pre-merge)
           # una review non eseguibile per key mancante NON deve risultare verde:
           # fallisci il job (coerente col fail-closed sul fallimento modello, GPT-5.5).
-          if [ -z "${BETRELAY_FUGU:-}" ]; then
-            if [ "${EVENT_ACTION:-}" = "labeled" ]; then
-              echo "::error::Gate finale a label ma BETRELAY_FUGU assente: review non eseguibile → job fallito (il gate non deve risultare verde)."
+          if [ -z "${BETRELAY_GPT:-}" ]; then
+            # Questo guard gira PRIMA di Python, quindi non puo- chiamare
+            # `decisione_gate`: la sua condizione e- volutamente piu- GROSSOLANA — «la
+            # label finale e- nel quadro?» — e in ogni caso in cui le due divergono
+            # sbaglia verso il ROSSO, che e- il verso giusto per una chiave mancante.
+            #
+            # Prima chiedeva solo che l-evento si chiamasse `labeled`, e GitHub non
+            # emette quell-evento per una PR aperta con la label gia- applicata: su
+            # `opened`, `reopened` e `ready_for_review` una chiave assente usciva
+            # VERDE e il gate finale risultava superato con zero righe lette.
+            # Segnalato da `gpt-5.6-sol`, corretto in entrambi i workflow con gate.
+            if [ "${LABEL_EVENTO:-}" = "${FINAL_LABEL:-}" ] \
+               || printf '%s' "${LABELS_PRESENTI:-}" | grep -q "\"${FINAL_LABEL}\""; then
+              echo "::error::Gate finale armato (label «${FINAL_LABEL}») ma BETRELAY_GPT assente: review non eseguibile → job fallito (il gate non deve risultare verde)."
               exit 1
             fi
-            echo "::notice::BETRELAY_FUGU non configurato: reviewer Fugu Ultra saltato (push automatico, nessun check rosso)."
+            echo "::notice::BETRELAY_GPT non configurato: reviewer GPT-5.6 Sol saltato (push automatico, nessun check rosso)."
             exit 0
           fi
 
-          echo "::add-mask::$BETRELAY_FUGU"
+          echo "::add-mask::$BETRELAY_GPT"
 
           python3 <<'PY'
           import json
@@ -166,10 +220,10 @@ jobs:
 
           # .strip(): un segreto incollato con newline/spazio finale renderebbe
           # invalido l'header Authorization (Bearer ...\n) -> request fallita.
-          BETRELAY_FUGU = os.environ["BETRELAY_FUGU"].strip()
-          OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "sakana/fugu-ultra")
-          REVIEW_ID = os.environ.get("REVIEW_ID", "fugu-ultra")
-          MODEL_LABEL = os.environ.get("MODEL_LABEL", OPENROUTER_MODEL)
+          BETRELAY_GPT = os.environ["BETRELAY_GPT"].strip()
+          MODEL_ID = os.environ.get("MODEL_ID", "gpt-5.6-sol")
+          REVIEW_ID = os.environ.get("REVIEW_ID", "gpt56-sol")
+          MODEL_LABEL = os.environ.get("MODEL_LABEL", MODEL_ID)
 
           MAX_PATCH_PER_FILE_CHARS = int(os.environ.get("MAX_PATCH_PER_FILE_CHARS", "4000"))
           MAX_TOTAL_PATCH_CHARS = int(os.environ.get("MAX_TOTAL_PATCH_CHARS", "14000"))
@@ -180,6 +234,7 @@ jobs:
 
           PRICE_INPUT_PER_MILLION = float(os.environ.get("PRICE_INPUT_PER_MILLION", "0"))
           PRICE_OUTPUT_PER_MILLION = float(os.environ.get("PRICE_OUTPUT_PER_MILLION", "0"))
+          PRICE_CACHE_READ_PER_MILLION = float(os.environ.get("PRICE_CACHE_READ_PER_MILLION", "0"))
 
           MANUAL_REVIEW_LABEL = os.environ.get("MANUAL_REVIEW_LABEL", "manual-review-required")
 
@@ -553,26 +608,36 @@ jobs:
 
           def call_model(system_prompt: str, user_prompt: str):
               payload = {
-                  "model": OPENROUTER_MODEL,
-                  "messages": [
+                  "model": MODEL_ID,
+                  # `input`, NON `messages`: su `v1/responses` il campo che porta il
+                  # prompt si chiama cosi', e `messages` e- il nome di
+                  # chat/completions. Segnalato da GPT-5.5 come [REAL_FINDING] sulla
+                  # PR #20: era rimasto indietro nella sostituzione, e avrebbe dato 400
+                  # a OGNI armamento del gate finale.
+                  "input": [
                       {"role": "system", "content": system_prompt},
                       {"role": "user", "content": user_prompt},
                   ],
-                  "temperature": 0.05,
-                  "max_tokens": MAX_OUTPUT_TOKENS,
-                  # Cap del reasoning nascosto. ATTENZIONE al valore: NON è "low" come
-                  # per GPT-5.5, e non è una svista. `openrouter.ai/api/v1/models` dichiara
-                  # per sakana/fugu-ultra:
-                  #   {"mandatory": true, "default_enabled": true,
-                  #    "supported_efforts": ["max","xhigh","high"], "default_effort": "xhigh"}
-                  # "low" NON è fra i supported_efforts: veniva scartato in silenzio e
-                  # subentrava il default `xhigh`. Cioè si pagava ragionamento quasi al
-                  # massimo credendo di averlo capato al minimo — sulla PR #281 sono usciti
-                  # 9.600 e 12.598 completion token contro i ~200-1.300 previsti dal prompt
-                  # ultra-corto, perché i token di reasoning SONO fatturati come output.
-                  # `mandatory: true` → non si può spegnere: "high" è il PAVIMENTO.
+                  # `store: False`: la richiesta contiene il diff della PR, e non c'e'
+                  # motivo di lasciarlo memorizzato lato OpenAI. Stessa scelta del
+                  # workflow GPT-5.5.
+                  "store": False,
+                  "max_output_tokens": MAX_OUTPUT_TOKENS,
+                  # NIENTE `temperature`: i modelli reasoning sull'endpoint
+                  # `v1/responses` la rifiutano, e lasciarla dentro darebbe un 400 al
+                  # primo tentativo — cioe' un gate rosso per un parametro, non per un
+                  # difetto del codice. Il workflow GPT-5.5, che gia' usa questo
+                  # endpoint, non la manda.
+                  #
+                  # `effort: high` e' una SCELTA, non una misura, e va detto: replica il
+                  # ruolo che aveva Fugu al gate finale, dove `high` era il pavimento
+                  # imposto dal modello. Su `gpt-5.6-sol` l'effort va da `none` a `max`,
+                  # quindi qui si potrebbe scendere. Non lo faccio a occhio: i token di
+                  # reasoning sono fatturati come output e il rendiconto qui sotto li
+                  # stampa a parte, quindi le prime review sul gate diranno se `high`
+                  # costa piu' di quanto rende. Abbassarlo prima di quel dato sarebbe
+                  # risparmiare sulla profondita- del solo reviewer che legge l'intera PR.
                   "reasoning": {"effort": "high"},
-                  "usage": {"include": True},
               }
 
               data = json.dumps(payload).encode("utf-8")
@@ -581,14 +646,12 @@ jobs:
               # 3 tentativi × 120s + backoff: worst-case < timeout-minutes del job.
               for attempt in range(1, 4):
                   req = urllib.request.Request(
-                      "https://openrouter.ai/api/v1/chat/completions",
+                      "https://api.openai.com/v1/responses",
                       data=data,
                       method="POST",
                       headers={
-                          "Authorization": f"Bearer {BETRELAY_FUGU}",
+                          "Authorization": f"Bearer {BETRELAY_GPT}",
                           "Content-Type": "application/json",
-                          "HTTP-Referer": f"https://github.com/{REPO}",
-                          "X-Title": "XTrader Relay Fugu Ultra PR Review",
                           "User-Agent": f"{REVIEW_ID}-push-range-review",
                       },
                   )
@@ -596,37 +659,70 @@ jobs:
                       with urllib.request.urlopen(req, timeout=120) as resp:
                           body = json.loads(resp.read().decode("utf-8"))
 
-                      choices = body.get("choices") or []
-                      if not choices:
-                          return "Il modello non ha restituito choices.", body.get("usage", {})
+                      # La forma della risposta di `v1/responses`: `output_text` quando
+                      # c'e', altrimenti si ricompone dai blocchi. `or ""` su ogni pezzo
+                      # perche' un blocco con `"text": null` farebbe fallire il join con
+                      # un TypeError su una risposta per il resto valida.
+                      text = body.get("output_text")
+                      if not text:
+                          parti = []
+                          for item in body.get("output", []):
+                              for blocco in item.get("content", []):
+                                  if isinstance(blocco.get("text"), str):
+                                      parti.append(blocco["text"])
+                          text = "\n".join(parti)
 
-                      msg = choices[0].get("message") or {}
-                      # content può essere null (JSON null → None) o lista di blocchi.
-                      # Normalizza None a "" PRIMA di str(): altrimenti str(None)="None"
-                      # verrebbe pubblicato come testo e il ramo di troncamento (not text)
-                      # non scatterebbe nemmeno con finish_reason=length (review GPT-5.5).
-                      content = msg.get("content") or ""
-                      if isinstance(content, list):
-                          # str(... or ""): un blocco con "text": null darebbe None e
-                          # farebbe fallire "\n".join (TypeError) su una risposta valida.
-                          content = "\n".join(str(part.get("text") or "") for part in content if isinstance(part, dict))
-
-                      text = str(content).strip()
-                      # Troncamento = finish_reason=length, INDIPENDENTE dal fatto che
-                      # ci sia testo: anche una review PARZIALE non vuota è incompleta
-                      # (Codex P1). Il banner "Output troncato" in testa fa scattare il
-                      # guard del chiamante (startswith) → model_failed sul gate a label
-                      # e niente done_marker → la review parziale non passa per completa.
-                      truncated = choices[0].get("finish_reason") == "length"
+                      text = (text or "").strip()
+                      # Troncamento su questo endpoint = `status=incomplete` con
+                      # `status`/`incomplete_details`, NON `finish_reason` come su
+                      # chat/completions: era la forma di OpenRouter e qui non esiste.
+                      # Leggerla ancora significherebbe non accorgersi MAI di un
+                      # troncamento, cioe' pubblicare una review parziale come completa.
+                      #
+                      # E la condizione e' INDIPENDENTE dal fatto che ci sia testo: anche
+                      # una review parziale non vuota e' incompleta (Codex P1). Il banner
+                      # in testa fa scattare il guard del chiamante (startswith) →
+                      # model_failed sul gate a label e niente done_marker, quindi la
+                      # review parziale non viene deduplicata come completata.
+                      #
+                      # E il troncamento vale QUALUNQUE sia il motivo, e QUALUNQUE sia
+                      # lo stato che non sia `completed`. La condizione e' una
+                      # WHITELIST: `completed` significa «ho finito», e tutto il resto —
+                      # `incomplete`, `failed`, `cancelled`, uno `status` assente perche'
+                      # la forma e' cambiata — e' una review che non e' finita. Scriverla
+                      # come blacklist di un solo valore era il difetto che
+                      # `gpt-5.6-sol` ha trovato alla sua prima chiamata reale: una
+                      # risposta `failed` CON del testo riceveva il done_marker, cioe'
+                      # veniva certificata completa e non piu' rifatta.
+                      #
+                      # Prima la condizione pretendeva anche
+                      # `incomplete_details.reason == "max_output_tokens"`, e quella
+                      # congiunzione era la falla: l'API puo' rispondere `incomplete`
+                      # per altri motivi — `content_filter` fra questi — e in quei casi
+                      # `truncated` restava falso. Una review PARZIALE veniva pubblicata
+                      # come completa, col `done_marker` che impedisce di rifarla: il
+                      # gate finale avrebbe detto «nessun bloccante» su una review
+                      # interrotta a meta'. Segnalato da CodeRabbit sulla PR #20 come
+                      # major, e corretto in TUTTI i workflow su questo endpoint, non
+                      # solo in quello segnalato (regola 2).
+                      #
+                      # Il motivo entra nei banner: serve a chi legge il commento per
+                      # sapere se aumentare il tetto o guardare altro.
+                      incomplete = body.get("incomplete_details") or {}
+                      motivo_incompleto = incomplete.get("reason") or "non dichiarato"
+                      stato = body.get("status") or "assente"
+                      truncated = stato != "completed"
                       if not text:
                           # Budget di output esaurito prima del testo: segnalalo con
                           # verita'.
                           if truncated:
                               text = (
-                                  "Output troncato: il modello ha esaurito il budget "
-                                  f"(MAX_OUTPUT_TOKENS={MAX_OUTPUT_TOKENS}, finish_reason=length) "
-                                  "prima di produrre la review. Aumenta MAX_OUTPUT_TOKENS "
-                                  "o riduci l'ampiezza del diff."
+                                  "Output troncato: il modello si e' interrotto "
+                                  f"(MAX_OUTPUT_TOKENS={MAX_OUTPUT_TOKENS}, status={stato}, reason={motivo_incompleto}) "
+                                  "prima di produrre la review. Se il motivo e' "
+                                  "max_output_tokens, aumenta MAX_OUTPUT_TOKENS o riduci "
+                                  "l'ampiezza del diff; altrimenti il motivo e' quello "
+                                  "dichiarato qui sopra."
                               )
                           else:
                               text = "Il modello non ha restituito testo."
@@ -636,7 +732,7 @@ jobs:
                           text = (
                               "Output troncato: il modello ha prodotto solo una review "
                               f"PARZIALE (MAX_OUTPUT_TOKENS={MAX_OUTPUT_TOKENS}, "
-                              "finish_reason=length). Segue il testo parziale.\n\n"
+                              f"status={stato}, reason={motivo_incompleto}). Segue il testo parziale.\n\n"
                               + text
                           )
                       return text, body.get("usage", {})
@@ -651,39 +747,64 @@ jobs:
                       last_error = str(exc)
                       time.sleep(min(60, 2 ** attempt))
 
-              raise RuntimeError(redact(f"OpenRouter request failed after retries: {last_error}"))
+              raise RuntimeError(redact(f"OpenAI request failed after retries: {last_error}"))
 
           def usage_note(usage, system_prompt, user_prompt, review):
-              prompt_tokens = int((usage or {}).get("prompt_tokens") or (usage or {}).get("input_tokens") or 0)
-              completion_tokens = int((usage or {}).get("completion_tokens") or (usage or {}).get("output_tokens") or 0)
+              # I nomi dei campi sono quelli di `v1/responses`. Il fallback ai nomi di
+              # chat/completions resta come rete: se un giorno la risposta cambiasse
+              # forma, meglio un conteggio letto dal nome vecchio che uno stimato.
+              prompt_tokens = int((usage or {}).get("input_tokens") or (usage or {}).get("prompt_tokens") or 0)
+              completion_tokens = int((usage or {}).get("output_tokens") or (usage or {}).get("completion_tokens") or 0)
               # I token di REASONING sono fatturati come output ma non si vedono nel testo:
               # senza questa riga un ragionamento che esplode è indistinguibile da una review
               # lunga, ed è esattamente per questo che l'effort sbagliato è sopravvissuto.
-              dettagli = (usage or {}).get("completion_tokens_details") or {}
+              # Su questo endpoint stanno in `output_tokens_details`, non in
+              # `completion_tokens_details`: leggere il nome vecchio darebbe sempre zero,
+              # cioe' un reasoning che esplode e nessuno che lo vede.
+              dettagli = (usage or {}).get("output_tokens_details") or (usage or {}).get("completion_tokens_details") or {}
               reasoning_tokens = int(dettagli.get("reasoning_tokens") or 0)
-              source = "OpenRouter usage"
+              # Token serviti dalla CACHE. Il caching di OpenAI e' automatico sopra i
+              # ~1024 token e `input_tokens` LI INCLUDE: prezzarli a tariffa piena
+              # gonfierebbe il costo dichiarato, e su quei numeri il proprietario decide
+              # quando armare il gate.
+              dettagli_input = (usage or {}).get("input_tokens_details") or {}
+              cached_tokens = int(dettagli_input.get("cached_tokens") or 0)
+              source = "OpenAI usage"
 
               if prompt_tokens <= 0:
                   prompt_tokens = max(1, len(system_prompt + user_prompt) // 4)
                   source = "stimato localmente"
+                  cached_tokens = 0
               if completion_tokens <= 0:
                   completion_tokens = max(1, len(review) // 4)
 
+              # Difesa: un `cached_tokens` maggiore dell'input renderebbe negativo il
+              # non-cachato e il costo piu' basso del vero — cioe' l'errore nella
+              # direzione che NASCONDE la spesa.
+              cached_tokens = max(0, min(cached_tokens, prompt_tokens))
+              input_pieno = prompt_tokens - cached_tokens
+
               total = prompt_tokens + completion_tokens
-              estimated = prompt_tokens / 1_000_000 * PRICE_INPUT_PER_MILLION + completion_tokens / 1_000_000 * PRICE_OUTPUT_PER_MILLION
+              estimated = (
+                  input_pieno / 1_000_000 * PRICE_INPUT_PER_MILLION
+                  + cached_tokens / 1_000_000 * PRICE_CACHE_READ_PER_MILLION
+                  + completion_tokens / 1_000_000 * PRICE_OUTPUT_PER_MILLION
+              )
 
               return (
                   "\n\n## Uso token / costo stimato\n"
                   f"- Fonte token: `{source}`\n"
                   f"- Prompt token: `{prompt_tokens}`\n"
-                  f"- Completion token: `{completion_tokens}`\n"
+                  + (f"- di cui serviti dalla cache: `{cached_tokens}`"
+                     f" (a ${PRICE_CACHE_READ_PER_MILLION:.2f}/M invece di"
+                     f" ${PRICE_INPUT_PER_MILLION:.2f}/M)\n" if cached_tokens else "")
+                  + f"- Completion token: `{completion_tokens}`\n"
                   + (f"- di cui reasoning: `{reasoning_tokens}`"
                      f" ({reasoning_tokens * 100 // max(1, completion_tokens)}%)\n"
                      if reasoning_tokens else "")
                   +
                   f"- Total token: `{total}`\n"
                   f"- Costo stimato base: `~${estimated:.4f}`\n"
-                  "- Nota Fugu: eventuali token di orchestrazione possono essere fatturati come token standard.\n"
               )
 
           try:
@@ -770,6 +891,24 @@ jobs:
           esito_gate = decisione_gate(EVENT_ACTION, etichette_pr, FINAL_LABEL,
                                       os.environ.get("LABEL_EVENTO", ""))
 
+          # «Sto agendo da gate finale?» — UNA volta, derivata da `decisione_gate`
+          # invece di essere riderivata dal nome dell'evento in ogni guard.
+          #
+          # Il difetto che chiude: i guard fail-closed chiedevano che l'evento si
+          # chiamasse `labeled`, ma GitHub NON emette quell'evento per una PR aperta
+          # con la label gia' applicata — lo dice la docstring qui sopra e lo dimostra
+          # un test verde da prima di questa PR. Su `opened`, `reopened` e
+          # `ready_for_review` il job faceva quindi il gate finale mentre i suoi guard
+          # credevano di essere su un push opzionale: chiave assente o errore del
+          # fornitore uscivano VERDI, e il gate risultava superato con zero righe
+          # lette. Segnalato da `gpt-5.6-sol` su se stesso; i siti erano sei, in
+          # entrambi i workflow con gate.
+          #
+          # `revisiona` e' l'unico esito che significa «review dell'intera PR perche'
+          # il gate e' armato»: `core` (solo Fable) e' il push su file core, dove il
+          # fail-open e' voluto, e `salta`/`stantio` non arrivano fino qui.
+          GATE_FINALE = esito_gate == "revisiona"
+
           if esito_gate == "stantio":
               print(
                   f"::error::{REVIEW_ID}: il head è cambiato DOPO che il gate finale era "
@@ -781,7 +920,7 @@ jobs:
           if esito_gate == "salta":
               print(
                   f"::notice::{REVIEW_ID}: push senza label finale → review forte saltata "
-                  "(nessun costo modello). Fugu spende solo sul gate finale a head stabile."
+                  "(nessun costo modello). Sol spende solo sul gate finale a head stabile."
               )
               sys.exit(0)
 
@@ -904,7 +1043,7 @@ jobs:
 
           if not diff_text.strip():
               published = upsert_comment(marker, f"""{marker}
-          # OpenRouter Fugu Ultra PR Review
+          # GPT-5.6 Sol PR Review
 
           Nessun patch testuale analizzabile trovato.
 
@@ -918,7 +1057,7 @@ jobs:
 
           Modalità sicurezza: niente checkout, niente esecuzione codice PR, niente auto-merge.
           """[:64000])
-              if not published and EVENT_ACTION == "labeled":
+              if not published and GATE_FINALE:
                   print("::error::Gate finale a label: esito non pubblicato → job fallito di proposito (P3-38 #76).")
                   sys.exit(1)
               sys.exit(0)
@@ -994,7 +1133,7 @@ jobs:
           Scope: {range_scope}
           Range: {range_base}...{range_head}
           Commits nel range: {commit_count}
-          Modello: {MODEL_LABEL} ({OPENROUTER_MODEL})
+          Modello: {MODEL_LABEL} ({MODEL_ID})
 
           Produci Markdown, MASSIMO 150 parole, SOLO queste due sezioni (i rischi di
           sicurezza / CSV / isolamento fra utenti / segreti vanno dentro "Bloccanti", non in sezioni a parte):
@@ -1012,7 +1151,7 @@ jobs:
               review, usage = call_model(system_prompt, user_prompt)
           except Exception as exc:
               review = (
-                  "## Review Fugu Ultra non completata\n\n"
+                  "## Review GPT-5.6 Sol non completata\n\n"
                   f"Errore sintetico:\n\n```text\n{redact(str(exc))[:3000]}\n```"
               )
               usage = {}
@@ -1025,7 +1164,9 @@ jobs:
               (
                   "Output troncato",
                   "Il modello non ha restituito testo",
-                  "Il modello non ha restituito choices",
+                  # «non ha restituito choices» era la forma di chat/completions e non
+                  # e' piu' raggiungibile su `v1/responses`: tolta invece di lasciarla
+                  # a far credere che il codice possa produrla.
               )
           ):
               model_failed = True
@@ -1041,7 +1182,7 @@ jobs:
           done_line = "" if model_failed else done_marker
 
           body = f"""{marker}{done_line}
-          # OpenRouter Fugu Ultra PR Review
+          # GPT-5.6 Sol PR Review
 
           **Modalità:** push-range diff via GitHub Compare API
           **Scope:** `{range_scope}`
@@ -1050,7 +1191,7 @@ jobs:
           **Checkout codice PR:** no
           **Esecuzione codice PR:** no
           **Auto-merge / auto-approve:** no
-          **Model:** `{OPENROUTER_MODEL}`
+          **Model:** `{MODEL_ID}`
           **Budget patch:** `{patch_budget_used}` caratteri max{" (escalato dal budget basso perché il diff era troncato)" if patch_budget_used != MAX_TOTAL_PATCH_CHARS else ""}
           **Budget output:** `{MAX_OUTPUT_TOKENS}` token max
 
@@ -1069,13 +1210,13 @@ jobs:
           published = upsert_comment(marker, body[:64000])
 
           # Gate finale obbligatorio: se il modello è fallito su un trigger a LABEL
-          # (OpenRouter auth/network/API), il check NON deve risultare verde — la
+          # (OpenAI auth/network/API), il check NON deve risultare verde — la
           # review forte richiesta non è avvenuta. Falliamo il job DOPO aver
           # pubblicato il commento con l'errore. Sui push automatici (file core)
           # resta fail-open: reviewer opzionale che non blocca la PR (Codex P2).
-          if model_failed and EVENT_ACTION == "labeled":
+          if model_failed and GATE_FINALE:
               print(
-                  "::error::Gate finale a label: la review Fugu Ultra non è stata "
+                  "::error::Gate finale a label: la review GPT-5.6 Sol non è stata "
                   "completata (errore provider) → job fallito di proposito."
               )
               sys.exit(1)
@@ -1084,7 +1225,7 @@ jobs:
           # review pubblicata): sul gate a LABEL il commento È il deliverable del job —
           # se la pubblicazione fallisce il check NON deve risultare verde. Sui push
           # automatici resta fail-open: reviewer opzionale che non blocca la PR.
-          if not published and EVENT_ACTION == "labeled":
+          if not published and GATE_FINALE:
               print(
                   "::error::Gate finale a label: review completata ma NON pubblicata "
                   "(permessi/quota API GitHub) → job fallito di proposito."

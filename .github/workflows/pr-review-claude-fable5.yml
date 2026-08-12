@@ -122,8 +122,19 @@ jobs:
           # una review non eseguibile per key mancante NON deve risultare verde:
           # fallisci il job (coerente col fail-closed sul fallimento modello, GPT-5.5).
           if [ -z "${BETRELAY_FABLE:-}" ]; then
-            if [ "${EVENT_ACTION:-}" = "labeled" ]; then
-              echo "::error::Gate finale a label ma BETRELAY_FABLE assente: review non eseguibile → job fallito (il gate non deve risultare verde)."
+            # Questo guard gira PRIMA di Python, quindi non puo- chiamare
+            # `decisione_gate`: la sua condizione e- volutamente piu- GROSSOLANA — «la
+            # label finale e- nel quadro?» — e in ogni caso in cui le due divergono
+            # sbaglia verso il ROSSO, che e- il verso giusto per una chiave mancante.
+            #
+            # Prima chiedeva solo che l-evento si chiamasse `labeled`, e GitHub non
+            # emette quell-evento per una PR aperta con la label gia- applicata: su
+            # `opened`, `reopened` e `ready_for_review` una chiave assente usciva
+            # VERDE e il gate finale risultava superato con zero righe lette.
+            # Segnalato da `gpt-5.6-sol`, corretto in entrambi i workflow con gate.
+            if [ "${LABEL_EVENTO:-}" = "${FINAL_LABEL:-}" ] \
+               || printf '%s' "${LABELS_PRESENTI:-}" | grep -q "\"${FINAL_LABEL}\""; then
+              echo "::error::Gate finale armato (label «${FINAL_LABEL}») ma BETRELAY_FABLE assente: review non eseguibile → job fallito (il gate non deve risultare verde)."
               exit 1
             fi
             echo "::notice::BETRELAY_FABLE non configurato: reviewer Claude Fable 5 saltato (push automatico, nessun check rosso)."
@@ -577,23 +588,42 @@ jobs:
                               parts.append(item.get("text") or "")
 
                       text = "\n".join(parts).strip()
-                      # Troncamento = stop_reason=max_tokens, INDIPENDENTE dal fatto
-                      # che ci sia testo: anche una review PARZIALE non vuota è
-                      # incompleta (Codex P1). Il banner "Output troncato" in testa fa
-                      # scattare il guard del chiamante (startswith) → model_failed sul
-                      # gate a label e niente done_marker → la review parziale non passa
-                      # per completa né viene deduplicata via.
-                      truncated = body.get("stop_reason") == "max_tokens"
+                      # Troncamento INDIPENDENTE dal fatto che ci sia testo: anche una
+                      # review PARZIALE non vuota è incompleta (Codex P1). Il banner
+                      # "Output troncato" in testa fa scattare il guard del chiamante
+                      # (startswith) → model_failed sul gate a label e niente
+                      # done_marker → la review parziale non passa per completa né
+                      # viene deduplicata via.
+                      #
+                      # La condizione è una WHITELIST, non `== "max_tokens"`. Prima
+                      # nominava il solo motivo atteso, e ogni ALTRO modo di non
+                      # finire — `refusal`, `pause_turn`, o un `stop_reason` assente
+                      # perché la forma della risposta è cambiata — dava truncated
+                      # falso: review parziale pubblicata come completa, col
+                      # done_marker che impedisce di rifarla. È la stessa falla che
+                      # CodeRabbit ha segnalato sui due workflow su `v1/responses`
+                      # nella PR #20; qui il campo si chiama `stop_reason` invece di
+                      # `status`, ma la classe è identica (regola 2: la classe, non il
+                      # sito). Su Anthropic l'unico motivo che significa «ho finito la
+                      # review» è `end_turn`: non passiamo `stop_sequences` e non
+                      # diamo strumenti al modello, quindi qualunque altro valore è un
+                      # taglio, e l'assenza del campo è una forma che non conosciamo —
+                      # in entrambi i casi si dichiara, non si assume.
+                      MOTIVI_COMPLETI = ("end_turn",)
+                      motivo_stop = body.get("stop_reason") or "non dichiarato"
+                      truncated = motivo_stop not in MOTIVI_COMPLETI
                       if not text:
                           # Budget esaurito prima di qualsiasi blocco di testo:
                           # segnalalo con verità invece di far sembrare che il modello
                           # non avesse nulla da dire.
                           if truncated:
                               text = (
-                                  "Output troncato: il modello ha esaurito il budget "
-                                  f"(MAX_OUTPUT_TOKENS={MAX_OUTPUT_TOKENS}, stop_reason=max_tokens) "
-                                  "prima di produrre la review. Aumenta MAX_OUTPUT_TOKENS "
-                                  "o riduci l'ampiezza del diff."
+                                  "Output troncato: il modello si è interrotto "
+                                  f"(MAX_OUTPUT_TOKENS={MAX_OUTPUT_TOKENS}, stop_reason={motivo_stop}) "
+                                  "prima di produrre la review. Se il motivo è "
+                                  "max_tokens, aumenta MAX_OUTPUT_TOKENS o riduci "
+                                  "l'ampiezza del diff; altrimenti il motivo è quello "
+                                  "dichiarato qui sopra."
                               )
                           else:
                               text = "Il modello non ha restituito testo."
@@ -603,7 +633,7 @@ jobs:
                           text = (
                               "Output troncato: il modello ha prodotto solo una review "
                               f"PARZIALE (MAX_OUTPUT_TOKENS={MAX_OUTPUT_TOKENS}, "
-                              "stop_reason=max_tokens). Segue il testo parziale.\n\n"
+                              f"stop_reason={motivo_stop}). Segue il testo parziale.\n\n"
                               + text
                           )
                       return text, body.get("usage", {})
@@ -777,6 +807,24 @@ jobs:
                                       os.environ.get("LABEL_EVENTO", ""),
                                       tocca_core, compare_maybe_truncated)
 
+          # «Sto agendo da gate finale?» — UNA volta, derivata da `decisione_gate`
+          # invece di essere riderivata dal nome dell'evento in ogni guard.
+          #
+          # Il difetto che chiude: i guard fail-closed chiedevano che l'evento si
+          # chiamasse `labeled`, ma GitHub NON emette quell'evento per una PR aperta
+          # con la label gia' applicata — lo dice la docstring qui sopra e lo dimostra
+          # un test verde da prima di questa PR. Su `opened`, `reopened` e
+          # `ready_for_review` il job faceva quindi il gate finale mentre i suoi guard
+          # credevano di essere su un push opzionale: chiave assente o errore del
+          # fornitore uscivano VERDI, e il gate risultava superato con zero righe
+          # lette. Segnalato da `gpt-5.6-sol` su se stesso; i siti erano sei, in
+          # entrambi i workflow con gate.
+          #
+          # `revisiona` e' l'unico esito che significa «review dell'intera PR perche'
+          # il gate e' armato»: `core` (solo Fable) e' il push su file core, dove il
+          # fail-open e' voluto, e `salta`/`stantio` non arrivano fino qui.
+          GATE_FINALE = esito_gate == "revisiona"
+
           if esito_gate == "stantio":
               print(
                   f"::error::{REVIEW_ID}: il head è cambiato DOPO che il gate finale era "
@@ -942,7 +990,7 @@ jobs:
 
           Modalità sicurezza: niente checkout, niente esecuzione codice PR, niente auto-merge.
           """[:64000])
-              if not published and EVENT_ACTION == "labeled":
+              if not published and GATE_FINALE:
                   print("::error::Gate finale a label: esito non pubblicato → job fallito di proposito (P3-38 #76).")
                   sys.exit(1)
               sys.exit(0)
@@ -1093,7 +1141,7 @@ jobs:
           # review forte richiesta non è avvenuta. Falliamo il job DOPO aver
           # pubblicato il commento con l'errore. Sui push automatici (file core)
           # resta fail-open: reviewer opzionale che non blocca la PR (Codex P2).
-          if model_failed and EVENT_ACTION == "labeled":
+          if model_failed and GATE_FINALE:
               print(
                   "::error::Gate finale a label: la review Claude Fable 5 non è stata "
                   "completata (errore provider) → job fallito di proposito."
@@ -1104,7 +1152,7 @@ jobs:
           # review pubblicata): sul gate a LABEL il commento È il deliverable del job —
           # se la pubblicazione fallisce il check NON deve risultare verde. Sui push
           # automatici resta fail-open: reviewer opzionale che non blocca la PR.
-          if not published and EVENT_ACTION == "labeled":
+          if not published and GATE_FINALE:
               print(
                   "::error::Gate finale a label: review completata ma NON pubblicata "
                   "(permessi/quota API GitHub) → job fallito di proposito."

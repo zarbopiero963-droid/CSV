@@ -547,26 +547,51 @@ jobs:
                           text = "\n".join(parts)
 
                       text = (text or "").strip()
-                      # Troncamento = status=incomplete/max_output_tokens, INDIPENDENTE
-                      # dal fatto che ci sia testo: anche una review PARZIALE non vuota è
-                      # incompleta (Codex P1). Il reasoning di un modello reasoning conta
-                      # nel budget. Il banner "Output troncato" in testa fa scattare il
-                      # guard del chiamante (startswith) → niente done_marker e la review
-                      # parziale non viene deduplicata come completata.
+                      # Troncamento = `status=incomplete`, INDIPENDENTE dal fatto che ci
+                      # sia testo: anche una review PARZIALE non vuota è incompleta
+                      # (Codex P1). Il reasoning di un modello reasoning conta nel budget.
+                      # Il banner "Output troncato" in testa fa scattare il guard del
+                      # chiamante (startswith) → niente done_marker e la review parziale
+                      # non viene deduplicata come completata.
+                      #
+                      # E il troncamento vale QUALUNQUE sia il motivo, e QUALUNQUE sia
+                      # lo stato che non sia `completed`. La condizione e' una
+                      # WHITELIST: `completed` significa «ho finito», e tutto il resto —
+                      # `incomplete`, `failed`, `cancelled`, uno `status` assente perche'
+                      # la forma e' cambiata — e' una review che non e' finita. Scriverla
+                      # come blacklist di un solo valore era il difetto che
+                      # `gpt-5.6-sol` ha trovato alla sua prima chiamata reale: una
+                      # risposta `failed` CON del testo riceveva il done_marker, cioe'
+                      # veniva certificata completa e non piu' rifatta.
+                      #
+                      # Prima la condizione pretendeva anche
+                      # `incomplete_details.reason == "max_output_tokens"`, e quella
+                      # congiunzione era la falla: l'API puo' rispondere `incomplete`
+                      # per altri motivi — `content_filter` fra questi — e in quei casi
+                      # `truncated` restava falso. Una review PARZIALE veniva pubblicata
+                      # come completa, col `done_marker` che impedisce di rifarla: il
+                      # gate finale avrebbe detto «nessun bloccante» su una review
+                      # interrotta a meta'. Segnalato da CodeRabbit sulla PR #20 come
+                      # major, e corretto in TUTTI i workflow su questo endpoint, non
+                      # solo in quello segnalato (regola 2).
+                      #
+                      # Il motivo entra nei banner: serve a chi legge il commento per
+                      # sapere se aumentare il tetto o guardare altro.
                       incomplete = body.get("incomplete_details") or {}
-                      truncated = (
-                          body.get("status") == "incomplete"
-                          and incomplete.get("reason") == "max_output_tokens"
-                      )
+                      motivo_incompleto = incomplete.get("reason") or "non dichiarato"
+                      stato = body.get("status") or "assente"
+                      truncated = stato != "completed"
                       if not text:
                           # Budget esaurito prima di qualsiasi testo: dillo, non
                           # "nessun testo".
                           if truncated:
                               text = (
-                                  "Output troncato: il modello ha esaurito il budget "
-                                  f"(MAX_OUTPUT_TOKENS={MAX_OUTPUT_TOKENS}, status=incomplete/max_output_tokens) "
-                                  "prima di produrre la review. Aumenta MAX_OUTPUT_TOKENS "
-                                  "o riduci l'ampiezza del diff."
+                                  "Output troncato: il modello si e' interrotto "
+                                  f"(MAX_OUTPUT_TOKENS={MAX_OUTPUT_TOKENS}, status={stato}, reason={motivo_incompleto}) "
+                                  "prima di produrre la review. Se il motivo e' "
+                                  "max_output_tokens, aumenta MAX_OUTPUT_TOKENS o riduci "
+                                  "l'ampiezza del diff; altrimenti il motivo e' quello "
+                                  "dichiarato qui sopra."
                               )
                           else:
                               text = "Il modello non ha restituito testo."
@@ -576,7 +601,7 @@ jobs:
                           text = (
                               "Output troncato: il modello ha prodotto solo una review "
                               f"PARZIALE (MAX_OUTPUT_TOKENS={MAX_OUTPUT_TOKENS}, "
-                              "status=incomplete/max_output_tokens). Segue il testo parziale.\n\n"
+                              f"status={stato}, reason={motivo_incompleto}). Segue il testo parziale.\n\n"
                               + text
                           )
                       return text, body.get("usage", {})
