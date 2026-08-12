@@ -6,15 +6,19 @@ invece di scorrere dentro il proprio. Qui si misura, non si guarda.
 """
 
 import sys, pathlib, tempfile
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 from playwright.sync_api import sync_playwright
 
-CHROMIUM = '/opt/pw-browsers/chromium-1194/chrome-linux/chrome'
+# Fonte unica dell-avvio del browser: il percorso pinnato in questo
+# ambiente, quello di Playwright in CI. Prima era ricopiato in cinque file.
+from tests.runtime import apri_chromium  # noqa: E402
+
 BASE = sys.argv[1] if len(sys.argv) > 1 else 'http://127.0.0.1:8099/app/'
 OUT = pathlib.Path(sys.argv[2]) if len(sys.argv) > 2 else pathlib.Path(tempfile.mkdtemp())
 OUT.mkdir(parents=True, exist_ok=True)
 errs = []
 with sync_playwright() as pw:
-    b = pw.chromium.launch(executable_path=CHROMIUM)
+    b = apri_chromium(pw)
     pg = b.new_page(viewport={'width': 390, 'height': 844})
     pg.on('pageerror', lambda e: errs.append(str(e)))
     pg.goto(BASE)

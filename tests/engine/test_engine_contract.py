@@ -14,13 +14,20 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 RADICE = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(RADICE))
+
+from tests.runtime import esigi_node  # noqa: E402
+
 CASI_JS = Path(__file__).with_name('engine_cases.mjs')
 
+# `node` risolto tramite la fonte unica dei runtime: in CI un node mancante deve
+# far FALLIRE, non saltare 24 casi lasciando la spunta verde.
 NODE = shutil.which('node')
 
 
@@ -39,8 +46,7 @@ def _esegui_casi() -> list[dict]:
 
 @pytest.fixture(scope='module')
 def casi() -> list[dict]:
-    if NODE is None:
-        pytest.skip('node non disponibile in questo ambiente: il motore JS non e\' eseguibile')
+    esigi_node()
     return _esegui_casi()
 
 

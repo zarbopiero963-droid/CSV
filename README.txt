@@ -162,6 +162,23 @@ Il parser attuale riconosce un messaggio contenente "P.Bet. PREMACHT 0,5HT", cer
 CSV: 14 colonne, virgola, campi tra virgolette, terminatore CRLF, UTF-8 con BOM,
      colonna finale Points. Verificato da verify_csv() prima di ogni scrittura.
 
+TEST E CI
+python -m pytest -q esegue la suite. Le dipendenze dei soli test stanno in
+requirements-dev.txt, separate da quelle del deploy:
+  pip install -r requirements-dev.txt && python -m pytest -q
+
+Dal 12/08/2026 li esegue anche la CI: .github/workflows/test.yml gira su ogni pull
+request e su ogni push a main. Il workflow impone TEST_RUNTIME_OBBLIGATORIO=1, che
+trasforma in FALLIMENTO ogni test saltato per un runtime mancante (node, Chromium).
+Senza quella variabile un'installazione del browser andata male darebbe
+"252 passed, 5 skipped", exit 0 e una spunta verde identica a quella di una suite
+completa: un check che non prova niente. In locale la variabile resta spenta e i
+test che richiedono node o Chromium si saltano con motivo scritto.
+
+Il percorso di Chromium e la decisione salta/fallisce vivono in un punto solo,
+tests/runtime.py. Le due guardie sono tests/safety/test_ci.py (legge il workflow) e
+tests/safety/test_runtime_severo.py (esercita il meccanismo).
+
 FACCIATA DEL SITO
 GET / restituisce la pagina pubblica di BetRelay (web/sito.html), non piu' l'oggetto
 JSON {"service","status","csv"}. Chi sonda il servizio in automatico usa /health, che
