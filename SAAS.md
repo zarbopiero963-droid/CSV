@@ -151,7 +151,12 @@ da test e tutti chiusi con una disambiguazione deterministica invece di un error
   un cliente. Ma azzerare l'etichetta **non basta**: ciò che la riga perdente possiede
   — chat, segnali, parser — viene **trasferito al superstite** prima di togliergliela,
   altrimenti quei dati restano su un utente che non risulta più quel profilo, cioè
-  nessuno li rivendica e per il codice multiutente sono di un altro.
+  nessuno li rivendica e per il codice multiutente sono di un altro. Nel trasferimento
+  dei parser lo **slug che collide** viene ri-disambiguato: `UNIQUE (user_id, slug)`
+  vieta la coppia, e due parser di utenti diversi con lo stesso slug sono uno stato
+  legale sotto quel vincolo — quindi esiste, e uno `UPDATE` in blocco vi sbatterebbe
+  contro. A cambiare nome è chi arriva, non chi era già del destinatario, che potrebbe
+  avere quello slug in un URL già in uso.
 
 Il ri-puntamento di `parser_chats` sposta **solo** le associazioni dei parser che
 appartengono al proprietario della chat sopravvissuta. Con la stessa chat rivendicata da
