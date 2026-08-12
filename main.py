@@ -601,6 +601,27 @@ def _travasa_nel_multiutente(c):
     il feed per utente, e generarne uno qui vorrebbe dire scriverlo da qualche
     parte — cioe' un segreto in piu' senza nessuno che lo usi.
     """
+    # La deduplica di `origin_profile` viene PRIMA di tutto, e l'ordine e' il punto.
+    # Sta qui e non accanto al suo indice perche' i lookup del ciclo sotto risolvono
+    # l'utente PER `origin_profile`: con due righe duplicate il lookup ne pesca una
+    # arbitrariamente, e se pesca quella che poi perde l'etichetta, chat, segnali e
+    # parser finiscono attribuiti a un utente che non risulta piu' quel profilo.
+    # Deduplicando prima, ogni lookup risolve sulla riga sopravvissuta.
+    #
+    # Misurato con `PRAGMA reverse_unordered_selects = ON`, che inverte le scansioni
+    # non ordinate: utente superstite 1, proprietario della chat 2, segnale 2 —
+    # incoerente. Segnalato da CodeRabbit, marcato Trivial, ma e' attribuzione
+    # sbagliata fra utenti.
+    #
+    # NON si cancella nessuna riga, e la differenza con `chats` e' sostanziale: una
+    # riga di `users` possiede chat, parser e segnali, quindi cancellarla perderebbe
+    # dati di un cliente. Si azzera invece `origin_profile` sulle perdenti — l'unica
+    # cosa che puo' essere ambigua — e l'etichetta resta all'`id` piu' basso. Serve
+    # anche perche' un indice UNIQUE non si crea su una tabella con duplicati:
+    # segnalato prima da Claude Fable 5 e GPT-5.5.
+    c.execute("UPDATE users SET origin_profile = NULL WHERE origin_profile IS NOT NULL"
+              ' AND id NOT IN (SELECT MIN(id) FROM users WHERE origin_profile IS NOT NULL'
+              ' GROUP BY origin_profile)')
     # `ORDER BY name` non e' decorazione: decide CHI vince quando due profili
     # rivendicano la stessa cosa — una chat o un parser. Senza, «il primo» significa
     # «il primo che la tabella restituisce», cioe' l'ordine di inserimento: due database
@@ -676,19 +697,6 @@ def _travasa_nel_multiutente(c):
     # I NULL multipli restano ammessi, ed e' cio' che serve: chi non viene da un
     # profilo — tutti i prossimi utenti — ha questa colonna vuota.
     #
-    # E prima dell'indice la deduplica, per la stessa ragione delle chat: un indice
-    # UNIQUE non si crea su una tabella che contiene duplicati, e senza questo passo
-    # `migra()` solleverebbe su un database che si trova nello stato che il vincolo
-    # mancante permetteva. Segnalato da Claude Fable 5 e GPT-5.5 — la stessa classe
-    # che avevo appena chiuso sulle chat, reintrodotta un commit dopo.
-    #
-    # Qui NON si cancella nessuna riga, e la differenza con `chats` e' sostanziale:
-    # una riga di `users` possiede chat, parser e segnali, quindi cancellarla
-    # perderebbe dati di un cliente. Si azzera invece `origin_profile` sulle perdenti
-    # — l'unica cosa che puo' essere ambigua — e l'etichetta resta all'`id` piu' basso.
-    c.execute("UPDATE users SET origin_profile = NULL WHERE origin_profile IS NOT NULL"
-              ' AND id NOT IN (SELECT MIN(id) FROM users WHERE origin_profile IS NOT NULL'
-              ' GROUP BY origin_profile)')
     c.execute('CREATE UNIQUE INDEX IF NOT EXISTS users_origin_profile'
               ' ON users (origin_profile)')
     # `UNIQUE (telegram_chat_id, message_thread_id)` sulla tabella NON deduplica le

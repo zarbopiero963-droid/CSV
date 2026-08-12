@@ -8,11 +8,21 @@ con dati finti.
 ## Modello concettuale
 
 L'entità centrale è il **parser**, non il profilo. È il parser che possiede
-configurazione, token, feed CSV, timer dei 90 secondi e log.
+configurazione, feed CSV, timer dei 90 secondi e log.
+
+**Il token no, e questa riga è stata corretta il 12/08/2026 perché diceva il
+contrario.** Qui c'era scritto che il parser possiede anche il token; nel «Modello
+dati» più sotto `token_hash` e `token_prefix` stanno su `users`, ed è lì che il codice
+li ha creati. Lo stesso documento affermava quindi due cose incompatibili, e il PR
+sull'autenticazione avrebbe implementato quella che leggeva per prima. La versione
+giusta è **il token appartiene all'utente**: è la correzione del modello sbagliato del
+prototipo, registrata in #2. Segnalato da CodeRabbit sulla PR #22, ed è la stessa forma
+del difetto raccontato in `CLAUDE.md` — una documentazione che contiene l'affermazione
+e la sua smentita.
 
 ```text
-utente (login Telegram)
- └── parser  (slug, token proprio, config propria, feed proprio, timer proprio)
+utente (login Telegram)   ← il TOKEN del feed sta qui: `users.token_hash`
+ └── parser  (slug, config propria, feed proprio, timer proprio)
       └── N chat Telegram   ←→   una chat può alimentare N parser dello stesso utente
 ```
 
@@ -107,8 +117,16 @@ dichiararle funzionanti sarebbe la copertura finta che `CLAUDE.md` vieta.
 
 ### Cosa fa la migrazione con i dati che trova
 
-`migra()` non cancella e non rinomina niente, gira **una volta per processo** (non a
-ogni connessione) e sta sul percorso di `db()`. Da quest'ultimo fatto viene il vincolo
+`migra()` **non cancella e non rinomina nessuna tabella, e non perde nessuna
+associazione**, gira **una volta per processo** (non a ogni connessione) e sta sul
+percorso di `db()`.
+
+La formulazione è più precisa di quella che stava qui («non cancella niente»), che dalla
+deduplica in poi era falsa: le righe `chats` **duplicate** vengono rimosse, dopo aver
+ri-puntato su quella sopravvissuta chi le riferiva. Nessuna informazione se ne va —
+la riga rimossa era una copia — ma «niente» era la parola sbagliata, ed è il tipo di
+imprecisione che questo documento esiste per non avere. Segnalato da CodeRabbit.
+Le righe di `users` invece non si toccano mai: vedi sotto. Da quest'ultimo fatto viene il vincolo
 che ne governa la forma: **non può sollevare per dati che esistono**, perché sollevare
 lì significa 500 su ogni richiesta, feed di XTrader compreso, e nessun riavvio lo
 cambierebbe. Quattro stati dei dati veri lo avrebbero fatto, tutti trovati da review o

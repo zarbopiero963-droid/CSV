@@ -239,10 +239,14 @@ DB_PATH: facoltativo; su Railway usare un volume per conservare i dati tra riavv
   parser e profili al primo riavvio.
   Lo schema viene portato al corrente all'avvio, alla prima connessione del
   processo: tabelle nuove create, colonne nuove aggiunte con ALTER additivo,
-  niente cancellato e niente rinominato. E' rieseguibile, quindi un riavvio non
-  cambia nulla, e non solleva sui dati che trova — se due profili elencano la
-  stessa chat ne resta una sola riga, del primo che l'ha dichiarata. Dettaglio
-  delle tabelle in SAAS.md, sezione «Modello dati».
+  nessuna tabella cancellata o rinominata e nessuna associazione persa. E'
+  rieseguibile, quindi un riavvio non cambia nulla, e non solleva sui dati che
+  trova. L'unica cosa che rimuove sono le righe DUPLICATE della tabella chats,
+  dopo aver ripuntato su quella sopravvissuta i parser che le riferivano: se due
+  profili elencano la stessa chat ne resta una sola riga, del primo in ordine
+  alfabetico di profilo. Le righe degli utenti non vengono mai cancellate, perche'
+  possiedono chat, parser e segnali. Dettaglio delle tabelle in SAAS.md, sezione
+  «Modello dati».
 
 I valori di mercato non sono piu' variabili d'ambiente: parser e profili vivono nel
 database e si gestiscono dalle API /api/parsers e /api/profiles.

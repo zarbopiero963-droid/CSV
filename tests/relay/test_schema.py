@@ -571,6 +571,15 @@ def test_dieci_thread_insieme_migrano_UNA_volta_sola(tmp_path, monkeypatch):
     for t in thread:
         t.join(timeout=15)
 
+    # `join(timeout=...)` ritorna anche quando il thread e- ancora vivo, e in quel caso
+    # `errori` resta vuoto e `chiamate` puo- avere una sola voce: un thread bloccato
+    # dentro `db()` — cioe- il deadlock che questo test dovrebbe trovare — darebbe
+    # VERDE. Segnalato da CodeRabbit sulla PR #22, ed e- la forma esatta del difetto
+    # «un test che dice di coprire una cosa e ne copre un-altra».
+    bloccati = [t.name for t in thread if t.is_alive()]
+    assert not bloccati, (
+        f'thread ancora vivi dopo 15 s di join: {bloccati}. Sono bloccati dentro '
+        '`db()`, e senza questo assert il test sarebbe passato comunque')
     assert not errori, f'connessioni fallite in concorrenza: {errori}'
     assert len(chiamate) == 1, f'migrazione eseguita {len(chiamate)} volte su 10 thread'
 
@@ -1282,3 +1291,85 @@ def test_il_proprietario_di_un_parser_CONDIVISO_non_dipende_dall_ordine_di_inser
         f'il proprietario del parser condiviso dipende dall-ordine di inserimento: '
         f'{uno!r} inserendo ZULU prima, {due!r} inserendo ALFA prima. Serve un ORDER BY '
         'esplicito, come per gli slug')
+
+
+# `PRAGMA reverse_unordered_selects` inverte le scansioni SENZA `ORDER BY`. E- il modo
+# di rendere VISIBILE una dipendenza dall-ordine di scansione invece di sperare che non
+# ci sia: SQLite e- libero di scegliere l-ordine, quindi un test che passa con l-ordine
+# naturale non dimostra niente. Il trucco l-ha suggerito CodeRabbit sulla PR #22.
+def _scansione_invertita(c):
+    c.execute('PRAGMA reverse_unordered_selects = ON')
+
+
+def test_con_origin_profile_duplicato_chat_e_segnali_vanno_al_SUPERSTITE(tmp_path):
+    """La deduplica deve girare PRIMA dei lookup che la consumano.
+
+    Segnalato da CodeRabbit come nitpick Trivial. Non e- trivial: `migra()` risolve
+    l'utente di ogni profilo per `origin_profile` — per le chat, per `signals.user_id`
+    e per la proprieta- dei parser — e la deduplica girava DOPO. Con due righe duplicate
+    il lookup ne pescava una arbitrariamente, e se pescava quella che poi perde
+    l'etichetta, i dati finivano su un utente che non risulta piu- quel profilo.
+
+    Misurato con la scansione invertita, sul codice precedente:
+
+        reverse_unordered_selects=OFF → superstite=1, chat=1, segnale=1  coerente
+        reverse_unordered_selects=ON  → superstite=1, chat=2, segnale=2  INCOERENTE
+
+    Cioe- il difetto c'era e l'ordine naturale lo nascondeva: e- la ragione per cui
+    questo test accende il PRAGMA invece di fidarsi.
+    """
+    c = sqlite3.connect(tmp_path / 'attribuzione.db')
+    _scansione_invertita(c)
+    for istruzione in SCHEMA_DI_PRODUZIONE:
+        c.execute(istruzione)
+    _crea_users(c, con_origin_profile=True)  # colonna presente, vincolo assente
+    c.execute("INSERT INTO users(origin_profile, first_name, slug) VALUES ('PIERO','PIERO','piero')")
+    c.execute("INSERT INTO users(origin_profile, first_name, slug) VALUES ('PIERO','PIERO','piero-2')")
+    c.execute('INSERT INTO profiles VALUES (?,?,?)', ('PIERO', CHAT_A, main.DEFAULT_PARSER))
+    c.execute('INSERT INTO signals(csv, parser, profile, expires_at) VALUES (?,?,?,?)',
+              ('"x"', main.DEFAULT_PARSER, 'PIERO', 9_999_999_999))
+
+    main.migra(c)
+
+    superstite = c.execute("SELECT id FROM users WHERE origin_profile='PIERO'").fetchone()[0]
+    proprietario = c.execute('SELECT owner_user_id FROM chats WHERE telegram_chat_id=?',
+                             (CHAT_A,)).fetchone()[0]
+    del_segnale = c.execute('SELECT user_id FROM signals').fetchall()
+    del_parser = c.execute('SELECT user_id FROM parsers WHERE name=?',
+                           (main.DEFAULT_PARSER,)).fetchone()[0]
+    assert proprietario == superstite, (
+        f'la chat e- attribuita a {proprietario} ma il profilo PIERO adesso e- '
+        f"l'utente {superstite}: l-attribuzione punta a un utente che non risulta piu- "
+        'quel profilo')
+    assert {r[0] for r in del_segnale} == {superstite}, del_segnale
+    assert del_parser == superstite, del_parser
+
+
+def test_la_chat_condivisa_va_al_PRIMO_profilo_anche_a_scansione_invertita(tmp_path):
+    """Non «uno dei due» ma **quale**, e senza dipendere dall-ordine di scansione.
+
+    Chiesto da CodeRabbit come Major: il test gemello asseriva solo che il proprietario
+    fosse *fra* gli utenti creati, quindi passava con qualunque dei due. Qui si fissa la
+    regola — vince il primo per nome, cioe- l'`ORDER BY name` del ciclo — e si accende
+    `reverse_unordered_selects` perche- senza quel PRAGMA il test passerebbe anche con
+    un ciclo non ordinato, per il solo fatto che l-ordine naturale coincide.
+    """
+    c = sqlite3.connect(tmp_path / 'condivisa_invertita.db')
+    _scansione_invertita(c)
+    for istruzione in SCHEMA_DI_PRODUZIONE:
+        c.execute(istruzione)
+    # ZULU inserito PRIMA, ALFA dopo: l'ordine di inserimento e- l'opposto di quello
+    # alfabetico, e la scansione invertita e- l'opposto di quello di inserimento.
+    for profilo in ('ZULU', 'ALFA'):
+        c.execute('INSERT INTO profiles VALUES (?,?,?)',
+                  (profilo, CHAT_A, main.DEFAULT_PARSER))
+
+    main.migra(c)
+
+    righe = c.execute('SELECT telegram_chat_id, owner_user_id FROM chats').fetchall()
+    assert len(righe) == 1, f'chat duplicata: {righe}'
+    proprietario = c.execute('SELECT origin_profile FROM users WHERE id=?',
+                             (righe[0][1],)).fetchone()[0]
+    assert proprietario == 'ALFA', (
+        f'la chat condivisa e- andata a {proprietario!r} invece che ad ALFA, che e- il '
+        'primo per nome: la regola dipende ancora dall-ordine di scansione')
