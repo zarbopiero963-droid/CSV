@@ -2016,6 +2016,34 @@ def test_il_guard_bash_ESEGUITO_su_un_payload_vero(path, etichette, label_evento
 
 
 @pytest.mark.parametrize('path', SU_V1_RESPONSES, ids=lambda p: p.name)
+def test_una_risposta_completa_ma_VUOTA_non_conta_come_review(monkeypatch, path):
+    """`status=completed` con zero testo: nessun troncamento, e nessuna review.
+
+    Il modello ha finito e non ha scritto niente. Non e' un troncamento — lo stato lo
+    dice — ma non e' nemmeno una review: se prendesse il `done_marker` il giro
+    successivo la salterebbe come «gia- fatta», e su un gate a label uscirebbe verde
+    con zero righe lette.
+
+    Questo caso e' qui perche' CodeRabbit ha trovato, sull'head finale della PR #20,
+    che `_prefissi_guard` catturava una sola stringa per `startswith`: il guard del
+    chiamante ne elenca due, e la seconda e' proprio «Il modello non ha restituito
+    testo». Quel banner non era legato a niente, e nessun test lo produceva — quindi il
+    buco non era solo nell'estrazione, era anche nella copertura. Il test che lo chiude
+    passa dal guard estratto invece di ripetere la stringa a mano.
+    """
+    call_model, _ = _call_model_del_gate(monkeypatch, path=path, risposta={
+        'output_text': '', 'status': 'completed', 'usage': {},
+    })
+    testo, _ = call_model('sistema', 'utente')
+
+    assert _e_marcata_non_completa(testo, path), (
+        f'una risposta completa ma VUOTA non e- riconosciuta dal guard '
+        f'{_prefissi_guard(path)}: prenderebbe il done_marker e il gate uscirebbe '
+        f'verde su zero righe lette.\n{testo!r}'
+    )
+
+
+@pytest.mark.parametrize('path', SU_V1_RESPONSES, ids=lambda p: p.name)
 def test_una_risposta_COMPLETA_non_porta_il_banner(monkeypatch, path):
     """Il contrario del test sopra, e serve.
 
@@ -2051,9 +2079,42 @@ def _prefissi_guard(path: Path) -> list:
     troncato» e verificava che il guard li riconoscesse — e passava anche dopo aver
     rinominato un banner, perche' il rinominato non veniva piu' trovato dalla ricerca
     stessa. Misurato per sabotaggio, non dedotto.
+
+    *E la seconda versione ne aveva un altro*, trovato da CodeRabbit sull'head finale
+    della PR #20: la regex catturava **una sola** stringa per `startswith`, e il guard
+    del chiamante ne elenca due — «Output troncato» e «Il modello non ha restituito
+    testo». Il secondo banner non era legato a niente, quindi riformularlo non avrebbe
+    fatto diventare rosso nulla: esattamente il difetto per cui questa funzione esiste.
+    Tre versioni, e la terza sta qui perche' le prime due dicevano di misurare una cosa
+    e ne misuravano un'altra.
+
+    Nella stessa segnalazione c'era un secondo difetto, e quello e' **smentito dalla
+    misura**: diceva che la `replace` non toglie niente perche' `_blocco` dedenta e
+    `_script` no. Misurato: `def call_model` sparisce da `fuori` in tutti e tre i
+    workflow (−5.846 caratteri su `pr-review-gpt55.yml`), perche' `_script` restituisce
+    gia' il corpo dello heredoc dedentato e per un `def` di primo livello il
+    `textwrap.dedent` di `_blocco` non cambia nulla. Nessuna patch per quel punto,
+    ma l'asserzione qui sotto lo vincola invece di lasciarlo alla fortuna.
     """
     fuori = _script(path).replace(_blocco(path, 'call_model'), '')
-    guardie = re.findall(r'startswith\(\s*\(?\s*(?:\n\s*)?"([^"]+)"', fuori)
+    assert 'def call_model' not in fuori, (
+        f'{path.name}: `call_model` non e- stato escluso da `fuori`. Le due estrazioni '
+        'sono divergenti (indentazione?), quindi i prefissi potrebbero venire dal '
+        'PRODUTTORE invece che dal chiamante, e il test misurerebbe se stesso'
+    )
+    # Tutte le stringhe di ogni `startswith`, non solo la prima. Si contano le
+    # parentesi invece di affidarsi a un pattern: i workflow scrivono il guard in due
+    # forme — `if ...startswith((...)):` in Fable e Sol, `review_complete = not
+    # ...startswith((...))` in GPT-5.5 — e una regex ancorata alla prima non trova la
+    # seconda. Ci sono cascato scrivendo questa correzione: la versione con `\\)\\s*:`
+    # lasciava GPT-5.5 senza nessun prefisso, e l'assert qui sotto l'ha rivelato.
+    guardie = []
+    for inizio in (m.end() for m in re.finditer(r'startswith\(', fuori)):
+        aperte, fine = 1, inizio
+        while aperte and fine < len(fuori):
+            aperte += {'(': 1, ')': -1}.get(fuori[fine], 0)
+            fine += 1
+        guardie.extend(re.findall(r'"([^"]+)"', fuori[inizio:fine]))
     assert guardie, f'{path.name}: nessun guard startswith trovato fuori da call_model'
     return guardie
 
