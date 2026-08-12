@@ -850,6 +850,82 @@ def test_su_un_host_APPENA_AVVIATO_il_freno_non_sopprime_il_primo_tentativo(monk
     assert len(tentativi) == 1, f'il freno non ha tenuto: {len(tentativi)}'
 
 
+def test_forza_IGNORA_il_freno_anche_appena_dopo_un_tentativo(monkeypatch):
+    """L'avvio deve poter fare i suoi tre tentativi, freno o no.
+
+    L'avvio chiama con `forza=True` proprio per questo: i tre tentativi si susseguono
+    a un secondo di distanza, cioe- ben dentro i 60 secondi del freno. Se il freno
+    valesse anche per il percorso forzato, l'avvio ne farebbe **uno** e i
+    ritentativi diventerebbero decorazione — il difetto sarebbe invisibile, perche-
+    un tentativo riuscito e' il caso normale e nessun test se ne accorgerebbe.
+
+    Non era coperto: `test_l_avvio_RITENTA_la_registrazione` non tocca
+    `_ULTIMO_TENTATIVO`, quindi non esercita il conflitto col freno. Segnalato da
+    GPT-5.5 sulla revisione della correzione del freno.
+    """
+    monkeypatch.setenv('TELEGRAM_BOT_TOKEN', BOT_FINTO)
+    monkeypatch.setattr(main, '_WEBHOOK_REGISTRATO', None)
+    # Freno appena armato: un tentativo NON forzato sarebbe soppresso.
+    monkeypatch.setattr(main, '_ULTIMO_TENTATIVO', main.time.monotonic())
+    tentativi = []
+    monkeypatch.setattr(main, '_chiama_set_webhook',
+                        lambda bot, url: tentativi.append(bot) or False)
+
+    main.assicura_registrazione()          # NON forzata: deve essere soppressa
+    assert tentativi == [], 'il freno non ha tenuto sul percorso NON forzato'
+
+    for _ in range(3):
+        main.assicura_registrazione(forza=True)
+    assert len(tentativi) == 3, (
+        f'`forza=True` e- stato frenato: {len(tentativi)} tentativi su 3. L-avvio '
+        f'ritenta a un secondo di distanza, quindi sempre dentro il freno: se il '
+        f'freno valesse anche li-, i tre tentativi dell-avvio sarebbero uno'
+    )
+
+
+def test_due_consegne_rifiutate_INSIEME_producono_un_solo_tentativo(monkeypatch):
+    """Il freno tiene anche se due consegne arrivano nello stesso istante.
+
+    Il primo che entra prende il lock, marca il tentativo e **poi** chiama la rete
+    fuori dal lock; il secondo trova il freno armato ed esce. Se il freno fosse
+    marcato dopo la chiamata invece che prima, due POST forgiati simultanei
+    diventerebbero due chiamate verso Telegram — e con dieci al secondo, dieci.
+
+    Non era coperto: il test di concorrenza esistente usa `forza=True`, che salta il
+    freno per costruzione, quindi verifica la numerazione dei tentativi e non il
+    freno. Segnalato da GPT-5.5.
+    """
+    monkeypatch.setenv('TELEGRAM_BOT_TOKEN', BOT_FINTO)
+    monkeypatch.setattr(main, '_WEBHOOK_REGISTRATO', None)
+    monkeypatch.setattr(main, '_ULTIMO_TENTATIVO', main.MAI_TENTATO)
+    tentativi = []
+    dentro = threading.Event()
+    liberi = threading.Event()
+
+    def finta(bot, url):
+        tentativi.append(bot)
+        dentro.set()
+        liberi.wait(10)     # tiene il primo in volo mentre il secondo prova
+        return True
+
+    monkeypatch.setattr(main, '_chiama_set_webhook', finta)
+
+    primo = threading.Thread(target=main.assicura_registrazione)
+    primo.start()
+    assert dentro.wait(10), 'il primo tentativo non e- partito'
+
+    # Il secondo arriva mentre il primo e- ancora in volo: deve trovare il freno.
+    main.assicura_registrazione()
+    assert len(tentativi) == 1, (
+        f'due consegne rifiutate insieme hanno prodotto {len(tentativi)} chiamate '
+        f'verso Telegram: il freno va marcato PRIMA della chiamata, non dopo'
+    )
+
+    liberi.set()
+    primo.join(10)
+    assert not primo.is_alive()
+
+
 def test_una_registrazione_riuscita_NON_rende_morta_l_autoriparazione(monkeypatch):
     """Il bloccante: dopo un successo, il ritentativo non partiva **mai piu-**.
 
