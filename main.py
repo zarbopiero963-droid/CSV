@@ -548,8 +548,15 @@ def _assegna_slug_e_ordine(c):
             prossimo += 1
 
 
-def _completa_colonne_nuove(c):
+def _completa_colonne_nuove(c, profilo_proprietario):
     """Riempie `user_id`, `id`, `slug` e `ordine` di ogni parser che ne e' senza.
+
+    `profilo_proprietario` e' OBBLIGATORIO e senza default, ed e' una scelta contro un
+    difetto futuro: la funzione assegna a quell'utente ogni parser senza proprietario,
+    e con `PIERO_PROFILE` cablato dentro il giorno in cui l'endpoint servira' piu'
+    utenti un parser creato per un altro finirebbe **in silenzio** sotto Piero.
+    Segnalato da Claude Fable 5 sulla PR #22. Come argomento, la decisione sta nei due
+    chiamanti — dove chi la cambiera' la vede — invece che nascosta qui dentro.
 
     Chiamata dalla migrazione **e** dal salvataggio di un parser, e la ragione di
     quest'ultimo e' un bloccante di Claude Fable 5 sulla PR #22: `migra()` gira una
@@ -562,10 +569,10 @@ def _completa_colonne_nuove(c):
     Una fonte unica e non due chiamate copiate: la regola 3, sulla parte del codice
     dove una divergenza fra i due percorsi sarebbe invisibile.
     """
-    piero = c.execute('SELECT id FROM users WHERE origin_profile=?',
-                      (PIERO_PROFILE,)).fetchone()
-    if piero:
-        c.execute('UPDATE parsers SET user_id=? WHERE user_id IS NULL', (piero[0],))
+    proprietario = c.execute('SELECT id FROM users WHERE origin_profile=?',
+                             (profilo_proprietario,)).fetchone()
+    if proprietario:
+        c.execute('UPDATE parsers SET user_id=? WHERE user_id IS NULL', (proprietario[0],))
     # `id` dal `rowid`, in una colonna vera: il `rowid` puo' cambiare con un VACUUM,
     # quindi memorizzarlo e' l'unico modo perche' un riferimento resti valido.
     c.execute('UPDATE parsers SET id=rowid WHERE id IS NULL')
@@ -620,14 +627,25 @@ def _travasa_nel_multiutente(c):
         c.execute('UPDATE signals SET user_id=? WHERE profile=? AND user_id IS NULL',
                   (utente, profilo))
     # Utente, `id`, `slug` e `ordine` dei parser: vedi `_completa_colonne_nuove`, che
-    # e' la stessa funzione chiamata dal salvataggio di un parser.
-    _completa_colonne_nuove(c)
+    # e' la stessa funzione chiamata dal salvataggio di un parser. Il proprietario e'
+    # PIERO perche' oggi i parser esistenti sono i suoi, ed e' l'unico utente.
+    _completa_colonne_nuove(c, PIERO_PROFILE)
     # I parser di uno stesso utente non possono avere due volte lo stesso slug:
     # e' il vincolo `UNIQUE (user_id, slug)` di #2, che su una tabella esistente
     # non si puo' aggiungere con ALTER e si esprime come indice.
     c.execute('CREATE UNIQUE INDEX IF NOT EXISTS parsers_utente_slug'
               ' ON parsers (user_id, slug)')
     c.execute('CREATE UNIQUE INDEX IF NOT EXISTS parsers_id ON parsers (id)')
+    # `users.origin_profile` e' UNIQUE nel CREATE TABLE, ma un database che riceve la
+    # colonna dall'ALTER non ha il vincolo: SQLite non sa aggiungerne con ADD COLUMN.
+    # I due percorsi finivano quindi con garanzie diverse, e quello senza garanzia era
+    # proprio quello dei database che esistono gia' — dove due righe con lo stesso
+    # profilo renderebbero ambiguo il lookup che `origin_profile` esiste per rendere
+    # certo. Segnalato in modo indipendente da GPT-5.5 e Claude Fable 5.
+    # I NULL multipli restano ammessi, ed e' cio' che serve: chi non viene da un
+    # profilo — tutti i prossimi utenti — ha questa colonna vuota.
+    c.execute('CREATE UNIQUE INDEX IF NOT EXISTS users_origin_profile'
+              ' ON users (origin_profile)')
     # `UNIQUE (telegram_chat_id, message_thread_id)` sulla tabella NON deduplica le
     # chat senza topic, e non e' un dettaglio: in SQL `NULL != NULL`, quindi due
     # righe con la stessa chat e `message_thread_id` NULL sono entrambe ammesse.
@@ -1157,17 +1175,26 @@ def save_parser(data: ParserIn, x_admin_token: str | None = Header(None)):
     # peggiore — un campo aggiunto a `ParserIn` e non qui verrebbe accettato dalla API
     # e non salvato. Che i nomi siano anche colonne di `parsers` e' vincolato da un
     # test, cosi' un campo nuovo senza colonna diventa rosso invece di dare 500.
+    #
+    # `INSERT OR IGNORE` seguito da `UPDATE` invece di `ON CONFLICT DO UPDATE`, che
+    # sarebbe la forma piu' compatta: l'UPSERT esiste solo da SQLite 3.24 (2018), e la
+    # versione di SQLite in produzione non e' una cosa che posso misurare da qui. Un
+    # endpoint che funziona in locale e solleva su Railway e' peggio di una riga in
+    # piu'. Le due istruzioni stanno nella stessa transazione, quindi il commit e'
+    # unico. Rischio segnalato da GPT-5.5, e rimosso invece che documentato.
     campi = tuple(ParserIn.model_fields)
     aggiornabili = [x for x in campi if x != 'name']
-    c.execute(
-        f'INSERT INTO parsers({", ".join(campi)})'
-        f' VALUES ({", ".join("?" * len(campi))})'
-        ' ON CONFLICT(name) DO UPDATE SET '
-        + ', '.join(f'{x}=excluded.{x}' for x in aggiornabili),
-        tuple(getattr(data, x) for x in campi))
+    c.execute(f'INSERT OR IGNORE INTO parsers({", ".join(campi)})'
+              f' VALUES ({", ".join("?" * len(campi))})',
+              tuple(getattr(data, x) for x in campi))
+    c.execute(f'UPDATE parsers SET {", ".join(f"{x}=?" for x in aggiornabili)}'
+              ' WHERE name=?',
+              tuple(getattr(data, x) for x in aggiornabili) + (data.name,))
     # Le colonne del multiutente subito, non al prossimo riavvio: vedi
-    # `_completa_colonne_nuove`.
-    _completa_colonne_nuove(c)
+    # `_completa_colonne_nuove`. Il proprietario e' PIERO perche' oggi e' l'unico
+    # utente e questo endpoint e' protetto dal suo token di amministrazione: quando
+    # servira' piu' utenti, qui va passato il proprietario della sessione.
+    _completa_colonne_nuove(c, PIERO_PROFILE)
     c.commit()
     c.close()
     return {'ok': True, 'parser': data.name}

@@ -859,3 +859,69 @@ def test_ogni_campo_di_ParserIn_e_una_colonna_di_parsers(tmp_path, monkeypatch):
         f'campi di ParserIn senza colonna in parsers: {sorted(campi - colonne)}. '
         'save_parser costruisce l-INSERT dal modello, quindi questi campi darebbero '
         '«no such column» sull-endpoint')
+
+
+def test_origin_profile_e_UNICO_anche_sui_database_gia_migrati(tmp_path):
+    """`ALTER TABLE ADD COLUMN` non porta il vincolo UNIQUE con se-.
+
+    Segnalato da GPT-5.5, ed e- esatto: `users` creata da zero ha
+    `origin_profile TEXT UNIQUE`, ma un database creato da una versione intermedia di
+    questo ramo riceve la colonna dall'ALTER — e l'ALTER non sa aggiungere vincoli. I
+    due percorsi finivano quindi con garanzie DIVERSE, e quello senza garanzia e-
+    proprio il percorso dei database che esistono gia-: due utenti con lo stesso
+    profilo di provenienza, cioe- il lookup ambiguo che `origin_profile` esiste per
+    chiudere.
+
+    Il vincolo si esprime come indice, la stessa forma usata per
+    `UNIQUE (user_id, slug)` sui parser e per lo stesso motivo.
+    """
+    c = _database_di_produzione(tmp_path / 'alterata.db')
+    # Lo stato intermedio: `users` esiste, senza `origin_profile`.
+    c.execute('CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT,'
+              ' telegram_id TEXT UNIQUE, username TEXT, first_name TEXT, slug TEXT UNIQUE,'
+              ' token_hash TEXT, token_prefix TEXT,'
+              " status TEXT NOT NULL DEFAULT 'registrato', access_expires_at INTEGER,"
+              ' telegram_reachable INTEGER NOT NULL DEFAULT 0,'
+              ' session_version INTEGER NOT NULL DEFAULT 1,'
+              ' is_admin INTEGER NOT NULL DEFAULT 0,'
+              ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP)')
+    colonne = {r[1] for r in c.execute('PRAGMA table_info(users)')}
+    assert 'origin_profile' not in colonne, 'il test non parte dallo stato che vuole'
+
+    main.migra(c)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        c.execute("INSERT INTO users(origin_profile, first_name) VALUES ('PIERO', 'x')")
+    # E i NULL restano ammessi in piu- copie: chi non viene da un profilo e- il caso
+    # normale di tutti i prossimi utenti, e un vincolo che li rifiutasse bloccherebbe
+    # il login Telegram.
+    c.execute("INSERT INTO users(first_name, slug) VALUES ('Tizio', 'tizio')")
+    c.execute("INSERT INTO users(first_name, slug) VALUES ('Caio', 'caio')")
+
+
+def test_il_proprietario_dei_parser_senza_utente_e_quello_CHIESTO(tmp_path):
+    """`_completa_colonne_nuove` non cabla Piero: obbedisce al chiamante.
+
+    Il guard che Claude Fable 5 chiede per il bloccante «ogni parser senza utente
+    finisce sotto Piero». Oggi Piero e- l'unico utente e l'assegnazione e- corretta;
+    il rischio e- il PR che rendera- l'endpoint multiutente e non si accorgera- di una
+    costante cablata in fondo a una funzione di migrazione.
+
+    Con il profilo come argomento obbligatorio la decisione sta nei due chiamanti, e
+    questo test dimostra che la funzione la RISPETTA invece di ignorarla — cioe- che
+    passare il proprietario giusto bastera-.
+    """
+    c = _database_di_produzione(tmp_path / 'proprietario.db')
+    c.execute('INSERT INTO profiles VALUES (?,?,?)', ('ALTRO', '-1004444444444', 'X'))
+    main.migra(c)
+    altro = c.execute('SELECT id FROM users WHERE origin_profile=?', ('ALTRO',)).fetchone()[0]
+    piero = c.execute('SELECT id FROM users WHERE origin_profile=?',
+                      (main.PIERO_PROFILE,)).fetchone()[0]
+
+    c.execute('INSERT INTO parsers(name, header) VALUES (?,?)', ('Di_Altro', 'H'))
+    main._completa_colonne_nuove(c, 'ALTRO')
+
+    proprietario = c.execute('SELECT user_id FROM parsers WHERE name=?',
+                             ('Di_Altro',)).fetchone()[0]
+    assert proprietario == altro, (
+        f'assegnato a {proprietario} invece che a ALTRO ({altro}); Piero e- {piero}')

@@ -44,7 +44,9 @@ users
                            ritrovarlo ai riavvii. NULL per chi non viene da un
                            profilo, che è il caso di tutti i prossimi utenti.
                            Non `first_name`: non è univoco (i nomi Telegram non lo
-                           sono affatto) e il login lo sovrascrive col nome vero
+                           sono affatto) e il login lo sovrascrive col nome vero.
+                           L'unicità è anche un indice, perché un database che riceve
+                           la colonna dall'ALTER non porta il vincolo con sé
 
 parsers            ← tabella PREESISTENTE, estesa con ALTER additivo
   name (primary key), header, market_name, market_type, selection_name,
@@ -128,9 +130,19 @@ creato dopo l'avvio resterebbe senza `user_id`, `slug`, `ordine` e `id` fino al 
 successivo — cioè fuori dall'indice `UNIQUE (user_id, slug)`, che con `user_id` NULL
 non vincola niente, e non riferibile da `parser_chats`.
 
-Per la stessa ragione quell'endpoint fa un **UPSERT** e non un `INSERT OR REPLACE`:
-`REPLACE` cancella la riga e la reinserisce, quindi cambiare l'header di un parser lo
-staccherebbe dal suo utente azzerandone l'`id`.
+Il **proprietario è un argomento obbligatorio** di quella funzione, non una costante al
+suo interno. Oggi entrambi i chiamanti passano `PIERO`, che è l'unico utente; il giorno
+che l'endpoint servirà più utenti va passato il proprietario della sessione, e la
+decisione è visibile nei due punti che la prendono invece di essere sepolta in una
+funzione di migrazione. **Resta aperto**, e appartiene al PR sul login: a chi
+appartiene un parser creato da un amministratore per conto di un altro utente.
+
+Per la stessa ragione quell'endpoint non fa più `INSERT OR REPLACE`: `REPLACE` cancella
+la riga e la reinserisce, quindi cambiare l'header di un parser lo staccherebbe dal suo
+utente azzerandone l'`id`. Fa invece `INSERT OR IGNORE` seguito da `UPDATE`, e non
+`ON CONFLICT DO UPDATE`, che sarebbe più compatto: l'UPSERT richiede SQLite ≥ 3.24 e la
+versione in produzione non è misurabile da qui, quindi la dipendenza è stata rimossa
+anziché documentata.
 
 A quale dei due utenti debba appartenere una chat che entrambi rivendicano *davvero*
 è una decisione del PR sul dispatch multi-parser, dove il webhook deve sceglierne uno;
