@@ -1190,3 +1190,95 @@ def test_un_profilo_che_nomina_un_parser_CANCELLATO_non_rompe_la_migrazione(serv
         f'parser senza utente dopo la migrazione: {senza_utente}. Restano fuori '
         'dall-indice UNIQUE (user_id, slug), che con user_id NULL non vincola')
     c.close()
+
+
+# Lo schema di `signals` come era PRIMA che esistessero `profile` ed `expires_at`.
+# Scritto a mano e congelato, come `SCHEMA_DI_PRODUZIONE` e per la stessa ragione: e-
+# un formato STORICO, e derivarlo dal codice nuovo non proverebbe niente.
+SIGNALS_PRIMA_DEI_PROFILI = (
+    'CREATE TABLE signals (id INTEGER PRIMARY KEY AUTOINCREMENT, csv TEXT NOT NULL,'
+    ' parser TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)')
+
+
+def test_un_database_ANTICO_senza_profile_ne_expires_at_si_migra(tmp_path):
+    """La regressione piu- grave di questo PR, e l'ho introdotta io togliendo due ALTER.
+
+    `[REAL_FINDING]` di GPT-5.6 Sol al secondo gate finale. Il codice PRIMA di questo PR
+    aveva, con il commento «Migrate databases created before profile support»:
+
+        try: c.execute('ALTER TABLE signals ADD COLUMN expires_at INTEGER')
+        except sqlite3.OperationalError: pass
+        try: c.execute('ALTER TABLE signals ADD COLUMN profile TEXT')
+        except sqlite3.OperationalError: pass
+
+    Riscrivendo la migrazione ho portato in `COLONNE_MULTIUTENTE` solo
+    `('signals','user_id')` e ho perso quei due. Su un database creato prima dei profili
+    il `CREATE TABLE IF NOT EXISTS` non fa niente — la tabella esiste — le colonne non
+    vengono aggiunte, e la UPDATE successiva muore. Misurato:
+
+        colonne di signals: ['id', 'csv', 'parser', 'created_at']
+        migra(): OperationalError - no such column: profile
+
+    E `migra()` sta sul percorso di `db()`: 500 su ogni richiesta, per sempre.
+
+    E- la regola 5 violata da me — quei due ALTER erano codice funzionante che non
+    andava toccato — e la regola 2-bis: ho riscritto una funzione senza cercare tutto
+    cio- che faceva.
+    """
+    c = sqlite3.connect(tmp_path / 'antico.db')
+    c.execute(SIGNALS_PRIMA_DEI_PROFILI)
+    c.execute('CREATE TABLE parsers (name TEXT PRIMARY KEY, header TEXT NOT NULL,'
+              ' market_name TEXT, market_type TEXT, selection_name TEXT, handicap TEXT,'
+              ' bet_type TEXT)')
+    c.execute('CREATE TABLE profiles (name TEXT PRIMARY KEY, chat_ids TEXT NOT NULL,'
+              ' parser TEXT NOT NULL)')
+    c.execute("INSERT INTO signals(csv, parser) VALUES ('\"Provider\"', 'vecchio')")
+    colonne = {r[1] for r in c.execute('PRAGMA table_info(signals)')}
+    assert 'profile' not in colonne and 'expires_at' not in colonne, colonne
+
+    main.migra(c)  # non deve sollevare
+
+    dopo = {r[1] for r in c.execute('PRAGMA table_info(signals)')}
+    assert {'profile', 'expires_at', 'user_id'} <= dopo, dopo
+    # Il segnale vecchio e- ancora li-, e ha ricevuto il profilo.
+    riga = c.execute('SELECT csv, parser, profile FROM signals').fetchone()
+    assert riga == ('"Provider"', 'vecchio', main.PIERO_PROFILE), riga
+
+
+def test_il_proprietario_di_un_parser_CONDIVISO_non_dipende_dall_ordine_di_inserimento(tmp_path):
+    """Chi vince fra due profili che nominano lo stesso parser deve essere una REGOLA.
+
+    Secondo `[REAL_FINDING]` di GPT-5.6 Sol: il ciclo sui profili non aveva `ORDER BY`,
+    quindi «il primo» — come diceva il mio commento — non era definito: era l'ordine di
+    scansione della tabella, cioe- l'ordine di inserimento. Due database con gli stessi
+    profili creati in ordine diverso davano proprietari diversi.
+
+    E- lo stesso difetto che avevo gia- corretto per gli slug con `ORDER BY name`, non
+    trovato allora perche- avevo cercato il sito e non la classe.
+
+    Questo test non guarda CHI vince: costruisce lo stesso stato due volte con l'ordine
+    di inserimento invertito e pretende lo STESSO esito. Una regola, qualunque sia.
+    """
+    def costruisci(nome, ordine):
+        c = sqlite3.connect(tmp_path / nome)
+        for istruzione in SCHEMA_DI_PRODUZIONE:
+            c.execute(istruzione)
+        c.execute('INSERT INTO parsers(name, header) VALUES (?,?)', ('Condiviso', 'H'))
+        for profilo in ordine:
+            c.execute('INSERT INTO profiles VALUES (?,?,?)',
+                      (profilo, f'-100{profilo}', 'Condiviso'))
+        main.migra(c)
+        proprietario = c.execute('SELECT user_id FROM parsers WHERE name=?',
+                                 ('Condiviso',)).fetchone()[0]
+        profilo = c.execute('SELECT origin_profile FROM users WHERE id=?',
+                            (proprietario,)).fetchone()[0]
+        c.close()
+        return profilo
+
+    uno = costruisci('ordine_uno.db', ('ZULU', 'ALFA'))
+    due = costruisci('ordine_due.db', ('ALFA', 'ZULU'))
+
+    assert uno == due, (
+        f'il proprietario del parser condiviso dipende dall-ordine di inserimento: '
+        f'{uno!r} inserendo ZULU prima, {due!r} inserendo ALFA prima. Serve un ORDER BY '
+        'esplicito, come per gli slug')

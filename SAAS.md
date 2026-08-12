@@ -137,6 +137,17 @@ nuovo va quindi preceduto dalla deduplica di ciò che esiste, o la migrazione mu
 proprio sul database che doveva proteggere. È la stessa classe tre volte in questo PR,
 e la terza l'ho reintrodotta subito dopo aver chiuso la seconda.
 
+Chi vince, quando due profili rivendicano la stessa cosa — una chat o un parser — è
+deciso da un **`ORDER BY name` esplicito** sul ciclo dei profili. Senza, «il primo»
+significa «il primo che la tabella restituisce», cioè l'ordine di inserimento: due
+database con gli stessi profili creati in ordine diverso davano proprietari diversi.
+
+E `COLONNE_MULTIUTENTE` porta anche le **due colonne legacy** `signals.profile` e
+`signals.expires_at`, che non sono nuove: su un database creato prima dei profili il
+`CREATE TABLE IF NOT EXISTS` non fa nulla, la tabella esiste senza di esse, e la
+`UPDATE signals SET profile=?` muore con «no such column: profile». Erano due `ALTER`
+del codice precedente che questa riscrittura aveva perso.
+
 Le colonne aggiunte a `parsers` sono riempite da `_completa_colonne_nuove()`, che la
 migrazione chiama **e** che chiama `POST /api/parsers`. Le due chiamate non sono un
 duplicato: `migra()` gira una volta per processo, quindi senza la seconda un parser

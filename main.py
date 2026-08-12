@@ -436,6 +436,16 @@ COLONNE_MULTIUTENTE = (
     # e mancava perche' un PRIMARY KEY non si aggiunge con ALTER — si aggiunge come
     # colonna con indice UNIQUE, riempita dal `rowid`. Segnalato da GPT-5.5.
     ('parsers', 'id', 'INTEGER'),
+    # Le DUE colonne legacy, e stanno qui perche' le avevo PERSE riscrivendo la
+    # migrazione. Il codice precedente le aggiungeva con due `try/except` e il commento
+    # «Migrate databases created before profile support»: su un database creato prima
+    # dei profili il `CREATE TABLE IF NOT EXISTS` non fa niente — la tabella esiste — e
+    # senza questi ALTER la `UPDATE signals SET profile=?` piu' sotto muore con
+    # «no such column: profile», cioe' 500 su ogni richiesta per sempre.
+    # `[REAL_FINDING]` di GPT-5.6 Sol: e' la regola 5 violata da me, e la regola 2-bis
+    # — ho riscritto una funzione senza cercare tutto cio' che faceva.
+    ('signals', 'profile', 'TEXT'),
+    ('signals', 'expires_at', 'INTEGER'),
     # I segnali passano da per-PROFILO a per-UTENTE. La colonna vecchia `profile`
     # resta e continua a governare il feed: qui si aggiunge solo la destinazione.
     ('signals', 'user_id', 'INTEGER'),
@@ -591,8 +601,14 @@ def _travasa_nel_multiutente(c):
     il feed per utente, e generarne uno qui vorrebbe dire scriverlo da qualche
     parte — cioe' un segreto in piu' senza nessuno che lo usi.
     """
+    # `ORDER BY name` non e' decorazione: decide CHI vince quando due profili
+    # rivendicano la stessa cosa — una chat o un parser. Senza, «il primo» significa
+    # «il primo che la tabella restituisce», cioe' l'ordine di inserimento: due database
+    # con gli stessi profili creati in ordine diverso davano proprietari diversi.
+    # `[REAL_FINDING]` di GPT-5.6 Sol, e lo stesso difetto che avevo gia' corretto per
+    # gli slug — non trovato allora perche' avevo cercato il sito e non la classe.
     for profilo, chat_ids, parser_del_profilo in c.execute(
-            'SELECT name, chat_ids, parser FROM profiles').fetchall():
+            'SELECT name, chat_ids, parser FROM profiles ORDER BY name').fetchall():
         # Lo slug dell'utente ha la stessa collisione dei parser — due profili che
         # differiscono solo per maiuscole — e la stessa conseguenza: `users.slug` e'
         # UNIQUE, quindi l'INSERT solleverebbe e il servizio non partirebbe. Cercata
