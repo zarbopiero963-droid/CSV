@@ -854,6 +854,34 @@ def _assegna_slug_e_ordine(c):
             prossimo += 1
 
 
+def riconcilia_su_utente(c, da_utente, a_utente):
+    """Travasa tutto da `da_utente` a `a_utente` e libera il suo `telegram_id`.
+
+    Esiste perche' il collegamento del proprietario deve essere **idempotente**: se una
+    riga sbagliata possiede il suo `telegram_id`, non basta scrivere quel valore sulla riga
+    giusta — `users.telegram_id` e' UNIQUE, quindi va prima liberato. E cio' che quella
+    riga avesse accumulato non va perso, da cui il travaso invece di una `DELETE`.
+
+    Riusa `RIFERIMENTI_UTENTE` e `_trasferisci_parser` della migrazione (regola 3): sono le
+    stesse otto coppie tabella/colonna, e tenerne due elenchi sarebbe la duplicazione che
+    diverge al primo `ALTER TABLE`. Il test che verifica la completezza di
+    `RIFERIMENTI_UTENTE` copre quindi anche questa funzione.
+
+    La riga perdente **non** viene cancellata: le si azzera `telegram_id` e resta un
+    account senza niente. Una `DELETE` sarebbe irreversibile e potrebbe orfanare una
+    colonna che nessuno ha ancora aggiunto a `RIFERIMENTI_UTENTE`; un `NULL` no. E' la
+    scelta prudente in una funzione che nasce per riparare, non per fare pulizia.
+
+    Non fa `commit`: la libera chi chiama, perche' questa operazione deve stare nella
+    stessa transazione della scrittura che segue.
+    """
+    for tabella, colonna in RIFERIMENTI_UTENTE:
+        c.execute(f'UPDATE {tabella} SET {colonna}=? WHERE {colonna}=?',
+                  (a_utente, da_utente))
+    _trasferisci_parser(c, da_utente, a_utente)
+    c.execute('UPDATE users SET telegram_id=NULL WHERE id=?', (da_utente,))
+
+
 def _trasferisci_parser(c, da_utente, a_utente):
     """Passa i parser di un utente a un altro, ri-disambiguando gli slug che collidono.
 
@@ -1772,47 +1800,72 @@ def login_telegram(data: LoginTelegramIn):
     c = db()
     riga = c.execute('SELECT id, session_version FROM users WHERE telegram_id=?',
                      (data.id,)).fetchone()
-    if riga is None:
-        # Il proprietario: il suo account esiste gia' e possiede i suoi parser, ma non
-        # ha `telegram_id` perche' nessuno lo aveva mai saputo. Si ATTACCA a quella
-        # riga invece di crearne una nuova, altrimenti resterebbero due account — uno
-        # con tutta la sua roba e nessun modo di entrarci, e uno vuoto in cui entra.
-        proprietario = None
-        if TELEGRAM_ADMIN_ID and data.id == TELEGRAM_ADMIN_ID:
-            proprietario = c.execute('SELECT id, session_version FROM users'
-                                     ' WHERE origin_profile=?', (PIERO_PROFILE,)).fetchone()
-        if proprietario:
-            # `telegram_reachable` non compare: prima c'era `telegram_reachable=
-            # telegram_reachable`, che riscrive la colonna col proprio valore e non fa
-            # niente. Suggeriva un'intenzione che il codice non porta. Segnalato da
-            # CodeRabbit sulla PR #23.
-            c.execute('UPDATE users SET telegram_id=?, username=?, first_name=?,'
-                      ' is_admin=1 WHERE id=?',
-                      (data.id, data.username or None, data.first_name or None,
-                       proprietario[0]))
-            riga = proprietario
-        else:
-            # Un cliente nuovo: l'account nasce e non puo' fare niente. L'accesso lo
-            # concede il PR sull'approvazione (#7), non questo.
-            #
-            # `OR IGNORE` piu' la rilettura qui sotto perche' fra il SELECT e questo
-            # INSERT c'e' spazio per un'altra richiesta, e `telegram_id` e' UNIQUE: due
-            # login simultanei di un utente nuovo non davano una riga doppia, davano un
-            # `IntegrityError`, cioe' un 500 a chi perdeva la corsa — al PRIMO accesso di
-            # un cliente, l'unico momento in cui puo' capitare. Il Login Widget in una
-            # pagina ricaricata, o due schede aperte, bastano. Segnalato da Claude
-            # Fable 5 sulla PR #23; la rilettura fa si' che il perdente si attacchi alla
-            # riga del vincitore invece di crearne un'altra.
-            c.execute('INSERT OR IGNORE INTO users(telegram_id, username, first_name,'
-                      " status) VALUES (?,?,?,'registrato')",
-                      (data.id, data.username or None, data.first_name or None))
-            riga = c.execute('SELECT id, session_version FROM users WHERE telegram_id=?',
-                             (data.id,)).fetchone()
-            if riga is None:
-                # Non deve accadere: l'inserimento e' andato o la riga c'era. Se accade,
-                # e' meglio un 503 che un `TypeError` sull'indice di `None`.
-                c.close()
-                raise HTTPException(503, 'account non creato: riprova')
+    # Il proprietario: il suo account esiste gia' e possiede i suoi parser, ma non ha
+    # `telegram_id` perche' nessuno lo aveva mai saputo. Si ATTACCA a quella riga invece
+    # di crearne una nuova, altrimenti resterebbero due account — uno con tutta la sua
+    # roba e nessun modo di entrarci, e uno vuoto in cui entra.
+    #
+    # E' un'INVARIANTE e non un ramo, e la differenza e' tutto: «se chi fa login e' l'ID
+    # dell'amministratore, la riga PIERO possiede quel telegram_id», qualunque cosa ci sia
+    # adesso. Prima il collegamento viveva dentro `if riga is None`, quindi funzionava solo
+    # se la variabile era impostata PRIMA del primo login: un login fatto troppo presto
+    # creava un account vuoto con quel telegram_id, e da quel momento ogni login successivo
+    # prendeva il ramo `else` e la riga PIERO non veniva collegata mai piu'. Senza via di
+    # ritorno — la riconciliazione della migrazione raggruppa per `origin_profile` e a
+    # quella riga e' cieca, nessun endpoint ripara, un riavvio non ripara — e senza nessun
+    # errore: solo una dashboard vuota. Su Railway lo stato «variabile impostata ma non
+    # arrivata nel processo» si produce da se' quando un build fallisce dopo averla
+    # cambiata, quindi il caso non era ipotetico.
+    #
+    # Idempotente significa che l'ordine non conta e che il login successivo RIPARA quello
+    # precedente.
+    proprietario = None
+    if TELEGRAM_ADMIN_ID and data.id == TELEGRAM_ADMIN_ID:
+        proprietario = c.execute('SELECT id, session_version FROM users'
+                                 ' WHERE origin_profile=?', (PIERO_PROFILE,)).fetchone()
+
+    if proprietario and (riga is None or riga[0] != proprietario[0]):
+        if riga is not None:
+            # Un'altra riga possiede il telegram_id dell'amministratore: e' l'account nato
+            # da un login fatto troppo presto. Va travasata prima di riscrivere il valore,
+            # perche' la colonna e' UNIQUE.
+            riconcilia_su_utente(c, da_utente=riga[0], a_utente=proprietario[0])
+            # In `admin_audit`, perche' una riparazione silenziosa e' indistinguibile da
+            # un'appropriazione di account: se un giorno questo ramo scattasse quando non
+            # deve, deve restare la traccia di quando e su chi.
+            _annota_admin(c, proprietario[0], 'riconciliato_account_duplicato',
+                          bersaglio=riga[0])
+        # `telegram_reachable` non compare: prima c'era `telegram_reachable=
+        # telegram_reachable`, che riscrive la colonna col proprio valore e non fa
+        # niente. Suggeriva un'intenzione che il codice non porta. Segnalato da
+        # CodeRabbit sulla PR #23.
+        c.execute('UPDATE users SET telegram_id=?, username=?, first_name=?,'
+                  ' is_admin=1 WHERE id=?',
+                  (data.id, data.username or None, data.first_name or None,
+                   proprietario[0]))
+        riga = proprietario
+    elif riga is None:
+        # Un cliente nuovo: l'account nasce e non puo' fare niente. L'accesso lo
+        # concede il PR sull'approvazione (#7), non questo.
+        #
+        # `OR IGNORE` piu' la rilettura qui sotto perche' fra il SELECT e questo
+        # INSERT c'e' spazio per un'altra richiesta, e `telegram_id` e' UNIQUE: due
+        # login simultanei di un utente nuovo non davano una riga doppia, davano un
+        # `IntegrityError`, cioe' un 500 a chi perdeva la corsa — al PRIMO accesso di
+        # un cliente, l'unico momento in cui puo' capitare. Il Login Widget in una
+        # pagina ricaricata, o due schede aperte, bastano. Segnalato da Claude
+        # Fable 5 sulla PR #23; la rilettura fa si' che il perdente si attacchi alla
+        # riga del vincitore invece di crearne un'altra.
+        c.execute('INSERT OR IGNORE INTO users(telegram_id, username, first_name,'
+                  " status) VALUES (?,?,?,'registrato')",
+                  (data.id, data.username or None, data.first_name or None))
+        riga = c.execute('SELECT id, session_version FROM users WHERE telegram_id=?',
+                         (data.id,)).fetchone()
+        if riga is None:
+            # Non deve accadere: l'inserimento e' andato o la riga c'era. Se accade,
+            # e' meglio un 503 che un `TypeError` sull'indice di `None`.
+            c.close()
+            raise HTTPException(503, 'account non creato: riprova')
     else:
         # Login successivi: il nome su Telegram puo' essere cambiato.
         c.execute('UPDATE users SET username=?, first_name=? WHERE id=?',

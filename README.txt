@@ -312,12 +312,21 @@ TELEGRAM_ALLOWED_CHAT_IDS: chat_id iniziali del profilo PIERO, separati da virgo
   il profilo PIERO, e una variabile per cliente imporrebbe un rideploy.
 TELEGRAM_ADMIN_ID: l'ID Telegram numerico del proprietario. Collega il suo login
   all'utente che possiede i suoi parser: quella riga ha origin_profile='PIERO' e
-  nessun telegram_id, perche' nessuno lo aveva mai saputo. SENZA questa variabile il
-  primo login del proprietario crea un secondo account VUOTO, e la sua dashboard
-  risulta vuota senza nessun errore da nessuna parte. Si trova scrivendo al bot e
+  nessun telegram_id, perche' nessuno lo aveva mai saputo. Si trova scrivendo al bot e
   aprendo https://api.telegram.org/bot<TOKEN>/getUpdates: e' message.from.id.
   Non e' un segreto — chiunque riceva un suo messaggio lo conosce — ma decide chi e'
-  l'amministratore.
+  l'amministratore. Deve contenere SOLO CIFRE: spazi e newline ai bordi sono tolti,
+  ma virgolette, apici, un + o uno spazio interno lo rendono diverso dall'id che
+  Telegram manda, e il confronto non combacia mai.
+  SENZA la variabile il login del proprietario crea un account VUOTO e la sua
+  dashboard risulta vuota senza errori. Il collegamento e' IDEMPOTENTE: impostando la
+  variabile, il login SUCCESSIVO ripara — travasa quello che l'account sbagliato aveva
+  accumulato, gli toglie il telegram_id e lo scrive sulla riga PIERO, con una riga in
+  admin_audit. Quindi l'ordine fra variabile e login non conta.
+  Fino al 12/08/2026 non era cosi': il collegamento viveva dentro «if riga is None»,
+  quindi valeva solo al PRIMO login, e un login fatto troppo presto lasciava il
+  proprietario fuori dal proprio account IN MODO IRREVERSIBILE — nessun endpoint
+  riparava, un riavvio non riparava, e serviva scrivere a mano nel database.
 ADMIN_PASSWORD_HASH: facoltativa. L'accesso di emergenza, utente 'administrator',
   per entrare nel pannello quando Telegram non e' disponibile. Contiene l'HASH e mai
   la password: la dashboard di Railway e' leggibile da chi ha accesso al progetto, e

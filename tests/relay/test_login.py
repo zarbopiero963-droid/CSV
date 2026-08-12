@@ -1205,3 +1205,176 @@ def test_un_campo_STRUTTURATO_usa_il_JSON_compatto(monkeypatch):
 
     # E per gli scalari nulla cambia: e- il motivo per cui questa correzione e- gratis.
     assert main.campi_firmati({'a': 5, 'b': 1.5, 'c': True}) == {'a': '5', 'b': '1.5', 'c': 'true'}
+
+
+def _riga_utente(percorso, campo, valore):
+    """Una riga di `users` come tupla `(id, telegram_id, origin_profile, is_admin)`."""
+    import sqlite3
+    c = sqlite3.connect(percorso)
+    r = c.execute(f'SELECT id, telegram_id, origin_profile, is_admin FROM users'
+                  f' WHERE {campo}=?', (valore,)).fetchone()
+    c.close()
+    return r
+
+
+def test_il_collegamento_dell_admin_RIPARA_un_account_gia_sbagliato(tmp_path, monkeypatch):
+    """**Il difetto per cui questo test esiste era IRREVERSIBILE.** Ordine-dipendente e muto.
+
+    Il collegamento del proprietario alla riga che possiede i suoi parser viveva dentro
+    `if riga is None`. Conseguenza misurata: se il primo login avveniva mentre
+    `TELEGRAM_ADMIN_ID` non era ancora impostata — o non era ancora arrivata nel processo,
+    che su Railway succede quando un build fallisce dopo aver cambiato una variabile —
+    nasceva un utente **vuoto** con quel `telegram_id`. Da quel momento ogni login
+    successivo trovava `riga is not None`, prendeva il ramo `else`, e la riga con
+    `origin_profile='PIERO'` non veniva collegata **mai piu'**.
+
+    Non c'era via di ritorno: la riconciliazione della migrazione raggruppa per
+    `origin_profile` e quella riga ha `origin_profile` NULL, quindi le e' cieca; nessun
+    endpoint ripara; un riavvio non ripara. Serviva scrivere a mano nel database di
+    produzione — che dalla dashboard di Railway non si puo' fare. Per il proprietario era
+    **irreversibile**, e l'unico avviso era una dashboard vuota senza errori.
+
+    E' la forma di difetto peggiore fra quelle che questo repository ha collezionato: il
+    codice e' corretto solo se le operazioni avvengono nell'ordine giusto, l'ordine
+    sbagliato non da' nessun errore, e lo stato che ne risulta non si sistema.
+
+    La correzione e' un'**invariante** invece di un ramo: se chi fa login e' l'ID
+    dell'amministratore, la riga `PIERO` possiede quel `telegram_id`, indipendentemente da
+    cosa c'e' adesso. Idempotente, quindi l'ordine non conta piu' e il login successivo
+    ripara cio' che il precedente ha sbagliato.
+    """
+    import sqlite3
+
+    percorso = str(tmp_path / 'ripara.db')
+    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    monkeypatch.setattr(main, 'BOT_TOKEN', BOT_FINTO)
+    monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
+
+    # PRIMO login SENZA la variabile: e' lo stato in cui il proprietario si troverebbe
+    # facendo login dopo un build fallito. Nasce l'account vuoto.
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', '')
+    main.login_telegram(main.LoginTelegramIn(**_dati_login()))
+
+    vuoto = _riga_utente(percorso, 'telegram_id', ADMIN_FINTO)
+    piero = _riga_utente(percorso, 'origin_profile', main.PIERO_PROFILE)
+    assert vuoto is not None and piero is not None
+    assert vuoto[0] != piero[0], (
+        'lo scenario non si e- prodotto: il primo login ha gia- collegato la riga PIERO, '
+        'quindi il test non misura la riparazione')
+    assert piero[1] is None, f'la riga PIERO ha gia- un telegram_id: {piero}'
+
+    # I parser stanno sulla riga PIERO, ed e' il motivo per cui il collegamento conta.
+    c = sqlite3.connect(percorso)
+    quanti = c.execute('SELECT COUNT(*) FROM parsers WHERE user_id=?', (piero[0],)).fetchone()[0]
+    c.close()
+    assert quanti > 0, 'la riga PIERO non possiede parser: il test non misura la posta in gioco'
+
+    # ORA la variabile arriva — il deploy e' passato — e il proprietario rifa' il login.
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', ADMIN_FINTO)
+    risposta = main.login_telegram(main.LoginTelegramIn(**_dati_login()))
+    assert risposta.status_code == 200
+
+    dopo_piero = _riga_utente(percorso, 'origin_profile', main.PIERO_PROFILE)
+    assert dopo_piero[1] == ADMIN_FINTO, (
+        f'la riga PIERO non ha ricevuto il telegram_id (e- {dopo_piero[1]!r}): il '
+        'collegamento non ripara, quindi il proprietario resta fuori dal proprio account '
+        'per sempre e senza nessun errore')
+    assert dopo_piero[3] == 1, 'la riga PIERO non risulta amministratore'
+
+    # E il telegram_id e' UNICO: non puo- essere rimasto anche sulla riga vuota.
+    c = sqlite3.connect(percorso)
+    quante = c.execute('SELECT COUNT(*) FROM users WHERE telegram_id=?', (ADMIN_FINTO,)).fetchone()[0]
+    c.close()
+    assert quante == 1, f'{quante} righe con lo stesso telegram_id: il vincolo UNIQUE e- violato'
+
+    # La sessione emessa deve essere quella del PROPRIETARIO, non dell'account vuoto:
+    # altrimenti il login "riesce" e mostra ancora una dashboard vuota.
+    cookie = None
+    for grezzo in (risposta.headers.get('set-cookie') or '').split(';'):
+        chiave, _, valore = grezzo.strip().partition('=')
+        if chiave == main.NOME_COOKIE:
+            cookie = valore
+    assert cookie, 'nessun cookie nella risposta'
+    assert main.leggi_sessione(cookie)['utente'] == dopo_piero[0], (
+        'la sessione e- stata emessa per l-account sbagliato: il login riesce e la '
+        'dashboard resta vuota')
+
+
+def test_la_riparazione_NON_perde_i_dati_dell_account_sbagliato(tmp_path, monkeypatch):
+    """Cio' che l'account nato per errore avesse accumulato deve finire sul proprietario.
+
+    Il caso non e' teorico: fra il login fatto troppo presto e la riparazione possono
+    passare giorni, e in quel tempo quell'account e' **l'unico** in cui il proprietario
+    riesce a entrare — quindi e' l'account su cui finirebbe qualunque cosa faccia.
+
+    Per questo la riparazione travasa invece di cancellare, e riusa `RIFERIMENTI_UTENTE`
+    della migrazione (regola 3): le stesse otto coppie tabella/colonna, un elenco solo.
+    """
+    import sqlite3
+
+    percorso = str(tmp_path / 'travaso.db')
+    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    monkeypatch.setattr(main, 'BOT_TOKEN', BOT_FINTO)
+    monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
+
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', '')
+    main.login_telegram(main.LoginTelegramIn(**_dati_login()))
+    vuoto = _riga_utente(percorso, 'telegram_id', ADMIN_FINTO)[0]
+    piero = _riga_utente(percorso, 'origin_profile', main.PIERO_PROFILE)[0]
+
+    # Roba dell'account sbagliato: una chat rivendicata e una riga di log.
+    c = sqlite3.connect(percorso)
+    c.execute('INSERT INTO chats(telegram_chat_id, title, owner_user_id) VALUES (?,?,?)',
+              ('-100999', 'Canale del proprietario', vuoto))
+    c.execute('INSERT INTO message_logs(user_id, text, esito) VALUES (?,?,?)',
+              (vuoto, 'un messaggio', 'ok'))
+    c.commit()
+    c.close()
+
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', ADMIN_FINTO)
+    main.login_telegram(main.LoginTelegramIn(**_dati_login()))
+
+    c = sqlite3.connect(percorso)
+    chat = c.execute('SELECT owner_user_id FROM chats WHERE telegram_chat_id=?',
+                     ('-100999',)).fetchone()[0]
+    log = c.execute('SELECT user_id FROM message_logs WHERE text=?', ('un messaggio',)).fetchone()[0]
+    audit = c.execute("SELECT admin_user_id, target_user_id FROM admin_audit"
+                      " WHERE action='riconciliato_account_duplicato'").fetchone()
+    rimasto = c.execute('SELECT telegram_id FROM users WHERE id=?', (vuoto,)).fetchone()[0]
+    c.close()
+
+    assert chat == piero, f'la chat e- rimasta all-account sbagliato (owner {chat}, atteso {piero})'
+    assert log == piero, f'il log e- rimasto all-account sbagliato (user {log}, atteso {piero})'
+    assert audit == (piero, vuoto), (
+        f'la riparazione non e- tracciata in admin_audit: {audit}. Una riparazione '
+        'silenziosa e- indistinguibile da un-appropriazione di account')
+    assert rimasto is None, (
+        'la riga perdente conserva il telegram_id: con UNIQUE su quella colonna lo stato '
+        'non sarebbe nemmeno stato scrivibile')
+
+
+def test_un_CLIENTE_non_fa_scattare_la_riparazione(tmp_path, monkeypatch):
+    """Il ramo che ripara deve valere SOLO per l'ID dell'amministratore.
+
+    E' il verso pericoloso: se scattasse per chiunque, il primo estraneo che fa login si
+    prenderebbe i parser e il feed del proprietario. Il codice lo esclude con
+    `data.id == TELEGRAM_ADMIN_ID`, e questo test lo vincola invece di fidarsi.
+    """
+    percorso = str(tmp_path / 'cliente.db')
+    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    monkeypatch.setattr(main, 'BOT_TOKEN', BOT_FINTO)
+    monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', ADMIN_FINTO)
+
+    estraneo = '111222333'
+    assert estraneo != ADMIN_FINTO
+    main.login_telegram(main.LoginTelegramIn(**_dati_login(id=estraneo, first_name='Estraneo')))
+
+    piero = _riga_utente(percorso, 'origin_profile', main.PIERO_PROFILE)
+    suo = _riga_utente(percorso, 'telegram_id', estraneo)
+    assert piero[1] is None, (
+        f'il login di un estraneo ha collegato il suo telegram_id alla riga del '
+        f'proprietario: {piero}. Si e- appena preso i suoi parser')
+    assert suo[0] != piero[0], 'l-estraneo e- entrato nell-account del proprietario'
+    assert suo[3] == 0, 'l-estraneo risulta amministratore'
+    assert suo[2] is None, 'l-estraneo ha ereditato un origin_profile'

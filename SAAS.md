@@ -489,6 +489,26 @@ Il proprietario entra in due modi, e il secondo non è un vezzo:
    dice «questo ID è il proprietario», e il codice **attacca** il `telegram_id` a quella
    riga invece di crearne una nuova. Senza la variabile resterebbero due account: uno
    con tutta la sua roba e nessun modo di entrarci, e uno vuoto in cui entra.
+
+   **È un'invariante, non un ramo**, e la differenza è tutto: «se chi fa login è l'ID
+   dell'amministratore, la riga `PIERO` possiede quel `telegram_id`», qualunque cosa ci
+   sia adesso. Quindi il collegamento è **idempotente** e l'ordine fra impostare la
+   variabile e fare il login **non conta**: il login successivo ripara quello precedente.
+   Se un'altra riga possiede già quell'ID, `riconcilia_su_utente()` le travasa tutto —
+   riusando `RIFERIMENTI_UTENTE` e `_trasferisci_parser` della migrazione, un elenco solo
+   (regola 3) — le azzera il `telegram_id`, che è UNIQUE, e scrive una riga in
+   `admin_audit`: una riparazione silenziosa sarebbe indistinguibile da
+   un'appropriazione di account. La riga perdente **non** viene cancellata, perché un
+   `NULL` è reversibile e una `DELETE` no.
+
+   *Fino al 12/08/2026 il collegamento viveva dentro `if riga is None`, quindi valeva solo
+   al primo login.* Un login fatto prima che la variabile fosse **arrivata nel processo** —
+   stato che su Railway si produce da sé quando un build fallisce dopo un cambio di
+   variabile — creava un account vuoto con quel `telegram_id`, e da lì ogni login successivo
+   prendeva il ramo `else`: la riga `PIERO` non veniva collegata mai più. Irreversibile per
+   il proprietario, e senza nessun errore: solo una dashboard vuota. La riconciliazione della
+   migrazione non aiutava, perché raggruppa per `origin_profile` e quella riga ha
+   `origin_profile` NULL.
 2. **Password** (`ADMIN_PASSWORD_HASH`), utente fisso `administrator`. Esiste perché
    con il solo login Telegram un guasto di Telegram, o la perdita di quell'account,
    chiuderebbero il proprietario fuori dal proprio pannello.
