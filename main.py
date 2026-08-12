@@ -45,6 +45,23 @@ _WEBHOOK_REGISTRATO = None
 _ULTIMO_TENTATIVO = 0.0
 _WEBHOOK_LOCK = threading.Lock()
 
+# I tentativi sono NUMERATI, e l'esito ricorda da quale tentativo viene.
+#
+# Serve perche' la chiamata di rete avviene fuori dal lock — deve, o una
+# `setWebhook` lenta bloccherebbe ogni consegna — quindi l'ordine in cui i
+# tentativi FINISCONO non e' l'ordine in cui sono PARTITI. Un tentativo partito
+# prima, andato in timeout dopo dieci secondi e fallito, scriveva `False` sopra il
+# `True` di uno partito dopo e riuscito: `/health` avrebbe detto «non registrato»
+# di un webhook registrato, e ogni consegna rifiutata avrebbe ritentato per niente.
+# Segnalato da Claude Fable 5.
+#
+# Il rimedio non e' rendere `True` appiccicoso: un fallimento vero — bot cambiato,
+# registrazione sovrascritta da un altro deploy — diventerebbe invisibile per
+# sempre, e questo flag non deve mentire in quella direzione. Vince il tentativo
+# piu' RECENTE, non l'ultimo a finire.
+_TENTATIVI_EMESSI = 0
+_TENTATIVO_DELL_ESITO = 0
+
 # Quanto attendere prima di ritentare una registrazione a partire da una consegna
 # rifiutata. Serve perche' quel percorso e' raggiungibile da CHIUNQUE: senza
 # freno, una raffica di POST forgiati diventerebbe una raffica di chiamate verso
@@ -61,19 +78,26 @@ def _chiama_set_webhook(bot_token, public_url):
     HTTP il flag direbbe «registrato» proprio nei casi in cui non lo e', cioe'
     mentirebbe nella direzione pericolosa. Segnalato da Sourcery.
 
-    Il segreto viaggia in un parametro di query verso api.telegram.org su HTTPS, e
-    non viene mai loggato da qui — ne' lo e' la `description` di un errore, che
-    Telegram fa eco all'URL inviato.
+    Il segreto viaggia nel CORPO del POST, non nell'URL: un URL non e' un posto
+    riservato, finisce nei log di ogni intermediario che lo tocca, e questa
+    chiamata si ripete a ogni deploy e a ogni autoriparazione. Il token del bot
+    resta nel percorso perche' l'API di Telegram lo mette li' e non c'e' modo di
+    spostarlo. Segnalato da GPT-5.5 e Fable 5; lo vincola
+    `test_il_segreto_non_finisce_nell_URL_ma_nel_CORPO`.
+
+    Niente viene loggato da qui — ne' la `description` di un errore, che Telegram
+    fa eco all'URL inviato.
     """
     import urllib.parse
     import urllib.request
     parametri = urllib.parse.urlencode({
         'url': f'{public_url}/telegram/webhook',
         'secret_token': webhook_secret(bot_token),
-    })
-    url = f'https://api.telegram.org/bot{bot_token}/setWebhook?{parametri}'
+    }).encode('utf-8')
+    url = f'https://api.telegram.org/bot{bot_token}/setWebhook'
+    richiesta = urllib.request.Request(url, data=parametri, method='POST')
     try:
-        with urllib.request.urlopen(url, timeout=10) as r:
+        with urllib.request.urlopen(richiesta, timeout=10) as r:
             risposta = json.loads(r.read().decode('utf-8'))
         return risposta.get('ok') is True
     except Exception:
@@ -101,6 +125,7 @@ def assicura_registrazione(forza=False):
     Bloccante alzato insieme da GPT-5.5 e Claude Fable 5 sulla PR #14.
     """
     global _WEBHOOK_REGISTRATO, _ULTIMO_TENTATIVO
+    global _TENTATIVI_EMESSI, _TENTATIVO_DELL_ESITO
     token = os.getenv('TELEGRAM_BOT_TOKEN', '')
     if not token:
         return None
@@ -111,11 +136,18 @@ def assicura_registrazione(forza=False):
         if not forza and adesso - _ULTIMO_TENTATIVO < ATTESA_FRA_TENTATIVI_S:
             return _WEBHOOK_REGISTRATO
         _ULTIMO_TENTATIVO = adesso
+        _TENTATIVI_EMESSI += 1
+        mio = _TENTATIVI_EMESSI
     public_url = os.getenv('PUBLIC_URL', 'https://csv-production-b04e.up.railway.app')
     esito = _chiama_set_webhook(token, public_url)
     with _WEBHOOK_LOCK:
-        _WEBHOOK_REGISTRATO = esito
-    return esito
+        # Solo se nessun tentativo piu' recente ha gia' scritto il suo esito: vedi
+        # `_TENTATIVI_EMESSI`. Senza questo confronto un tentativo lento e fallito
+        # sovrascrive un successo piu' recente.
+        if mio >= _TENTATIVO_DELL_ESITO:
+            _TENTATIVO_DELL_ESITO = mio
+            _WEBHOOK_REGISTRATO = esito
+        return _WEBHOOK_REGISTRATO
 
 
 @app.on_event('startup')

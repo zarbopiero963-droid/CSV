@@ -43,8 +43,10 @@ perche- governi l'enforcement.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -390,3 +392,212 @@ def test_una_registrazione_riuscita_non_viene_ripetuta(monkeypatch):
     for _ in range(10):
         assert main.assicura_registrazione() is True
     assert tentativi == [], f'ha richiamato Telegram {len(tentativi)} volte per niente'
+
+
+def test_il_segreto_non_finisce_nell_URL_ma_nel_CORPO(monkeypatch):
+    """Dove viaggia il segreto quando lo mandiamo a Telegram.
+
+    Un URL non e- un posto riservato: finisce nei log di ogni intermediario che
+    lo tocca, e `setWebhook` chiamato con `?secret_token=...` scriverebbe il
+    segreto in quei log a ogni registrazione — cioe- a ogni deploy e a ogni
+    autoriparazione. Il corpo di un POST no. Segnalato da GPT-5.5 e Fable 5.
+
+    Il token del BOT resta nel percorso perche- l'API di Telegram lo mette
+    li- e non c'e- modo di spostarlo; il segreto invece si sposta, e questo test
+    verifica che sia stato spostato davvero.
+    """
+    visti = []
+
+    class RispostaFinta:
+        def read(self):
+            return b'{"ok": true, "result": true}'
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def finta_urlopen(richiesta, *a, **k):
+        visti.append(richiesta)
+        return RispostaFinta()
+
+    monkeypatch.setattr(urllib.request, 'urlopen', finta_urlopen)
+    assert main._chiama_set_webhook(BOT_FINTO, 'https://esempio.invalid') is True
+
+    assert len(visti) == 1
+    richiesta = visti[0]
+    segreto = main.webhook_secret(BOT_FINTO)
+    assert not isinstance(richiesta, str), (
+        'urlopen e- stata chiamata con una stringa: il segreto puo- stare solo '
+        'nell-URL'
+    )
+    assert segreto not in richiesta.full_url, (
+        f'il segreto del webhook e- nell-URL della richiesta: {richiesta.full_url}'
+    )
+    assert richiesta.get_method() == 'POST'
+    corpo = richiesta.data or b''
+    assert segreto.encode('utf-8') in corpo, (
+        'il segreto non e- nel corpo: se non e- ne- qui ne- nell-URL, Telegram non '
+        'lo riceve affatto e ogni consegna verrebbe rifiutata'
+    )
+    # E l-URL deve comunque contenere quello che serve per arrivare a destinazione.
+    assert richiesta.full_url.endswith('/setWebhook')
+
+
+# ------------------- l'autoriparazione, chiamata dall'handler vero
+
+class RichiestaFinta:
+    """Il minimo che `telegram_webhook` legge di una `Request`.
+
+    Serve per esercitare l'handler in processo: i test sul servizio vero
+    verificano lo stato HTTP, ma non possono osservare se l'autoriparazione e-
+    stata chiamata, perche- avviene dentro l'altro processo.
+    """
+
+    def __init__(self, intestazioni=None, corpo=None):
+        self.headers = dict(intestazioni or {})
+        self._corpo = {} if corpo is None else corpo
+
+    async def json(self):
+        return self._corpo
+
+
+def _handler(richiesta):
+    """Esegue l'handler e restituisce (stato, spie): 200 oppure il codice HTTP."""
+    try:
+        risultato = asyncio.run(main.telegram_webhook(richiesta))
+    except main.HTTPException as e:
+        return e.status_code, None
+    return 200, risultato
+
+
+def test_una_consegna_rifiutata_CHIAMA_l_autoriparazione_dall_handler(monkeypatch):
+    """Il pezzo che nessun test copriva: la chiamata dentro l'handler.
+
+    Che `assicura_registrazione()` funzioni e- verificato altrove; che l'handler
+    la CHIAMI davvero su una consegna rifiutata non lo era. Misurato: sostituendo
+    quella riga con `pass` la suite restava tutta verde, cioe- il rimedio al
+    blackout poteva essere cancellato per sbaglio senza che niente diventasse
+    rosso. Segnalato da GPT-5.5 come test mancante sulla PR #14.
+
+    Le due condizioni vanno insieme: 403 **e** ritentativo. Solo il 403 sarebbe
+    il fail-closed senza la sua via d'uscita; solo il ritentativo sarebbe una
+    scrittura accettata.
+    """
+    segreto = main.webhook_secret(BOT_FINTO)
+    monkeypatch.setattr(main, 'SEGRETO_WEBHOOK', segreto)
+    chiamate = []
+    monkeypatch.setattr(main, 'assicura_registrazione',
+                        lambda *a, **k: chiamate.append(True))
+
+    # Senza header, e con l'header sbagliato: entrambe sono la prova che Telegram
+    # non conosce il segreto, entrambe devono ritentare.
+    for intestazioni in ({}, {'X-Telegram-Bot-Api-Secret-Token': 'non-e-quello'}):
+        chiamate.clear()
+        stato, _ = _handler(RichiestaFinta(intestazioni))
+        assert stato == 403, f'{intestazioni} -> {stato}'
+        assert len(chiamate) == 1, (
+            f'{intestazioni}: l-handler non ha ritentato la registrazione '
+            f'({len(chiamate)} chiamate). Una consegna rifiutata e- l-unico '
+            f'segnale che abbiamo che Telegram non conosce il segreto: senza '
+            f'questo ritentativo il blackout dura fino al prossimo deploy.'
+        )
+
+    # E la consegna legittima non ritenta niente: chiamare Telegram a ogni
+    # segnale valido sarebbe una chiamata di rete per messaggio.
+    chiamate.clear()
+    stato, risultato = _handler(
+        RichiestaFinta({'X-Telegram-Bot-Api-Secret-Token': segreto}, corpo={}))
+    assert stato == 200, stato
+    assert risultato == {'ok': True, 'ignored': 'no_text'}, risultato
+    assert chiamate == [], 'una consegna accettata ha richiamato Telegram'
+
+
+def test_senza_bot_il_rifiuto_NON_chiama_telegram(monkeypatch):
+    """Senza bot non c-e- niente da riparare, e ritentare sarebbe un amplificatore.
+
+    `assicura_registrazione()` esce da se- senza token, ma il rifiuto per
+    «nessun bot» deve fermarsi prima di arrivarci: e- il ramo raggiungibile da
+    chiunque su un-istanza mal configurata, e non deve nemmeno provare a
+    entrare in un thread per ogni POST forgiato.
+    """
+    monkeypatch.setattr(main, 'SEGRETO_WEBHOOK', '')
+    chiamate = []
+    monkeypatch.setattr(main, 'assicura_registrazione',
+                        lambda *a, **k: chiamate.append(True))
+    stato, _ = _handler(RichiestaFinta({'X-Telegram-Bot-Api-Secret-Token': 'qualsiasi'}))
+    assert stato == 403, stato
+    assert chiamate == [], 'ha tentato una registrazione senza avere un bot'
+
+
+def test_un_tentativo_lento_e_fallito_non_sovrascrive_un_esito_piu_recente(monkeypatch):
+    """Due registrazioni sovrapposte: vince la piu- recente, non l-ultima a finire.
+
+    La chiamata di rete avviene FUORI dal lock — deve, o una `setWebhook` lenta
+    bloccherebbe ogni consegna — quindi l-ordine in cui i tentativi finiscono non
+    e- l-ordine in cui sono partiti. Un tentativo partito prima, andato in timeout
+    dopo dieci secondi e fallito, scriveva `False` sopra il `True` di un tentativo
+    partito dopo e riuscito: `/health` avrebbe detto «non registrato» su un webhook
+    registrato, e ogni consegna rifiutata avrebbe ritentato per niente. Segnalato
+    da Claude Fable 5 sulla PR #14.
+
+    Il rimedio non e- rendere `True` appiccicoso — cosi- un fallimento vero
+    diventerebbe invisibile per sempre, che e- la direzione in cui questo flag non
+    deve mentire — ma numerare i tentativi e ignorare la scrittura di uno vecchio.
+    """
+    monkeypatch.setenv('TELEGRAM_BOT_TOKEN', BOT_FINTO)
+    monkeypatch.setattr(main, '_WEBHOOK_REGISTRATO', None)
+    monkeypatch.setattr(main, '_ULTIMO_TENTATIVO', 0.0)
+    monkeypatch.setattr(main, '_TENTATIVI_EMESSI', 0, raising=False)
+    monkeypatch.setattr(main, '_TENTATIVO_DELL_ESITO', 0, raising=False)
+
+    lento_e_dentro = threading.Event()
+    veloce_ha_finito = threading.Event()
+
+    def finta(bot, url):
+        if threading.current_thread().name == 'LENTO':
+            lento_e_dentro.set()
+            assert veloce_ha_finito.wait(10), 'il tentativo veloce non e- finito'
+            return False
+        return True
+
+    monkeypatch.setattr(main, '_chiama_set_webhook', finta)
+
+    def corri_veloce():
+        main.assicura_registrazione(forza=True)
+        veloce_ha_finito.set()
+
+    lento = threading.Thread(target=main.assicura_registrazione,
+                             kwargs={'forza': True}, name='LENTO')
+    veloce = threading.Thread(target=corri_veloce, name='VELOCE')
+
+    lento.start()
+    assert lento_e_dentro.wait(10), 'il tentativo lento non e- partito'
+    veloce.start()
+    veloce.join(10)
+    assert main._WEBHOOK_REGISTRATO is True, 'il tentativo riuscito non ha scritto'
+    lento.join(10)
+    assert not lento.is_alive()
+
+    assert main._WEBHOOK_REGISTRATO is True, (
+        'un tentativo piu- VECCHIO e fallito ha sovrascritto l-esito riuscito di '
+        'uno piu- recente'
+    )
+
+
+def test_un_fallimento_piu_recente_resta_visibile(monkeypatch):
+    """L-altra faccia del test qui sopra, e la ragione per cui non basta «True appiccicoso».
+
+    Se Telegram smette davvero di conoscere il segreto — la registrazione viene
+    sovrascritta da un altro deploy, il bot cambia token — il tentativo che
+    fallisce e- l-ultimo emesso, e `/health` deve dirlo. Una regola che vietasse
+    di scrivere `False` dopo un `True` renderebbe questo caso invisibile.
+    """
+    monkeypatch.setenv('TELEGRAM_BOT_TOKEN', BOT_FINTO)
+    monkeypatch.setattr(main, '_WEBHOOK_REGISTRATO', True)
+    monkeypatch.setattr(main, '_ULTIMO_TENTATIVO', 0.0)
+    monkeypatch.setattr(main, '_chiama_set_webhook', lambda bot, url: False)
+    assert main.assicura_registrazione(forza=True) is False
+    assert main._WEBHOOK_REGISTRATO is False, (
+        'un fallimento successivo a una registrazione riuscita non e- piu- '
+        'visibile su /health'
+    )

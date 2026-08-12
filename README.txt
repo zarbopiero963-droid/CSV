@@ -89,8 +89,8 @@ registrazione c'e' stato. "csv" e' l'esito del verificatore di formato;
 se'. /health non ha token, quindi dice se il token c'e', mai quale;
 "webhook" vale "protetto" (l'header viene preteso) o "chiuso senza bot"
 (e in quel caso ogni consegna viene rifiutata);
-"webhook_registrato" e' l'esito dell'ultima setWebhook all'avvio, e se e' false
-"status" diventa "degraded".
+"webhook_registrato" e' l'esito dell'ULTIMO tentativo di registrazione - all'avvio
+o da una consegna rifiutata - e se e' false "status" diventa "degraded".
 
 "feed_scartati" conta le RIGHE DISTINTE salvate che non hanno passato la verifica
 e sono state servite come feed vuoto - non le richieste che le incontrano, perche'

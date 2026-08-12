@@ -380,10 +380,25 @@ Telegram risponde `HTTP 200` anche quando rifiuta — token sbagliato, URL non
 valido — e dirlo solo nel corpo: fidarsi del codice HTTP farebbe dire «registrato»
 proprio nei casi in cui non lo è.
 
+Il `secret_token` viaggia nel **corpo** del POST verso `api.telegram.org`, non in
+un parametro di query: un URL non è un posto riservato, finisce nei log di ogni
+intermediario che lo tocca, e questa chiamata si ripete a ogni deploy e a ogni
+autoriparazione. Il token del bot resta nel percorso perché l'API di Telegram lo
+mette lì e non c'è modo di spostarlo.
+
+Poiché la chiamata di rete avviene **fuori** dal lock — deve, o una `setWebhook`
+lenta bloccherebbe ogni consegna — i tentativi sono numerati e l'esito ricorda da
+quale tentativo viene: vince il più **recente**, non l'ultimo a finire. Senza, un
+tentativo partito prima e andato in timeout scriveva `false` sopra il `true` di uno
+partito dopo e riuscito. Il rimedio non è rendere `true` appiccicoso: un
+fallimento vero — bot cambiato, registrazione sovrascritta da un altro deploy —
+diventerebbe invisibile per sempre, e questo flag non deve mentire in quella
+direzione.
+
 `/health` espone i due assi separatamente: `webhook` dice se l'enforcement è
-attivo, `webhook_registrato` se l'ultima `setWebhook` è riuscita. Il secondo fa
-scattare `degraded`, perché resti diagnosticabile — non perché governi
-l'enforcement.
+attivo, `webhook_registrato` l'esito dell'**ultimo tentativo** di registrazione —
+all'avvio o da una consegna rifiutata. Il secondo fa scattare `degraded`, perché
+resti diagnosticabile — non perché governi l'enforcement.
 
 Nel modello multiutente questo non cambia: **un solo bot serve tutti gli utenti**,
 quindi c'è un solo segreto, derivato dallo stesso token. Ciò che cambia per utente

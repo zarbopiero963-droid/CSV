@@ -635,19 +635,35 @@ def test_l_handler_di_startup_INGOIA_gli_errori(monkeypatch):
     """
     monkeypatch.setenv('TELEGRAM_BOT_TOKEN', '000000:FINTO-NON-ESISTE')
     monkeypatch.setenv('PUBLIC_URL', 'https://esempio-non-esiste.invalid')
+    monkeypatch.setattr(main, '_WEBHOOK_REGISTRATO', None)
     tentativi = []
 
-    def esplode(url, *a, **k):
-        tentativi.append(url)
+    def esplode(richiesta, *a, **k):
+        tentativi.append(richiesta)
         raise OSError('rete non disponibile nei test')
 
     monkeypatch.setattr(urllib.request, 'urlopen', esplode)
+
+    async def _senza_attesa(_secondi):
+        # Lo startup ritenta tre volte con una pausa fra i tentativi: attendere
+        # davvero renderebbe questo test lungo tre secondi per niente.
+        return None
+
+    monkeypatch.setattr(main.asyncio, 'sleep', _senza_attesa)
     asyncio.run(main.register_telegram_webhook())  # non deve sollevare
 
     assert tentativi, 'con un token nell-ambiente lo startup DEVE tentare la chiamata'
-    assert 'setWebhook' in tentativi[0]
+    # `urlopen` riceve una `Request`, non una stringa: il segreto sta nel corpo e
+    # non nell-URL (vedi `test_il_segreto_non_finisce_nell_URL_ma_nel_CORPO`).
+    # Questa asserzione leggeva `tentativi[0]` come stringa e si e- rotta quando la
+    # chiamata e- passata a POST: il consumatore, non il sito del difetto.
+    url = tentativi[0].full_url
+    assert 'setWebhook' in url
     # Il token non deve comparire in un posto diverso dall'URL di Telegram.
-    assert tentativi[0].startswith('https://api.telegram.org/bot')
+    assert url.startswith('https://api.telegram.org/bot')
+    # E lo startup ritenta: un blip di rete mentre il container parte non deve
+    # lasciare l-istanza con l-enforcement attivo e Telegram che non sa il segreto.
+    assert len(tentativi) == 3, f'tentativi di registrazione: {len(tentativi)}'
 
 
 # ------------------------------------------------------------------- HTTP
