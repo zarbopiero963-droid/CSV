@@ -533,7 +533,12 @@ Tre controlli, e ognuno serve per un motivo diverso:
 - la **scadenza per inattività**, 20 minuti dal momento in `emessa`. È «di inattività» e
   non «di sessione» perché **ogni rotta che valida la sessione riemette il cookie** con
   un `emessa` nuovo — oggi `GET /api/me`, e ogni rotta autenticata futura deve fare lo
-  stesso. Il rinnovo va **dopo** la validazione: prima, un cookie scaduto tornerebbe buono
+  stesso. **È verificato, non raccomandato:**
+  `test_ogni_rotta_che_usa_la_SESSIONE_rinnova_anche_il_cookie` elenca le rotte il cui
+  codice legge `utente_dalla_sessione` e pretende che riemettano il cookie — una rotta
+  nuova che se ne dimentica fa fallire quel test invece di funzionare benissimo e far
+  scadere la sessione di chi la usa. Il rischio è stato alzato da Fable 5 e GPT-5.5 sulla
+  PR #23. Il rinnovo va **dopo** la validazione: prima, un cookie scaduto tornerebbe buono
   al primo tentativo e la scadenza si annullerebbe da sé. Ed è **per-rotta e non un
   middleware**, di proposito: un middleware girerebbe anche su `/xtrader.csv`, cioè
   metterebbe codice di sessione sul percorso del feed — esattamente la NON-relazione

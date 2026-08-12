@@ -332,9 +332,9 @@ def _chiama(base, metodo, path, endpoint, token=None):
     req = urllib.request.Request(url, data=dati, headers=intestazioni, method=metodo)
     try:
         with urllib.request.urlopen(req, timeout=10) as r:  # noqa: S310 - loopback
-            return r.status, r.read(), dict(r.headers)
+            return r.status, r.read(), r.headers
     except urllib.error.HTTPError as e:
-        return e.code, e.read(), dict(e.headers)
+        return e.code, e.read(), e.headers
 
 
 def _e_errore_di_validazione(corpo: bytes) -> bool:
@@ -573,10 +573,10 @@ def test_le_rotte_di_login_rifiutano_chi_non_ha_la_PROPRIA_credenziale(
     # corpo passava anche se la rotta lo avesse impostato davvero. Era la mia asserzione
     # che non asseriva niente, segnalata da CodeRabbit sulla PR #23 — e una guardia
     # vacua e- peggio di nessuna guardia, perche- si legge come copertura.
-    assert main.NOME_COOKIE not in (intestazioni.get('set-cookie')
-                                    or intestazioni.get('Set-Cookie') or ''), (
+    emessi = intestazioni.get_all('Set-Cookie') or []
+    assert not any(main.NOME_COOKIE in c for c in emessi), (
         f'{metodo} {path} ha messo un cookie di sessione in una risposta di rifiuto: '
-        f'intestazioni {intestazioni}')
+        f'{emessi}')
 
 
 def test_le_tre_categorie_di_rotte_coprono_TUTTE_le_rotte():

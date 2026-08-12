@@ -365,18 +365,25 @@ def _chiama(base, metodo, path, corpo=None, cookie=None, token=None):
     req = urllib.request.Request(url, data=dati, headers=intestazioni, method=metodo)
     try:
         with urllib.request.urlopen(req, timeout=10) as r:  # noqa: S310 - loopback
-            return r.status, r.read(), dict(r.headers)
+            return r.status, r.read(), r.headers
     except urllib.error.HTTPError as e:
-        return e.code, e.read(), dict(e.headers)
+        return e.code, e.read(), e.headers
 
 
 def _cookie_dalla_risposta(intestazioni):
-    """Il valore del cookie di sessione dall'header `Set-Cookie`."""
-    grezzo = intestazioni.get('set-cookie') or intestazioni.get('Set-Cookie') or ''
-    for pezzo in grezzo.split(';'):
-        chiave, _, valore = pezzo.strip().partition('=')
-        if chiave == main.NOME_COOKIE:
-            return valore
+    """Il valore del cookie di sessione, letto da TUTTI gli header `Set-Cookie`.
+
+    `get_all` e non `get`, e non `dict(headers)`: una risposta puo- portare piu-
+    `Set-Cookie`, e `dict()` ne tiene uno solo — misurato, tiene il PRIMO e butta il
+    resto. Un cookie di sessione emesso come secondo header sarebbe quindi invisibile a
+    questo helper, e le asserzioni che si fidano di lui direbbero «nessun cookie»
+    guardando nel posto sbagliato. Segnalato da Claude Fable 5 sulla PR #23.
+    """
+    for grezzo in (intestazioni.get_all('Set-Cookie') or []):
+        for pezzo in grezzo.split(';'):
+            chiave, _, valore = pezzo.strip().partition('=')
+            if chiave == main.NOME_COOKIE:
+                return valore
     return None
 
 
@@ -886,3 +893,67 @@ def test_un_campo_SCONOSCIUTO_ma_firmato_da_Telegram_viene_accettato():
         'il modello scarta i campi che non conosce: la data_check_string ricostruita e- '
         'piu- corta di quella firmata, quindi il giorno che Telegram aggiunge un campo '
         f'ogni login vero viene rifiutato. Conservati: {sorted(conservati)}')
+
+
+def test_ogni_rotta_che_usa_la_SESSIONE_rinnova_anche_il_cookie():
+    """La guardia sulla disciplina, perche' il rinnovo e' per-rotta e non un middleware.
+
+    Segnalata come rischio da Claude Fable 5 e da GPT-5.5 sulla PR #23, ed e' lo stesso
+    rischio in due formulazioni: il rinnovo per-rotta funziona solo se **ogni** rotta
+    autenticata futura si ricorda di farlo. Chi ne aggiunge una senza rinnovare non rompe
+    niente in modo visibile — la rotta funziona — ma da quel momento la sessione di chi
+    usa **quella** rotta scade venti minuti dopo il login. Una regressione silenziosa, e
+    il PR sull'approvazione (#7) piu' quello sul feed per utente ne aggiungeranno diverse.
+
+    Il middleware la eviterebbe e non si puo' usare: girerebbe anche su `/xtrader.csv`,
+    cioe' metterebbe codice di sessione sul percorso del feed — la NON-relazione che
+    questo PR esiste per garantire. Quindi la disciplina serve, e cio' che si puo' fare e'
+    renderla **verificabile** invece di raccomandata.
+
+    Il controllo e' sul sorgente e non sul comportamento di proposito: una rotta futura
+    puo' avere qualunque metodo, percorso e corpo, e un test che dovesse costruire una
+    richiesta valida per ciascuna non riuscirebbe a coprirle tutte. Qui la copertura e'
+    completa per costruzione. Il comportamento — che il rinnovo funzioni davvero, e che
+    avvenga DOPO la validazione — lo misurano
+    `test_una_richiesta_valida_RINNOVA_la_scadenza` e
+    `test_un_cookie_GIA_scaduto_non_viene_resuscitato_dal_rinnovo`.
+    """
+    import inspect
+
+    inadempienti = []
+    for rotta in main.app.routes:
+        funzione = getattr(rotta, 'endpoint', None)
+        if funzione is None:
+            continue
+        try:
+            sorgente = inspect.getsource(funzione)
+        except (OSError, TypeError):
+            continue
+        if 'utente_dalla_sessione' not in sorgente:
+            continue
+        if '_rispondi_con_sessione' not in sorgente:
+            inadempienti.append(f'{sorted(getattr(rotta, "methods", []))} {rotta.path}')
+
+    assert not inadempienti, (
+        'queste rotte leggono la sessione e NON riemettono il cookie, quindi per chi le '
+        'usa i venti minuti tornano assoluti dal login invece che di inattivita-: '
+        f'{inadempienti}. Il rinnovo si ottiene restituendo _rispondi_con_sessione(...) '
+        'con utente["versione"], DOPO la validazione.')
+
+    # E la guardia non deve essere vacua: se nessuna rotta usa la sessione, il ciclo qui
+    # sopra non guarda niente e il test passa dicendo nulla.
+    usano = [r.path for r in main.app.routes
+             if getattr(r, 'endpoint', None) is not None
+             and 'utente_dalla_sessione' in (inspect.getsource(r.endpoint)
+                                             if _leggibile(r.endpoint) else '')]
+    assert usano, 'nessuna rotta usa utente_dalla_sessione: questa guardia non misura niente'
+
+
+def _leggibile(funzione):
+    """Vero se `inspect.getsource` non solleva su questa funzione."""
+    import inspect
+    try:
+        inspect.getsource(funzione)
+    except (OSError, TypeError):
+        return False
+    return True
