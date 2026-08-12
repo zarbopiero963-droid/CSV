@@ -1691,5 +1691,15 @@ def test_a_PARITA_di_telegram_id_vince_l_id_piu_basso(tmp_path):
     assert superstite == primo, (
         f'a parita- di telegram_id ha vinto {superstite} invece del piu- basso {primo}: '
         'la regola non e- deterministica')
-    # E nessuna delle due righe e- stata cancellata: entrambe sono identita- vere.
+    # UNA sola riga tiene l'etichetta: la perdente la perde, e questo test NON
+    # cristallizza duplicati di `origin_profile` — dubbio sollevato da GPT-5.5 leggendo la
+    # versione precedente, che asseriva solo l'esistenza delle righe.
+    etichettate = c.execute('SELECT id FROM users WHERE origin_profile=?',
+                            (main.PIERO_PROFILE,)).fetchall()
+    assert len(etichettate) == 1, (
+        f'due righe tengono ancora l-etichetta: {etichettate}. Sarebbe il lookup ambiguo '
+        'che `origin_profile` esiste per rendere certo')
+    # Ma nessuna delle due righe e- CANCELLATA: entrambe sono identita- Telegram vere, e
+    # l'identita- di un utente non si butta perche- la migrazione ha scelto l'altra.
     assert {r[0] for r in c.execute('SELECT id FROM users').fetchall()} >= {primo, secondo}
+    assert c.execute('SELECT telegram_id FROM users WHERE id=?', (secondo,)).fetchone()[0] == '222'
