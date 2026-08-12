@@ -483,6 +483,14 @@ jobs:
                   if total + len(block) > max_total:
                       skipped.append(filename)
                       budget_truncated = True
+                      # Se era anche stato tagliato dal tetto per-file, NON e' piu'
+                      # «inviato incompleto»: non e' stato inviato affatto. I due stati
+                      # sono esclusivi e «non inviato» vince, o il preambolo direbbe al
+                      # modello di aver ricevuto codice che non ha ricevuto — la stessa
+                      # confusione che il preambolo esiste per togliere, un livello piu'
+                      # sotto. Segnalato da GPT-5.5 sulla PR #16 e misurato.
+                      if filename in tagliati:
+                          tagliati.remove(filename)
                       continue
 
                   chunks.append(block)

@@ -900,6 +900,39 @@ def test_il_prompt_DICE_al_modello_cosa_non_ha_visto(path):
     # E l'istruzione che impedisce di trasformare un'assenza in un difetto.
     assert 'NON autorizza' in testo, testo
 
+    # La RESA, non solo il contenuto: GPT-5.5 ha sospettato che le etichette
+    # finissero sulla stessa riga dell'istruzione, rendendo l'output non triabile.
+    # Non era vero, ma un sospetto verificabile va verificato, non discusso.
+    righe = [r for r in testo.split('\n') if r.strip()]
+    etichette = [r for r in righe if r.startswith('- [')]
+    assert len(etichette) == 2, f'le etichette non sono due righe proprie: {righe}'
+    assert etichette[0].startswith('- [REAL_FINDING]'), etichette
+    assert etichette[1].startswith('- [INSUFFICIENT_CONTEXT]'), etichette
+    # E ogni file elencato sta su una riga sua, o il modello non li distingue.
+    assert '- main.py' in righe, righe
+    assert '- web/engine.js' in righe, righe
+
+
+def test_le_tre_copie_del_preambolo_dicono_LA_STESSA_COSA():
+    """Tre copie identiche per necessita-, quindi la parita- va vincolata.
+
+    I workflow non fanno checkout e non possono importare un modulo comune: la
+    regola 3 di `CLAUDE.md` lo riconosce e chiede in cambio che i test verifichino
+    la parita-. Segnalato da Sourcery su questa PR come duplicazione — e- vero, ed
+    e- deliberata: quello che non deve accadere e- che DIVERGANO.
+
+    Confronto sull'OUTPUT e non sul sorgente: due implementazioni scritte diverse
+    ma equivalenti vanno bene, due scritte uguali che si comportano diverso no.
+    """
+    casi = ([], ['solo/saltato.py']), (['solo/tagliato.py'], []), (['a.py'], ['b.py'])
+    for tagliati, saltati in casi:
+        uscite = {p.name: _funzione_contesto(p)(tagliati, saltati) for p in (GPT, FABLE, FUGU)}
+        distinte = set(uscite.values())
+        assert len(distinte) == 1, (
+            f'le tre copie divergono su tagliati={tagliati} saltati={saltati}:\n'
+            + '\n'.join(f'--- {n} ---\n{t}' for n, t in uscite.items())
+        )
+
 
 @pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
 def test_il_preambolo_del_contesto_e_davvero_nel_prompt(path):
@@ -956,6 +989,30 @@ def test_un_file_TAGLIATO_a_meta_non_si_confonde_con_uno_non_inviato(path):
     assert 'FILE: main.py' in testo, 'il file tagliato deve comunque essere nel payload'
     assert 'README.txt' not in tagliati, (
         f'un file che entra intero non e- tagliato: tagliati={tagliati}'
+    )
+
+
+@pytest.mark.parametrize('path', (GPT, FABLE, FUGU), ids=lambda p: p.name)
+def test_un_file_tagliato_e_POI_scartato_e_solo_NON_INVIATO(path):
+    """I due stati sono esclusivi: «non inviato» vince su «inviato incompleto».
+
+    Un file puo- essere tagliato dal tetto per-file e **poi** scartato dal tetto
+    totale. Dichiararlo in entrambe le liste direbbe al modello «l'hai ricevuto
+    incompleto» quando non l'ha ricevuto affatto — cioe- esattamente la confusione
+    che il preambolo esiste per togliere, reintrodotta un livello piu- sotto.
+
+    Segnalato da GPT-5.5 sulla review di questa PR, e misurato: con un totale da
+    500 caratteri `main.py` risultava sia in `saltati` sia in `tagliati`.
+    """
+    build = _funzione_payload(path)
+    # Tetto per-file piccolo (taglia) e totale ancora piu- piccolo (scarta).
+    testo, saltati, _, _, tagliati = build([_file_finto('main.py', righe=4000)], 2000, 500)
+
+    assert 'main.py' in saltati, f'il file non e- stato scartato: saltati={saltati}'
+    assert 'FILE: main.py' not in testo, 'un file scartato non deve essere nel payload'
+    assert 'main.py' not in tagliati, (
+        'un file NON INVIATO e- dichiarato anche come «inviato incompleto»: il '
+        'modello leggerebbe che ha ricevuto codice che non ha ricevuto'
     )
 
 
