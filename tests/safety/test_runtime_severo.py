@@ -21,6 +21,10 @@ from pathlib import Path
 import pytest
 from _pytest.outcomes import Failed, Skipped
 
+# `pytester` lancia un pytest FIGLIO: e' l'unico modo di sapere come pytest
+# tratta una chiamata avvenuta durante l'import di un modulo di test.
+pytest_plugins = ['pytester']
+
 RADICE = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(RADICE))
 
@@ -106,6 +110,142 @@ def test_senza_node_e_in_CI_esigi_node_FALLISCE(monkeypatch):
     monkeypatch.setattr(runtime.shutil, 'which', lambda _: None)
     with pytest.raises(Failed):
         runtime.esigi_node()
+
+
+def test_senza_node_e_in_locale_esigi_node_SALTA(monkeypatch):
+    """Il rovescio del precedente, chiesto da Sourcery e giustamente.
+
+    Senza questo caso, una modifica che trasformasse lo skip locale in un
+    fallimento passerebbe inosservata: l'unico test che c'era esercitava solo il
+    ramo severo, e i due rami sono l'intero contratto di questa funzione.
+    """
+    monkeypatch.delenv(runtime.VARIABILE_SEVERA, raising=False)
+    monkeypatch.setattr(runtime.shutil, 'which', lambda _: None)
+    with pytest.raises(Skipped):
+        runtime.esigi_node()
+
+
+# ------------------------------------------------- il ramo dell'import mancante
+
+def _import_rotto(monkeypatch):
+    """Fa sollevare `ImportError` all'import di playwright, e solo a quello."""
+    import builtins
+    vero = builtins.__import__
+
+    def finto(nome, *resto, **chiavi):
+        if nome.startswith('playwright'):
+            raise ImportError('playwright non installato (finto)')
+        return vero(nome, *resto, **chiavi)
+
+    monkeypatch.setattr(builtins, '__import__', finto)
+
+
+def test_senza_playwright_e_in_locale_esigi_browser_SALTA(monkeypatch):
+    """Il primo dei due rami d'errore di `esigi_browser`, non coperto prima.
+
+    Segnalato da Sourcery: i test coprivano «Chromium non avviabile» e non
+    «Playwright non importabile», che sono due guasti diversi e producono due
+    messaggi diversi. Qui conta anche che sia uno **skip a livello di modulo**
+    valido, perche' e' esattamente da li' che la funzione viene chiamata.
+    """
+    monkeypatch.delenv(runtime.VARIABILE_SEVERA, raising=False)
+    _import_rotto(monkeypatch)
+    with pytest.raises(Skipped) as esito:
+        runtime.esigi_browser()
+    assert 'playwright' in str(esito.value)
+
+
+def test_senza_playwright_e_in_CI_esigi_browser_FALLISCE(monkeypatch):
+    monkeypatch.setenv(runtime.VARIABILE_SEVERA, '1')
+    _import_rotto(monkeypatch)
+    with pytest.raises(Failed) as esito:
+        runtime.esigi_browser()
+    messaggio = str(esito.value)
+    assert 'playwright' in messaggio
+    assert runtime.VARIABILE_SEVERA in messaggio
+
+
+# -------------------------------------- lo skip a LIVELLO DI MODULO, che era rotto
+
+def test_uno_skip_a_livello_di_modulo_e_permesso_e_NON_interrompe_la_raccolta(
+        monkeypatch, pytester):
+    """Il difetto trovato da GPT-5.5 e Fable 5, riprodotto e chiuso.
+
+    `pytest.skip()` fuori da un test, senza `allow_module_level=True`, **non
+    salta**: pytest lo tratta come errore di raccolta e interrompe l'esecuzione.
+    Misurato prima della correzione, su un modulo finto che chiama `_manca` al
+    livello superiore:
+
+        ERROR collecting test_livello_modulo.py
+        !!!! Interrupted: 1 error during collection !!!!
+
+    Cioe' su una macchina senza Chromium non si perdevano cinque test: si perdeva
+    **tutta la suite**. Ed era una regressione rispetto al `pytest.mark.skipif`
+    che `esigi_browser()` ha sostituito.
+
+    Qui si esegue davvero un modulo di test finto — `pytester` lancia un pytest
+    figlio — perche' l'unico modo di sapere come pytest tratta una chiamata
+    all'import e' fargliela trattare.
+    """
+    monkeypatch.delenv(runtime.VARIABILE_SEVERA, raising=False)
+    pytester.makepyfile(f"""
+        import sys
+        sys.path.insert(0, {str(RADICE)!r})
+        from tests import runtime
+        runtime._manca('finto', 'a livello di modulo', livello_modulo=True)
+
+        def test_mai_raggiunto():
+            raise AssertionError('non dovrebbe girare')
+    """)
+    esito = pytester.runpytest('-q')
+    esito.assert_outcomes(skipped=1, errors=0, failed=0)
+
+
+def test_senza_il_flag_lo_stesso_skip_diventa_un_ERRORE_di_raccolta(
+        monkeypatch, pytester):
+    """La controprova: e' il flag a fare la differenza, non altro.
+
+    Se un domani qualcuno togliesse `allow_module_level`, questo test resterebbe
+    verde e l'altro diventerebbe rosso — quindi la coppia dice *quale* delle due
+    forme e' quella giusta, e non solo che una funziona.
+    """
+    monkeypatch.delenv(runtime.VARIABILE_SEVERA, raising=False)
+    pytester.makepyfile(f"""
+        import sys
+        sys.path.insert(0, {str(RADICE)!r})
+        from tests import runtime
+        runtime._manca('finto', 'a livello di modulo')   # senza il flag
+
+        def test_mai_raggiunto():
+            pass
+    """)
+    esito = pytester.runpytest('-q')
+    esito.assert_outcomes(errors=1)
+
+
+def test_in_CI_lo_stesso_modulo_NON_esce_verde(pytester, monkeypatch):
+    """La proprieta' che la CI compra: rosso, non verde silenzioso.
+
+    A livello di modulo `pytest.fail` diventa un errore di raccolta invece di un
+    fallimento pulito — GPT-5.5 lo ha notato. Non e' un difetto: l'esito e'
+    comunque **rosso** e il messaggio resta leggibile, e quelle due sono le sole
+    cose che quel ramo deve garantire. Qui si verificano entrambe, su un pytest
+    figlio vero perche' la variabile deve arrivargli nell'ambiente.
+    """
+    monkeypatch.setenv(runtime.VARIABILE_SEVERA, '1')
+    pytester.makepyfile(f"""
+        import sys
+        sys.path.insert(0, {str(RADICE)!r})
+        from tests import runtime
+        runtime._manca('finto', 'assente in CI', livello_modulo=True)
+
+        def test_mai_raggiunto():
+            pass
+    """)
+    esito = pytester.runpytest_subprocess('-q')
+    assert esito.ret != 0, \
+        'in modalita- severa un runtime mancante a livello di modulo deve dare ROSSO'
+    esito.stdout.fnmatch_lines(['*assente in CI*'])
 
 
 def test_senza_chromium_pinnato_NE_avviabile_e_in_CI_FALLISCE(monkeypatch):

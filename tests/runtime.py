@@ -52,12 +52,31 @@ def severa() -> bool:
     return os.environ.get(VARIABILE_SEVERA, '') not in ('', '0', 'false', 'no')
 
 
-def _manca(cosa: str, dettaglio: str):
+def _manca(cosa: str, dettaglio: str, livello_modulo: bool = False):
     """Fallisce in modalita' severa, salta altrimenti. Il motivo e' lo stesso testo.
 
     Un solo punto in cui si decide, perche' la decisione e' una: se il messaggio
     fosse duplicato fra il ramo che salta e quello che falseisce, uno dei due
     diventerebbe meno preciso dell'altro alla prima modifica.
+
+    `livello_modulo` va passato quando la chiamata avviene durante l'import di un
+    file di test e non dentro una funzione. **Non e' un dettaglio di forma:**
+    `pytest.skip()` fuori da un test, senza `allow_module_level=True`, non salta —
+    solleva, e pytest lo tratta come errore di RACCOLTA. Misurato:
+
+        ERROR collecting test_livello_modulo.py
+        Using pytest.skip outside of a test will skip the entire module...
+        !!!! Interrupted: 1 error during collection !!!!
+
+    Cioe' su una macchina senza Chromium l'intera suite si **interrompe** invece
+    di saltare cinque test: una regressione rispetto al `pytest.mark.skipif` che
+    questa funzione ha sostituito. Il difetto e' sopravvissuto ai miei test perche'
+    qui Chromium c'e' sempre e questo ramo non veniva mai percorso. Segnalato da
+    GPT-5.5 e Claude Fable 5 sulla PR #18, indipendentemente.
+
+    In modalita' severa `pytest.fail` a livello di modulo diventa anch'esso un
+    errore di raccolta — con il messaggio in chiaro, quindi rosso e leggibile, che
+    e' l'unica cosa che quel ramo deve garantire.
     """
     motivo = f'{cosa} non disponibile: {dettaglio}'
     if severa():
@@ -67,7 +86,7 @@ def _manca(cosa: str, dettaglio: str):
             f'saltato: una CI che salta i test dei runtime esterni esce verde '
             f'senza aver eseguito niente. Installa il runtime o togli la variabile.'
         )
-    pytest.skip(motivo)
+    pytest.skip(motivo, allow_module_level=livello_modulo)
 
 
 def percorso_chromium() -> str | None:
@@ -103,7 +122,7 @@ def esigi_browser() -> None:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        _manca('playwright', 'il pacchetto non e\' installato')
+        _manca('playwright', 'il pacchetto non e\' installato', livello_modulo=True)
         return
 
     if percorso_chromium():
@@ -114,7 +133,7 @@ def esigi_browser() -> None:
             pw.chromium.launch().close()
     except Exception as e:
         _manca('Chromium', f'ne- pinnato in {CHROMIUM_PINNATO} ne- avviabile da '
-                           f'Playwright ({type(e).__name__})')
+                           f'Playwright ({type(e).__name__})', livello_modulo=True)
 
 
 def esigi_node() -> str:

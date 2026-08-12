@@ -60,20 +60,31 @@ def dati(testo):
     return yaml.safe_load(testo)
 
 
-def test_il_workflow_esegue_pytest(testo):
+def _comandi(dati):
+    """Tutti i `run:` del workflow, dalla struttura.
+
+    Letti dal YAML e non dal testo: cosi' un commento che nomina un comando non
+    conta come comando, e un cambio di indentazione non rompe la guardia. La prima
+    versione scansionava le righe e contava anche il nome del job e i commenti —
+    Sourcery ha segnalato la fragilita', e sabotando l'invocazione l'avevo trovata
+    prima: `pytest tests/relay` la lasciava verde.
+    """
+    fuori = []
+    for job in (dati.get('jobs') or {}).values():
+        for passo in job.get('steps') or []:
+            if passo.get('run'):
+                fuori.append(passo['run'])
+    return fuori
+
+
+def test_il_workflow_esegue_pytest(dati):
     """Il minimo: che il comando ci sia, e sull'intera suite.
 
     Un `pytest tests/relay` verificherebbe un quarto della suite lasciando la
     spunta identica, e questo controllo esiste perche' quella differenza non si
     vede guardando il colore del check.
     """
-    # Solo le righe che sono un COMANDO. Il file nomina `pytest` anche nel nome del
-    # job e nei commenti, e contarle avrebbe reso questo controllo verde per
-    # sempre: la prima versione lo era, e l'ho scoperto sabotando l'invocazione
-    # invece di rileggerla.
-    comandi = [r.strip() for r in testo.splitlines()
-               if not r.strip().startswith('#')
-               and ('python -m pytest' in r or r.strip().startswith('pytest '))]
+    comandi = [c for c in _comandi(dati) if 'pytest' in c]
     assert comandi, 'il workflow non esegue pytest da nessuna parte'
 
     interi = [c for c in comandi if 'tests/' not in c]
@@ -125,16 +136,18 @@ def test_il_workflow_VIETA_a_se_stesso_di_saltare_i_runtime(dati):
         )
 
 
-def test_il_workflow_installa_il_browser_che_i_test_pretendono(testo):
+def test_il_workflow_installa_il_browser_che_i_test_pretendono(dati):
     """Punto 3, e senza di lui il punto 2 renderebbe la CI rossa per sempre.
 
     Il percorso pinnato di `tests/runtime.py` e' dell'immagine locale: in CI non
     esiste, quindi il browser va installato, o `esigi_browser()` fallisce in
     modalita' severa a ogni esecuzione.
     """
-    assert 'playwright install' in testo, \
+    installa = [c for c in _comandi(dati) if 'playwright install' in c]
+    assert installa, \
         'il workflow non installa Chromium: i test browser fallirebbero sempre'
-    assert 'chromium' in testo, 'l-installazione non nomina chromium'
+    assert any('chromium' in c for c in installa), \
+        f'l-installazione non nomina chromium: {installa}'
 
 
 def test_il_workflow_NON_riceve_segreti(dati):
@@ -158,14 +171,16 @@ def test_il_workflow_NON_riceve_segreti(dati):
             f'permesso di scrittura non necessario: {chiave}: {valore}'
 
 
-def test_il_workflow_installa_le_dipendenze_DEI_TEST(testo):
+def test_il_workflow_installa_le_dipendenze_DEI_TEST(dati):
     """`requirements.txt` non basta: pytest e playwright stanno in quello dei test.
 
     Senza, la CI fallirebbe all'import — rosso onesto, ma per il motivo sbagliato,
     e chi lo legge perde tempo su un guasto di configurazione credendo a un test.
     """
-    assert 'requirements-dev.txt' in testo, \
-        'il workflow non installa requirements-dev.txt'
+    assert any('requirements-dev.txt' in c for c in _comandi(dati)), (
+        'il workflow non installa requirements-dev.txt: pytest e playwright stanno '
+        'la- dentro, e senza la CI fallirebbe all-import'
+    )
 
 
 def test_il_workflow_parte_sulle_PR_e_sui_push(dati):
