@@ -92,6 +92,40 @@ def _database_di_produzione(percorso: Path) -> sqlite3.Connection:
     return c
 
 
+CLAUSOLA_ORIGIN = ' origin_profile TEXT UNIQUE,'
+
+
+def _crea_users(c, con_origin_profile: bool):
+    """La tabella `users` come la crea `main`, meno cio- che il test vuole assente.
+
+    DERIVATA dallo schema vero invece di ricopiata, e la ragione l-ha segnalata GPT-5.5:
+    tre test costruivano a mano una `users` di tredici colonne per rappresentare lo
+    stato di un database migrato da una versione intermedia di questo ramo. Il giorno
+    che lo schema vero guadagna una colonna, quelle copie restano indietro e i test
+    continuano a passare misurando una tabella che non esiste piu- da nessuna parte —
+    un falso verde, cioe- il difetto peggiore che un test possa avere.
+
+    `SCHEMA_DI_PRODUZIONE` invece resta scritto a mano, e non e- un-incoerenza: quello
+    e- un formato STORICO e congelato — il database che sta in produzione adesso — e
+    derivarlo dal codice nuovo non proverebbe niente sulla migrazione. Questo e- lo
+    stato transitorio di uno schema VIVO, che deve seguirlo.
+
+    `con_origin_profile=False` da- lo stato precedente alla colonna;
+    `True` da- lo stato dell-ALTER: colonna presente, vincolo UNIQUE assente, che
+    `ALTER TABLE ADD COLUMN` non sa aggiungere.
+    """
+    vero = next(x for x in main.SCHEMA_MULTIUTENTE
+                if 'CREATE TABLE IF NOT EXISTS users' in x)
+    assert CLAUSOLA_ORIGIN in vero, (
+        f'la clausola {CLAUSOLA_ORIGIN!r} non e- piu- nello schema di `users`: e- stata '
+        'rinominata o riformattata, e questo aiutante starebbe costruendo una tabella '
+        'sbagliata in silenzio. Aggiornare CLAUSOLA_ORIGIN')
+    sostituto = ' origin_profile TEXT,' if con_origin_profile else ''
+    istruzione = vero.replace(CLAUSOLA_ORIGIN, sostituto)
+    assert istruzione != vero, 'la sostituzione non ha cambiato niente'
+    c.execute(istruzione)
+
+
 def _fotografia(c: sqlite3.Connection) -> dict:
     """Tutto il contenuto del database, tabella per tabella, per confrontarlo dopo."""
     # `sqlite_sequence` e' escluso: e' il contatore interno dell-AUTOINCREMENT, e
@@ -877,14 +911,7 @@ def test_origin_profile_e_UNICO_anche_sui_database_gia_migrati(tmp_path):
     """
     c = _database_di_produzione(tmp_path / 'alterata.db')
     # Lo stato intermedio: `users` esiste, senza `origin_profile`.
-    c.execute('CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT,'
-              ' telegram_id TEXT UNIQUE, username TEXT, first_name TEXT, slug TEXT UNIQUE,'
-              ' token_hash TEXT, token_prefix TEXT,'
-              " status TEXT NOT NULL DEFAULT 'registrato', access_expires_at INTEGER,"
-              ' telegram_reachable INTEGER NOT NULL DEFAULT 0,'
-              ' session_version INTEGER NOT NULL DEFAULT 1,'
-              ' is_admin INTEGER NOT NULL DEFAULT 0,'
-              ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP)')
+    _crea_users(c, con_origin_profile=False)
     colonne = {r[1] for r in c.execute('PRAGMA table_info(users)')}
     assert 'origin_profile' not in colonne, 'il test non parte dallo stato che vuole'
 
@@ -946,14 +973,7 @@ def test_un_database_con_origin_profile_GIA_duplicato_resta_attraversabile(tmp_p
     c = _database_di_produzione(tmp_path / 'utenti_doppi.db')
     # Lo stato senza vincolo: la colonna c'e-, l'indice no. E- il database migrato da
     # una versione intermedia di questo ramo.
-    c.execute('CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT,'
-              ' origin_profile TEXT, telegram_id TEXT UNIQUE, username TEXT,'
-              ' first_name TEXT, slug TEXT UNIQUE, token_hash TEXT, token_prefix TEXT,'
-              " status TEXT NOT NULL DEFAULT 'registrato', access_expires_at INTEGER,"
-              ' telegram_reachable INTEGER NOT NULL DEFAULT 0,'
-              ' session_version INTEGER NOT NULL DEFAULT 1,'
-              ' is_admin INTEGER NOT NULL DEFAULT 0,'
-              ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP)')
+    _crea_users(c, con_origin_profile=True)
     c.execute("INSERT INTO users(origin_profile, first_name, slug) VALUES ('PIERO','PIERO','piero')")
     c.execute("INSERT INTO users(origin_profile, first_name, slug) VALUES ('PIERO','PIERO','piero-2')")
     doppi = [r[0] for r in c.execute(
@@ -1022,14 +1042,7 @@ def test_la_deduplica_di_origin_profile_e_PER_PROFILO_non_globale(tmp_path):
     I NULL multipli restano intatti: non appartengono a nessun gruppo.
     """
     c = _database_di_produzione(tmp_path / 'due_gruppi.db')
-    c.execute('CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT,'
-              ' origin_profile TEXT, telegram_id TEXT UNIQUE, username TEXT,'
-              ' first_name TEXT, slug TEXT UNIQUE, token_hash TEXT, token_prefix TEXT,'
-              " status TEXT NOT NULL DEFAULT 'registrato', access_expires_at INTEGER,"
-              ' telegram_reachable INTEGER NOT NULL DEFAULT 0,'
-              ' session_version INTEGER NOT NULL DEFAULT 1,'
-              ' is_admin INTEGER NOT NULL DEFAULT 0,'
-              ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP)')
+    _crea_users(c, con_origin_profile=True)
     for profilo, slug in (('PIERO', 'piero'), ('PIERO', 'piero-2'),
                           ('ALTRO', 'altro'), ('ALTRO', 'altro-2')):
         c.execute('INSERT INTO users(origin_profile, first_name, slug) VALUES (?,?,?)',
