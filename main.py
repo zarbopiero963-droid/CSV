@@ -7,17 +7,64 @@ from pydantic import BaseModel
 
 app = FastAPI(title='XTrader Signal Relay')
 
+def webhook_secret(bot_token):
+    """Il segreto che prova che una consegna viene da Telegram.
+
+    DERIVATO dal token del bot invece di essere una variabile a se'. La ragione e'
+    che una variabile nuova lascerebbe una finestra fra il deploy e la sua
+    configurazione, e in quella finestra bisognerebbe scegliere fra un webhook
+    muto e un webhook aperto — due modi di sbagliare. Derivandolo, il valore
+    esiste sempre dove esiste il bot, non sta nel repository, e Telegram lo
+    riceve alla registrazione senza che nessuno faccia niente.
+
+    Non contiene il token e non lo rivela: e' un digest. Se contenesse il token,
+    ogni consegna di Telegram lo porterebbe in un header, e da li' nei log di
+    qualunque proxy davanti al servizio.
+
+    Senza bot restituisce stringa vuota, e quello NON attiva l'enforcement: senza
+    bot non esiste un webhook registrato, quindi non arrivera' mai una consegna
+    vera e non c'e' superficie da chiudere. Pretendere l'header comunque
+    renderebbe soltanto impossibile provare il relay in locale.
+    """
+    if not bot_token:
+        return ''
+    return hashlib.sha256(('betrelay-webhook-v1:' + bot_token).encode('utf-8')).hexdigest()
+
+
+# Esito dell'ultimo tentativo di registrazione: None = non tentato (nessun bot),
+# True = Telegram conosce il segreto, False = tentativo fallito.
+#
+# Serve perche' l'handler qui sotto INGOIA le eccezioni, e senza questo stato un
+# fallimento sarebbe invisibile. Il caso da temere e' preciso: se Telegram
+# conserva una registrazione VECCHIA senza segreto e la nuova chiamata fallisce,
+# continua a consegnare senza header e il relay rifiuta tutto — i segnali si
+# fermano, ed e' un guasto piu' grave del difetto che l'enforcement chiude. Per
+# questo `/health` lo espone e lo fa diventare `degraded`.
+_WEBHOOK_REGISTRATO = None
+
+
 @app.on_event('startup')
 async def register_telegram_webhook():
+    global _WEBHOOK_REGISTRATO
     token = os.getenv('TELEGRAM_BOT_TOKEN', '')
     public_url = os.getenv('PUBLIC_URL', 'https://csv-production-b04e.up.railway.app')
     if token:
+        import urllib.parse
         import urllib.request
-        url = f'https://api.telegram.org/bot{token}/setWebhook?url={public_url}/telegram/webhook'
+        # Il segreto va in un parametro di query verso api.telegram.org, su HTTPS,
+        # e non viene mai loggato da qui.
+        parametri = urllib.parse.urlencode({
+            'url': f'{public_url}/telegram/webhook',
+            'secret_token': webhook_secret(token),
+        })
+        url = f'https://api.telegram.org/bot{token}/setWebhook?{parametri}'
         try:
             urllib.request.urlopen(url, timeout=10).read()
+            _WEBHOOK_REGISTRATO = True
         except Exception:
-            pass
+            # Si continua ad avviare: un errore di rete all'avvio non deve
+            # impedire al servizio di servire il feed. Ma lo stato resta scritto.
+            _WEBHOOK_REGISTRATO = False
 
 DB_PATH = os.getenv('DB_PATH', '/tmp/signals.db')
 TOKEN = os.getenv('CSV_ACCESS_TOKEN', '')
@@ -404,8 +451,19 @@ def health():
     #
     # Dice «configurato o no», non altro: `/health` e' senza token.
     auth_state = 'ok' if TOKEN else 'non configurato'
-    stato = {'status': 'ok' if csv_state == 'ok' and auth_state == 'ok' else 'degraded',
-             'csv': csv_state, 'auth': auth_state, 'feed_scartati': scarti}
+    # Lo stato del webhook, sulle stesse due domande di `auth`: l'enforcement e'
+    # attivo? e Telegram sa il segreto? Sono cose diverse, e la seconda e' quella
+    # che puo' fermare i segnali in silenzio (vedi `_WEBHOOK_REGISTRATO`).
+    webhook_state = 'protetto' if webhook_secret(os.getenv('TELEGRAM_BOT_TOKEN', '')) else 'nessun bot'
+    sano = csv_state == 'ok' and auth_state == 'ok' and _WEBHOOK_REGISTRATO is not False
+    stato = {'status': 'ok' if sano else 'degraded',
+             'csv': csv_state, 'auth': auth_state, 'webhook': webhook_state,
+             'feed_scartati': scarti}
+    if _WEBHOOK_REGISTRATO is not None:
+        # Solo quando un tentativo c'e' stato: su un'istanza senza bot la chiave
+        # sarebbe rumore, e una chiave che c'e' sempre e non dice niente e' peggio
+        # di una assente.
+        stato['webhook_registrato'] = _WEBHOOK_REGISTRATO
     if scarti:
         stato['ultimo_scarto'] = motivo
     return stato
@@ -493,6 +551,29 @@ def test_message(data: MessageIn, x_admin_token: str | None = Header(None), pars
 
 @app.post('/telegram/webhook')
 async def telegram_webhook(request: Request):
+    """Riceve le consegne di Telegram, e SOLO quelle.
+
+    Il filtro dei `chat_id` piu' sotto fa instradamento — decide a quale feed
+    appartiene un messaggio — e non puo' autenticare, perche' il `chat_id` arriva
+    nel corpo e quindi lo scrive il mittente. Senza il controllo qui sopra questo
+    endpoint era un percorso di SCRITTURA non autenticato verso i segnali che
+    XTrader legge: misurato, un POST forgiato senza alcun token rispondeva 200 e
+    la riga entrava nel feed, mentre leggere lo stesso feed dava 401. Bastavano
+    l'URL del servizio, il testo di riconoscimento del parser (che sta in
+    `README.txt`) e il `chat_id` del canale, che conosce chi e' nel canale.
+    Segnalato da Fugu Ultra, Issue #13.
+
+    403 e non 401: non c'e' una credenziale da correggere, la richiesta non viene
+    da chi dice di essere. Il messaggio non contiene mai il segreto — atteso o
+    ricevuto — e il confronto e' a tempo costante, perche' questo valore arriva su
+    OGNI consegna ed e' quindi il piu' confrontato del servizio.
+    """
+    atteso = webhook_secret(os.getenv('TELEGRAM_BOT_TOKEN', ''))
+    if atteso:
+        ricevuto = request.headers.get('X-Telegram-Bot-Api-Secret-Token', '')
+        if not ricevuto or not secrets.compare_digest(
+                ricevuto.encode('utf-8'), atteso.encode('utf-8')):
+            raise HTTPException(403, 'Forbidden')
     payload = await request.json()
     msg = payload.get('message') or payload.get('channel_post') or {}
     chat = msg.get('chat') or {}

@@ -320,6 +320,40 @@ Dopo il passo 1 la variabile è comunque **inerte**: la riga `PIERO` esiste già
 `INSERT OR IGNORE` non la aggiorna, quindi modificarla non cambia più nulla. Per
 cambiare i `chat_id` si usa l'API.
 
+### Autenticazione del webhook
+
+Il webhook non può usare `CSV_ACCESS_TOKEN` — a chiamarlo è Telegram — ma non è
+per questo aperto: pretende l'header `X-Telegram-Bot-Api-Secret-Token` e risponde
+`403` senza.
+
+**Il filtro dei `chat_id` non è la protezione**, e la distinzione è il difetto che
+questa parte chiude: quel filtro fa *instradamento* — decide a quale feed
+appartiene un messaggio — e non può autenticare, perché il `chat_id` arriva nel
+corpo della richiesta e quindi lo scrive il mittente. Prima del `secret_token`,
+`POST /telegram/webhook` era un percorso di **scrittura non autenticato** verso i
+segnali che XTrader legge: misurato, un POST forgiato senza alcun token rispondeva
+`200` e la riga entrava nel feed, mentre leggere lo stesso feed dava `401`.
+Segnalato da Fugu Ultra sulla PR #12, Issue #13.
+
+Il segreto è **derivato** da `TELEGRAM_BOT_TOKEN` con un digest, non è una
+variabile a sé. Una variabile nuova lascerebbe una finestra fra il deploy e la sua
+configurazione, e in quella finestra bisognerebbe scegliere fra un webhook muto e
+un webhook aperto: due modi di sbagliare. Derivandolo, il valore esiste sempre
+dove esiste il bot, non sta nel repository, e Telegram lo riceve alla
+registrazione all'avvio.
+
+`/health` espone due cose diverse: `webhook` dice se l'enforcement è attivo,
+`webhook_registrato` se l'ultima `setWebhook` è riuscita. La seconda esiste per un
+caso preciso — se Telegram conserva una registrazione vecchia senza segreto e la
+nuova chiamata fallisce, continua a consegnare senza header e il relay rifiuta
+tutto, fermando i segnali in silenzio. È un guasto più grave del difetto che
+l'enforcement chiude, quindi fa scattare `degraded` invece di restare invisibile.
+
+Nel modello multiutente questo non cambia: **un solo bot serve tutti gli utenti**,
+quindi c'è un solo segreto, derivato dallo stesso token. Ciò che cambia per utente
+è l'instradamento — `chat_id` → parser — che resta la funzione del filtro, ora
+senza doppio ruolo.
+
 ## Note operative su Telegram
 
 - Nei **gruppi** il bot con privacy mode attiva vede solo i comandi. Va

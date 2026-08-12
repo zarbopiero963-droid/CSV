@@ -38,15 +38,18 @@ CSV_ACCESS_TOKEN protegge dieci rotte: i due feed CSV (/xtrader.csv e
 l'header X-Admin-Token). Quattro sono in lettura, sei in scrittura.
 Restano pubbliche soltanto /, /health, /telegram/webhook e /app.
 
-ATTENZIONE su /telegram/webhook: NON e' autenticata. Il filtro dei chat_id fa
-INSTRADAMENTO — decide a quale feed appartiene un messaggio — non autenticazione,
-perche' il chat_id arriva dal corpo della richiesta e quindi lo scrive il mittente.
-Il servizio non distingue una consegna vera di Telegram da una costruita da altri,
-quindi oggi esiste un percorso di SCRITTURA non autenticato verso i segnali, che
-aggira CSV_ACCESS_TOKEN. Misurato: GET /xtrader.csv senza token da' 401, POST
-/telegram/webhook senza alcun token da' 200 e la riga finisce nel feed.
-La correzione e' il secret_token di Telegram: vedi Issue #13. Fino a quel momento
-questa riga descrive un rischio noto, non una protezione.
+/telegram/webhook non usa CSV_ACCESS_TOKEN — la chiama Telegram, non un client
+nostro — ma NON e' aperta: pretende l'header X-Telegram-Bot-Api-Secret-Token e
+risponde 403 senza. Il filtro dei chat_id NON e' quella protezione: fa
+instradamento, decide a quale feed appartiene un messaggio, e non puo' autenticare
+perche' il chat_id arriva dal corpo e quindi lo scrive il mittente. Prima del
+secret_token questo endpoint era un percorso di SCRITTURA non autenticato verso i
+segnali: misurato, un POST forgiato senza alcun token rispondeva 200 e la riga
+entrava nel feed, mentre leggere lo stesso feed dava 401.
+Il segreto e' DERIVATO da TELEGRAM_BOT_TOKEN, non e' una variabile da impostare:
+esiste sempre dove esiste il bot, non sta nel repository, e Telegram lo riceve
+alla registrazione all'avvio. Senza TELEGRAM_BOT_TOKEN non c'e' webhook registrato
+e l'enforcement non si attiva - e' lo stato dello sviluppo locale.
 
 /app serve i file statici del prototipo: e' un mount, non una rotta, e non ha ne'
 puo' avere un token perche' e' la pagina che si apre nel browser. Nulla di sensibile deve finire in web/: lo vincola la guardia
@@ -64,11 +67,22 @@ Internet. Non farlo: si controlla su /health.
 
 CONTROLLO
 GET /health
-Risponde {"status","csv","auth","feed_scartati"} e, se feed_scartati non e' zero,
-anche "ultimo_scarto" col motivo. "csv" e' l'esito del verificatore di formato;
+Risponde {"status","csv","auth","webhook","feed_scartati"}, piu' "ultimo_scarto"
+se feed_scartati non e' zero e "webhook_registrato" se un tentativo di
+registrazione c'e' stato. "csv" e' l'esito del verificatore di formato;
 "auth" vale "ok" oppure "non configurato" e in quel caso "status" diventa
 "degraded" — a differenza degli scarti, una variabile mancante non si ripara da
 se'. /health non ha token, quindi dice se il token c'e', mai quale;
+"webhook" vale "protetto" (l'header viene pretesso) o "nessun bot";
+"webhook_registrato" e' l'esito dell'ultima setWebhook all'avvio, e se e' false
+"status" diventa "degraded".
+
+DA CONTROLLARE DOPO UN DEPLOY, e non e' una formalita': se webhook_registrato e'
+false, Telegram puo' conservare una registrazione vecchia SENZA segreto, continuare
+a consegnare senza header, e il relay rifiuta tutto — i segnali si fermano in
+silenzio. E' il motivo per cui quell'esito e' esposto qui e fa scattare degraded.
+Rimedio: un nuovo deploy, che ritenta la registrazione. Verifica dopo ogni deploy
+che /health dica webhook_registrato true, poi manda un segnale di prova.
 "feed_scartati" conta le RIGHE DISTINTE salvate che non hanno passato la verifica
 e sono state servite come feed vuoto - non le richieste che le incontrano, perche'
 XTrader interroga il feed a raffica e una sola riga guasta resterebbe tale per
