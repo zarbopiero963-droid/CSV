@@ -1404,6 +1404,8 @@ def test_un_CLIENTE_non_fa_scattare_la_riparazione(tmp_path, monkeypatch):
     '+987654321',        # col segno, come lo scrive chi pensa a un numero di telefono
     '987 654 321',       # con gli spazi dentro
     '٩٨٧',               # cifre arabe-indiane: `.isdigit()` le accetta, Telegram no
+    '001234',            # zero iniziale: passa come cifra, ma Telegram manda 1234
+    '0',                 # non e' l'id di nessuno
 ])
 def test_un_TELEGRAM_ADMIN_ID_malformato_viene_RICONOSCIUTO(valore, monkeypatch):
     """Le quattro forme sbagliate sono tutte silenziose, e la quinta inganna `.isdigit()`.
@@ -1424,7 +1426,7 @@ def test_un_TELEGRAM_ADMIN_ID_malformato_viene_RICONOSCIUTO(valore, monkeypatch)
         'nessun posto dove leggere perche- il suo account risulta vuoto')
 
 
-@pytest.mark.parametrize('valore', ['987654321', '1', '', '  987654321  '])
+@pytest.mark.parametrize('valore', ['987654321', '1', '', '  987654321  ', '10'])
 def test_un_TELEGRAM_ADMIN_ID_BUONO_non_viene_segnalato(valore, monkeypatch):
     """Il verso opposto: un avviso che scatta sul valore giusto insegna a ignorarlo.
 

@@ -590,8 +590,14 @@ TELEGRAM_ADMIN_ID = os.getenv('TELEGRAM_ADMIN_ID', '').strip()
 # non combaciano con nessun id Telegram, cioe' proprio il caso che questo controllo esiste
 # per nominare. Segnalato da GPT-5.5 sulla PR #24.
 def admin_id_malformato():
-    """Vero se `TELEGRAM_ADMIN_ID` e' impostato ma non e' una sequenza di sole cifre ASCII."""
-    return bool(TELEGRAM_ADMIN_ID) and re.fullmatch(r'[0-9]+', TELEGRAM_ADMIN_ID) is None
+    """Vero se `TELEGRAM_ADMIN_ID` e' impostato ma non puo' combaciare con un id Telegram.
+
+    `[1-9][0-9]*` e non `[0-9]+`: uno zero iniziale passa come cifra ma Telegram manda
+    `1234`, non `001234`, quindi il confronto fra stringhe non combacia **mai** — un valore
+    accettato dal controllo e inutile in produzione, cioe' il caso peggiore per un controllo.
+    Esclude anche `0`, che non e' l'id di nessuno. Segnalato da GPT-5.5 sulla PR #24.
+    """
+    return bool(TELEGRAM_ADMIN_ID) and re.fullmatch(r'[1-9][0-9]*', TELEGRAM_ADMIN_ID) is None
 
 
 
