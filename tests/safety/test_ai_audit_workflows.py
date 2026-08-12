@@ -14,6 +14,7 @@ questo servizio.
 
 from __future__ import annotations
 
+import os
 import re
 import textwrap
 from pathlib import Path
@@ -1881,6 +1882,79 @@ def test_anche_il_guard_in_bash_copre_la_pr_aperta_con_la_label(path):
             f'{variabile}, quindi una PR aperta con la label finale gia- applicata '
             'esce VERDE senza review'
         )
+
+
+def _esegui_guard_bash(path: Path, ambiente: dict) -> int:
+    """ESEGUE il pezzo di bash che precede Python, e restituisce il suo exit code.
+
+    Il guard «Secret assente» e' scritto in bash e finora nessun test lo eseguiva:
+    era vincolato solo dalla presenza di certe stringhe nel sorgente, che non dice
+    nulla su cosa faccia con un payload vero. Chiesto da GPT-5.5 sulla PR #20, che
+    dubitava del formato di `LABELS_PRESENTI` prodotto da `toJSON` — un dubbio
+    legittimo, perche' se quel formato non e' quello atteso il `grep` non trova la
+    label e il gate torna a uscire verde senza review.
+
+    Si taglia allo heredoc `python3` di proposito: eseguire anche quello farebbe
+    partire il reviewer per davvero, chiamando GitHub e il fornitore.
+    """
+    import subprocess
+    import tempfile
+    passo = next(p for p in _carica(path)['jobs']['review']['steps'] if 'run' in p)
+    prefisso = passo['run'].split('python3')[0]
+    with tempfile.NamedTemporaryFile('w', suffix='.sh', delete=False) as f:
+        f.write(prefisso)
+        script = f.name
+    # `env` pulito: nessuna variabile della macchina puo' influenzare l'esito.
+    return subprocess.run(['bash', script], env=ambiente,
+                          capture_output=True, text=True).returncode
+
+
+# `toJSON` di GitHub stampa il JSON indentato su piu' righe, ma il formato non e'
+# garantito dal contratto delle Actions: il test tiene ENTRAMBE le forme, cosi' il
+# guard non dipende dall'una. E la lista vuota (`[]`, nessuna label) e' il caso in cui
+# uscire verdi e' giusto.
+COMPATTO = '["manual-review-required","{finale}"]'
+INDENTATO = '[\n  "manual-review-required",\n  "{finale}"\n]'
+
+
+@pytest.mark.parametrize('path', CON_GATE_FINALE, ids=lambda p: p.name)
+@pytest.mark.parametrize('etichette, label_evento, atteso', (
+    (COMPATTO, '', 1),
+    (INDENTATO, '', 1),
+    ('[]', '{finale}', 1),
+    ('[]', '', 0),
+    ('["manual-review-required"]', 'manual-review-required', 0),
+), ids=('opened_label_compatta', 'opened_label_indentata',
+        'labeled_senza_elenco', 'nessuna_label', 'altra_label'))
+def test_il_guard_bash_ESEGUITO_su_un_payload_vero(path, etichette, label_evento, atteso):
+    """Secret assente + gate armato = ROSSO, anche senza evento `labeled`.
+
+    E- il test che GPT-5.5 ha chiesto con queste parole: «PR aperta con label finale
+    gia- presente e secret mancante, atteso job rosso». Prima di questa PR quel caso
+    usciva VERDE, e il gate finale risultava superato con zero righe lette.
+
+    I due primi casi coprono il dubbio sul formato di `toJSON`: la label va trovata
+    sia se il JSON e- compatto sia se e- indentato su piu- righe. Gli ultimi due sono
+    il verso opposto, e servono a impedire la correzione pigra «esci sempre rosso»:
+    senza label finale il reviewer e- OPZIONALE e un Secret assente non deve bloccare
+    la PR — e- il comportamento che rende questi workflow innocui su un fork o su un
+    repository senza chiavi.
+    """
+    finale = 'final-fable-review' if path is FABLE else 'final-fugu-review'
+    ambiente = {
+        'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
+        'FINAL_LABEL': finale,
+        'LABELS_PRESENTI': etichette.replace('{finale}', finale),
+        'LABEL_EVENTO': label_evento.replace('{finale}', finale),
+        'EVENT_ACTION': 'labeled' if label_evento else 'opened',
+        # Il Secret NON c'e': e- il caso in prova.
+    }
+    codice = _esegui_guard_bash(path, ambiente)
+    assert codice == atteso, (
+        f'{path.name}: con etichette={ambiente["LABELS_PRESENTI"]!r} e '
+        f'label_evento={ambiente["LABEL_EVENTO"]!r} il guard e- uscito {codice}, '
+        f'atteso {atteso}. Un 0 dove serve 1 significa gate finale VERDE senza review'
+    )
 
 
 @pytest.mark.parametrize('path', SU_V1_RESPONSES, ids=lambda p: p.name)
