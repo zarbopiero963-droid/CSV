@@ -1693,7 +1693,6 @@ def test_il_gate_legge_una_risposta_minimale_di_v1_responses(monkeypatch, path):
     richiesta contiene il diff della PR, e «non memorizzare» e' una promessa che
     vale solo se arriva davvero al fornitore. Chiesto da CodeRabbit sulla PR #20.
     """
-    import json as _json
     call_model, chiamate = _call_model_del_gate(monkeypatch, path=path, risposta={
         'output_text': 'nessun bloccante',
         'status': 'completed',
@@ -1704,7 +1703,7 @@ def test_il_gate_legge_una_risposta_minimale_di_v1_responses(monkeypatch, path):
     assert testo == 'nessun bloccante', f'testo non estratto: {testo!r}'
     assert usage == {'input_tokens': 1_000, 'output_tokens': 10}
 
-    corpo = _json.loads(chiamate[0].data.decode('utf-8'))
+    corpo = _corpo_spedito(chiamate)
     assert 'input' in corpo, f'la richiesta spedita non ha `input`: {sorted(corpo)}'
     assert 'messages' not in corpo, 'la richiesta spedita ha ancora `messages`'
 
@@ -1814,6 +1813,28 @@ def _e_marcata_non_completa(testo: str, path: Path) -> bool:
     return any(testo.lstrip().startswith(g) for g in _prefissi_guard(path))
 
 
+def _corpo_spedito(chiamate: list) -> dict:
+    """Il corpo JSON del POST che `call_model` ha davvero spedito.
+
+    Esiste per il messaggio d'errore, non per la riga di codice. `chiamate[0].data`
+    scritto in linea da' `IndexError: list index out of range` se un domani
+    `call_model` smette di chiamare il fornitore — un errore che dice dove si e'
+    rotto ma non cosa e- successo, e in un file di guardie e- il difetto che qui si
+    e- gia- pagato piu- volte: un test che fallisce senza spiegare si guarda per
+    trenta secondi e si archivia come «flaky».
+
+    Segnalato da GPT-5.5 sulla PR #20, ed era in DUE posti — questo e il gate su
+    `v1/responses` — quindi la correzione sta in uno (regola 3).
+    """
+    import json as _json
+    assert chiamate, (
+        'call_model non ha spedito nessuna richiesta: non c-e- niente da ispezionare. '
+        'Se il flusso e- cambiato e la chiamata al fornitore non avviene piu-, questo '
+        'test non verifica piu- il payload e va riscritto, non aggiustato'
+    )
+    return _json.loads(chiamate[0].data.decode('utf-8'))
+
+
 def test_la_premessa_della_whitelist_di_fable_resta_vera(monkeypatch):
     """Fable dichiara completo solo `end_turn`, e quella scelta ha una PREMESSA.
 
@@ -1840,13 +1861,12 @@ def test_la_premessa_della_whitelist_di_fable_resta_vera(monkeypatch):
     Che `end_turn` sia l'unico motivo accettato non e' asserito qui sul testo della
     whitelist: lo dimostra, sui cinque valori, il test parametrizzato qui sopra.
     """
-    import json as _json
     risposta = {'content': [{'type': 'text', 'text': 'ok'}],
                 'stop_reason': 'end_turn', 'usage': {}}
     call_model, chiamate = _call_model_di_fable(monkeypatch, risposta)
     call_model('sistema', 'utente')
 
-    corpo = _json.loads(chiamate[0].data.decode('utf-8'))
+    corpo = _corpo_spedito(chiamate)
     assert 'tools' not in corpo, (
         'il payload di Fable ora spedisce `tools`: `stop_reason=tool_use` diventa un '
         'modo LEGITTIMO di finire, e la whitelist `MOTIVI_COMPLETI` va aggiornata o '
