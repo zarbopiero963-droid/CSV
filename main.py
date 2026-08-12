@@ -45,7 +45,18 @@ def webhook_secret(bot_token):
 # `assicura_registrazione`) due consegne concorrenti scriverebbero entrambe:
 # segnalato da Sourcery. Stessa forma del lock sugli scarti di consegna.
 _WEBHOOK_REGISTRATO = None
-_ULTIMO_TENTATIVO = 0.0
+
+# Sentinella «nessun tentativo e' mai avvenuto». Non `0.0`, e la differenza non e'
+# stilistica: `time.monotonic()` conta dall'avvio dell'HOST, non dall'epoca, quindi
+# su un container appena partito vale pochi secondi. Con `0.0` la sottrazione
+# `adesso - _ULTIMO_TENTATIVO` restava sotto i 60 secondi del freno, e il freno si
+# comportava come se un tentativo fosse appena avvenuto quando non ne era avvenuto
+# nessuno: la prima autoriparazione da consegna rifiutata era soppressa per il primo
+# minuto di vita del processo. Cioe' proprio nella finestra in cui una registrazione
+# stantia e' piu' probabile — subito dopo un deploy — il rimedio era muto.
+# Segnalato da Claude Fable 5 sulla review finale della PR #14.
+MAI_TENTATO = None
+_ULTIMO_TENTATIVO = MAI_TENTATO
 _WEBHOOK_LOCK = threading.Lock()
 
 # I tentativi sono NUMERATI, e l'esito ricorda da quale tentativo viene.
@@ -198,7 +209,8 @@ def assicura_registrazione(forza=False):
         return None
     with _WEBHOOK_LOCK:
         adesso = time.monotonic()
-        if not forza and adesso - _ULTIMO_TENTATIVO < ATTESA_FRA_TENTATIVI_S:
+        if (not forza and _ULTIMO_TENTATIVO is not MAI_TENTATO
+                and adesso - _ULTIMO_TENTATIVO < ATTESA_FRA_TENTATIVI_S):
             return _WEBHOOK_REGISTRATO
         _ULTIMO_TENTATIVO = adesso
         _TENTATIVI_EMESSI += 1

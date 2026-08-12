@@ -811,6 +811,45 @@ def test_una_raffica_di_consegne_rifiutate_produce_UN_tentativo(monkeypatch):
     )
 
 
+def test_su_un_host_APPENA_AVVIATO_il_freno_non_sopprime_il_primo_tentativo(monkeypatch):
+    """Il valore iniziale del freno non deve mentire sul tempo.
+
+    `time.monotonic()` conta dall'avvio dell'**host**, non dall'epoca: su un
+    container appena partito vale pochi secondi. Con un valore iniziale di `0.0` la
+    sottrazione `adesso - 0.0` restava sotto i 60 secondi del freno, quindi il
+    freno si comportava come se un tentativo fosse appena avvenuto **quando non ne
+    era avvenuto nessuno**, e sopprimeva la prima autoriparazione da consegna
+    rifiutata per il primo minuto di vita del processo.
+
+    Che sia proprio la finestra peggiore non e- un caso: la registrazione stantia —
+    Telegram che consegna senza header perche- la registrazione precedente non
+    aveva un segreto — e- piu- probabile subito dopo un deploy. Il rimedio era muto
+    esattamente quando serve. Segnalato da Claude Fable 5 sulla review finale.
+
+    Il sentinella e- `MAI_TENTATO`, non uno zero che finge di essere un istante.
+    """
+    monkeypatch.setenv('TELEGRAM_BOT_TOKEN', BOT_FINTO)
+    monkeypatch.setattr(main, '_WEBHOOK_REGISTRATO', None)
+    monkeypatch.setattr(main, '_ULTIMO_TENTATIVO', main.MAI_TENTATO)
+    # Host appena avviato: `monotonic` vale pochi secondi.
+    monkeypatch.setattr(main.time, 'monotonic', lambda: 5.0)
+    tentativi = []
+    monkeypatch.setattr(main, '_chiama_set_webhook',
+                        lambda bot, url: tentativi.append(bot) or True)
+
+    main.assicura_registrazione()      # non forzata: e- il percorso dell'handler
+
+    assert len(tentativi) == 1, (
+        'su un host appena avviato il freno ha soppresso la prima autoriparazione: '
+        'nessun tentativo era mai avvenuto, e il freno si e- comportato come se '
+        'fosse appena avvenuto'
+    )
+    # E subito dopo il freno tiene, altrimenti non sarebbe un freno.
+    for _ in range(5):
+        main.assicura_registrazione()
+    assert len(tentativi) == 1, f'il freno non ha tenuto: {len(tentativi)}'
+
+
 def test_una_registrazione_riuscita_NON_rende_morta_l_autoriparazione(monkeypatch):
     """Il bloccante: dopo un successo, il ritentativo non partiva **mai piu-**.
 
