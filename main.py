@@ -1822,16 +1822,26 @@ def login_password(data: LoginPasswordIn):
     Ogni accesso riuscito finisce in `admin_audit`: e' l'unico modo per cui un accesso
     non suo sia visibile, e per cui «non sono stato io» sia dimostrabile.
     """
-    attesa = _prenota_tentativo()
-    if attesa:
-        # 429 e non 401: chi legge deve sapere che il muro e' il freno e non la
-        # password, altrimenti prova a cambiare password quando deve solo aspettare.
-        raise HTTPException(429, f'troppi tentativi: riprova fra {attesa} secondi')
+    # PRIMA si guarda se la porta esiste, POI si consuma il gettone. L'ordine inverso —
+    # che e' quello che avevo scritto io correggendo l'aggiramento per concorrenza — fa
+    # consumare il freno a richieste su un percorso DISABILITATO: cinque richieste senza
+    # nessuna credenziale lo bruciavano per cinque minuti, a costo zero per chi le manda.
+    # E dopo quelle cinque la risposta diventava `429 troppi tentativi` invece di `503
+    # manca ADMIN_PASSWORD_HASH`, cioe' il proprietario che arriva a configurare la
+    # variabile — nell'emergenza per cui questo percorso esiste — leggeva «hai fatto troppi
+    # tentativi» e andava a cercare la password invece della configurazione mancante. Un
+    # messaggio che manda dalla parte sbagliata e' peggio di nessun messaggio.
+    # Segnalato da Claude Fable 5 sulla PR #23.
     if not ADMIN_PASSWORD_HASH:
         # Variabile assente → percorso disabilitato. 503 e non 401, per la stessa
         # ragione di `auth()`: chi lo vede deve andare a configurare, non a cercare la
         # password giusta.
         raise HTTPException(503, 'accesso con password non configurato: manca ADMIN_PASSWORD_HASH')
+    attesa = _prenota_tentativo()
+    if attesa:
+        # 429 e non 401: chi legge deve sapere che il muro e' il freno e non la
+        # password, altrimenti prova a cambiare password quando deve solo aspettare.
+        raise HTTPException(429, f'troppi tentativi: riprova fra {attesa} secondi')
     # Sui byte, come negli altri due siti e per la stessa ragione: lo username lo scrive
     # chi chiama, e `administratör` faceva rispondere 500 invece di 401.
     giusta = (hmac.compare_digest(data.username.encode('utf-8'),

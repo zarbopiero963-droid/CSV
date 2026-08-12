@@ -1124,3 +1124,49 @@ def test_il_freno_non_si_AGGIRA_con_richieste_concorrenti(monkeypatch):
         'ogni richiesta che passa accende uno scrypt — il freno amplifica il carico invece '
         'di ridurlo')
     assert 429 in esiti, f'nessuna richiesta e- stata frenata: {esiti}'
+
+
+def test_senza_ADMIN_PASSWORD_HASH_il_freno_non_si_CONSUMA(monkeypatch):
+    """Una porta **chiusa** non deve poter consumare il freno della porta.
+
+    Regressione introdotta dalla mia stessa correzione del giro precedente, trovata da
+    Claude Fable 5 sulla PR #23: spostando il conteggio del tentativo prima della verifica
+    — che era giusto, chiudeva l'aggiramento per concorrenza — l'ho messo anche **prima**
+    del controllo su `ADMIN_PASSWORD_HASH`. Misurato:
+
+        stati: [503, 503, 503, 503, 503, 429, 429]
+        contatore del freno: 5
+
+    Cinque richieste **senza nessuna credenziale**, su un percorso che e' *disabilitato*,
+    bruciano il freno per cinque minuti. Un `for` di shell da un estraneo, a costo zero.
+
+    E il danno peggiore e' il secondo: dopo quelle cinque, la risposta diventa `429
+    troppi tentativi` invece di `503 manca ADMIN_PASSWORD_HASH`. Cioe' il proprietario che
+    arriva a configurare la variabile — nell'emergenza per cui quel percorso esiste — legge
+    «hai fatto troppi tentativi» e va a cercare la password giusta invece della
+    configurazione mancante. Un messaggio d'errore che manda dalla parte sbagliata e' peggio
+    di nessun messaggio.
+
+    La correzione e' l'ordine: prima si guarda se la porta esiste, poi si consuma il gettone.
+    """
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(main, 'ADMIN_PASSWORD_HASH', '')
+    main._TENTATIVI_PASSWORD.update({'falliti': 0, 'ultimo': 0.0})
+
+    stati = []
+    for _ in range(main.TENTATIVI_PRIMA_DEL_FRENO + 3):
+        try:
+            main.login_password(main.LoginPasswordIn(username='administrator',
+                                                     password='qualunque'))
+            stati.append(200)
+        except HTTPException as e:
+            stati.append(e.status_code)
+
+    assert set(stati) == {503}, (
+        f'con il percorso disabilitato le risposte sono {stati}: le richieste hanno '
+        'consumato il freno, quindi un estraneo lo brucia a costo zero E il 503 che dice '
+        'cosa configurare viene sostituito da un 429 che manda a cercare la password')
+    assert main._TENTATIVI_PASSWORD['falliti'] == 0, (
+        f"il contatore e- {main._TENTATIVI_PASSWORD['falliti']} invece di 0: una porta "
+        'chiusa non deve poter consumare il freno della porta')
