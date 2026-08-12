@@ -591,7 +591,8 @@ def _travasa_nel_multiutente(c):
     il feed per utente, e generarne uno qui vorrebbe dire scriverlo da qualche
     parte — cioe' un segreto in piu' senza nessuno che lo usi.
     """
-    for profilo, chat_ids in c.execute('SELECT name, chat_ids FROM profiles').fetchall():
+    for profilo, chat_ids, parser_del_profilo in c.execute(
+            'SELECT name, chat_ids, parser FROM profiles').fetchall():
         # Lo slug dell'utente ha la stessa collisione dei parser — due profili che
         # differiscono solo per maiuscole — e la stessa conseguenza: `users.slug` e'
         # UNIQUE, quindi l'INSERT solleverebbe e il servizio non partirebbe. Cercata
@@ -626,6 +627,20 @@ def _travasa_nel_multiutente(c):
                           ' VALUES (?,?)', (chat, utente))
         c.execute('UPDATE signals SET user_id=? WHERE profile=? AND user_id IS NULL',
                   (utente, profilo))
+        # Il parser che questo profilo usa appartiene a QUESTO utente. Prima tutti i
+        # parser senza proprietario finivano al proprietario per difetto, quindi con due
+        # profili il parser del secondo passava a Piero — e l'informazione giusta era
+        # nella riga che questo ciclo stava gia' leggendo. `[REAL_FINDING]` di GPT-5.6
+        # Sol, piu' preciso della segnalazione gemella di Fable 5: non «un giorno
+        # assegnera' male» ma «assegna male adesso», e un secondo profilo si crea da
+        # `POST /api/profiles`.
+        #
+        # `AND user_id IS NULL` perche' un'attribuzione gia' fatta non si sovrascrive:
+        # due profili che nominano lo stesso parser lo lasciano al primo, come per le
+        # chat condivise e per la stessa ragione.
+        if parser_del_profilo:
+            c.execute('UPDATE parsers SET user_id=? WHERE name=? AND user_id IS NULL',
+                      (utente, parser_del_profilo))
     # Utente, `id`, `slug` e `ordine` dei parser: vedi `_completa_colonne_nuove`, che
     # e' la stessa funzione chiamata dal salvataggio di un parser. Il proprietario e'
     # PIERO perche' oggi i parser esistenti sono i suoi, ed e' l'unico utente.
@@ -689,8 +704,19 @@ def _travasa_nel_multiutente(c):
             ' ORDER BY id', (chat, topic)).fetchall()]
         vincente, perdenti = identificativi[0], identificativi[1:]
         for perdente in perdenti:
-            c.execute('UPDATE parser_chats SET chat_id=? WHERE chat_id=?',
+            # `OR IGNORE` piu' la DELETE, e non una UPDATE nuda: `parser_chats` ha
+            # `PRIMARY KEY (parser_id, chat_id)`, quindi se un parser era associato a
+            # ENTRAMBE le righe duplicate lo spostamento creerebbe una riga che esiste
+            # gia' e solleverebbe — un altro modo di rendere `migra()` impossibile da
+            # attraversare, dentro la correzione che ne chiudeva un altro.
+            # `[REAL_FINDING]` di GPT-5.6 Sol al gate finale della PR #22.
+            #
+            # Niente va perso: `OR IGNORE` sposta cio' che puo' spostarsi, la DELETE
+            # toglie le righe rimaste indietro proprio perche' la loro destinazione
+            # c'era gia'. L'associazione `(parser, vincente)` esiste in entrambi i casi.
+            c.execute('UPDATE OR IGNORE parser_chats SET chat_id=? WHERE chat_id=?',
                       (vincente, perdente))
+            c.execute('DELETE FROM parser_chats WHERE chat_id=?', (perdente,))
             c.execute('DELETE FROM chats WHERE id=?', (perdente,))
     c.execute('CREATE UNIQUE INDEX IF NOT EXISTS chats_chat_topic'
               f' ON chats ({CHIAVE_CHAT})')

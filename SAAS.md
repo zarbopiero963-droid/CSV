@@ -121,7 +121,11 @@ da test e tutti chiusi con una disambiguazione deterministica invece di un error
   «Regole di isolamento» applicata: una chat appartiene a un solo utente. Chi
   puntava alla riga scartata viene **ri-puntato** su quella sopravvissuta, perché
   cancellare senza ri-puntare lascerebbe un `parser_chats.chat_id` che riferisce un
-  `id` inesistente — un parser che smette di ricevere in silenzio;
+  `id` inesistente — un parser che smette di ricevere in silenzio. Il ri-puntamento è
+  `UPDATE OR IGNORE` seguito da una `DELETE`, perché `parser_chats` ha
+  `PRIMARY KEY (parser_id, chat_id)`: un parser associato a **entrambe** le righe
+  duplicate produrrebbe altrimenti una riga che esiste già, cioè un altro modo di
+  rendere la migrazione non attraversabile, dentro la correzione che ne chiudeva uno;
 - **due utenti con lo stesso `origin_profile`**, cioè lo stato che l'assenza di indice
   sui database già migrati permetteva → l'etichetta resta all'`id` più basso e sugli
   altri diventa NULL. Qui **non si cancella nessuna riga**, a differenza delle chat:
@@ -140,8 +144,15 @@ creato dopo l'avvio resterebbe senza `user_id`, `slug`, `ordine` e `id` fino al 
 successivo — cioè fuori dall'indice `UNIQUE (user_id, slug)`, che con `user_id` NULL
 non vincola niente, e non riferibile da `parser_chats`.
 
-Il **proprietario è un argomento obbligatorio** di quella funzione, non una costante al
-suo interno. Oggi entrambi i chiamanti passano `PIERO`, che è l'unico utente; il giorno
+**L'appartenenza di un parser si legge da `profiles.parser`**, non si assume: il
+travaso assegna il parser di ciascun profilo all'utente di quel profilo. Solo i parser
+che nessun profilo nomina finiscono al proprietario per difetto — quelli non hanno
+un'appartenenza da leggere, e lasciarli senza `user_id` li terrebbe fuori dall'indice
+`UNIQUE (user_id, slug)`. Due profili che nominano lo stesso parser lo lasciano al
+primo, come per le chat condivise e per la stessa ragione.
+
+Il **proprietario per difetto è un argomento obbligatorio** di quella funzione, non una
+costante al suo interno. Oggi entrambi i chiamanti passano `PIERO`, che è l'unico utente; il giorno
 che l'endpoint servirà più utenti va passato il proprietario della sessione, e la
 decisione è visibile nei due punti che la prendono invece di essere sepolta in una
 funzione di migrazione. **Resta aperto**, e appartiene al PR sul login: a chi

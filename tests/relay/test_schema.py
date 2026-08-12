@@ -1067,3 +1067,81 @@ def test_la_deduplica_di_origin_profile_e_PER_PROFILO_non_globale(tmp_path):
     assert senza == 4, (
         f'{senza} righe senza profilo invece di 4: due erano NULL dall-inizio e due '
         'sono le perdenti azzerate, e nessuna delle prime due va toccata')
+
+
+def test_la_deduplica_regge_un_parser_associato_a_ENTRAMBE_le_duplicate(tmp_path):
+    """Il ri-puntamento non puo- collidere con l-associazione che esiste gia-.
+
+    `[REAL_FINDING]` di GPT-5.6 Sol al gate finale, ed e- la QUARTA volta in questo PR
+    che compare la stessa classe — questa volta **dentro la correzione** che chiudeva la
+    terza. `parser_chats` ha `PRIMARY KEY (parser_id, chat_id)`: se un parser era
+    associato a entrambe le righe duplicate, spostare la seconda sulla prima crea una
+    riga che c'e- gia-. Misurato sul codice precedente:
+
+        sqlite3.IntegrityError: UNIQUE constraint failed:
+            parser_chats.parser_id, parser_chats.chat_id
+
+    E siccome `migra()` sta sul percorso di `db()`, di nuovo: 500 su ogni richiesta,
+    per sempre. La lezione e- che aggiungere una scrittura a una migrazione significa
+    chiedersi di nuovo «e se i dati la rendessero impossibile?», anche quando la
+    scrittura serve a rendere possibile un'altra cosa.
+
+    `UPDATE OR IGNORE` sposta cio- che puo- spostarsi; la `DELETE` che segue toglie le
+    righe che non si sono mosse perche- la destinazione esisteva gia-. Niente va perso:
+    l'associazione `(parser, vincente)` c'e- in entrambi i casi.
+    """
+    c = _database_di_produzione(tmp_path / 'doppia_associazione.db')
+    for istruzione in main.SCHEMA_MULTIUTENTE:
+        c.execute(istruzione)
+    c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id) VALUES (?,?)', (CHAT_A, 1))
+    c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id) VALUES (?,?)', (CHAT_A, 2))
+    vincente, perdente = [r[0] for r in c.execute(
+        'SELECT id FROM chats WHERE telegram_chat_id=? ORDER BY id', (CHAT_A,)).fetchall()]
+    c.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (7,?)', (vincente,))
+    c.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (7,?)', (perdente,))
+
+    main.migra(c)  # non deve sollevare
+
+    righe = c.execute('SELECT parser_id, chat_id FROM parser_chats').fetchall()
+    assert righe == [(7, vincente)], (
+        f'atteso la sola associazione (7, {vincente}): {righe}')
+    superstiti = c.execute('SELECT COUNT(*) FROM chats WHERE telegram_chat_id=?',
+                           (CHAT_A,)).fetchone()[0]
+    assert superstiti == 1, superstiti
+
+
+def test_il_parser_di_un_profilo_appartiene_a_QUEL_profilo(tmp_path):
+    """`profiles.parser` dice di chi e- il parser: la migrazione deve leggerlo.
+
+    `[REAL_FINDING]` di GPT-5.6 Sol, piu- preciso della versione di Fable 5 sullo stesso
+    punto: non «un giorno potrebbe assegnare male», ma «assegna male ADESSO, e
+    l'informazione giusta e- nella tabella che il ciclo sta gia- leggendo».
+
+    Misurato sul codice precedente, con due profili e un parser per ciascuno:
+
+        profilo -> utente: {'PIERO': 1, 'ALTRO': 2}
+        parser  -> utente: {'Parser_Telegram_XTrader_v1': 1, 'Parser_Di_Altro': 1}
+                                                                             ^ ALTRO e- 2
+
+    Il parser del profilo ALTRO finiva a Piero. Un secondo profilo si crea da
+    `POST /api/profiles`, quindi non e- uno stato ipotetico.
+
+    Il proprietario per difetto resta per i parser che NESSUN profilo nomina — quelli
+    non hanno un'appartenenza da leggere, e lasciarli senza utente li terrebbe fuori
+    dall'indice `UNIQUE (user_id, slug)`.
+    """
+    c = _database_di_produzione(tmp_path / 'proprieta_parser.db')
+    c.execute('INSERT INTO parsers(name, header) VALUES (?,?)', ('Parser_Di_Altro', 'H'))
+    c.execute('INSERT INTO profiles VALUES (?,?,?)', ('ALTRO', CHAT_B, 'Parser_Di_Altro'))
+
+    main.migra(c)
+
+    utenti = dict(c.execute('SELECT origin_profile, id FROM users').fetchall())
+    parser = dict(c.execute('SELECT name, user_id FROM parsers').fetchall())
+    assert parser['Parser_Di_Altro'] == utenti['ALTRO'], (
+        f"Parser_Di_Altro e- del profilo ALTRO (utente {utenti['ALTRO']}) ma e- stato "
+        f"assegnato all-utente {parser['Parser_Di_Altro']}")
+    assert parser[main.DEFAULT_PARSER] == utenti['PIERO'], parser
+    # `Secondo_Parser` non e- nominato da nessun profilo: resta al proprietario per
+    # difetto, e soprattutto NON resta senza utente.
+    assert parser['Secondo_Parser'] == utenti['PIERO'], parser
