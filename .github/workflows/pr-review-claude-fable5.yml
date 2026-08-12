@@ -246,7 +246,20 @@ jobs:
               # Le virgolette sono escluse dal riconoscimento del letterale, altrimenti
               # questa regola mangerebbe la forma fra virgolette che l'esenzione qui
               # sotto esiste per preservare.
-              (re.compile(r"""\$\{\{[^{}]*\}\}(?=[^\s"'])[^\s"',;]*"""), "[REDACTED_VALORE_INCOLLATO]"),
+              # Il trigger esclude le CHIUSURE — `)`, `]`, `}`, `>`, `,`, `;` — perche' un
+              # segreto non comincia con una parentesi chiusa. Prima le includeva, e
+              # `name: pytest (<espressione>)` diventava
+              # `name: pytest ([REDACTED_VALORE_INCOLLATO]`, con la parentesi di apertura
+              # spaiata: Fugu Ultra lo ha letto come file corrotto e ha bloccato il merge
+              # tre volte sulla PR #18, spendendo ~$0.63 per revisionare la redazione del
+              # proprio input.
+              #
+              # `.` `/` `+` `=` `:` restano trigger, e la distinzione e' misurata: un JWT
+              # contiene punti, il base64 contiene barre, quindi la' un letterale
+              # incollato e' plausibile. Con `,` non si perde nemmeno protezione teorica:
+              # la classe di consumazione la esclude gia', quindi `<espressione>,coda`
+              # usciva in chiaro anche prima.
+              (re.compile(r"""\$\{\{[^{}]*\}\}(?=[^\s"'\)\]\}>,;])[^\s"',;]*"""), "[REDACTED_VALORE_INCOLLATO]"),
               # Esenta le espressioni di GitHub Actions, cioe' la forma
               # dollaro-graffa-graffa: un riferimento a un Secret e' un PUNTATORE al
               # segreto, non il segreto. Senza l'esenzione questa regola trasformava una
