@@ -48,26 +48,63 @@ ESTENSIONI = ('.py', '.js', '.mjs', '.html', '.css', '.json', '.yml', '.yaml')
 BOM = '\ufeff'
 
 
-def _sorgenti() -> list[Path]:
-    trovati = []
+def _per_voce() -> dict:
+    """I file scansionati, RAGGRUPPATI per voce di `SORGENTI`.
+
+    Raggruppati e non appiattiti perche' il totale non basta: `Path.rglob` su un
+    percorso inesistente non solleva, restituisce zero file. Una voce sbagliata
+    sparirebbe quindi in silenzio dentro la somma.
+    """
+    per_voce = {}
     for voce in SORGENTI:
         percorso = RADICE / voce
         if percorso.is_file():
-            trovati.append(percorso)
+            per_voce[voce] = [percorso]
             continue
-        for p in percorso.rglob('*'):
-            if p.is_file() and p.suffix in ESTENSIONI and '__pycache__' not in p.parts:
-                trovati.append(p)
-    return trovati
+        per_voce[voce] = [p for p in percorso.rglob('*')
+                          if p.is_file() and p.suffix in ESTENSIONI
+                          and '__pycache__' not in p.parts]
+    return per_voce
+
+
+def _sorgenti() -> list[Path]:
+    return [p for file in _per_voce().values() for p in file]
+
+
+@pytest.mark.parametrize('voce', SORGENTI)
+def test_ogni_voce_di_SORGENTI_esiste_e_produce_file(voce):
+    """Il guardiano del guardiano — e la prima versione non lo era.
+
+    Chiedeva solo `len(trovati) >= 15` su TUTTE le voci insieme. `Path.rglob` su un
+    percorso inesistente non solleva e non stampa niente: restituisce zero file.
+    Rinominare una cartella non faceva quindi diventare rosso nulla, perche' la somma
+    restava sopra la soglia grazie alle altre.
+
+    Misurato, e il numero e' la ragione per cui questa versione esiste: fingendo che
+    `web/` fosse rinominata, la scansione passava da 29 a 23 file e il controllo
+    aggregato **passava ancora**. I 6 file che smettevano di essere controllati in
+    silenzio erano `api.js`, `app.js`, **`engine.js`**, `index.html`, `sito.html`,
+    `styles.css` — cioe' il motore di parsing e la facciata del prodotto.
+
+    Segnalato da CodeRabbit come Major sulla PR #21, ed era Major: un guardiano che
+    smette di guardare senza dirlo e' peggio di nessun guardiano, perche' il verde
+    continua ad arrivare.
+    """
+    file = _per_voce()[voce]
+    assert file, (
+        f'la voce {voce!r} di SORGENTI non produce nessun file: il percorso non '
+        'esiste piu- (rinominato? spostato?), oppure nessun file ha un suffisso di '
+        f'ESTENSIONI {ESTENSIONI}. Quei file NON vengono piu- controllati, e senza '
+        'questo test la cosa non si vedrebbe'
+    )
 
 
 def test_ci_sono_sorgenti_da_controllare():
-    """Il guardiano del guardiano: se l'elenco si svuota, il test resta verde a vuoto.
+    """La soglia complessiva, che resta utile accanto al controllo per voce.
 
-    Senza questo caso un errore nei percorsi — una cartella rinominata, un suffisso
-    cambiato — trasformerebbe la verifica in un ciclo su zero file, cioe' in un
-    `assert True` travestito. E' la classe di difetto che questo repository ha gia'
-    pagato piu' volte: un test verde che non misura niente.
+    Il controllo per voce non vedrebbe un `ESTENSIONI` svuotato a meta': ogni voce
+    continuerebbe a produrre qualche file e la copertura calerebbe comunque. Questo
+    misura l'ordine di grandezza.
     """
     trovati = _sorgenti()
     assert len(trovati) >= 15, (
@@ -82,11 +119,17 @@ def test_nessun_BOM_letterale_nel_sorgente(percorso):
     testo = percorso.read_text(encoding='utf-8')
     if BOM not in testo:
         return
-    righe = [(n, r) for n, r in enumerate(testo.splitlines(), 1) if BOM in r]
+    # Un record per OCCORRENZA e non per riga: `r.index(BOM)` restituisce solo la
+    # PRIMA colonna, quindi due U+FEFF sulla stessa riga venivano contati come uno e
+    # la seconda posizione non veniva detta. In un messaggio che serve a TROVARE un
+    # carattere invisibile, la posizione e' tutto il contenuto utile.
+    # Segnalato da CodeRabbit sulla PR #21.
+    occorrenze = [(n, r, c) for n, r in enumerate(testo.splitlines(), 1)
+                  for c, carattere in enumerate(r, 1) if carattere == BOM]
     dettaglio = '\n'.join(
-        f'    riga {n}, colonna {r.index(BOM) + 1}: {r.strip()[:70]!r}' for n, r in righe)
+        f'    riga {n}, colonna {c}: {r.strip()[:70]!r}' for n, r, c in occorrenze)
     raise AssertionError(
-        f'{percorso.relative_to(RADICE)} contiene {len(righe)} U+FEFF letterali.\n'
+        f'{percorso.relative_to(RADICE)} contiene {len(occorrenze)} U+FEFF letterali.\n'
         'Un U+FEFF e- invisibile in un editor: si scrive con l-escape.\n'
         "    sbagliato:  '<carattere invisibile>'.encode('utf-8')\n"
         "    giusto   :  '\\ufeff'.encode('utf-8')\n"

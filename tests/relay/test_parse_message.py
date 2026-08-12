@@ -98,12 +98,12 @@ def _ambiente_pulito(monkeypatch):
 
 # I quattro casi misurati rossi prima della patch, piu' le varianti di spazio
 # vuoto che il contratto tratta come «mancante».
-@pytest.mark.parametrize('coda', ('', '   ', '\t', ' \t ', ' '), ids=(
+@pytest.mark.parametrize('coda', ('', '   ', '\t', ' \t ', '\xa0'), ids=(
     'nudo', 'spazi', 'tab', 'spazi_e_tab', 'spazio_insecabile'))
 def test_un_marcatore_senza_evento_da_None_e_non_solleva(coda):
     """Il caso registrato: nessun evento dopo il marcatore.
 
-    ` ` (spazio insecabile) e' nell'elenco perche' arriva davvero dai messaggi
+    `\xa0` (spazio insecabile) e' nell'elenco perche' arriva davvero dai messaggi
     Telegram copiati e incollati, e `str.strip()` lo rimuove: se un domani la
     normalizzazione cambiasse, questo caso tornerebbe a essere un evento fatto di
     un carattere invisibile — cioe- una riga CSV con un nome squadra vuoto.
@@ -278,7 +278,7 @@ def test_il_servizio_NON_ha_raggiunto_telegram(servizio, tmp_path):
     righe = _attendi_righe_del_log(tmp_path / 'uvicorn.log', 'registrazione webhook')
     assert any('URLError' in r for r in righe), (
         'atteso URLError (connessione rifiutata dal proxy morto). '
-        f'Righe trovate:\n' + '\n'.join(f'  {r}' for r in righe))
+        'Righe trovate:\n' + '\n'.join(f'  {r}' for r in righe))
     assert not any('HTTPError' in r for r in righe), (
         'HTTPError significa che TELEGRAM HA RISPOSTO: la richiesta e- uscita dalla '
         'macchina e il proxy non ha protetto niente.\n' + '\n'.join(f'  {r}' for r in righe))
