@@ -1170,3 +1170,38 @@ def test_senza_ADMIN_PASSWORD_HASH_il_freno_non_si_CONSUMA(monkeypatch):
     assert main._TENTATIVI_PASSWORD['falliti'] == 0, (
         f"il contatore e- {main._TENTATIVI_PASSWORD['falliti']} invece di 0: una porta "
         'chiusa non deve poter consumare il freno della porta')
+
+
+def test_un_campo_STRUTTURATO_usa_il_JSON_compatto(monkeypatch):
+    """`json.dumps` di default mette uno spazio: `{"a": 1}`, non `{"a":1}`.
+
+    Terzo bloccante di Claude Fable 5 sulla PR #23, ed e' l'unico dei suoi finding che
+    riguarda un caso **ipotetico**: oggi il Login Widget manda solo scalari, e per uno
+    scalare le due forme sono identiche — misurato, `json.dumps(5)` e la versione compatta
+    danno entrambe `'5'`. La divergenza esiste solo per oggetti e liste.
+
+    Lo correggo comunque perche' la correzione e' **a zero cambiamento di comportamento**
+    per i campi che esistono davvero: un argomento in piu', nessun rischio, e toglie una
+    scelta arbitraria — la spaziatura di default di Python — in favore della forma
+    canonica che un firmatario usa. Se un giorno Telegram aggiungesse un campo strutturato,
+    il difetto sarebbe una firma valida rifiutata **in silenzio**, cioe' la stessa forma
+    del bloccante sui numeri che ha rotto ogni login: latente finche' nessun client vero
+    esiste, e poi totale. Ne ho pagato uno in questo PR; il secondo non lo aspetto.
+
+    L'assunzione resta scritta, come chiedeva il finding: i campi del widget sono
+    **piatti**. Questo test vincola la serializzazione nel caso in cui smettano di esserlo.
+    """
+    import json as _json
+
+    grezzi = {'id': 77, 'auth_date': int(time.time()), 'extra': {'a': 1}, 'lista': [1, 2]}
+    # Come firmerebbe chi serializza in JSON compatto, che e- la forma canonica.
+    atteso = {k: (v if isinstance(v, str) else _json.dumps(v, separators=(',', ':')))
+              for k, v in grezzi.items()}
+    grezzi['hash'] = _firma_telegram(atteso)
+
+    assert main.verifica_login_telegram(main.campi_firmati(grezzi), BOT_FINTO) is True, (
+        'un campo strutturato viene serializzato con gli spazi di default di Python, che '
+        'divergono dal JSON compatto: una firma VALIDA verrebbe rifiutata in silenzio')
+
+    # E per gli scalari nulla cambia: e- il motivo per cui questa correzione e- gratis.
+    assert main.campi_firmati({'a': 5, 'b': 1.5, 'c': True}) == {'a': '5', 'b': '1.5', 'c': 'true'}

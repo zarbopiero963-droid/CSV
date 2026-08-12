@@ -50,6 +50,11 @@ def campi_firmati(dati):
     stringa e farebbe fallire ogni login vero — un difetto che si vedrebbe solo in
     produzione, perche' un test che costruisce i campi a mano li manderebbe tutti.
 
+    **Assunzione dichiarata:** i campi del Login Widget sono **piatti** — stringhe e
+    numeri, nessun oggetto e nessuna lista. La serializzazione dei valori strutturati usa
+    il JSON compatto per il caso in cui quell'assunzione cadesse, e un test la vincola,
+    ma nessun campo di Telegram e' strutturato oggi.
+
     Fonte unica di proposito (regola 3): la usano l'endpoint e i test, e due conversioni
     corrette oggi sono due conversioni divergenti domani.
     """
@@ -64,7 +69,14 @@ def campi_firmati(dati):
             # `True` diventerebbe `1`.
             testo = 'true' if valore else 'false'
         else:
-            testo = json.dumps(valore)
+            # `separators` compatti: il default di Python mette uno spazio dopo `:` e `,`,
+            # quindi un campo strutturato diventerebbe `{"a": 1}` invece di `{"a":1}` e
+            # divergerebbe dalla forma canonica che un firmatario usa — una firma VALIDA
+            # rifiutata in silenzio. Per gli scalari, che sono tutto cio' che il widget
+            # manda oggi, le due forme sono identiche (misurato), quindi la correzione non
+            # cambia nessun comportamento reale: chiude solo il caso futuro.
+            # Segnalato da Claude Fable 5 sulla PR #23.
+            testo = json.dumps(valore, separators=(',', ':'))
         if testo != '':
             fuori[chiave] = testo
     return fuori
