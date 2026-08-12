@@ -1594,13 +1594,19 @@ def test_il_gate_dichiara_il_modello_e_l_etichetta_separati():
         'il prezzo dei token dalla cache non e- dichiarato'
 
 
-def _call_model_del_gate(risposta=None, errore=None):
+def _call_model_del_gate(monkeypatch, risposta=None, errore=None):
     """Esegue `call_model` del gate con una finta `urlopen`.
 
     Chiesto da GPT-5.5 nei «test minimi» della PR #20, e la richiesta era giusta: i
     test statici dicono che il payload ha la forma giusta, non che il codice sappia
     leggere una risposta o reagire a un errore. `risposta` e' il corpo JSON che la
     finta restituisce; `errore` un'eccezione da sollevare al suo posto.
+
+    La sostituzione passa da `monkeypatch` e non da un `try/finally` scritto a mano.
+    La prima versione lo faceva, in tre punti diversi, e GPT-5.5 ha segnalato la
+    fragilita': un ripristino manuale non avviene se l'asserzione solleva prima di
+    arrivarci, e tre copie della stessa riga di ripristino sono tre occasioni di
+    scriverla male. `monkeypatch` ripristina da se', anche sul fallimento.
     """
     import io
     import json as _json
@@ -1639,12 +1645,12 @@ def _call_model_del_gate(risposta=None, errore=None):
         'urllib': urllib,
         'io': io,
     }
-    spazio['urllib'].request.urlopen = finta_urlopen  # type: ignore[assignment]
+    monkeypatch.setattr(urllib.request, 'urlopen', finta_urlopen)
     exec(_blocco(SOL, 'call_model'), spazio)  # noqa: S102 - sorgente del repo
     return spazio['call_model'], chiamate
 
 
-def test_il_gate_legge_una_risposta_minimale_di_v1_responses():
+def test_il_gate_legge_una_risposta_minimale_di_v1_responses(monkeypatch):
     """`output_text` e `usage` estratti da una risposta della forma nuova.
 
     E la richiesta spedita viene ISPEZIONATA: e' l'unico modo di sapere che il
@@ -1652,16 +1658,12 @@ def test_il_gate_legge_una_risposta_minimale_di_v1_responses():
     non prova che quel dizionario finisca nel corpo del POST.
     """
     import json as _json
-    vero_urlopen = __import__('urllib.request', fromlist=['request']).urlopen
-    try:
-        call_model, chiamate = _call_model_del_gate(risposta={
-            'output_text': 'nessun bloccante',
-            'status': 'completed',
-            'usage': {'input_tokens': 1_000, 'output_tokens': 10},
-        })
-        testo, usage = call_model('sistema', 'utente')
-    finally:
-        __import__('urllib.request', fromlist=['request']).urlopen = vero_urlopen
+    call_model, chiamate = _call_model_del_gate(monkeypatch, risposta={
+        'output_text': 'nessun bloccante',
+        'status': 'completed',
+        'usage': {'input_tokens': 1_000, 'output_tokens': 10},
+    })
+    testo, usage = call_model('sistema', 'utente')
 
     assert testo == 'nessun bloccante', f'testo non estratto: {testo!r}'
     assert usage == {'input_tokens': 1_000, 'output_tokens': 10}
@@ -1674,24 +1676,20 @@ def test_il_gate_legge_una_risposta_minimale_di_v1_responses():
     assert 'temperature' not in corpo
 
 
-def test_una_risposta_TRONCATA_non_passa_per_completa():
+def test_una_risposta_TRONCATA_non_passa_per_completa(monkeypatch):
     """`status=incomplete` deve mettere il banner che marca la review non completa.
 
     Il banner in testa e' cio' che il chiamante controlla con `startswith` per non
     pubblicare il `done_marker`: senza, una review interrotta a meta' verrebbe
     deduplicata come completata e non rifatta mai piu'.
     """
-    vero_urlopen = __import__('urllib.request', fromlist=['request']).urlopen
-    try:
-        call_model, _ = _call_model_del_gate(risposta={
-            'output_text': 'meta- review',
-            'status': 'incomplete',
-            'incomplete_details': {'reason': 'max_output_tokens'},
-            'usage': {},
-        })
-        testo, _ = call_model('sistema', 'utente')
-    finally:
-        __import__('urllib.request', fromlist=['request']).urlopen = vero_urlopen
+    call_model, _ = _call_model_del_gate(monkeypatch, risposta={
+        'output_text': 'meta- review',
+        'status': 'incomplete',
+        'incomplete_details': {'reason': 'max_output_tokens'},
+        'usage': {},
+    })
+    testo, _ = call_model('sistema', 'utente')
 
     assert testo.startswith('Output troncato'), (
         f'una review troncata non porta il banner, quindi passerebbe per completa:\n{testo!r}'
@@ -1699,7 +1697,7 @@ def test_una_risposta_TRONCATA_non_passa_per_completa():
     assert 'meta- review' in testo, 'il testo parziale e- stato buttato via'
 
 
-def test_un_400_del_fornitore_fa_FALLIRE_e_non_restituisce_una_review():
+def test_un_400_del_fornitore_fa_FALLIRE_e_non_restituisce_una_review(monkeypatch):
     """Chiesto da GPT-5.5: fail-closed sull'errore del fornitore.
 
     Un 400 non e' un caso da ritentare — la richiesta e' malformata, e ritentarla
@@ -1711,16 +1709,13 @@ def test_un_400_del_fornitore_fa_FALLIRE_e_non_restituisce_una_review():
     E' il difetto che questa PR ha sfiorato per davvero: col payload sbagliato ogni
     armamento avrebbe preso un 400.
     """
+    import io
     import urllib.error
-    vero_urlopen = __import__('urllib.request', fromlist=['request']).urlopen
-    try:
-        call_model, chiamate = _call_model_del_gate(errore=urllib.error.HTTPError(
-            'https://api.openai.com/v1/responses', 400, 'Bad Request', {},
-            __import__('io').BytesIO(b'{"error": {"message": "Unknown parameter: messages."}}')))
-        with pytest.raises(RuntimeError) as esito:
-            call_model('sistema', 'utente')
-    finally:
-        __import__('urllib.request', fromlist=['request']).urlopen = vero_urlopen
+    call_model, chiamate = _call_model_del_gate(monkeypatch, errore=urllib.error.HTTPError(
+        'https://api.openai.com/v1/responses', 400, 'Bad Request', {},
+        io.BytesIO(b'{"error": {"message": "Unknown parameter: messages."}}')))
+    with pytest.raises(RuntimeError) as esito:
+        call_model('sistema', 'utente')
 
     assert 'HTTP 400' in str(esito.value), f'il motivo non arriva al chiamante: {esito.value}'
     assert len(chiamate) == 1, (
