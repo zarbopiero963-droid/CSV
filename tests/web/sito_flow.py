@@ -126,6 +126,17 @@ with sync_playwright() as pw:
             " || getComputedStyle(e).overflowX === 'scroll'")
         print(f'  {nome}: riquadro CSV {interno} in {esterno}, scorre={scorre}')
         assert scorre, f'{nome}: il riquadro del CSV non scorre: allargherebbe la pagina'
+        # `overflow-x: auto` da solo non prova niente: e' vero anche su un
+        # contenuto che sta tutto dentro, o che va a capo. A 390 px la riga del CSV
+        # DEVE sporgere davvero, o questo controllo non sta guardando lo
+        # scorrimento — sta guardando una regola CSS. Segnalato da CodeRabbit.
+        # Solo a 390: a schermo largo il contenitore potrebbe legittimamente
+        # bastare, e pretendere l'eccedenza li' sarebbe un test che chiede alla
+        # pagina di stare scomoda.
+        if larghezza == 390:
+            assert interno > esterno, (
+                f'{nome}: il CSV entra tutto ({interno} in {esterno}): il controllo '
+                'sullo scorrimento non sta misurando nulla')
 
         # Il pulsante principale: cliccato, non letto.
         pagina.click('.azioni a.bottone')
@@ -136,10 +147,27 @@ with sync_playwright() as pw:
         pagina.screenshot(path=str(OUT / f'{nome}-3-applicazione.png'))
         print(f'  {nome}: il pulsante porta a {pagina.url}')
 
-        # E si torna indietro dal marchio, come su qualunque sito.
+        # E il marchio riporta all'apex, come su qualunque sito.
+        #
+        # La prima versione di questo blocco era VACUA, ed e' il difetto peggiore
+        # dei tre trovati da CodeRabbit: caricava `BASE`, cliccava `.marchio` e
+        # aspettava `h1` — che era gia' li'. Misurato: cambiando l'href del marchio
+        # in `#dovenonva`, il test passava comunque (`1 passed`). Un test che non
+        # puo' fallire non e' un test.
+        #
+        # Adesso il click e' OSSERVABILE: si parte da un URL diverso — l'ancora
+        # `#come`, raggiunta cliccando il secondo pulsante, che e' anch'essa
+        # navigazione da verificare — e si pretende di tornare all'apex nudo.
         pagina.goto(BASE, wait_until='load')
+        pagina.click('.azioni a.bottone.calmo')
+        assert pagina.url.endswith('#come'), \
+            f'{nome}: «Come funziona» non porta all\'ancora, sono su {pagina.url}'
         pagina.click('.marchio')
+        pagina.wait_for_url(BASE)
+        assert pagina.url == BASE, \
+            f'{nome}: il marchio non riporta all\'apex, sono su {pagina.url}'
         pagina.wait_for_selector('h1')
+        print(f'  {nome}: #come -> marchio -> {pagina.url}')
         pagina.close()
 
 print('screenshot in', OUT)

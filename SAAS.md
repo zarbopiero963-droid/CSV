@@ -10,7 +10,7 @@ con dati finti.
 L'entità centrale è il **parser**, non il profilo. È il parser che possiede
 configurazione, token, feed CSV, timer dei 90 secondi e log.
 
-```
+```text
 utente (login Telegram)
  └── parser  (slug, token proprio, config propria, feed proprio, timer proprio)
       └── N chat Telegram   ←→   una chat può alimentare N parser dello stesso utente
@@ -18,7 +18,7 @@ utente (login Telegram)
 
 Il "profilo" si riduce allo slug dell'utente nell'URL del feed:
 
-```
+```text
 /profiles/PIERO/over-15-premacht.csv?token=...
 /profiles/PIERO/over-25-live.csv?token=...
 /profiles/MARCO/handicap-asiatico.csv?token=...
@@ -26,7 +26,7 @@ Il "profilo" si riduce allo slug dell'utente nell'URL del feed:
 
 ## Modello dati
 
-```
+```text
 users
   id, telegram_id (unique), username, first_name, slug (unique), status, created_at
 
@@ -224,7 +224,7 @@ mesi. **Un controllo che nessuno legge non è un controllo.**
 
 Implementato con dati finti in `web/api.js`, un commento per endpoint.
 
-```
+```text
 POST   /api/auth/telegram/widget      verifica HMAC del Login Widget → sessione
 POST   /api/auth/telegram/code        login con codice usa-e-getta dal bot
 GET    /api/me
@@ -552,7 +552,7 @@ costruito: quando lo sarà, quella pastiglia va cambiata, non lasciata lì.
 
 ## Prototipo
 
-```
+```sh
 uvicorn main:app --reload
 ```
 
