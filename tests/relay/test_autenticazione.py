@@ -303,7 +303,12 @@ def _rotte_protette():
 
 
 def _chiama(base, metodo, path, endpoint, token=None):
-    """Esegue la richiesta e restituisce il codice di stato, senza sollevare."""
+    """Esegue la richiesta e restituisce `(stato, corpo, intestazioni)`, senza sollevare.
+
+    Le intestazioni servono perche' un cookie di sessione sta in `Set-Cookie` e non nel
+    corpo: senza, l'asserzione che verifica «una risposta di rifiuto non emette cookie»
+    cercava nel posto sbagliato e passava sempre.
+    """
     # I parametri di percorso non esistono: `auth()` viene prima della ricerca nel
     # database, quindi un nome inventato deve dare 401 e non 404 — e il fatto che
     # dia 401 dimostra proprio quell'ordine, cioe- che il servizio non rivela
@@ -327,9 +332,9 @@ def _chiama(base, metodo, path, endpoint, token=None):
     req = urllib.request.Request(url, data=dati, headers=intestazioni, method=metodo)
     try:
         with urllib.request.urlopen(req, timeout=10) as r:  # noqa: S310 - loopback
-            return r.status, r.read()
+            return r.status, r.read(), dict(r.headers)
     except urllib.error.HTTPError as e:
-        return e.code, e.read()
+        return e.code, e.read(), dict(e.headers)
 
 
 def _e_errore_di_validazione(corpo: bytes) -> bool:
@@ -372,7 +377,7 @@ def test_ogni_rotta_protetta_rifiuta_una_richiesta_senza_token(servizio_con_toke
     )
     aperte = []
     for metodo, path, endpoint in rotte:
-        stato, _ = _chiama(servizio_con_token, metodo, path, endpoint)
+        stato, _, _ = _chiama(servizio_con_token, metodo, path, endpoint)
         if stato != 401:
             aperte.append(f'{metodo} {path} -> {stato}')
     assert not aperte, (
@@ -391,7 +396,8 @@ def test_le_rotte_protette_accettano_il_token_giusto(servizio_con_token):
     """
     negati, invalidi = [], []
     for metodo, path, endpoint in _rotte_protette():
-        stato, corpo = _chiama(servizio_con_token, metodo, path, endpoint, token=TOKEN_DI_PROVA)
+        stato, corpo, _ = _chiama(servizio_con_token, metodo, path, endpoint,
+                                  token=TOKEN_DI_PROVA)
         if stato in (401, 503):
             negati.append(f'{metodo} {path} -> {stato}')
         elif stato == 422 and _e_errore_di_validazione(corpo):
@@ -487,7 +493,8 @@ def test_senza_token_configurato_anche_le_api_di_scrittura_sono_chiuse(servizio_
     `POST /api/test-message` aperto inietta un segnale nel CSV che XTrader legge.
     """
     for metodo, path, endpoint in _rotte_protette():
-        stato, _ = _chiama(servizio_senza_token, metodo, path, endpoint, token='qualunque-cosa')
+        stato, _, _ = _chiama(servizio_senza_token, metodo, path, endpoint,
+                              token='qualunque-cosa')
         assert stato == 503, f'{metodo} {path} risponde {stato} invece di 503'
 
 
@@ -557,12 +564,19 @@ def test_le_rotte_di_login_rifiutano_chi_non_ha_la_PROPRIA_credenziale(
     """
     atteso = ROTTE_CON_AUTENTICAZIONE_PROPRIA[(metodo, path)]
     endpoint = next(e for m, p, e in _tutte_le_rotte() if (m, p) == (metodo, path))
-    stato, corpo = _chiama(servizio_con_token, metodo, path, endpoint, token=TOKEN_DI_PROVA)
+    stato, corpo, intestazioni = _chiama(servizio_con_token, metodo, path, endpoint,
+                                        token=TOKEN_DI_PROVA)
     assert stato == atteso, (
         f'{metodo} {path} risponde {stato} invece di {atteso}. Se e- 200, questa rotta '
         f'apre una sessione a chi non ha nessuna credenziale; il corpo era: {corpo[:200]!r}')
-    assert b'betrelay_sessione' not in corpo, (
-        f'{metodo} {path} ha messo un cookie di sessione in una risposta di rifiuto')
+    # Sull'header `Set-Cookie`, non sul corpo: il cookie vive la-, quindi cercarlo nel
+    # corpo passava anche se la rotta lo avesse impostato davvero. Era la mia asserzione
+    # che non asseriva niente, segnalata da CodeRabbit sulla PR #23 — e una guardia
+    # vacua e- peggio di nessuna guardia, perche- si legge come copertura.
+    assert main.NOME_COOKIE not in (intestazioni.get('set-cookie')
+                                    or intestazioni.get('Set-Cookie') or ''), (
+        f'{metodo} {path} ha messo un cookie di sessione in una risposta di rifiuto: '
+        f'intestazioni {intestazioni}')
 
 
 def test_le_tre_categorie_di_rotte_coprono_TUTTE_le_rotte():

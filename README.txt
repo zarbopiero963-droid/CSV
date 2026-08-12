@@ -70,10 +70,18 @@ indirizzo. Il prezzo — un estraneo puo' tenere occupato questo percorso per qu
 minuto — e' accettabile perche' il login Telegram resta disponibile.
 Ogni accesso riuscito finisce in admin_audit.
 
+ENTRAMBE le rotte di login rispondono 503 "sessioni non configurate" se manca
+TELEGRAM_BOT_TOKEN: il segreto che firma i cookie deriva da quel token, quindi senza
+non c'e' nessuna sessione da emettere. Prima uscivano 200 con un cookie VUOTO — il
+login sembrava riuscito e ogni richiesta successiva rispondeva 401, senza niente da
+nessuna parte che dicesse perche'. E' il caso di chi configura ADMIN_PASSWORD_HASH ma
+non il bot, cioe' l'emergenza per cui quel percorso esiste.
+
 GET /api/me
 Chi e' l'utente della sessione: {"utente","nome","stato","admin","accesso_scade"}.
 401 se il cookie manca, non e' firmato, e' scaduto, o se session_version e' cambiata.
 Non restituisce mai un token, ne' l'hash della password, ne' il telegram_id.
+Rinnova il cookie: e' la rotta che rende i 20 minuti "di inattivita'" (vedi sotto).
 
 POST /api/logout
 Cancella il cookie. Riesce sempre, anche senza sessione: chiudere una sessione che
@@ -82,7 +90,9 @@ butterebbe fuori tutti i dispositivi.
 
 IL COOKIE E IL FEED NON SI TOCCANO
 Il cookie di sessione (betrelay_sessione) e' HttpOnly, Secure, SameSite=Lax, e scade
-dopo 20 MINUTI DI INATTIVITA' — viene riemesso a ogni richiesta valida.
+dopo 20 MINUTI DI INATTIVITA': ogni rotta che valida la sessione lo riemette con
+un'emissione nuova (oggi GET /api/me). Senza quel rinnovo la scadenza sarebbe assoluta
+dal login, e chi sta lavorando verrebbe buttato fuori ogni 20 minuti.
 Quei 20 minuti riguardano SOLO il sito. Il feed CSV non ha sessione: XTrader lo
 interroga con un token nell'URL, non fa login e non "resta attivo". Collegare le due
 cose farebbe perdere i segnali a ogni cliente 20 minuti dopo aver chiuso il browser,

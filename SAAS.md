@@ -461,6 +461,7 @@ passare inosservata.
 |---|---|---|
 | `POST /api/login/telegram` | firma del Login Widget → sessione | `401 login non valido` |
 | `POST /api/login/password` | `administrator` + password → sessione | `401`, `429` se frenato, `503` se la variabile manca |
+| *entrambe* | | `503` anche se manca `TELEGRAM_BOT_TOKEN`: il segreto dei cookie deriva da lì, quindi non c'è nessuna sessione da emettere |
 | `POST /api/logout` | cancella il cookie | niente: è pubblica di proposito |
 | `GET /api/me` | chi è l'utente della sessione | `401 sessione assente o scaduta` |
 
@@ -530,8 +531,18 @@ Tre controlli, e ognuno serve per un motivo diverso:
 
 - la **firma**, contro un cookie riscritto;
 - la **scadenza per inattività**, 20 minuti dal momento in `emessa`. È «di inattività» e
-  non «di sessione» perché il cookie viene riemesso a ogni risposta che apre una
-  sessione;
+  non «di sessione» perché **ogni rotta che valida la sessione riemette il cookie** con
+  un `emessa` nuovo — oggi `GET /api/me`, e ogni rotta autenticata futura deve fare lo
+  stesso. Il rinnovo va **dopo** la validazione: prima, un cookie scaduto tornerebbe buono
+  al primo tentativo e la scadenza si annullerebbe da sé. Ed è **per-rotta e non un
+  middleware**, di proposito: un middleware girerebbe anche su `/xtrader.csv`, cioè
+  metterebbe codice di sessione sul percorso del feed — esattamente la NON-relazione
+  descritta sotto. *Fino al 12/08/2026 il rinnovo non esisteva e questa riga diceva
+  comunque «di inattività»: la scadenza era assoluta dal login, quindi il proprietario si
+  sarebbe trovato buttato fuori ogni venti minuti mentre lavorava. Segnalato
+  indipendentemente da GPT-5.5, Claude Fable 5 e CodeRabbit sulla PR #23 — tre reviewer
+  sullo stesso punto, perché la promessa era scritta qui e in `README.txt` e il codice non
+  la manteneva;*
 - **`session_version` confrontata con quella nel database**, che è il modo di invalidare
   una sessione **subito** senza aspettare i venti minuti: serve per «entra come cliente»
   e per buttare fuori un accesso sospetto. Senza quel confronto un cookie rubato

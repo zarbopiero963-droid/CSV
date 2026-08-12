@@ -630,3 +630,259 @@ def test_incrementare_session_version_INVALIDA_i_cookie_gia_emessi(servizio, tmp
     # E un login nuovo funziona: l'incremento chiude le sessioni vecchie, non l'utente.
     _, _, nuove = _chiama(servizio, 'POST', '/api/login/telegram', corpo=_dati_login())
     assert _chiama(servizio, 'GET', '/api/me', cookie=_cookie_dalla_risposta(nuove))[0] == 200
+
+
+def test_una_richiesta_valida_RINNOVA_la_scadenza(servizio):
+    """Venti minuti di **inattivita'**, non di sessione. Erano di sessione.
+
+    Segnalato indipendentemente da GPT-5.5 e da Claude Fable 5 sulla PR #23, e hanno
+    ragione entrambi: `_rispondi_con_sessione` era usata solo dalle due rotte di login,
+    quindi il cookie non veniva mai riemesso e i venti minuti partivano dal login e non
+    dall'ultima richiesta. Il proprietario si sarebbe trovato buttato fuori ogni venti
+    minuti **mentre stava lavorando**.
+
+    Il difetto stava in `main.py`, ma la sua prova stava nel mio docstring di
+    `firma_sessione` — «il cookie va riemesso a ogni richiesta valida: e' cosi' che venti
+    minuti diventano di inattivita'» — e in `SAAS.md`. Una promessa scritta e non
+    mantenuta e' peggio di una funzione mancante: chi legge la doc smette di cercare.
+
+    Il rinnovo e' per-rotta e NON un middleware, di proposito: un middleware girerebbe
+    anche su `/xtrader.csv`, cioe' metterebbe codice di sessione sul percorso del feed —
+    esattamente la NON-relazione che questo PR esiste per garantire.
+    """
+    _, corpo, intestazioni = _chiama(servizio, 'POST', '/api/login/telegram',
+                                     corpo=_dati_login())
+    utente = json.loads(corpo)['utente']
+
+    # Un cookie di un quarto d'ora fa: valido, ma con l'orologio a meta' strada.
+    emessa_vecchia = int(time.time()) - 15 * 60
+    vecchio = main.firma_sessione(utente=utente, versione=1, emessa=emessa_vecchia)
+
+    stato, corpo, intestazioni = _chiama(servizio, 'GET', '/api/me', cookie=vecchio)
+    assert stato == 200, (stato, corpo)
+
+    rinnovato = _cookie_dalla_risposta(intestazioni)
+    assert rinnovato, (
+        'una richiesta valida non ha riemesso il cookie: i venti minuti partono dal '
+        'login e non dall-ultima richiesta, quindi sono di SESSIONE e non di '
+        f'INATTIVITA-, contro quanto dicono il docstring e SAAS.md. Intestazioni: {intestazioni}')
+
+    emessa_nuova = int(rinnovato.split('.')[2])
+    assert emessa_nuova > emessa_vecchia, (
+        f'il cookie e- stato riemesso con la stessa emissione ({emessa_nuova} contro '
+        f'{emessa_vecchia}): il rinnovo non sposta la scadenza e non serve a niente')
+    # E l'identita- non cambia col rinnovo: sarebbe un modo di cambiare utente.
+    assert main.leggi_sessione(rinnovato) == {'utente': utente, 'versione': 1}
+
+
+def test_un_cookie_GIA_scaduto_non_viene_resuscitato_dal_rinnovo(servizio):
+    """Il rinnovo vale per chi e' ancora dentro, non per chi e' gia' fuori.
+
+    E' il rischio che il rinnovo introduce: se il cookie venisse riemesso **prima** di
+    controllarne la validita', la scadenza per inattivita' non esisterebbe piu' — ogni
+    cookie, per vecchio che sia, tornerebbe buono al primo tentativo. Un meccanismo di
+    scadenza che si annulla da se' al primo uso.
+    """
+    _, corpo, _ = _chiama(servizio, 'POST', '/api/login/telegram', corpo=_dati_login())
+    utente = json.loads(corpo)['utente']
+
+    scaduto = main.firma_sessione(utente=utente, versione=1,
+                                  emessa=time.time() - main.INATTIVITA_MASSIMA - 60)
+    stato, corpo, intestazioni = _chiama(servizio, 'GET', '/api/me', cookie=scaduto)
+    assert stato == 401, (stato, corpo)
+    assert _cookie_dalla_risposta(intestazioni) is None, (
+        'un cookie scaduto ha ricevuto un cookie nuovo: la scadenza per inattivita- non '
+        'esiste piu-, perche- basta usarla per annullarla')
+
+
+def test_una_riga_CREATA_FRA_il_SELECT_e_l_INSERT_non_diventa_un_500(tmp_path, monkeypatch):
+    """`SELECT` poi `INSERT` su una colonna UNIQUE: fra i due c'e' spazio per un altro.
+
+    Segnalato da Claude Fable 5 sulla PR #23, e la finestra e' reale: `users.telegram_id`
+    e' **UNIQUE** — misurato in `SCHEMA_MULTIUTENTE` — quindi due login simultanei di un
+    utente **nuovo** non producono una riga doppia, producono un `IntegrityError`, cioe'
+    un **500** a chi perde la corsa. Al primo accesso di un cliente, che e' l'unico
+    momento in cui puo' accadere. Il caso non e' esotico: il Login Widget in una pagina
+    ricaricata, o due schede aperte, danno due POST ravvicinate.
+
+    **Come e' misurata, perche' la strada ovvia non funziona.** Prima ho provato con
+    richieste HTTP davvero concorrenti (6 e 12 thread contro il servizio in
+    sottoprocesso, allineati da una barriera): **30 richieste, tutte 200, zero
+    collisioni**. La finestra c'e' ma non si apre da fuori — l'event loop di uvicorn
+    distanzia gli handler piu' di quanto duri il lavoro su SQLite, che e' sotto il
+    millisecondo. Un test a thread sarebbe rimasto verde prima e dopo la correzione,
+    cioe' decorativo: e' esattamente cio' che `CLAUDE.md` vieta.
+
+    Quindi la corsa la riproduco nel punto in cui esiste: una connessione avvolta che,
+    **subito dopo** il `SELECT` su `telegram_id`, inserisce la riga concorrente. Il
+    `fetchone()` restituisce `None` — al momento dell'`execute` la riga non c'era — e il
+    codice entra nel ramo che inserisce trovandosi la chiave gia' occupata. E' la
+    finestra, non una sua imitazione.
+    """
+    import sqlite3
+
+    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'corsa.db'))
+    monkeypatch.setattr(main, 'BOT_TOKEN', BOT_FINTO)
+    monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', '')  # un CLIENTE, non il proprietario
+
+    vera = main.db
+    intruso = {'fatto': False}
+
+    class Avvolta:
+        """Una connessione normale, tranne che apre la finestra una volta sola."""
+
+        def __init__(self, c):
+            self._c = c
+
+        def execute(self, sql, *resto):
+            esito = self._c.execute(sql, *resto)
+            if not intruso['fatto'] and 'FROM users WHERE telegram_id' in sql:
+                intruso['fatto'] = True
+                altra = vera()
+                altra.execute('INSERT INTO users(telegram_id, status)'
+                              " VALUES (?, 'registrato')", ('555000222',))
+                altra.commit()
+                altra.close()
+            return esito
+
+        def __getattr__(self, nome):
+            return getattr(self._c, nome)
+
+    monkeypatch.setattr(main, 'db', lambda: Avvolta(vera()))
+
+    dati = _dati_login(id='555000222', first_name='Cliente')
+    try:
+        risposta = main.login_telegram(main.LoginTelegramIn(**dati))
+    except sqlite3.IntegrityError as e:
+        raise AssertionError(
+            f'login concorrente -> IntegrityError ({e}), che via HTTP e- un 500: il '
+            'SELECT-poi-INSERT su telegram_id UNIQUE non regge la corsa. Serve un '
+            'inserimento idempotente piu- una rilettura'
+        ) from None
+
+    assert risposta.status_code == 200, risposta.status_code
+
+    # E la riga resta UNA: il perdente si attacca a quella del vincitore, non ne crea
+    # un'altra ne- sovrascrive la sua.
+    c = sqlite3.connect(tmp_path / 'corsa.db')
+    righe = c.execute('SELECT COUNT(*) FROM users WHERE telegram_id=?',
+                      ('555000222',)).fetchone()[0]
+    c.close()
+    assert righe == 1, f'{righe} righe per lo stesso telegram_id invece di una'
+    assert intruso['fatto'], 'la finestra non e- stata aperta: il test non misura niente'
+
+
+# --------------------------------------------- `compare_digest` e le stringhe non ASCII
+#
+# Tre siti, tutti su input che arriva da fuori. Segnalati da Claude Fable 5 (uno) e da
+# CodeRabbit (tutti tre) sulla PR #23.
+#
+# La cosa che rende questa classe grave non e' il difetto, e' che era GIA' SCRITTA in
+# questo file. Il docstring di `auth()`, da luglio, dice: «passando le STRINGHE,
+# compare_digest solleverebbe TypeError su una non ASCII, e un token con un accento
+# diventerebbe un 500 invece di un 401 — un modo per far scrivere una traccia nei log con
+# un solo parametro di query». Poi ho scritto tre confronti nuovi, tutti su stringhe, due
+# dei quali su valori che li scrive l'attaccante. La lezione era imparata e documentata, e
+# non ha impedito niente: e' esattamente il caso della regola 2 — trovato il sito, non
+# cercata la classe.
+
+@pytest.mark.parametrize('valore', ['ö' * 64, 'firma-con-è', '🆚' * 8])
+def test_un_hash_NON_ASCII_dal_widget_rifiuta_invece_di_SOLLEVARE(valore):
+    """L'`hash` lo scrive chi chiama, e `verifica_login_telegram` promette di non sollevare.
+
+    Il valore finisce in `hmac.compare_digest` come stringa: con un carattere non ASCII
+    quella funzione **solleva** `TypeError`, quindi la rotta di login risponde 500 invece
+    di 401. Chi chiama decide di far scrivere un traceback nei log con un campo di JSON.
+    """
+    dati = _dati_login()
+    dati['hash'] = valore
+    assert main.verifica_login_telegram(dati, BOT_FINTO) is False
+
+
+@pytest.mark.parametrize('firma', ['ö' * 64, 'x' * 63 + 'é'])
+def test_una_firma_di_cookie_NON_ASCII_rifiuta_invece_di_SOLLEVARE(firma, monkeypatch):
+    """Il caso peggiore dei tre: il cookie lo scrive il browser, cioe' il mittente.
+
+    `leggi_sessione` sta dietro **ogni** rotta autenticata, quindi un cookie con un
+    accento non darebbe un 401 su una rotta: darebbe un 500 su tutte.
+    """
+    monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
+    assert main.leggi_sessione(f'1.1.{int(time.time())}.{firma}') is None
+
+
+def test_uno_username_NON_ASCII_non_diventa_un_500(tmp_path, monkeypatch):
+    """Terzo sito: `login_password` confronta lo username come stringa.
+
+    Il test gira con `ADMIN_PASSWORD_HASH` **impostato**, e non e' un dettaglio: senza,
+    il `503` del percorso disabilitato arriva prima del confronto e il difetto non viene
+    nemmeno sfiorato. La prima versione di questo test non lo impostava, passava verde,
+    e non misurava niente — la trappola che questa sessione ha incontrato piu' volte.
+    """
+    ambiente = dict(AMBIENTE_DEL_SERVIZIO, ADMIN_PASSWORD_HASH=main.hash_password('giusta'))
+    monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
+    with relay_avviato(tmp_path, **ambiente) as base:
+        stato, corpo, intestazioni = _chiama(base, 'POST', '/api/login/password',
+                                             corpo={'username': 'administratör',
+                                                    'password': 'giusta'})
+    assert stato == 401, (
+        f'uno username con una dieresi risponde {stato} invece di 401 (corpo '
+        f'{corpo[:200]!r}): chi chiama la rotta di login decide di far sollevare il server')
+    assert _cookie_dalla_risposta(intestazioni) is None
+
+
+def test_senza_bot_token_il_login_a_password_NON_finge_di_riuscire(tmp_path, monkeypatch):
+    """`ADMIN_PASSWORD_HASH` impostato e bot token assente: 503, non un 200 bugiardo.
+
+    Segnalato da CodeRabbit sulla PR #23, e misurato: `firma_sessione` senza segreto
+    restituisce stringa vuota, e la risposta uscendo diceva `200 {'ok': true}` con
+    `betrelay_sessione=""`. Il login sembrava riuscito e **ogni richiesta successiva
+    rispondeva 401**, senza niente da nessuna parte che dicesse perche'.
+
+    E' la forma peggiore del fail-open: non apre una porta, apre una porta finta. Chi la
+    attraversa non trova niente e non sa dove guardare — e in questo caso «chi» e' il
+    proprietario che ha appena configurato la password per entrare, cioe' esattamente la
+    situazione di emergenza per cui quel percorso esiste.
+    """
+    ambiente = dict(AMBIENTE_DEL_SERVIZIO, ADMIN_PASSWORD_HASH=main.hash_password('giusta'))
+    ambiente.pop('TELEGRAM_BOT_TOKEN', None)
+    monkeypatch.setattr(main, 'SEGRETO_SESSIONE', '')
+    with relay_avviato(tmp_path, **ambiente) as base:
+        stato, corpo, intestazioni = _chiama(base, 'POST', '/api/login/password',
+                                             corpo={'username': 'administrator',
+                                                    'password': 'giusta'})
+    assert stato == 503, (
+        f'senza bot token il login a password risponde {stato} (corpo {corpo[:200]!r}) '
+        'invece di 503: emette un cookie vuoto e finge di essere riuscito')
+    assert _cookie_dalla_risposta(intestazioni) in (None, ''), (
+        'e- stato emesso un cookie che non potra- mai essere valido')
+
+
+def test_un_campo_SCONOSCIUTO_ma_firmato_da_Telegram_viene_accettato():
+    """Telegram firma i campi che manda, compresi quelli che noi non conosciamo ancora.
+
+    Segnalato da CodeRabbit sulla PR #23. Pydantic **scarta** i campi non dichiarati,
+    quindi la `data_check_string` che ricostruiamo sarebbe piu' corta di quella firmata e
+    la firma non combacerebbe: il giorno che Telegram aggiunge un campo — l'ha gia' fatto
+    con `photo_url` — **tutti i login veri comincerebbero a essere rifiutati**, e il
+    sintomo sarebbe «il login non funziona piu'» senza nessun errore nei log.
+
+    Il verso opposto resta chiuso e vale la pena dirlo: accettare i campi sconosciuti non
+    apre niente, perche' entrano nella stringa firmata. Un campo aggiunto **dopo** la
+    firma la invalida comunque — lo verifica
+    `test_un_campo_AGGIUNTO_dopo_la_firma_viene_rifiutato`.
+    """
+    campi = {
+        'id': ADMIN_FINTO,
+        'first_name': 'Piero',
+        'auth_date': str(int(time.time())),
+        'campo_che_telegram_aggiungera': 'un valore',
+    }
+    campi['hash'] = _firma_telegram(campi)
+    # La funzione pura lo accetta: e' il modello Pydantic il punto dove si perde.
+    assert main.verifica_login_telegram(campi, BOT_FINTO) is True
+    conservati = main.LoginTelegramIn(**campi).model_dump()
+    assert 'campo_che_telegram_aggiungera' in conservati, (
+        'il modello scarta i campi che non conosce: la data_check_string ricostruita e- '
+        'piu- corta di quella firmata, quindi il giorno che Telegram aggiunge un campo '
+        f'ogni login vero viene rifiutato. Conservati: {sorted(conservati)}')

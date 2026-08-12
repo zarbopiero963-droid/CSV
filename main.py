@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 app = FastAPI(title='XTrader Signal Relay')
 
@@ -84,7 +84,14 @@ def verifica_login_telegram(dati, bot_token):
     # Confronto a tempo costante: la durata della risposta non deve raccontare quanti
     # caratteri iniziali erano giusti. Stesso motivo per cui `auth()` usa
     # `compare_digest` sul token del feed.
-    return hmac.compare_digest(calcolato, str(atteso))
+    #
+    # E sui BYTE, non sulle stringhe: `compare_digest` su `str` **solleva** `TypeError`
+    # se un lato non e' ASCII, e `atteso` e' il campo `hash` che scrive chi chiama. Con
+    # le stringhe, un `hash` con un accento faceva rispondere 500 invece di 401 —
+    # misurato. Il docstring di `auth()` descrive questa trappola da luglio e io l'ho
+    # reintrodotta qui: regola 2, avevo corretto il sito e non cercato la classe.
+    # Segnalato da Claude Fable 5 e da CodeRabbit sulla PR #23.
+    return hmac.compare_digest(calcolato.encode('utf-8'), str(atteso).encode('utf-8'))
 
 
 def hash_password(password):
@@ -185,7 +192,11 @@ def leggi_sessione(cookie):
     corpo = f'{utente}.{versione}.{emessa}'
     atteso = hmac.new(SEGRETO_SESSIONE.encode('utf-8'), corpo.encode('utf-8'),
                       hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(atteso, firma):
+    # Sui byte: `firma` viene dal cookie, cioe' la scrive il browser. Sulle stringhe,
+    # `compare_digest` solleva `TypeError` su un carattere non ASCII, e questa funzione
+    # sta dietro OGNI rotta autenticata — quindi non era un 500 su una rotta, era un 500
+    # su tutte, scatenabile cambiando un cookie. E' il piu' grave dei tre siti.
+    if not hmac.compare_digest(atteso.encode('utf-8'), firma.encode('utf-8')):
         return None
     try:
         utente, versione, emessa = int(utente), int(versione), int(emessa)
@@ -1584,6 +1595,9 @@ def utente_dalla_sessione(request):
       cliente» e per buttare fuori un accesso sospetto. Senza questo confronto, un
       cookie rubato resterebbe valido fino alla scadenza naturale e non ci sarebbe
       niente da fare.
+
+    Restituisce anche `versione`, che serve a chi deve **rinnovare** il cookie: vedi
+    `_rispondi_con_sessione`.
     """
     sessione = leggi_sessione(request.cookies.get(NOME_COOKIE))
     if not sessione:
@@ -1595,27 +1609,68 @@ def utente_dalla_sessione(request):
     c.close()
     if not riga or riga[1] != sessione['versione']:
         return None
-    return {'id': riga[0], 'status': riga[2], 'is_admin': bool(riga[3]),
-            'first_name': riga[4], 'access_expires_at': riga[5]}
+    return {'id': riga[0], 'versione': riga[1], 'status': riga[2],
+            'is_admin': bool(riga[3]), 'first_name': riga[4],
+            'access_expires_at': riga[5]}
 
 
 def _rispondi_con_sessione(utente, versione, corpo):
-    """La risposta che apre una sessione, col cookie impostato come si deve.
+    """La risposta che apre **o rinnova** una sessione, col cookie impostato come si deve.
 
     `httponly` perche' un cookie leggibile da JavaScript e' un cookie che un XSS porta
     via. `samesite='lax'` perche' una POST da un altro sito non deve portarsi dietro la
     sessione. `secure` perche' il servizio sta su HTTPS e il cookie non deve mai
     viaggiare in chiaro — betrelay.net e' dietro TLS, quindi non c'e' niente da perdere.
+
+    **Il rinnovo non e' un dettaglio: senza, i venti minuti non sono di inattivita'.**
+    `firma_sessione` mette dentro il momento dell'emissione, quindi un cookie mai
+    riemesso scade venti minuti dopo il LOGIN — e il proprietario si troverebbe buttato
+    fuori ogni venti minuti mentre sta lavorando. Fino al 12/08/2026 questa funzione era
+    chiamata solo dalle due rotte di login, mentre il docstring di `firma_sessione` e
+    `SAAS.md` promettevano il contrario: segnalato indipendentemente da GPT-5.5 e da
+    Claude Fable 5 sulla PR #23. Una promessa scritta e non mantenuta e' peggio di una
+    funzione mancante, perche' chi legge la doc smette di cercare.
+
+    Quindi ogni rotta che valida una sessione la richiama. **Per-rotta e non un
+    middleware, di proposito:** un middleware girerebbe anche su `/xtrader.csv`, cioe'
+    metterebbe codice di sessione sul percorso del feed — esattamente la NON-relazione
+    che questo PR esiste per garantire (`test_la_sessione_scaduta_NON_tocca_il_feed`).
     """
+    valore = firma_sessione(utente, versione)
+    if not valore:
+        # Senza bot token il segreto e' vuoto e `firma_sessione` non firma niente. Prima
+        # questa funzione usciva comunque `200 {'ok': true}` con `betrelay_sessione=""`:
+        # il login SEMBRAVA riuscito e ogni richiesta successiva rispondeva 401, senza
+        # niente da nessuna parte che dicesse perche'. E' la forma peggiore del
+        # fail-open — non apre una porta, apre una porta finta — e coglie chi ha appena
+        # configurato la password per entrare, cioe' l'emergenza per cui esiste quel
+        # percorso. Segnalato da CodeRabbit sulla PR #23.
+        raise HTTPException(503, 'sessioni non configurate: manca TELEGRAM_BOT_TOKEN')
     risposta = JSONResponse(corpo)
-    risposta.set_cookie(NOME_COOKIE, firma_sessione(utente, versione),
+    risposta.set_cookie(NOME_COOKIE, valore,
                         httponly=True, samesite='lax', secure=True,
                         max_age=INATTIVITA_MASSIMA, path='/')
     return risposta
 
 
 class LoginTelegramIn(BaseModel):
-    """I campi che il Login Widget consegna. `hash` e' la firma, non un dato."""
+    """I campi che il Login Widget consegna. `hash` e' la firma, non un dato.
+
+    `extra='allow'` non e' permissivita': e' l'unico modo di restare compatibili.
+    Telegram firma **tutti** i campi che manda, compresi quelli che noi non conosciamo,
+    e Pydantic per default li scarta — quindi la `data_check_string` che ricostruiamo
+    sarebbe piu' corta di quella firmata e la firma non combacerebbe. Il giorno che
+    Telegram aggiunge un campo (l'ha gia' fatto con `photo_url`), **tutti i login veri
+    verrebbero rifiutati**, e il sintomo sarebbe «il login non funziona piu'» senza un
+    errore da nessuna parte. Segnalato da CodeRabbit sulla PR #23.
+
+    Il verso opposto resta chiuso: accettare i campi sconosciuti non apre niente, perche'
+    entrano nella stringa firmata. Un campo aggiunto **dopo** la firma la invalida — lo
+    verifica `test_un_campo_AGGIUNTO_dopo_la_firma_viene_rifiutato`.
+    """
+
+    model_config = ConfigDict(extra='allow')
+
     id: str
     auth_date: str
     hash: str
@@ -1659,19 +1714,37 @@ def login_telegram(data: LoginTelegramIn):
             proprietario = c.execute('SELECT id, session_version FROM users'
                                      ' WHERE origin_profile=?', (PIERO_PROFILE,)).fetchone()
         if proprietario:
+            # `telegram_reachable` non compare: prima c'era `telegram_reachable=
+            # telegram_reachable`, che riscrive la colonna col proprio valore e non fa
+            # niente. Suggeriva un'intenzione che il codice non porta. Segnalato da
+            # CodeRabbit sulla PR #23.
             c.execute('UPDATE users SET telegram_id=?, username=?, first_name=?,'
-                      ' telegram_reachable=telegram_reachable, is_admin=1 WHERE id=?',
+                      ' is_admin=1 WHERE id=?',
                       (data.id, data.username or None, data.first_name or None,
                        proprietario[0]))
             riga = proprietario
         else:
             # Un cliente nuovo: l'account nasce e non puo' fare niente. L'accesso lo
             # concede il PR sull'approvazione (#7), non questo.
-            c.execute('INSERT INTO users(telegram_id, username, first_name, status)'
-                      " VALUES (?,?,?,'registrato')",
+            #
+            # `OR IGNORE` piu' la rilettura qui sotto perche' fra il SELECT e questo
+            # INSERT c'e' spazio per un'altra richiesta, e `telegram_id` e' UNIQUE: due
+            # login simultanei di un utente nuovo non davano una riga doppia, davano un
+            # `IntegrityError`, cioe' un 500 a chi perdeva la corsa — al PRIMO accesso di
+            # un cliente, l'unico momento in cui puo' capitare. Il Login Widget in una
+            # pagina ricaricata, o due schede aperte, bastano. Segnalato da Claude
+            # Fable 5 sulla PR #23; la rilettura fa si' che il perdente si attacchi alla
+            # riga del vincitore invece di crearne un'altra.
+            c.execute('INSERT OR IGNORE INTO users(telegram_id, username, first_name,'
+                      " status) VALUES (?,?,?,'registrato')",
                       (data.id, data.username or None, data.first_name or None))
             riga = c.execute('SELECT id, session_version FROM users WHERE telegram_id=?',
                              (data.id,)).fetchone()
+            if riga is None:
+                # Non deve accadere: l'inserimento e' andato o la riga c'era. Se accade,
+                # e' meglio un 503 che un `TypeError` sull'indice di `None`.
+                c.close()
+                raise HTTPException(503, 'account non creato: riprova')
     else:
         # Login successivi: il nome su Telegram puo' essere cambiato.
         c.execute('UPDATE users SET username=?, first_name=? WHERE id=?',
@@ -1703,7 +1776,10 @@ def login_password(data: LoginPasswordIn):
         # ragione di `auth()`: chi lo vede deve andare a configurare, non a cercare la
         # password giusta.
         raise HTTPException(503, 'accesso con password non configurato: manca ADMIN_PASSWORD_HASH')
-    giusta = (hmac.compare_digest(data.username, ADMIN_USERNAME)
+    # Sui byte, come negli altri due siti e per la stessa ragione: lo username lo scrive
+    # chi chiama, e `administratör` faceva rispondere 500 invece di 401.
+    giusta = (hmac.compare_digest(data.username.encode('utf-8'),
+                                 ADMIN_USERNAME.encode('utf-8'))
               and verifica_password_admin(data.password, ADMIN_PASSWORD_HASH))
     _registra_tentativo(giusta)
     if not giusta:
@@ -1743,13 +1819,20 @@ def chi_sono(request: Request):
     Non restituisce mai un token, ne' l'hash della password, ne' il `telegram_id`: il
     primo e' un segreto, il secondo pure, il terzo non serve al browser e finirebbe nei
     log di qualunque proxy davanti al servizio.
+
+    **E rinnova il cookie**, che e' cio' che rende i venti minuti «di inattivita'» invece
+    che «di sessione»: il rinnovo va DOPO la validazione, altrimenti un cookie scaduto
+    tornerebbe buono al primo tentativo e la scadenza si annullerebbe da se'. Ogni rotta
+    autenticata futura deve fare lo stesso — vedi `_rispondi_con_sessione` per il perche'
+    non e' un middleware.
     """
     utente = utente_dalla_sessione(request)
     if not utente:
         raise HTTPException(401, 'sessione assente o scaduta')
-    return {'utente': utente['id'], 'nome': utente['first_name'],
-            'stato': utente['status'], 'admin': utente['is_admin'],
-            'accesso_scade': utente['access_expires_at']}
+    return _rispondi_con_sessione(utente['id'], utente['versione'], {
+        'utente': utente['id'], 'nome': utente['first_name'],
+        'stato': utente['status'], 'admin': utente['is_admin'],
+        'accesso_scade': utente['access_expires_at']})
 
 
 @app.get('/api/parsers')
