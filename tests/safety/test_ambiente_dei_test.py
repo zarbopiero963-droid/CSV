@@ -93,10 +93,54 @@ def test_anche_l_ambiente_di_supporto_e_ripulito():
 
 # --------------------------------------------------------- guardia sulla classe
 
-FIXTURE_CHE_AVVIANO_IL_RELAY = [
-    RADICE / 'tests' / 'relay' / 'test_csv_contract.py',
-    RADICE / 'tests' / 'web' / 'test_prototype_flow.py',
-]
+def _file_che_avviano_il_relay():
+    """Scopre chi avvia davvero il relay, invece di fidarsi di un elenco.
+
+    Prima qui c'era una lista cablata di due percorsi, e una lista cablata non
+    vede il file nuovo: chi aggiungesse una quarta fixture che tira su `main:app`
+    non comparirebbe in nessuna delle guardie sotto. Il criterio ora e' il FATTO —
+    un `subprocess.Popen` e il modulo `main:app` nello stesso file — non la
+    presenza della parola «uvicorn», che oggi compare anche nei commenti di chi
+    l'avvio l'ha delegato.
+    """
+    # I criteri si COMPONGONO a runtime, non si scrivono: questo file parla del
+    # pattern — nei messaggi d'errore e nella regex del test accanto — e scritti
+    # per esteso troverebbe se stesso. Misurato: senza la composizione la
+    # scoperta restituiva anche `tests/safety/test_ambiente_dei_test.py`, e due
+    # guardie diventavano rosse per auto-riferimento. Stessa classe del redattore
+    # che si mangiava il proprio file di test nella PR #9.
+    avvio = 'subprocess' + '.Popen('
+    modulo = 'main' + ':app'
+    trovati = []
+    for percorso in sorted((RADICE / 'tests').rglob('*.py')):
+        testo = percorso.read_text('utf-8')
+        if avvio in testo and modulo in testo:
+            trovati.append(percorso)
+    return trovati
+
+
+FIXTURE_CHE_AVVIANO_IL_RELAY = _file_che_avviano_il_relay()
+
+
+def test_il_relay_si_avvia_da_un_posto_solo():
+    """Regola 3 sull'avvio del servizio, resa verificabile.
+
+    Le tre fixture che tiravano su `main:app` erano tre copie quasi identiche, e
+    portavano tutte e tre lo stesso difetto: `stdout=PIPE` mai letta, che appende
+    i test invece di farli fallire quando uvicorn scrive piu' del buffer.
+    Segnalato da CodeRabbit su una copia, ed era su tutte — la duplicazione non e'
+    un problema estetico, e' il moltiplicatore del difetto.
+
+    Ora l'avvio vive in `tests/servizio.py`. Questo test pretende che ne esista
+    **uno**: una quarta copia rinasce facilmente, e nessuno se ne accorgerebbe
+    finche' le due implementazioni non divergono.
+    """
+    nomi = [str(p.relative_to(RADICE)) for p in FIXTURE_CHE_AVVIANO_IL_RELAY]
+    assert nomi == ['tests/servizio.py'], (
+        'il relay viene avviato da piu- di un posto (o da un posto diverso da '
+        f'tests/servizio.py): {nomi}. Chi ha bisogno di un servizio in un test usa '
+        '`relay_avviato`, non una copia della Popen.'
+    )
 
 
 def test_nessuna_fixture_passa_l_ambiente_intero():
@@ -125,10 +169,12 @@ def test_chi_avvia_uvicorn_usa_la_fonte_unica():
     erediterebbe comunque l'ambiente intero — che e' esattamente lo stato in cui
     si trovava `tests/web/test_prototype_flow.py`.
     """
+    assert FIXTURE_CHE_AVVIANO_IL_RELAY, (
+        'nessun file avvia il relay: il criterio di scoperta non funziona piu- e '
+        'queste guardie non stanno controllando niente'
+    )
     for percorso in FIXTURE_CHE_AVVIANO_IL_RELAY:
         testo = percorso.read_text('utf-8')
-        if 'uvicorn' not in testo:
-            continue
         assert 'ambiente_di_servizio' in testo, (
             f'{percorso.relative_to(RADICE)} avvia uvicorn senza passare da '
             f'tests.ambiente: erediterebbe TELEGRAM_BOT_TOKEN'

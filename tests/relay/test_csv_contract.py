@@ -33,7 +33,8 @@ RADICE = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(RADICE))
 
 import main  # noqa: E402 - dopo l'inserimento del percorso
-from tests.ambiente import CHIAVI_PERICOLOSE, ambiente_di_servizio  # noqa: E402
+from tests.ambiente import CHIAVI_PERICOLOSE, TOKEN_DI_PROVA  # noqa: E402
+from tests.servizio import relay_avviato  # noqa: E402
 
 
 # Intestazione attesa, costruita dalle colonne reali e non ricopiata a mano:
@@ -45,19 +46,30 @@ RIGA_VALIDA = ['XTrader', '', 'Juventus - Palermo', '', 'Over/Under 1,5 gol',
 
 
 @pytest.fixture(autouse=True)
-def _senza_token_ambientale(monkeypatch):
-    """Neutralizza `CSV_ACCESS_TOKEN` per le chiamate IN PROCESSO.
+def _token_noto(monkeypatch):
+    """Impone un token NOTO per le chiamate IN PROCESSO.
 
     La whitelist di `tests.ambiente` protegge il sottoprocesso uvicorn, ma non
     puo' fare niente per `import main`: `main.TOKEN` viene letto da `os.environ`
     al momento dell'import, quindi su una macchina dove quella variabile e'
-    impostata i test che chiamano `profile_csv()` direttamente ricevono un 401 e
-    la suite passa o fallisce a seconda di chi la esegue. Misurato: senza questa
-    fixture, `CSV_ACCESS_TOKEN=... pytest tests/relay` fallisce tre test.
+    impostata i test che chiamano `profile_csv()` direttamente riceverebbero un
+    401, e la suite passerebbe o fallirebbe a seconda di chi la esegue. Misurato:
+    senza questa fixture, `CSV_ACCESS_TOKEN=... pytest tests/relay` fallisce.
 
-    Autouse di proposito: e' la classe del difetto, non i tre siti di oggi. Un
-    test che voglia invece verificare il rifiuto per token errato imposta
-    `main.TOKEN` da se', e il suo monkeypatch vince perche' arriva dopo.
+    Fino al fail-closed di `auth()` questa fixture AZZERAVA il token, e quella era
+    la scelta sbagliata per un motivo che allora non si vedeva: azzerandolo,
+    l'intera suite girava con l'autenticazione spenta. Misurato: sostituendo tutte
+    e otto le chiamate ad `auth()` con `pass` — cioe' togliendo la serratura da
+    dieci rotte — si otteneva **144 passed**. La suite non poteva accorgersi
+    dell'assenza di cio' che non esercitava mai.
+
+    Ora il token c'e' e vale `TOKEN_DI_PROVA`, che sta in `tests/ambiente.py`
+    insieme alla whitelist: le due cose rispondono alla stessa domanda — quale
+    ambiente i test danno al servizio — e separarle le farebbe divergere.
+
+    Autouse di proposito: e' la classe del difetto, non i siti di oggi. Un test
+    che voglia verificare il rifiuto imposta `main.TOKEN` da se', e il suo
+    monkeypatch vince perche' arriva dopo.
 
     E non basta `main.TOKEN`: segnalato da Fugu Ultra nella review finale.
     L'handler di startup legge `os.environ` DIRETTAMENTE, non le costanti del
@@ -68,9 +80,19 @@ def _senza_token_ambientale(monkeypatch):
     processo, con lo stesso elenco che protegge i sottoprocessi: una seconda
     lista divergerebbe.
     """
-    monkeypatch.setattr(main, 'TOKEN', '')
+    monkeypatch.setattr(main, 'TOKEN', TOKEN_DI_PROVA)
     for chiave in CHIAVI_PERICOLOSE:
         monkeypatch.delenv(chiave, raising=False)
+
+
+def _feed(profilo=main.PIERO_PROFILE):
+    """Il feed servito, col token di prova.
+
+    Esiste perche' `auth()` e' fail-closed: `profile_csv(profilo, None)` ora e' un
+    401, e questi test parlano del CONTRATTO CSV, non dell'autenticazione — quella
+    ha il suo file. Il token compare in un posto solo: se cambia, cambia qui.
+    """
+    return main.profile_csv(profilo, TOKEN_DI_PROVA)
 
 
 # ------------------------------------------------------------ funzioni pure
@@ -198,7 +220,7 @@ def test_una_riga_vecchia_senza_bom_non_viene_servita(tmp_path, monkeypatch):
     finally:
         c.close()
 
-    risposta = main.profile_csv('PIERO', None)
+    risposta = _feed()
     corpo = risposta.body.decode('utf-8')
     assert corpo.startswith('\ufeff'), 'il feed ha servito la riga vecchia senza BOM'
     assert 'Juventus' not in corpo, 'il contenuto sospetto e- uscito comunque'
@@ -229,7 +251,7 @@ def test_il_feed_degradato_lascia_una_traccia(tmp_path, monkeypatch):
         c.close()
 
     assert main._SCARTI_CONSEGNA['n'] == 0
-    main.profile_csv('PIERO', None)
+    _feed()
 
     assert main._SCARTI_CONSEGNA['n'] == 1, 'lo scarto non e- stato contato'
     assert 'BOM' in main._SCARTI_CONSEGNA['ultimo'], \
@@ -279,7 +301,7 @@ def test_la_stessa_riga_guasta_conta_UNO_non_uno_per_richiesta(tmp_path, monkeyp
         c.close()
 
     for _ in range(5):
-        risposta = main.profile_csv('PIERO', None)
+        risposta = _feed()
         assert risposta.body.decode('utf-8').startswith('\ufeff')
 
     assert main._SCARTI_CONSEGNA['n'] == 1, (
@@ -299,7 +321,7 @@ def test_la_stessa_riga_guasta_conta_UNO_non_uno_per_richiesta(tmp_path, monkeyp
     finally:
         c.close()
 
-    main.profile_csv('PIERO', None)
+    _feed()
     assert main._SCARTI_CONSEGNA['n'] == 2, (
         'una riga guasta diversa e- un evento nuovo: se non viene contata, il bug '
         'che azzera i feed resterebbe invisibile'
@@ -337,7 +359,7 @@ def test_due_profili_guasti_non_fanno_salire_il_contatore_a_raffica(tmp_path, mo
     # XTrader alterna i due feed, come fa in produzione.
     for _ in range(6):
         for profilo in ('PIERO', 'SECONDO'):
-            main.profile_csv(profilo, None)
+            _feed(profilo)
 
     assert main._SCARTI_CONSEGNA['n'] == 2, (
         f'due profili con una riga guasta IDENTICA hanno prodotto '
@@ -376,7 +398,7 @@ def test_due_profili_con_righe_guaste_DIVERSE_non_salgono_a_raffica(tmp_path, mo
 
     for _ in range(6):
         for profilo in ('PIERO', 'SECONDO'):
-            main.profile_csv(profilo, None)
+            _feed(profilo)
 
     assert main._SCARTI_CONSEGNA['n'] == 2, (
         f'dodici richieste alternate su due profili con righe guaste diverse hanno '
@@ -421,7 +443,7 @@ def test_richieste_CONCORRENTI_sullo_stesso_feed_contano_una_volta(tmp_path, mon
         try:
             pronti.wait(timeout=10)  # tutti insieme, per massimizzare la race
             for _ in range(5):
-                risposta = main.profile_csv('PIERO', None)
+                risposta = _feed()
                 assert risposta.body.decode('utf-8').startswith('\ufeff')
         except Exception as exc:  # noqa: BLE001 - va riportato, non ingoiato
             errori.append(exc)
@@ -537,7 +559,7 @@ def test_l_impronta_non_conserva_il_contenuto_del_segnale(tmp_path, monkeypatch)
     finally:
         c.close()
 
-    main.profile_csv('PIERO', None)
+    _feed()
     stato = str(main._SCARTI_CONSEGNA)
     assert 'Juventus' not in stato, f'il contenuto del segnale e- rimasto in memoria: {stato}'
     assert 'Segreta' not in stato, f'il contenuto del segnale e- rimasto in memoria: {stato}'
@@ -563,7 +585,7 @@ def test_il_motivo_dello_scarto_non_contiene_il_segnale(tmp_path, monkeypatch):
     finally:
         c.close()
 
-    main.profile_csv('PIERO', None)
+    _feed()
     motivo = main._SCARTI_CONSEGNA['ultimo']
     assert motivo, 'nessun motivo registrato'
     assert 'Juventus' not in motivo, f'il motivo espone il contenuto del segnale: {motivo!r}'
@@ -630,51 +652,36 @@ def test_l_handler_di_startup_INGOIA_gli_errori(monkeypatch):
 
 # ------------------------------------------------------------------- HTTP
 
-def _porta_libera() -> int:
-    with socket.socket() as s:
-        s.bind(('127.0.0.1', 0))
-        return s.getsockname()[1]
-
-
 @pytest.fixture(scope='module')
 def servizio(tmp_path_factory):
-    """Il servizio vero su una porta libera: i byte contano, non le stringhe."""
-    porta = _porta_libera()
-    db = tmp_path_factory.mktemp('relay') / 'signals.db'
-    proc = subprocess.Popen(
-        [sys.executable, '-m', 'uvicorn', 'main:app', '--host', '127.0.0.1',
-         '--port', str(porta), '--log-level', 'warning'],
-        # Ambiente ripulito, non ereditato: con TELEGRAM_BOT_TOKEN in giro
-        # l'avvio del relay ripunterebbe il webhook di produzione, e con
-        # CSV_ACCESS_TOKEN le richieste senza token qui sotto darebbero 401.
-        cwd=RADICE, env=ambiente_di_servizio(DB_PATH=str(db)),
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-    )
-    base = f'http://127.0.0.1:{porta}'
-    try:
-        scaduto = time.monotonic() + 30
-        while time.monotonic() < scaduto:
-            if proc.poll() is not None:
-                pytest.fail(f'uvicorn e- morto durante l-avvio:\n{proc.stdout.read()[-2000:]}')
-            try:
-                with urllib.request.urlopen(f'{base}/health', timeout=1) as r:
-                    if r.status == 200:
-                        break
-            except (urllib.error.URLError, OSError):
-                time.sleep(0.2)
-        else:
-            pytest.fail('uvicorn non ha risposto su /health entro 30 s')
+    """Il servizio vero su una porta libera: i byte contano, non le stringhe.
+
+    L'avvio passa da `tests.servizio`, fonte unica delle tre fixture che tirano su
+    il relay: prima erano tre copie, e portavano tutte lo stesso difetto (la pipe
+    di stdout mai letta, che appende i test invece di farli fallire).
+
+    Il token di prova si passa DI PROPOSITO — `auth()` e- fail-closed, quindi un
+    servizio senza token risponde 503 su ogni rotta protetta e questi test non
+    potrebbero nemmeno leggere il feed. Quello del proprietario resta fuori: lo
+    toglie la whitelist, questo lo mettiamo noi e vale solo qui.
+    """
+    with relay_avviato(tmp_path_factory.mktemp('relay'),
+                       CSV_ACCESS_TOKEN=TOKEN_DI_PROVA) as base:
         yield base
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
 
 
 def _get(base, path):
-    with urllib.request.urlopen(f'{base}{path}', timeout=10) as r:
+    """GET col token di prova, aggiunto qui invece che in ogni chiamata.
+
+    Da quando `auth()` e' fail-closed le rotte del feed pretendono il token: senza,
+    ogni asserzione sui byte fallirebbe con un 401 e il messaggio parlerebbe di
+    autenticazione in un file che verifica il contratto CSV. `/health` e `/` lo
+    ignorano — un parametro di query in piu' non li disturba — quindi qui non serve
+    distinguere.
+    """
+    separatore = '&' if '?' in path else '?'
+    url = f'{base}{path}{separatore}token={TOKEN_DI_PROVA}'
+    with urllib.request.urlopen(url, timeout=10) as r:
         return r.status, r.headers, r.read()
 
 
@@ -702,7 +709,7 @@ def test_il_feed_vuoto_ha_il_bom_e_una_riga_sola(servizio):
     req = urllib.request.Request(
         f'{servizio}/api/profiles',
         data=json.dumps({'name': 'VUOTO', 'chat_ids': '', 'parser': main.DEFAULT_PARSER}).encode(),
-        headers={'Content-Type': 'application/json'}, method='POST',
+        headers={'Content-Type': 'application/json', 'X-Admin-Token': TOKEN_DI_PROVA}, method='POST',
     )
     with urllib.request.urlopen(req, timeout=10) as r:
         assert r.status == 200
@@ -733,7 +740,7 @@ def test_l_api_di_prova_restituisce_il_csv_col_bom(servizio):
     req = urllib.request.Request(
         f'{servizio}/api/test-message',
         data=json.dumps({'message': messaggio}).encode('utf-8'),
-        headers={'Content-Type': 'application/json'},
+        headers={'Content-Type': 'application/json', 'X-Admin-Token': TOKEN_DI_PROVA},
         method='POST',
     )
     with urllib.request.urlopen(req, timeout=10) as r:

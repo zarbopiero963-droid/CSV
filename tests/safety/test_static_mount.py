@@ -104,3 +104,122 @@ def test_nessun_sorgente_python_sotto_il_mount():
     """
     python = [p.relative_to(RADICE).as_posix() for p in WEB.rglob('*.py')]
     assert not python, f'sorgente Python servito pubblicamente su /app: {python}'
+
+
+# ---------------------------------------------------------------- il CONTENUTO
+#
+# I test sopra guardano il TIPO dei file; questi guardano cosa c'e' dentro. La
+# distinzione non e' accademica: `.js` e' un'estensione legittima sotto il mount,
+# ed e' esattamente il file in cui i dati finti del prototipo vivono — quindi e'
+# il posto dove qualcuno sostituisce il chat_id finto col proprio mentre prova
+# qualcosa, o incolla un token per vedere se l'API risponde. Il tipo resterebbe
+# valido e il segreto sarebbe scaricabile da chiunque conosca l'URL.
+#
+# Chiesto da Claude Fable 5 e da GPT-5.5 sulla PR #12, entrambi come verifica
+# manuale («confermare che web/ non contenga configurazioni, dump, token o dati
+# utente»). Una verifica manuale vale per il giorno in cui la si fa: qui diventa
+# un test.
+#
+# Le forme si COMPONGONO a runtime: scritte per esteso, questo file finirebbe nel
+# payload di una review e il redattore dei workflow le maciullerebbe (e' la
+# lezione della PR #9, dove il file di test del redattore veniva mangiato dal
+# redattore stesso).
+_SK = 'sk' + '-'
+_GH = 'gh' + 'p_'
+_XT = 'xt' + '_'
+FORME_DI_SEGRETO = (
+    ('chiave OpenAI/Anthropic', re.compile(_SK + r'[A-Za-z0-9_\-]{20,}')),
+    ('token GitHub', re.compile(_GH + r'[A-Za-z0-9_]{30,}')),
+    ('token di feed BetRelay', re.compile(_XT + r'[A-Za-z0-9_\-]{12,}')),
+    ('token di bot Telegram', re.compile(r'\b\d{8,12}:[A-Za-z0-9_\-]{30,}\b')),
+)
+
+# I chat_id che il prototipo mostra di proposito, dichiarati uno per uno. Un
+# chat_id NUOVO sotto il mount fa fallire il test finche' qualcuno non lo aggiunge
+# qui: e' l'unico modo di distinguere un valore finto da uno vero, perche' dalla
+# forma sono identici.
+CHAT_ID_FINTI_DICHIARATI = {'-1001987654321'}
+FORMA_CHAT_ID = re.compile(r'-100\d{7,}')
+
+
+# Le estensioni che si leggono come testo. Il controllo sul contenuto gira solo su
+# queste: leggere un font o un PNG come UTF-8 con `errors='replace'` e' lento e —
+# peggio — produce sequenze casuali in cui una forma puo' combaciare per caso,
+# rendendo rumorosa proprio la guardia che deve restare credibile. Segnalato da
+# GPT-5.5. I binari restano comunque vincolati da `ESTENSIONI_STATICHE`: un `.env`
+# o un `.db` sotto il mount non passa il test sui tipi, e questo e' il limite
+# dichiarato — un token nascosto nei metadati di un'immagine non verrebbe visto.
+ESTENSIONI_TESTUALI = {'.html', '.css', '.js', '.json', '.svg', '.map'}
+
+
+def _file_serviti():
+    return [p for p in sorted(WEB.rglob('*'))
+            if p.is_file() and p.suffix.lower() in ESTENSIONI_TESTUALI]
+
+
+def test_nessun_valore_dalla_forma_di_un_segreto_sotto_il_mount():
+    """Un token sotto `/app` e- scaricabile da chiunque, senza token e senza sessione."""
+    trovati = []
+    for percorso in _file_serviti():
+        testo = percorso.read_text(encoding='utf-8', errors='replace')
+        for nome, forma in FORME_DI_SEGRETO:
+            for m in forma.finditer(testo):
+                riga = testo[:m.start()].count('\n') + 1
+                trovati.append(f'{percorso.relative_to(RADICE).as_posix()}:{riga}: {nome}')
+    assert not trovati, (
+        'valori dalla forma di un segreto sotto il mount pubblico /app:\n  '
+        + '\n  '.join(trovati)
+    )
+
+
+def test_i_chat_id_sotto_il_mount_sono_dichiarati_finti():
+    """Dalla forma un chat_id finto e uno vero sono identici: serve una dichiarazione.
+
+    Il prototipo ne mostra uno di proposito (`-1001987654321`, dentro il modulo dei
+    dati finti). Uno nuovo — per esempio il canale vero del proprietario, incollato
+    durante una prova — sarebbe indistinguibile, quindi il test pretende che sia
+    elencato qui sopra.
+    """
+    non_dichiarati = []
+    for percorso in _file_serviti():
+        testo = percorso.read_text(encoding='utf-8', errors='replace')
+        for m in FORMA_CHAT_ID.finditer(testo):
+            if m.group(0) not in CHAT_ID_FINTI_DICHIARATI:
+                riga = testo[:m.start()].count('\n') + 1
+                # Si riporta la POSIZIONE, non il valore. Questa guardia scatta
+                # proprio quando il chat_id e' probabilmente VERO, e stamparlo lo
+                # copierebbe nel log della CI — cioe- in un secondo posto
+                # consultabile. Il messaggio dice dove guardare; il valore lo si
+                # legge nel proprio file. Segnalato da GPT-5.5, che ha notato
+                # l'incoerenza: per i token il valore non veniva stampato, per i
+                # chat_id si-.
+                non_dichiarati.append(f'{percorso.relative_to(RADICE).as_posix()}:{riga}')
+    assert not non_dichiarati, (
+        'chat_id non dichiarati sotto il mount pubblico /app (posizione riportata, '
+        'valore no: se e- vero non va copiato nei log). Se e- finto aggiungerlo a '
+        'CHAT_ID_FINTI_DICHIARATI, se e- vero togliere il valore dal file:\n  '
+        + '\n  '.join(non_dichiarati)
+    )
+
+
+def test_i_riconoscitori_riconoscono_davvero():
+    """Senza questo, una regex che non combacia mai darebbe una guardia verde a vita.
+
+    E- la lezione del sabotaggio a vuoto della PR #9: un controllo che non puo-
+    fallire non e- un controllo, e la sua innocuita- e- indistinguibile dal suo
+    funzionamento. I campioni si compongono, come le forme.
+    """
+    campioni = {
+        'chiave OpenAI/Anthropic': _SK + 'ant-api03-' + 'A' * 24,
+        'token GitHub': _GH + 'B' * 36,
+        'token di feed BetRelay': _XT + 'C' * 20,
+        'token di bot Telegram': '123456789' + ':' + 'D' * 35,
+    }
+    for nome, forma in FORME_DI_SEGRETO:
+        assert forma.search(campioni[nome]), f'la forma «{nome}» non riconosce il suo campione'
+    assert FORMA_CHAT_ID.search('-1009876543210'), 'la forma del chat_id non riconosce niente'
+    # E non deve combaciare con del testo innocuo, o sarebbe rumore.
+    innocuo = 'const colore = "#1e88e5"; // 2026-08-11, versione 1.0.0'
+    for nome, forma in FORME_DI_SEGRETO:
+        assert not forma.search(innocuo), f'la forma «{nome}» combacia con testo innocuo'
+    assert not FORMA_CHAT_ID.search(innocuo)

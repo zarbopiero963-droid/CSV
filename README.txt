@@ -32,10 +32,43 @@ POST /api/test-message?parser=Parser_Telegram_XTrader_v1
 Header: X-Admin-Token: TOKEN
 Body JSON: {"message":"testo completo del messaggio"}
 
+AUTENTICAZIONE
+CSV_ACCESS_TOKEN protegge dieci rotte: i due feed CSV (/xtrader.csv e
+/profiles/NOME.csv, col parametro ?token=) e le otto API di gestione (con
+l'header X-Admin-Token). Quattro sono in lettura, sei in scrittura.
+Restano pubbliche soltanto /, /health, /telegram/webhook e /app.
+
+ATTENZIONE su /telegram/webhook: NON e' autenticata. Il filtro dei chat_id fa
+INSTRADAMENTO — decide a quale feed appartiene un messaggio — non autenticazione,
+perche' il chat_id arriva dal corpo della richiesta e quindi lo scrive il mittente.
+Il servizio non distingue una consegna vera di Telegram da una costruita da altri,
+quindi oggi esiste un percorso di SCRITTURA non autenticato verso i segnali, che
+aggira CSV_ACCESS_TOKEN. Misurato: GET /xtrader.csv senza token da' 401, POST
+/telegram/webhook senza alcun token da' 200 e la riga finisce nel feed.
+La correzione e' il secret_token di Telegram: vedi Issue #13. Fino a quel momento
+questa riga descrive un rischio noto, non una protezione.
+
+/app serve i file statici del prototipo: e' un mount, non una rotta, e non ha ne'
+puo' avere un token perche' e' la pagina che si apre nel browser. Nulla di sensibile deve finire in web/: lo vincola la guardia
+tests/safety/test_static_mount.py, che controlla il tipo dei file E il loro
+contenuto (token dalla forma nota, chat_id non dichiarati finti).
+Il controllo e' FAIL-CLOSED: se CSV_ACCESS_TOKEN non e' configurato il servizio
+risponde 503 "servizio non configurato" a tutte le rotte protette, e NON le
+lascia aperte. Un token sbagliato o assente nella richiesta da' invece 401: i due
+codici distinguono "la tua chiave e' sbagliata" da "questo servizio va
+configurato", che richiedono azioni diverse.
+Prima dell'11/08/2026 il controllo era fail-OPEN: senza la variabile ogni rotta
+rispondeva 200, feed e API di scrittura compresi, senza alcun errore nei log.
+Cancellare quella variabile dalla dashboard rendeva il servizio scrivibile da
+Internet. Non farlo: si controlla su /health.
+
 CONTROLLO
 GET /health
-Risponde {"status","csv","feed_scartati"} e, se feed_scartati non e' zero,
+Risponde {"status","csv","auth","feed_scartati"} e, se feed_scartati non e' zero,
 anche "ultimo_scarto" col motivo. "csv" e' l'esito del verificatore di formato;
+"auth" vale "ok" oppure "non configurato" e in quel caso "status" diventa
+"degraded" — a differenza degli scarti, una variabile mancante non si ripara da
+se'. /health non ha token, quindi dice se il token c'e', mai quale;
 "feed_scartati" conta le RIGHE DISTINTE salvate che non hanno passato la verifica
 e sono state servite come feed vuoto - non le richieste che le incontrano, perche'
 XTrader interroga il feed a raffica e una sola riga guasta resterebbe tale per
@@ -59,10 +92,19 @@ Il prototipo dell'interfaccia multiutente e' servito su /app (file statici in we
 Usa dati finti nel browser, non tocca il relay. Architettura e contratto API in SAAS.md.
 
 VARIABILI RAILWAY
-CSV_ACCESS_TOKEN: token segreto per proteggere CSV e inserimento.
+CSV_ACCESS_TOKEN: token segreto che protegge i due feed CSV E tutte le API di
+  gestione. OBBLIGATORIA: senza, il servizio risponde 503 a tutte le rotte
+  protette (vedi AUTENTICAZIONE).
 TELEGRAM_BOT_TOKEN: token del bot; se presente il webhook viene registrato all'avvio.
-PUBLIC_URL: URL pubblico del servizio, usato per registrare il webhook.
+PUBLIC_URL: URL pubblico del servizio, usato per registrare il webhook. Se manca,
+  il codice usa un default cablato sull'URL Railway: impostarla sempre, perche' un
+  secondo deploy senza questa variabile ripunterebbe il webhook del bot vero.
 TELEGRAM_ALLOWED_CHAT_IDS: chat_id iniziali del profilo PIERO, separati da virgola.
+  TRANSITORIA, e ha una scaletta di pensionamento in SAAS.md. Su un database
+  persistente diventa INERTE: il seed usa INSERT OR IGNORE, quindi la riga PIERO
+  esiste gia' e modificare la variabile non cambia piu' nulla — per cambiare i
+  chat_id si usa POST /api/profiles. Non replicarla per altri utenti: popola solo
+  il profilo PIERO, e una variabile per cliente imporrebbe un rideploy.
 DB_PATH: facoltativo; su Railway usare un volume per conservare i dati tra riavvii.
 
 I valori di mercato non sono piu' variabili d'ambiente: parser e profili vivono nel
