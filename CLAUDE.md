@@ -38,6 +38,7 @@ Il merge resta sempre manuale del repository owner.
 | Guardie sulla CI e sul suo meccanismo | `tests/safety/test_ci.py`, `tests/safety/test_runtime_severo.py` |
 | Test del relay: contratto CSV sui byte della risposta HTTP | `tests/relay/test_csv_contract.py` |
 | Test del relay: autenticazione, webhook, parser | `tests/relay/test_autenticazione.py`, `tests/relay/test_webhook.py`, `tests/relay/test_parse_message.py` |
+| Schema multiutente e migrazione idempotente | `migra()` in `main.py`, `tests/relay/test_schema.py` |
 | Test del motore e del contratto CSV (casi eseguiti in node) | `tests/engine/engine_cases.mjs`, `tests/engine/test_engine_contract.py` |
 | Test del prototipo in browser (Playwright/Chromium) | `tests/web/prototype_flow.py`, `tests/web/mobile_layout.py`, `tests/web/test_prototype_flow.py` |
 | Test della facciata: HTTP e browser | `tests/relay/test_facciata.py`, `tests/web/sito_flow.py`, `tests/web/test_sito.py` |
@@ -1261,9 +1262,22 @@ Devi verificare:
   colabrodo — dichiaralo e trattalo come rischio, non come comportamento accettabile;
 - compatibilità con i dati già scritti dalla versione precedente;
 - nessun token reale, chat ID reale o path locale committato;
-- comportamento noto al riavvio: `DB_PATH` di default punta a `/tmp`, quindi **su Railway senza
-  volume i dati si perdono a ogni deploy**. Non scoprirlo in produzione: se il task riguarda la
-  persistenza, il passaggio a Postgres o a un volume montato va dichiarato nel PR body.
+- comportamento noto al riavvio, e qui va distinto il **default del codice** dalla **configurazione di
+  questo servizio**, perché fino al 12/08/2026 questa riga li confondeva:
+  - il default è ancora `DB_PATH=/tmp/signals.db`, e chi deployasse senza impostare la variabile
+    **perderebbe i dati a ogni deploy**. Resta vero e resta un rischio;
+  - **in produzione la variabile è impostata**: `DB_PATH=/data/signals.db`, dentro il volume montato
+    su `/data` (`RAILWAY_VOLUME_MOUNT_PATH`). Misurato il 12/08/2026 sulle Variables del servizio, e
+    confermato dal log di avvio che dice `Mounting volume on: …`. **I dati persistono.**
+
+  Prima qui c'era scritto «su Railway senza volume i dati si perdono a ogni deploy» come se
+  descrivesse la produzione, e nessuno l'aveva misurato: è la stessa forma dell'errore sul BOM, dove
+  per mesi era scritto «verificato byte per byte» senza che nessuno avesse guardato i byte. Se il task
+  riguarda la persistenza, va dichiarato nel PR body **quale dei due casi** si sta trattando.
+- la migrazione dello schema vive in `migra()` e gira **una volta per processo**, non a ogni
+  connessione: prima stava dentro `db()`, quindi ogni richiesta — incluse le letture del feed, che
+  XTrader interroga a raffica — apriva una transazione di scrittura. Funzionava perché idempotente,
+  non perché progettato. Chi aggiunge tabelle le aggiunge lì, e il test di idempotenza le copre.
 
 ---
 

@@ -8,11 +8,21 @@ con dati finti.
 ## Modello concettuale
 
 L'entità centrale è il **parser**, non il profilo. È il parser che possiede
-configurazione, token, feed CSV, timer dei 90 secondi e log.
+configurazione, feed CSV, timer dei 90 secondi e log.
+
+**Il token no, e questa riga è stata corretta il 12/08/2026 perché diceva il
+contrario.** Qui c'era scritto che il parser possiede anche il token; nel «Modello
+dati» più sotto `token_hash` e `token_prefix` stanno su `users`, ed è lì che il codice
+li ha creati. Lo stesso documento affermava quindi due cose incompatibili, e il PR
+sull'autenticazione avrebbe implementato quella che leggeva per prima. La versione
+giusta è **il token appartiene all'utente**: è la correzione del modello sbagliato del
+prototipo, registrata in #2. Segnalato da CodeRabbit sulla PR #22, ed è la stessa forma
+del difetto raccontato in `CLAUDE.md` — una documentazione che contiene l'affermazione
+e la sua smentita.
 
 ```text
-utente (login Telegram)
- └── parser  (slug, token proprio, config propria, feed proprio, timer proprio)
+utente (login Telegram)   ← il TOKEN del feed sta qui: `users.token_hash`
+ └── parser  (slug, config propria, feed proprio, timer proprio)
       └── N chat Telegram   ←→   una chat può alimentare N parser dello stesso utente
 ```
 
@@ -26,33 +36,200 @@ Il "profilo" si riduce allo slug dell'utente nell'URL del feed:
 
 ## Modello dati
 
+Questo elenco è **misurato su `PRAGMA table_info`** dopo `migra()`, non copiato dal
+disegno: fino al 12/08/2026 descriveva un modello che il codice non aveva ancora, e
+due voci erano diventate false — `token_hash` risultava su `parsers` mentre sta su
+`users`, e `signals` risultava con `parser_id` mentre ha `profile` e `user_id`. Un
+modello dati scritto a mano accanto a un modello dati eseguito è la duplicazione che
+la regola 3 vieta; qui vive perché il codice non lo genera, e per questo va
+ri-misurato ogni volta che lo schema cambia.
+
 ```text
 users
-  id, telegram_id (unique), username, first_name, slug (unique), status, created_at
+  id, origin_profile (unique), telegram_id (unique), username, first_name,
+  slug (unique), token_hash, token_prefix, status, access_expires_at,
+  telegram_reachable, session_version, is_admin, created_at
+                           `origin_profile` è il profilo da cui la migrazione ha
+                           creato l'utente, e serve come chiave stabile per
+                           ritrovarlo ai riavvii. NULL per chi non viene da un
+                           profilo, che è il caso di tutti i prossimi utenti.
+                           Non `first_name`: non è univoco (i nomi Telegram non lo
+                           sono affatto) e il login lo sovrascrive col nome vero.
+                           L'unicità è anche un indice, perché un database che riceve
+                           la colonna dall'ALTER non porta il vincolo con sé
 
-parsers
-  id, user_id, slug, name, config_json, token_hash, token_prefix, active, created_at
-  unique (user_id, slug)
+parsers            ← tabella PREESISTENTE, estesa con ALTER additivo
+  name (primary key), header, market_name, market_type, selection_name,
+  handicap, bet_type,                       ← le colonne del formato originale
+  user_id, slug, config_json, active, ordine, created_at, id
+  unique (user_id, slug)   come indice: su una tabella esistente UNIQUE non si
+  unique (id)              aggiunge con ALTER, e un PRIMARY KEY nemmeno. `id` è
+                           riempito dal `rowid`, che `parser_chats` può riferire
 
 chats
   id, telegram_chat_id, message_thread_id, title, type, owner_user_id, verified_at
-  unique (telegram_chat_id, message_thread_id)
+  unique (telegram_chat_id, IFNULL(message_thread_id, ''))
+                           l'`IFNULL` NON è cosmetico: in SQL `NULL != NULL`, quindi
+                           un UNIQUE sulla coppia non deduplica le chat senza topic
 
 parser_chats
   parser_id, chat_id
   primary key (parser_id, chat_id)
 
-signals
-  id, parser_id, csv, expires_at, created_at
-  una sola riga viva per parser
+signals            ← tabella PREESISTENTE, estesa con ALTER additivo
+  id, csv, parser, profile, created_at, expires_at,   ← formato originale
+  user_id                                             ← destinazione nuova
+  una sola riga viva per parser. `profile` continua a governare il feed: il
+  passaggio a `user_id` è del PR sul feed per utente, non di questo
 
 message_logs
-  id, parser_id, chat_id, text, matched, created_at
+  id, user_id, parser_id, chat_id, text, esito, created_at
   mai token, mai segreti
 
 chat_verifications
-  code (unique), user_id, expires_at, consumed_at
+  code (primary key), user_id, expires_at, consumed_at
+
+access_requests
+  id, user_id, created_at, decided_at, decided_by, granted_days, outcome
+
+admin_audit
+  id, admin_user_id, target_user_id, action, created_at
+
+feed_reads
+  token_id, giorno, ip_hash
+  primary key (token_id, giorno, ip_hash)
+
+webhook_seen
+  update_id (primary key), created_at
+  il dedup delle riconsegne di Telegram: senza, una riconsegna riscrive il
+  segnale e fa ripartire il TTL
+
+profiles           ← tabella PREESISTENTE, invariata
+  name (primary key), chat_ids, parser
+  resta la fonte del filtro delle chat finché il dispatch multi-parser non arriva
 ```
+
+`webhook_seen`, `message_logs` e `feed_reads` **esistono ma nessun codice le legge
+ancora**: il dedup degli `update_id`, i log persistenti e il conteggio delle letture
+sono comportamenti dei PR successivi. Le tabelle nascono adesso perché aggiungerle
+dopo vorrebbe dire una seconda migrazione su un database con dati dei clienti;
+dichiararle funzionanti sarebbe la copertura finta che `CLAUDE.md` vieta.
+
+### Cosa fa la migrazione con i dati che trova
+
+`migra()` **non cancella e non rinomina nessuna tabella, e non perde nessuna
+associazione**, gira **una volta per processo** (non a ogni connessione) e sta sul
+percorso di `db()`.
+
+La formulazione è più precisa di quella che stava qui («non cancella niente»), che dalla
+deduplica in poi era falsa: le righe `chats` **duplicate** vengono rimosse, dopo aver
+ri-puntato su quella sopravvissuta chi le riferiva. Nessuna informazione se ne va —
+la riga rimossa era una copia — ma «niente» era la parola sbagliata, ed è il tipo di
+imprecisione che questo documento esiste per non avere. Segnalato da CodeRabbit.
+Le righe di `users` invece non si cancellano mai, perché possiedono dati: vedi sotto.
+
+Dal fatto che `migra()` sta sul percorso di `db()` viene il vincolo che ne governa la
+forma: **non può sollevare per dati che esistono**, perché sollevare lì significa 500 su
+ogni richiesta, feed di XTrader compreso, e nessun riavvio lo cambierebbe. **Cinque**
+stati dei dati veri lo avrebbero fatto, tutti trovati da review o da test e tutti chiusi
+con una disambiguazione deterministica invece di un errore:
+
+- due parser i cui nomi differiscono solo per maiuscole → `slug` uguale → `-2`, `-3`;
+- due profili nella stessa condizione → stesso trattamento su `users.slug`;
+- **due profili che elencano la stessa chat** → una sola riga in `chats`, e la
+  proprietà resta al primo che l'ha dichiarata (`id` più basso). È la regola 3 di
+  «Regole di isolamento» applicata: una chat appartiene a un solo utente. Chi
+  puntava alla riga scartata viene **ri-puntato** su quella sopravvissuta, perché
+  cancellare senza ri-puntare lascerebbe un `parser_chats.chat_id` che riferisce un
+  `id` inesistente — un parser che smette di ricevere in silenzio. Il ri-puntamento è
+  `UPDATE OR IGNORE` seguito da una `DELETE`, perché `parser_chats` ha
+  `PRIMARY KEY (parser_id, chat_id)`: un parser associato a **entrambe** le righe
+  duplicate produrrebbe altrimenti una riga che esiste già, cioè un altro modo di
+  rendere la migrazione non attraversabile, dentro la correzione che ne chiudeva uno;
+- **due utenti con lo stesso `origin_profile`**, cioè lo stato che l'assenza di indice
+  sui database già migrati permetteva → l'etichetta resta a **una sola** riga e sulle
+  altre diventa NULL. Qui **non si cancella nessuna riga**, a differenza delle chat:
+  una riga di `users` possiede chat, parser e segnali, e cancellarla perderebbe dati di
+  un cliente. Ma azzerare l'etichetta **non basta**: ciò che la riga perdente possiede
+  — chat, segnali, parser — viene **trasferito al superstite** prima di togliergliela,
+  altrimenti quei dati restano su un utente che non risulta più quel profilo, cioè
+  nessuno li rivendica e per il codice multiutente sono di un altro. Nel trasferimento
+  dei parser lo **slug che collide** viene ri-disambiguato: `UNIQUE (user_id, slug)`
+  vieta la coppia, e due parser di utenti diversi con lo stesso slug sono uno stato
+  legale sotto quel vincolo — quindi esiste, e uno `UPDATE` in blocco vi sbatterebbe
+  contro. A cambiare nome è chi arriva, non chi era già del destinatario, che potrebbe
+  avere quello slug in un URL già in uso.
+
+  **Chi vince** fra due righe con la stessa etichetta è chi ha un `telegram_id`, e solo a
+  parità l'`id` più basso: quella riga è l'identità con cui l'utente **accede**, mentre
+  la riga creata dal travaso è un segnaposto. Tenere l'id minimo a prescindere
+  sposterebbe i dati sul segnaposto e lascerebbe vuoto l'account del login, cioè
+  separerebbe proprietà e identità.
+
+  Ciò che si sposta è **tutto** ciò che riferisce l'utente, elencato in
+  `RIFERIMENTI_UTENTE`: `chats.owner_user_id`, `signals.user_id`,
+  `message_logs.user_id`, `chat_verifications.user_id`, `access_requests.user_id` e
+  `.decided_by`, `admin_audit.admin_user_id` e `.target_user_id` — più i parser, che
+  passano dalla funzione dedicata perché devono anche ri-disambiguare lo slug. Un test
+  confronta quell'elenco con lo schema reale, così una colonna nuova che riferisce un
+  utente non può restare fuori in silenzio.
+
+Il ri-puntamento di `parser_chats` sposta **solo** le associazioni dei parser che
+appartengono al proprietario della chat sopravvissuta. Con la stessa chat rivendicata da
+due utenti — la riga del primo sopravvive, quella del secondo viene scartata — spostare
+tutto aggancerebbe un parser del secondo alla chat del primo: un legame fra utenti
+diversi, che nel dispatch significa i segnali di una chat consegnati al feed sbagliato.
+La correzione non è spostare meglio, è **non spostare**: la chat appartiene a un solo
+utente, quindi l'associazione di un parser altrui è illegittima e viene rimossa.
+
+Un indice UNIQUE non si crea su una tabella che contiene già duplicati: ogni vincolo
+nuovo va quindi preceduto dalla deduplica di ciò che esiste, o la migrazione muore
+proprio sul database che doveva proteggere. È la stessa classe tre volte in questo PR,
+e la terza l'ho reintrodotta subito dopo aver chiuso la seconda.
+
+Chi vince, quando due profili rivendicano la stessa cosa — una chat o un parser — è
+deciso da un **`ORDER BY name` esplicito** sul ciclo dei profili. Senza, «il primo»
+significa «il primo che la tabella restituisce», cioè l'ordine di inserimento: due
+database con gli stessi profili creati in ordine diverso davano proprietari diversi.
+
+E `COLONNE_MULTIUTENTE` porta anche le **due colonne legacy** `signals.profile` e
+`signals.expires_at`, che non sono nuove: su un database creato prima dei profili il
+`CREATE TABLE IF NOT EXISTS` non fa nulla, la tabella esiste senza di esse, e la
+`UPDATE signals SET profile=?` muore con «no such column: profile». Erano due `ALTER`
+del codice precedente che questa riscrittura aveva perso.
+
+Le colonne aggiunte a `parsers` sono riempite da `_completa_colonne_nuove()`, che la
+migrazione chiama **e** che chiama `POST /api/parsers`. Le due chiamate non sono un
+duplicato: `migra()` gira una volta per processo, quindi senza la seconda un parser
+creato dopo l'avvio resterebbe senza `user_id`, `slug`, `ordine` e `id` fino al riavvio
+successivo — cioè fuori dall'indice `UNIQUE (user_id, slug)`, che con `user_id` NULL
+non vincola niente, e non riferibile da `parser_chats`.
+
+**L'appartenenza di un parser si legge da `profiles.parser`**, non si assume: il
+travaso assegna il parser di ciascun profilo all'utente di quel profilo. Solo i parser
+che nessun profilo nomina finiscono al proprietario per difetto — quelli non hanno
+un'appartenenza da leggere, e lasciarli senza `user_id` li terrebbe fuori dall'indice
+`UNIQUE (user_id, slug)`. Due profili che nominano lo stesso parser lo lasciano al
+primo, come per le chat condivise e per la stessa ragione.
+
+Il **proprietario per difetto è un argomento obbligatorio** di quella funzione, non una
+costante al suo interno. Oggi entrambi i chiamanti passano `PIERO`, che è l'unico utente; il giorno
+che l'endpoint servirà più utenti va passato il proprietario della sessione, e la
+decisione è visibile nei due punti che la prendono invece di essere sepolta in una
+funzione di migrazione. **Resta aperto**, e appartiene al PR sul login: a chi
+appartiene un parser creato da un amministratore per conto di un altro utente.
+
+Per la stessa ragione quell'endpoint non fa più `INSERT OR REPLACE`: `REPLACE` cancella
+la riga e la reinserisce, quindi cambiare l'header di un parser lo staccherebbe dal suo
+utente azzerandone l'`id`. Fa invece `INSERT OR IGNORE` seguito da `UPDATE`, e non
+`ON CONFLICT DO UPDATE`, che sarebbe più compatto: l'UPSERT richiede SQLite ≥ 3.24 e la
+versione in produzione non è misurabile da qui, quindi la dipendenza è stata rimossa
+anziché documentata.
+
+A quale dei due utenti debba appartenere una chat che entrambi rivendicano *davvero*
+è una decisione del PR sul dispatch multi-parser, dove il webhook deve sceglierne uno;
+qui è fissata come «il primo», e un test la tiene ferma perché il giorno che cambia si
+veda.
 
 ## Regole di isolamento
 
@@ -505,7 +682,8 @@ senza doppio ruolo.
 |---|---|
 | Fatto | Prototipo web app in `web/`, servito su `/app`, con motore di parsing e contratto API |
 | Fatto | Test hard del motore e del contratto CSV (`tests/engine/`), guardia sui workflow di review (`tests/safety/`) |
-| M1 | Postgres, tabelle utenti/parser/chat, token hashati, verifica chat, feed per parser, compatibilità `/xtrader.csv` |
+| Fatto | Lo **schema** di questa sezione, creato in place su SQLite da `migra()`, con i dati esistenti travasati e i test in `tests/relay/test_schema.py`. Le tabelle esistono e i vincoli reggono; il *comportamento* che le usa è dei PR sotto |
+| M1 | Token hashati, verifica chat, feed per utente, compatibilità `/xtrader.csv`. **Postgres differito** e non più urgente: i dati persistono già, `DB_PATH` in produzione è `/data/signals.db` dentro il volume (misurato il 12/08/2026) |
 | M2 | Motore di parsing generico in Python, endpoint di test, dispatch multi-parser nel webhook |
 | M3 | Login Telegram reale, sessioni, la web app collegata al backend |
 | M4 | Log persistenti, sospensione, suggerimento AI lato server, abbonamenti |

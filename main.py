@@ -342,25 +342,530 @@ class ProfileIn(BaseModel):
     parser: str = DEFAULT_PARSER
 
 
+# Le tre tabelle con cui il servizio e' nato. Restano con QUESTI nomi e questa
+# forma: gli endpoint le leggono, e questa migrazione non cambia il comportamento
+# di nessuna rotta. Lo scambio delle letture verso lo schema multiutente e' un
+# lavoro successivo (PR 8/9/12 della roadmap in #2).
+SCHEMA_ORIGINALE = (
+    'CREATE TABLE IF NOT EXISTS signals (id INTEGER PRIMARY KEY AUTOINCREMENT,'
+    ' csv TEXT NOT NULL, parser TEXT, profile TEXT,'
+    ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP, expires_at INTEGER)',
+    'CREATE TABLE IF NOT EXISTS parsers (name TEXT PRIMARY KEY, header TEXT NOT NULL,'
+    ' market_name TEXT, market_type TEXT, selection_name TEXT, handicap TEXT, bet_type TEXT)',
+    'CREATE TABLE IF NOT EXISTS profiles (name TEXT PRIMARY KEY, chat_ids TEXT NOT NULL,'
+    ' parser TEXT NOT NULL)',
+)
+
+# Lo schema multiutente deciso in #2. NOVE tabelle nuove: `users` e `chats` e le
+# altre non esistevano, quindi si creano.
+#
+# `parsers` e `signals` NON sono qui, e la ragione e' un vincolo reale: esistono
+# gia' con una forma diversa, e SQLite non ammette due tabelle con lo stesso nome.
+# Creare `parsers_v2` accanto a `parsers` avrebbe lasciato due fonti per la stessa
+# cosa — esattamente cio' che la regola 3 vieta — e rinominare le vecchie avrebbe
+# rotto ogni endpoint. Si estendono invece con ALTER additivo, vedi
+# `COLONNE_MULTIUTENTE`.
+#
+# `token_hash` e `token_prefix` stanno su `users` e non sui parser: il feed e il
+# timer appartengono all'utente, il parser possiede solo configurazione e log. E'
+# la correzione del modello sbagliato del prototipo, registrata in #2.
+SCHEMA_MULTIUTENTE = (
+    # `origin_profile` e' il profilo da cui la migrazione ha creato questo utente, e
+    # serve come CHIAVE STABILE per ritrovarlo ai riavvii successivi. Prima il
+    # travaso cercava per `first_name`, che non e' univoco: al primo login Telegram di
+    # un omonimo, chat, segnali e parser sarebbero passati a lui. `first_name` non va
+    # nemmeno bene come chiave in se', perche' il login lo SOVRASCRIVE col nome vero.
+    # NULL per chi non viene da un profilo, ed e' il caso normale dei prossimi utenti.
+    # Segnalato da Claude Fable 5 sulla PR #22.
+    'CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT,'
+    ' origin_profile TEXT UNIQUE,'
+    ' telegram_id TEXT UNIQUE, username TEXT, first_name TEXT, slug TEXT UNIQUE,'
+    ' token_hash TEXT, token_prefix TEXT,'
+    " status TEXT NOT NULL DEFAULT 'registrato', access_expires_at INTEGER,"
+    ' telegram_reachable INTEGER NOT NULL DEFAULT 0,'
+    ' session_version INTEGER NOT NULL DEFAULT 1,'
+    ' is_admin INTEGER NOT NULL DEFAULT 0,'
+    ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP)',
+    'CREATE TABLE IF NOT EXISTS chats (id INTEGER PRIMARY KEY AUTOINCREMENT,'
+    ' telegram_chat_id TEXT NOT NULL, message_thread_id TEXT, title TEXT, type TEXT,'
+    ' owner_user_id INTEGER, verified_at INTEGER,'
+    ' UNIQUE (telegram_chat_id, message_thread_id))',
+    'CREATE TABLE IF NOT EXISTS parser_chats (parser_id INTEGER NOT NULL,'
+    ' chat_id INTEGER NOT NULL, PRIMARY KEY (parser_id, chat_id))',
+    'CREATE TABLE IF NOT EXISTS message_logs (id INTEGER PRIMARY KEY AUTOINCREMENT,'
+    ' user_id INTEGER, parser_id INTEGER, chat_id INTEGER, text TEXT, esito TEXT,'
+    ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP)',
+    'CREATE TABLE IF NOT EXISTS chat_verifications (code TEXT PRIMARY KEY,'
+    ' user_id INTEGER, expires_at INTEGER, consumed_at INTEGER)',
+    'CREATE TABLE IF NOT EXISTS access_requests (id INTEGER PRIMARY KEY AUTOINCREMENT,'
+    ' user_id INTEGER, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,'
+    ' decided_at INTEGER, decided_by INTEGER, granted_days INTEGER, outcome TEXT)',
+    'CREATE TABLE IF NOT EXISTS admin_audit (id INTEGER PRIMARY KEY AUTOINCREMENT,'
+    ' admin_user_id INTEGER, target_user_id INTEGER, action TEXT,'
+    ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP)',
+    'CREATE TABLE IF NOT EXISTS feed_reads (token_id INTEGER, giorno TEXT,'
+    ' ip_hash TEXT, PRIMARY KEY (token_id, giorno, ip_hash))',
+    # `update_id` UNIQUE e' il dedup dei webhook duplicati: Telegram riconsegna, e
+    # senza questa tabella una riconsegna riscrive il segnale e fa ripartire il TTL.
+    'CREATE TABLE IF NOT EXISTS webhook_seen (update_id TEXT PRIMARY KEY,'
+    ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP)',
+)
+
+# «Nessun topic» si scrive NULL, e in SQL `NULL != NULL`: ogni confronto fra chat
+# deve quindi passare da questa espressione, o due righe identiche si sfuggono a
+# vicenda. Sta qui, in UNA forma, perche' serve in tre punti — l'indice UNIQUE, il
+# controllo di esistenza del travaso, la deduplica — e ricopiarla sarebbe tre
+# occasioni di divergere su una sottigliezza che non solleva quando sbagli.
+# Ogni colonna che riferisce `users.id`, in UNA lista. Serve alla riconciliazione di due
+# utenti duplicati, che deve spostare TUTTO cio' che punta al perdente: dimenticarne una
+# lascia dati agganciati a un utente che non e' piu' quel profilo, cioe' dati che nessuno
+# rivendica. `[REAL_FINDING]` di GPT-5.6 Sol, che ne aveva viste quattro mancanti.
+#
+# `parsers.user_id` non e' qui perche' passa da `_trasferisci_parser`, che deve anche
+# ri-disambiguare lo slug. La convenzione di nome e' vincolata da un test: una colonna
+# nuova che si chiama come queste e non entra nell'elenco fa diventare rosso quel test,
+# che e' l'unico modo perche' la lista non resti indietro.
+RIFERIMENTI_UTENTE = (
+    ('chats', 'owner_user_id'),
+    ('signals', 'user_id'),
+    ('message_logs', 'user_id'),
+    ('chat_verifications', 'user_id'),
+    ('access_requests', 'user_id'),
+    ('access_requests', 'decided_by'),
+    ('admin_audit', 'admin_user_id'),
+    ('admin_audit', 'target_user_id'),
+)
+
+# I nomi che per convenzione riferiscono un utente. Il test li usa per trovare le colonne
+# che DOVREBBERO essere in `RIFERIMENTI_UTENTE`.
+NOMI_DI_RIFERIMENTO_UTENTE = ('user_id', 'owner_user_id', 'admin_user_id',
+                              'target_user_id', 'decided_by')
+
+TOPIC_CHAT = "IFNULL(message_thread_id, '')"
+CHIAVE_CHAT = f'telegram_chat_id, {TOPIC_CHAT}'
+
+# Colonne aggiunte alle due tabelle che esistono gia'. Additive e nullable: una
+# colonna in piu' non cambia nessuna `SELECT` esistente, perche' tutte nominano le
+# colonne che leggono invece di usare `SELECT *`. Verificato prima di scriverle.
+COLONNE_MULTIUTENTE = (
+    ('parsers', 'user_id', 'INTEGER'),
+    ('parsers', 'slug', 'TEXT'),
+    ('parsers', 'config_json', 'TEXT'),
+    ('parsers', 'active', 'INTEGER DEFAULT 1'),
+    # `ordine` decide chi vince quando due parser dello stesso utente riconoscono
+    # lo stesso messaggio. Serve un ORDER BY esplicito, e va mostrato in UI.
+    ('parsers', 'ordine', 'INTEGER'),
+    ('parsers', 'created_at', 'DATETIME'),
+    # `parser_chats.parser_id` e' INTEGER e `parsers` aveva solo `name` TEXT: quella
+    # tabella nasceva MORTA, nessuna colonna a cui riferirsi. #2 prevede `parsers id`
+    # e mancava perche' un PRIMARY KEY non si aggiunge con ALTER — si aggiunge come
+    # colonna con indice UNIQUE, riempita dal `rowid`. Segnalato da GPT-5.5.
+    ('parsers', 'id', 'INTEGER'),
+    # Le DUE colonne legacy, e stanno qui perche' le avevo PERSE riscrivendo la
+    # migrazione. Il codice precedente le aggiungeva con due `try/except` e il commento
+    # «Migrate databases created before profile support»: su un database creato prima
+    # dei profili il `CREATE TABLE IF NOT EXISTS` non fa niente — la tabella esiste — e
+    # senza questi ALTER la `UPDATE signals SET profile=?` piu' sotto muore con
+    # «no such column: profile», cioe' 500 su ogni richiesta per sempre.
+    # `[REAL_FINDING]` di GPT-5.6 Sol: e' la regola 5 violata da me, e la regola 2-bis
+    # — ho riscritto una funzione senza cercare tutto cio' che faceva.
+    ('signals', 'profile', 'TEXT'),
+    ('signals', 'expires_at', 'INTEGER'),
+    # I segnali passano da per-PROFILO a per-UTENTE. La colonna vecchia `profile`
+    # resta e continua a governare il feed: qui si aggiunge solo la destinazione.
+    ('signals', 'user_id', 'INTEGER'),
+    # Per i database creati da una versione intermedia di QUESTO ramo, dove `users`
+    # esiste gia' senza `origin_profile`. Sulla tabella creata da zero l'ALTER trova
+    # la colonna e l'errore «duplicate column name» viene ingoiato, come per le altre.
+    ('users', 'origin_profile', 'TEXT'),
+)
+
+# I percorsi gia' migrati in QUESTO processo. Prima la migrazione girava a ogni
+# `db()`, cioe' a ogni richiesta: tre CREATE TABLE, due ALTER, due INSERT OR
+# IGNORE, una UPDATE e un COMMIT — una transazione di SCRITTURA anche sulle
+# letture del feed, che XTrader interroga a raffica. Funzionava perche' e'
+# idempotente, non perche' fosse progettato. Con undici tabelle quel costo si
+# moltiplicherebbe sul percorso piu' caldo del servizio.
+#
+# Un insieme di percorsi e non un booleano: i test usano un database per test
+# nello stesso processo, e un flag globale li lascerebbe senza schema.
+_PERCORSI_MIGRATI: set = set()
+_LOCK_MIGRAZIONE = threading.Lock()
+
+
+def migra(c):
+    """Porta il database allo schema corrente. Idempotente: si puo' rieseguire.
+
+    Non cancella e non rinomina niente. Le tre tabelle originali restano con la
+    loro forma, gli endpoint continuano a leggerle, e nessuna rotta cambia
+    comportamento — se questa migrazione avesse un difetto il servizio funziona
+    comunque e si corregge senza aver perso dati. E' la scelta deliberata per il
+    cambiamento piu' rischioso del progetto: in produzione il database sta su un
+    volume e contiene i parser veri del proprietario.
+
+    L'idempotenza non e' un'aspirazione: `CREATE TABLE IF NOT EXISTS`, `ALTER`
+    dentro un `try` che ingoia solo «duplicate column name», e `INSERT OR IGNORE`.
+    Il test la esegue due volte di fila su un database popolato e confronta.
+    """
+    for istruzione in SCHEMA_ORIGINALE + SCHEMA_MULTIUTENTE:
+        c.execute(istruzione)
+    for tabella, colonna, tipo in COLONNE_MULTIUTENTE:
+        try:
+            c.execute(f'ALTER TABLE {tabella} ADD COLUMN {colonna} {tipo}')
+        except sqlite3.OperationalError as e:
+            # SOLO la colonna che esiste gia'. Prima questo `except` era nudo e
+            # avrebbe ingoiato anche «no such table», cioe' uno schema mancante.
+            if 'duplicate column name' not in str(e).lower():
+                raise
+    c.execute('INSERT OR IGNORE INTO parsers(name,header,market_name,market_type,'
+              'selection_name,handicap,bet_type) VALUES (?,?,?,?,?,?,?)',
+              (DEFAULT_PARSER, 'P.Bet. PREMACHT 0,5HT', 'Over/Under 1,5 gol',
+               'OVER_UNDER_15', 'Over 1,5 goal', '0', 'PUNTA'))
+    # Preserve the existing Telegram setup as the default PIERO feed.
+    c.execute('INSERT OR IGNORE INTO profiles(name,chat_ids,parser) VALUES (?,?,?)',
+              (PIERO_PROFILE, os.getenv('TELEGRAM_ALLOWED_CHAT_IDS', ''), DEFAULT_PARSER))
+    c.execute('UPDATE signals SET profile=? WHERE profile IS NULL', (PIERO_PROFILE,))
+    _travasa_nel_multiutente(c)
+    c.commit()
+
+
+def _slug_libero(base, presi):
+    """Uno slug non ancora usato, derivato da `base` in modo DETERMINISTICO.
+
+    Non casuale, e non e' un dettaglio: la migrazione rigira a ogni riavvio, e uno
+    slug casuale rinominerebbe le cose dei clienti ogni volta. Con l'ordine di
+    partenza fisso, `Uno`/`UNO`/`uno` danno sempre `uno`, `uno-2`, `uno-3`.
+    """
+    if base not in presi:
+        return base
+    for n in range(2, 10_000):
+        candidato = f'{base}-{n}'
+        if candidato not in presi:
+            return candidato
+    raise RuntimeError(f'impossibile disambiguare lo slug {base!r}')
+
+
+def _assegna_slug_e_ordine(c):
+    """Slug univoci e `ordine` deterministico ai parser che ne sono senza.
+
+    Esiste per un bloccante misurato sulla PR #22, ed era il piu' grave introdotto
+    finora: `slug = lower(name)` mandava `Over15` e `over15` sullo stesso slug,
+    l'indice UNIQUE non si creava, `migra()` sollevava — e `migra()` sta sul percorso
+    di `db()`, cioe' di OGNI richiesta. Il feed avrebbe iniziato a dare 500 e non
+    avrebbe piu' smesso.
+
+        IntegrityError: UNIQUE constraint failed: parsers.user_id, parsers.slug
+
+    Segnalato insieme da Claude Fable 5 e GPT-5.5. La lezione e' che una migrazione
+    sul percorso di ogni richiesta non puo' sollevare per dati che esistono: qualunque
+    stato del database deve poter essere attraversato.
+
+    Si assegna solo a chi ha `slug`/`ordine` a NULL: chi ne ha gia' uno lo tiene, cosi'
+    un ordine scelto dall'utente non viene sovrascritto al riavvio successivo.
+    """
+    presi = {r[0] for r in c.execute(
+        'SELECT slug FROM parsers WHERE slug IS NOT NULL').fetchall()}
+    massimo = c.execute('SELECT MAX(ordine) FROM parsers').fetchone()[0]
+    prossimo = (massimo + 1) if massimo is not None else 0
+    # `ORDER BY name` e' cio' che rende stabile la disambiguazione: due esecuzioni
+    # incontrano gli stessi nomi nello stesso ordine.
+    for (nome,) in c.execute(
+            'SELECT name FROM parsers WHERE slug IS NULL OR ordine IS NULL'
+            ' ORDER BY name').fetchall():
+        riga = c.execute('SELECT slug, ordine FROM parsers WHERE name=?', (nome,)).fetchone()
+        slug, ordine = riga
+        if slug is None:
+            slug = _slug_libero(nome.lower(), presi)
+            presi.add(slug)
+            c.execute('UPDATE parsers SET slug=? WHERE name=?', (slug, nome))
+        if ordine is None:
+            c.execute('UPDATE parsers SET ordine=? WHERE name=?', (prossimo, nome))
+            prossimo += 1
+
+
+def _trasferisci_parser(c, da_utente, a_utente):
+    """Passa i parser di un utente a un altro, ri-disambiguando gli slug che collidono.
+
+    Un `UPDATE parsers SET user_id=?` in blocco solleverebbe se i due utenti hanno un
+    parser con lo stesso slug: `UNIQUE (user_id, slug)` vieta la coppia, e sotto quel
+    vincolo due parser di due utenti diversi con lo stesso slug sono uno stato legale —
+    quindi lo stato esiste e la scrittura lo incontra. Misurato:
+    `IntegrityError: UNIQUE constraint failed: parsers.user_id, parsers.slug`, cioe'
+    `migra()` che solleva sul percorso di ogni richiesta. Bloccante di GPT-5.5.
+
+    Chi era GIA' del destinatario tiene il suo slug: a cambiare nome e' chi arriva, che
+    e' l'unico ordine sensato — l'altro potrebbe essere in un URL che qualcuno usa.
+    `ORDER BY name` per lo stesso motivo di `_assegna_slug_e_ordine`: due esecuzioni
+    devono disambiguare allo stesso modo.
+    """
+    for nome, slug in c.execute(
+            'SELECT name, slug FROM parsers WHERE user_id=? ORDER BY name',
+            (da_utente,)).fetchall():
+        if slug is not None and c.execute(
+                'SELECT 1 FROM parsers WHERE user_id=? AND slug=?',
+                (a_utente, slug)).fetchone():
+            presi = {r[0] for r in c.execute(
+                'SELECT slug FROM parsers WHERE slug IS NOT NULL').fetchall()}
+            c.execute('UPDATE parsers SET slug=? WHERE name=?',
+                      (_slug_libero(slug, presi), nome))
+        c.execute('UPDATE parsers SET user_id=? WHERE name=?', (a_utente, nome))
+
+
+def _completa_colonne_nuove(c, profilo_proprietario):
+    """Riempie `user_id`, `id`, `slug` e `ordine` di ogni parser che ne e' senza.
+
+    `profilo_proprietario` e' OBBLIGATORIO e senza default, ed e' una scelta contro un
+    difetto futuro: la funzione assegna a quell'utente ogni parser senza proprietario,
+    e con `PIERO_PROFILE` cablato dentro il giorno in cui l'endpoint servira' piu'
+    utenti un parser creato per un altro finirebbe **in silenzio** sotto Piero.
+    Segnalato da Claude Fable 5 sulla PR #22. Come argomento, la decisione sta nei due
+    chiamanti — dove chi la cambiera' la vede — invece che nascosta qui dentro.
+
+    Chiamata dalla migrazione **e** dal salvataggio di un parser, e la ragione di
+    quest'ultimo e' un bloccante di Claude Fable 5 sulla PR #22: `migra()` gira una
+    volta per PROCESSO, quindi un parser creato via API dopo l'avvio restava con
+    quelle quattro colonne a NULL fino al riavvio successivo. Non e' cosmetico —
+    `parser_chats.chat_id` riferisce `parsers.id`, e l'indice `UNIQUE (user_id, slug)`
+    non vincola le righe con `user_id` NULL, perche' in SQL `NULL != NULL`: la riga
+    sfuggiva al vincolo che protegge l'isolamento (visto anche da GPT-5.5).
+
+    Una fonte unica e non due chiamate copiate: la regola 3, sulla parte del codice
+    dove una divergenza fra i due percorsi sarebbe invisibile.
+    """
+    proprietario = c.execute('SELECT id FROM users WHERE origin_profile=?',
+                             (profilo_proprietario,)).fetchone()
+    if proprietario:
+        c.execute('UPDATE parsers SET user_id=? WHERE user_id IS NULL', (proprietario[0],))
+    # `id` dal `rowid`, in una colonna vera: il `rowid` puo' cambiare con un VACUUM,
+    # quindi memorizzarlo e' l'unico modo perche' un riferimento resti valido.
+    c.execute('UPDATE parsers SET id=rowid WHERE id IS NULL')
+    _assegna_slug_e_ordine(c)
+
+
+def _travasa_nel_multiutente(c):
+    """I dati esistenti nello schema nuovo, senza toccare quelli vecchi.
+
+    `telegram_id` resta NULL: il proprietario non ha ancora fatto login Telegram e
+    inventarne uno creerebbe un utente che il login non riconoscerebbe. SQLite
+    ammette piu' NULL in una colonna UNIQUE, quindi il vincolo regge.
+
+    `token_hash` resta NULL per la stessa ragione: oggi il feed e' protetto da
+    `CSV_ACCESS_TOKEN`, uno per tutto il servizio. I token per utente nascono con
+    il feed per utente, e generarne uno qui vorrebbe dire scriverlo da qualche
+    parte — cioe' un segreto in piu' senza nessuno che lo usi.
+    """
+    # La deduplica di `origin_profile` viene PRIMA di tutto, e l'ordine e' il punto.
+    # Sta qui e non accanto al suo indice perche' i lookup del ciclo sotto risolvono
+    # l'utente PER `origin_profile`: con due righe duplicate il lookup ne pesca una
+    # arbitrariamente, e se pesca quella che poi perde l'etichetta, chat, segnali e
+    # parser finiscono attribuiti a un utente che non risulta piu' quel profilo.
+    # Deduplicando prima, ogni lookup risolve sulla riga sopravvissuta.
+    #
+    # Misurato con `PRAGMA reverse_unordered_selects = ON`, che inverte le scansioni
+    # non ordinate: utente superstite 1, proprietario della chat 2, segnale 2 —
+    # incoerente. Segnalato da CodeRabbit, marcato Trivial, ma e' attribuzione
+    # sbagliata fra utenti.
+    #
+    # NON si cancella nessuna riga, e la differenza con `chats` e' sostanziale: una
+    # riga di `users` possiede chat, parser e segnali, quindi cancellarla perderebbe
+    # dati di un cliente. L'etichetta resta all'`id` piu' basso. Serve anche perche' un
+    # indice UNIQUE non si crea su una tabella con duplicati: segnalato prima da Claude
+    # Fable 5 e GPT-5.5.
+    #
+    # Ma azzerare l'etichetta NON BASTA, e la prima versione si fermava li': la riga
+    # perdente restava proprietaria di cio' che possedeva, quindi quei dati finivano su
+    # un utente che non risulta piu' quel profilo — nessuno li rivendica, e per il
+    # codice multiutente sono di un altro. Misurato: superstite 1, chat 2, segnale 2.
+    # `[REAL_FINDING]` di GPT-5.6 Sol. Cio' che la perdente possiede si TRASFERISCE
+    # al superstite prima di togliere l'etichetta.
+    #
+    # Il trasferimento dei parser passa da `_trasferisci_parser`, che ri-disambigua lo
+    # slug quando collide. Qui c'era scritto che gli slug sono univoci GLOBALMENTE e che
+    # quindi spostare un parser non poteva violare `UNIQUE (user_id, slug)`: vero per il
+    # codice che li assegna, ma non e' un vincolo — il vincolo e' sulla COPPIA, e sotto
+    # quel vincolo due parser di due utenti con lo stesso slug sono uno stato legale.
+    # Misurato: `IntegrityError: UNIQUE constraint failed: parsers.user_id, parsers.slug`.
+    # Bloccante di GPT-5.5, ed era una regola appoggiata a una prova che non esiste.
+    for (etichetta,) in c.execute(
+            'SELECT origin_profile FROM users WHERE origin_profile IS NOT NULL'
+            ' GROUP BY origin_profile HAVING COUNT(*) > 1').fetchall():
+        # Vince chi ha un `telegram_id`, e solo a parita' l'`id` piu' basso. La riga con
+        # `telegram_id` e' quella con cui l'utente ACCEDE: tenere l'id minimo a
+        # prescindere sposterebbe i dati su un segnaposto senza identita', staccandoli
+        # dall'account con cui il proprietario fa login. `[REAL_FINDING]` di GPT-5.6 Sol.
+        # `(telegram_id IS NULL)` vale 0 per chi ce l'ha e 1 per chi no, quindi
+        # l'ordinamento mette davanti l'identita' vera e resta deterministico.
+        utenti = [r[0] for r in c.execute(
+            'SELECT id FROM users WHERE origin_profile=?'
+            ' ORDER BY (telegram_id IS NULL), id', (etichetta,)).fetchall()]
+        superstite, perdenti = utenti[0], utenti[1:]
+        for perdente in perdenti:
+            for tabella, colonna in RIFERIMENTI_UTENTE:
+                c.execute(f'UPDATE {tabella} SET {colonna}=? WHERE {colonna}=?',
+                          (superstite, perdente))
+            _trasferisci_parser(c, perdente, superstite)
+            c.execute('UPDATE users SET origin_profile=NULL WHERE id=?', (perdente,))
+    # `ORDER BY name` non e' decorazione: decide CHI vince quando due profili
+    # rivendicano la stessa cosa — una chat o un parser. Senza, «il primo» significa
+    # «il primo che la tabella restituisce», cioe' l'ordine di inserimento: due database
+    # con gli stessi profili creati in ordine diverso davano proprietari diversi.
+    # `[REAL_FINDING]` di GPT-5.6 Sol, e lo stesso difetto che avevo gia' corretto per
+    # gli slug — non trovato allora perche' avevo cercato il sito e non la classe.
+    for profilo, chat_ids, parser_del_profilo in c.execute(
+            'SELECT name, chat_ids, parser FROM profiles ORDER BY name').fetchall():
+        # Lo slug dell'utente ha la stessa collisione dei parser — due profili che
+        # differiscono solo per maiuscole — e la stessa conseguenza: `users.slug` e'
+        # UNIQUE, quindi l'INSERT solleverebbe e il servizio non partirebbe. Cercata
+        # perche' era la stessa forma, non perche' qualcuno l'avesse segnalata come
+        # bloccante (GPT-5.5 l'aveva vista come rischio manuale).
+        riga = c.execute('SELECT id FROM users WHERE origin_profile=?', (profilo,)).fetchone()
+        if riga is None:
+            presi = {r[0] for r in c.execute('SELECT slug FROM users').fetchall()}
+            c.execute('INSERT INTO users(origin_profile, slug, first_name, status, is_admin)'
+                      ' VALUES (?,?,?,?,?)',
+                      (profilo, _slug_libero(profilo.lower(), presi), profilo,
+                       'attivo' if profilo == PIERO_PROFILE else 'registrato',
+                       1 if profilo == PIERO_PROFILE else 0))
+            riga = c.execute('SELECT id FROM users WHERE origin_profile=?', (profilo,)).fetchone()
+        if not riga:
+            continue
+        utente = riga[0]
+        # Le chat: da stringa separata da virgole a righe. `message_thread_id` resta
+        # NULL — i topic dei gruppi non sono ancora gestiti.
+        #
+        # Il controllo di esistenza e' ESPLICITO, e prima era un `INSERT OR IGNORE`
+        # che non ignorava niente: il vincolo UNIQUE sulla tabella e' sulla coppia
+        # `(telegram_chat_id, message_thread_id)`, e con `message_thread_id` NULL non
+        # deduplica (vedi `TOPIC_CHAT`). Due profili che elencano la stessa chat
+        # inserivano quindi due righe, l'indice sull'espressione qui sotto non si
+        # poteva piu' creare, e `migra()` sollevava a ogni richiesta.
+        for chat in sorted({x.strip() for x in (chat_ids or '').split(',') if x.strip()}):
+            gia = c.execute(f'SELECT id FROM chats WHERE telegram_chat_id=?'
+                            f' AND {TOPIC_CHAT}=?', (chat, '')).fetchone()
+            if gia is None:
+                c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id)'
+                          ' VALUES (?,?)', (chat, utente))
+        c.execute('UPDATE signals SET user_id=? WHERE profile=? AND user_id IS NULL',
+                  (utente, profilo))
+        # Il parser che questo profilo usa appartiene a QUESTO utente. Prima tutti i
+        # parser senza proprietario finivano al proprietario per difetto, quindi con due
+        # profili il parser del secondo passava a Piero — e l'informazione giusta era
+        # nella riga che questo ciclo stava gia' leggendo. `[REAL_FINDING]` di GPT-5.6
+        # Sol, piu' preciso della segnalazione gemella di Fable 5: non «un giorno
+        # assegnera' male» ma «assegna male adesso», e un secondo profilo si crea da
+        # `POST /api/profiles`.
+        #
+        # `AND user_id IS NULL` perche' un'attribuzione gia' fatta non si sovrascrive:
+        # due profili che nominano lo stesso parser lo lasciano al primo, come per le
+        # chat condivise e per la stessa ragione.
+        if parser_del_profilo:
+            c.execute('UPDATE parsers SET user_id=? WHERE name=? AND user_id IS NULL',
+                      (utente, parser_del_profilo))
+    # Utente, `id`, `slug` e `ordine` dei parser: vedi `_completa_colonne_nuove`, che
+    # e' la stessa funzione chiamata dal salvataggio di un parser. Il proprietario e'
+    # PIERO perche' oggi i parser esistenti sono i suoi, ed e' l'unico utente.
+    _completa_colonne_nuove(c, PIERO_PROFILE)
+    # I parser di uno stesso utente non possono avere due volte lo stesso slug:
+    # e' il vincolo `UNIQUE (user_id, slug)` di #2, che su una tabella esistente
+    # non si puo' aggiungere con ALTER e si esprime come indice.
+    c.execute('CREATE UNIQUE INDEX IF NOT EXISTS parsers_utente_slug'
+              ' ON parsers (user_id, slug)')
+    c.execute('CREATE UNIQUE INDEX IF NOT EXISTS parsers_id ON parsers (id)')
+    # `users.origin_profile` e' UNIQUE nel CREATE TABLE, ma un database che riceve la
+    # colonna dall'ALTER non ha il vincolo: SQLite non sa aggiungerne con ADD COLUMN.
+    # I due percorsi finivano quindi con garanzie diverse, e quello senza garanzia era
+    # proprio quello dei database che esistono gia' — dove due righe con lo stesso
+    # profilo renderebbero ambiguo il lookup che `origin_profile` esiste per rendere
+    # certo. Segnalato in modo indipendente da GPT-5.5 e Claude Fable 5.
+    # I NULL multipli restano ammessi, ed e' cio' che serve: chi non viene da un
+    # profilo — tutti i prossimi utenti — ha questa colonna vuota.
+    #
+    c.execute('CREATE UNIQUE INDEX IF NOT EXISTS users_origin_profile'
+              ' ON users (origin_profile)')
+    # `UNIQUE (telegram_chat_id, message_thread_id)` sulla tabella NON deduplica le
+    # chat senza topic, e non e' un dettaglio: in SQL `NULL != NULL`, quindi due
+    # righe con la stessa chat e `message_thread_id` NULL sono entrambe ammesse.
+    # Misurato: la seconda esecuzione della migrazione duplicava tutte le chat, e il
+    # test sul duplicato non sollevava. Un indice sull'ESPRESSIONE chiude il buco
+    # senza rendere la colonna obbligatoria — «nessun topic» resta NULL, che e' il
+    # suo significato, invece di diventare una stringa vuota che sembra un valore.
+    #
+    # Prima dell'indice, la deduplica di cio' che esiste GIA'. Non e' una cintura in
+    # piu': l'indice UNIQUE non si puo' creare su una tabella che contiene duplicati,
+    # quindi su un database in quello stato `migra()` sollevava — e `migra()` sta sul
+    # percorso di `db()`, cioe' di ogni richiesta, feed di XTrader compreso. L'indice
+    # che serve a impedire i duplicati non si poteva creare a causa dei duplicati, e
+    # nessun riavvio lo avrebbe cambiato.
+    #
+    # Sopravvive la riga con l'`id` piu' basso, cioe' il primo che ha dichiarato la
+    # chat. Le associazioni che puntavano alle altre vengono RIPUNTATE prima della
+    # cancellazione: senza, resterebbe una riga di `parser_chats` che riferisce un
+    # `id` inesistente e il parser smetterebbe di ricevere da quella chat in silenzio.
+    # Oggi nessun codice scrive in `parser_chats`, quindi il ripuntamento non ha
+    # ancora niente da salvare; il PR sul dispatch lo trovera' fatto invece di
+    # scoprirlo su dati di un cliente.
+    for chat, topic in c.execute(f'SELECT {CHIAVE_CHAT} FROM chats'
+                                 f' GROUP BY {CHIAVE_CHAT} HAVING COUNT(*) > 1').fetchall():
+        identificativi = [r[0] for r in c.execute(
+            f'SELECT id FROM chats WHERE telegram_chat_id=? AND {TOPIC_CHAT}=?'
+            ' ORDER BY id', (chat, topic)).fetchall()]
+        vincente, perdenti = identificativi[0], identificativi[1:]
+        for perdente in perdenti:
+            # `OR IGNORE` piu' la DELETE, e non una UPDATE nuda: `parser_chats` ha
+            # `PRIMARY KEY (parser_id, chat_id)`, quindi se un parser era associato a
+            # ENTRAMBE le righe duplicate lo spostamento creerebbe una riga che esiste
+            # gia' e solleverebbe — un altro modo di rendere `migra()` impossibile da
+            # attraversare, dentro la correzione che ne chiudeva un altro.
+            # `[REAL_FINDING]` di GPT-5.6 Sol al gate finale della PR #22.
+            #
+            # Niente va perso: `OR IGNORE` sposta cio' che puo' spostarsi, la DELETE
+            # toglie le righe rimaste indietro proprio perche' la loro destinazione
+            # c'era gia'. L'associazione `(parser, vincente)` esiste in entrambi i casi.
+            # Si spostano SOLO le associazioni dei parser che appartengono al
+            # proprietario della chat sopravvissuta. Prima si spostavano tutte, e con la
+            # stessa chat rivendicata da due utenti — la riga di ALFA sopravvive, quella
+            # di BETA viene scartata — un parser di BETA finiva agganciato alla chat di
+            # ALFA. Misurato: `parser 1 (utente 2) -> chat 1 (utente 1)`. Nel PR sul
+            # dispatch quel legame significa i segnali di una chat consegnati al feed di
+            # un altro utente. `[REAL_FINDING]` di GPT-5.6 Sol, il piu' grave dei suoi.
+            #
+            # La correzione non e' spostare meglio, e' NON spostare: la chat appartiene a
+            # un solo utente, quindi l'associazione di un parser altrui e' illegittima e
+            # la `DELETE` sotto la porta via insieme al resto. `IS` e non `=` perche' un
+            # proprietario NULL deve combaciare con un `user_id` NULL, e con `=` no.
+            c.execute('UPDATE OR IGNORE parser_chats SET chat_id=? WHERE chat_id=?'
+                      ' AND parser_id IN (SELECT id FROM parsers WHERE user_id IS'
+                      ' (SELECT owner_user_id FROM chats WHERE id=?))',
+                      (vincente, perdente, vincente))
+            c.execute('DELETE FROM parser_chats WHERE chat_id=?', (perdente,))
+            c.execute('DELETE FROM chats WHERE id=?', (perdente,))
+    c.execute('CREATE UNIQUE INDEX IF NOT EXISTS chats_chat_topic'
+              f' ON chats ({CHIAVE_CHAT})')
+
+
 def db():
     c = sqlite3.connect(DB_PATH)
-    c.execute('CREATE TABLE IF NOT EXISTS signals (id INTEGER PRIMARY KEY AUTOINCREMENT, csv TEXT NOT NULL, parser TEXT, profile TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, expires_at INTEGER)')
-    # Migrate databases created before profile support.
-    try:
-        c.execute('ALTER TABLE signals ADD COLUMN expires_at INTEGER')
-    except sqlite3.OperationalError:
-        pass
-    try:
-        c.execute('ALTER TABLE signals ADD COLUMN profile TEXT')
-    except sqlite3.OperationalError:
-        pass
-    c.execute('CREATE TABLE IF NOT EXISTS parsers (name TEXT PRIMARY KEY, header TEXT NOT NULL, market_name TEXT, market_type TEXT, selection_name TEXT, handicap TEXT, bet_type TEXT)')
-    c.execute('CREATE TABLE IF NOT EXISTS profiles (name TEXT PRIMARY KEY, chat_ids TEXT NOT NULL, parser TEXT NOT NULL)')
-    c.execute('INSERT OR IGNORE INTO parsers VALUES (?,?,?,?,?,?,?)', (DEFAULT_PARSER, 'P.Bet. PREMACHT 0,5HT', 'Over/Under 1,5 gol', 'OVER_UNDER_15', 'Over 1,5 goal', '0', 'PUNTA'))
-    # Preserve the existing Telegram setup as the default PIERO feed.
-    c.execute('INSERT OR IGNORE INTO profiles(name,chat_ids,parser) VALUES (?,?,?)', (PIERO_PROFILE, os.getenv('TELEGRAM_ALLOWED_CHAT_IDS', ''), DEFAULT_PARSER))
-    c.execute("UPDATE signals SET profile=? WHERE profile IS NULL", (PIERO_PROFILE,))
-    c.commit()
+    # `busy_timeout` prima di ogni altra cosa. Il lock qui sotto e' PER PROCESSO: con
+    # piu' worker due processi eseguono la migrazione sullo stesso file, e senza
+    # timeout il secondo riceve subito «database is locked» invece di aspettare — un
+    # deploy che parte rotto. Segnalato da Claude Fable 5 sulla PR #22.
+    c.execute('PRAGMA busy_timeout = 5000')
+    if DB_PATH not in _PERCORSI_MIGRATI:
+        with _LOCK_MIGRAZIONE:
+            # Riletto DENTRO il lock: due richieste possono arrivare qui insieme, e
+            # senza il secondo controllo entrambe migrerebbero.
+            if DB_PATH not in _PERCORSI_MIGRATI:
+                try:
+                    migra(c)
+                except Exception:
+                    # Chiudere e rilanciare. Senza, ogni richiesta ritenta, sbaglia, e
+                    # lascia dietro un'altra connessione: un guasto che PEGGIORA da
+                    # solo mentre il traffico continua. Il percorso non viene marcato
+                    # migrato, quindi il tentativo successivo riprova — che e' giusto,
+                    # perche' la causa piu' probabile e' un lock momentaneo.
+                    c.close()
+                    raise
+                _PERCORSI_MIGRATI.add(DB_PATH)
     return c
 
 
@@ -811,7 +1316,46 @@ def list_parsers(x_admin_token: str | None = Header(None)):
 def save_parser(data: ParserIn, x_admin_token: str | None = Header(None)):
     auth(x_admin_token)
     c = db()
-    c.execute('INSERT OR REPLACE INTO parsers VALUES (?,?,?,?,?,?,?)', tuple(data.model_dump().values()))
+    # Le colonne sono ELENCATE, e l'aggiornamento e' un UPSERT invece di un `INSERT OR
+    # REPLACE`. Le due cose chiudono due difetti distinti introdotti dalla migrazione
+    # dello schema, entrambi misurati:
+    #
+    # 1. senza elenco, l'INSERT dipendeva dal NUMERO di colonne, e con le sette
+    #    aggiunte da `COLONNE_MULTIUTENTE` non era piu' valido:
+    #    «table parsers has 14 columns but 7 values were supplied». Cioe' questo
+    #    endpoint rispondeva 500 a ogni creazione o modifica di parser;
+    # 2. `REPLACE` cancella la riga e la reinserisce, quindi le colonne non nominate
+    #    tornano a NULL: cambiare l'header di un parser lo STACCAVA dal suo utente e
+    #    ne azzerava l'`id`. Misurato: (1, 'parser_...', 0, 1) -> (None, None, None, None).
+    #
+    # `ON CONFLICT` nomina solo i campi del modello: tutto il resto della riga resta
+    # com'era, che e' esattamente cio' che serve.
+    #
+    # I nomi vengono DAL MODELLO invece di essere ricopiati qui: una seconda lista
+    # sarebbe una lista che divergera', e la divergenza sarebbe silenziosa nel verso
+    # peggiore — un campo aggiunto a `ParserIn` e non qui verrebbe accettato dalla API
+    # e non salvato. Che i nomi siano anche colonne di `parsers` e' vincolato da un
+    # test, cosi' un campo nuovo senza colonna diventa rosso invece di dare 500.
+    #
+    # `INSERT OR IGNORE` seguito da `UPDATE` invece di `ON CONFLICT DO UPDATE`, che
+    # sarebbe la forma piu' compatta: l'UPSERT esiste solo da SQLite 3.24 (2018), e la
+    # versione di SQLite in produzione non e' una cosa che posso misurare da qui. Un
+    # endpoint che funziona in locale e solleva su Railway e' peggio di una riga in
+    # piu'. Le due istruzioni stanno nella stessa transazione, quindi il commit e'
+    # unico. Rischio segnalato da GPT-5.5, e rimosso invece che documentato.
+    campi = tuple(ParserIn.model_fields)
+    aggiornabili = [x for x in campi if x != 'name']
+    c.execute(f'INSERT OR IGNORE INTO parsers({", ".join(campi)})'
+              f' VALUES ({", ".join("?" * len(campi))})',
+              tuple(getattr(data, x) for x in campi))
+    c.execute(f'UPDATE parsers SET {", ".join(f"{x}=?" for x in aggiornabili)}'
+              ' WHERE name=?',
+              tuple(getattr(data, x) for x in aggiornabili) + (data.name,))
+    # Le colonne del multiutente subito, non al prossimo riavvio: vedi
+    # `_completa_colonne_nuove`. Il proprietario e' PIERO perche' oggi e' l'unico
+    # utente e questo endpoint e' protetto dal suo token di amministrazione: quando
+    # servira' piu' utenti, qui va passato il proprietario della sessione.
+    _completa_colonne_nuove(c, PIERO_PROFILE)
     c.commit()
     c.close()
     return {'ok': True, 'parser': data.name}
