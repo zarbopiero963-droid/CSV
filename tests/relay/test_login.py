@@ -42,7 +42,7 @@ RADICE = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(RADICE))
 
 import main  # noqa: E402 - dopo l'inserimento del percorso
-from tests.ambiente import CHIAVI_PERICOLOSE  # noqa: E402
+from tests.ambiente import CHIAVI_PERICOLOSE, ambiente_di_supporto  # noqa: E402
 
 # Un token di bot finto, con la forma di quelli veri (`<id>:<segreto>`) perche' la
 # derivazione della chiave non deve dipendere dal contenuto.
@@ -1464,12 +1464,23 @@ def test_gli_spazi_ai_bordi_li_toglie_la_LETTURA_non_il_controllo(tmp_path):
     import subprocess
     import sys
 
+    # `ambiente_di_supporto` e non un dizionario scritto qui: e' la FONTE UNICA
+    # dell'ambiente dei sottoprocessi di test (regola 3), e la prima versione di questo test
+    # la aggirava con un dict inline. Non era pedanteria — quel dict passava solo `PATH` e
+    # `PYTHONPATH`, mentre la whitelist passa anche `HOME`, `LANG` e `TMPDIR`, che su una
+    # macchina di CI diversa dalla mia possono servire all'interprete. Un test che fallisce
+    # per l'ambiente e non per il codice e' rumore che si impara a ignorare. Segnalato come
+    # rischio da GPT-5.5 sulla PR #24.
+    #
+    # `TELEGRAM_ADMIN_ID` e' fra le CHIAVI_PERICOLOSE, quindi non arriva per eredita': qui
+    # si passa DI PROPOSITO, che e' il caso che quel modulo documenta.
     esito = subprocess.run(
         [sys.executable, '-c',
          'import main; print(repr(main.TELEGRAM_ADMIN_ID)); print(main.admin_id_malformato())'],
         cwd=str(RADICE), capture_output=True, text=True, timeout=60,
-        env={'PATH': os.environ.get('PATH', ''), 'PYTHONPATH': str(RADICE),
-             'TELEGRAM_ADMIN_ID': '  987654321\n', 'DB_PATH': str(tmp_path / 'x.db')})
+        env=ambiente_di_supporto(PYTHONPATH=str(RADICE),
+                                 TELEGRAM_ADMIN_ID='  987654321\n',
+                                 DB_PATH=str(tmp_path / 'x.db')))
     assert esito.returncode == 0, esito.stderr
     righe = esito.stdout.strip().splitlines()
     assert righe[0] == "'987654321'", (
