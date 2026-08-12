@@ -895,6 +895,43 @@ def test_un_campo_SCONOSCIUTO_ma_firmato_da_Telegram_viene_accettato():
         f'ogni login vero viene rifiutato. Conservati: {sorted(conservati)}')
 
 
+def _funzioni_chiamate(funzione):
+    """I nomi delle funzioni **chiamate** dentro `funzione`, letti dall'AST.
+
+    Dall'albero sintattico e non dal testo del sorgente, e la differenza non e'
+    accademica: cercando la sottostringa, un **commento** che nomina l'helper conta come
+    se lo chiamasse. Misurato — una rotta che legge la sessione, non rinnova il cookie e
+    porta il commento «qui non uso `_rispondi_con_sessione`» passava la guardia. Un
+    falso negativo silenziato da un commento e' il difetto peggiore che una guardia possa
+    avere, perche' si legge come copertura. Segnalato da GPT-5.5 sulla PR #23.
+
+    Restituisce `None` se il sorgente non e' leggibile: chi chiama distingue «non usa la
+    sessione» da «non ho potuto guardare».
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    try:
+        sorgente = textwrap.dedent(inspect.getsource(funzione))
+    except (OSError, TypeError):
+        return None
+    try:
+        albero = ast.parse(sorgente)
+    except SyntaxError:
+        return None
+
+    nomi = set()
+    for nodo in ast.walk(albero):
+        if isinstance(nodo, ast.Call):
+            bersaglio = nodo.func
+            if isinstance(bersaglio, ast.Name):
+                nomi.add(bersaglio.id)
+            elif isinstance(bersaglio, ast.Attribute):
+                nomi.add(bersaglio.attr)
+    return nomi
+
+
 def test_ogni_rotta_che_usa_la_SESSIONE_rinnova_anche_il_cookie():
     """La guardia sulla disciplina, perche' il rinnovo e' per-rotta e non un middleware.
 
@@ -910,28 +947,31 @@ def test_ogni_rotta_che_usa_la_SESSIONE_rinnova_anche_il_cookie():
     questo PR esiste per garantire. Quindi la disciplina serve, e cio' che si puo' fare e'
     renderla **verificabile** invece di raccomandata.
 
-    Il controllo e' sul sorgente e non sul comportamento di proposito: una rotta futura
-    puo' avere qualunque metodo, percorso e corpo, e un test che dovesse costruire una
-    richiesta valida per ciascuna non riuscirebbe a coprirle tutte. Qui la copertura e'
-    completa per costruzione. Il comportamento — che il rinnovo funzioni davvero, e che
-    avvenga DOPO la validazione — lo misurano
-    `test_una_richiesta_valida_RINNOVA_la_scadenza` e
+    Il controllo guarda le **chiamate** e non il comportamento di proposito: una rotta
+    futura puo' avere qualunque metodo, percorso e corpo, e un test che dovesse costruire
+    una richiesta valida per ciascuna non riuscirebbe a coprirle tutte. Cosi' la copertura
+    e' completa per costruzione. Che il rinnovo funzioni davvero, e che avvenga DOPO la
+    validazione, lo misurano `test_una_richiesta_valida_RINNOVA_la_scadenza` e
     `test_un_cookie_GIA_scaduto_non_viene_resuscitato_dal_rinnovo`.
-    """
-    import inspect
 
+    **Il limite che resta, scritto perche' non sia una sorpresa:** una rotta che ottenesse
+    l'utente per vie indirette — una dipendenza FastAPI, un alias, un helper che avvolge
+    `utente_dalla_sessione` — non nominerebbe quella funzione fra le proprie chiamate e
+    sfuggirebbe. Il giorno che quella forma servira', questa guardia va estesa a
+    riconoscerla, e questo paragrafo e' il promemoria. Il caso dei commenti e delle
+    stringhe invece **e' chiuso**, perche' l'AST non li vede.
+    """
     inadempienti = []
+    guardate = []
     for rotta in main.app.routes:
         funzione = getattr(rotta, 'endpoint', None)
         if funzione is None:
             continue
-        try:
-            sorgente = inspect.getsource(funzione)
-        except (OSError, TypeError):
+        chiamate = _funzioni_chiamate(funzione)
+        if chiamate is None or 'utente_dalla_sessione' not in chiamate:
             continue
-        if 'utente_dalla_sessione' not in sorgente:
-            continue
-        if '_rispondi_con_sessione' not in sorgente:
+        guardate.append(rotta.path)
+        if '_rispondi_con_sessione' not in chiamate:
             inadempienti.append(f'{sorted(getattr(rotta, "methods", []))} {rotta.path}')
 
     assert not inadempienti, (
@@ -942,18 +982,5 @@ def test_ogni_rotta_che_usa_la_SESSIONE_rinnova_anche_il_cookie():
 
     # E la guardia non deve essere vacua: se nessuna rotta usa la sessione, il ciclo qui
     # sopra non guarda niente e il test passa dicendo nulla.
-    usano = [r.path for r in main.app.routes
-             if getattr(r, 'endpoint', None) is not None
-             and 'utente_dalla_sessione' in (inspect.getsource(r.endpoint)
-                                             if _leggibile(r.endpoint) else '')]
-    assert usano, 'nessuna rotta usa utente_dalla_sessione: questa guardia non misura niente'
-
-
-def _leggibile(funzione):
-    """Vero se `inspect.getsource` non solleva su questa funzione."""
-    import inspect
-    try:
-        inspect.getsource(funzione)
-    except (OSError, TypeError):
-        return False
-    return True
+    assert guardate, (
+        'nessuna rotta chiama utente_dalla_sessione: questa guardia non misura niente')
