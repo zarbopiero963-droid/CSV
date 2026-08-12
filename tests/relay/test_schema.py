@@ -1145,3 +1145,48 @@ def test_il_parser_di_un_profilo_appartiene_a_QUEL_profilo(tmp_path):
     # `Secondo_Parser` non e- nominato da nessun profilo: resta al proprietario per
     # difetto, e soprattutto NON resta senza utente.
     assert parser['Secondo_Parser'] == utenti['PIERO'], parser
+
+
+def test_un_profilo_che_nomina_un_parser_CANCELLATO_non_rompe_la_migrazione(servizio):
+    """Il riferimento orfano, e non e- uno stato inventato per il test.
+
+    Chiesto da GPT-5.5 sul commit che ha introdotto l'attribuzione da
+    `profiles.parser`: se quel nome non corrisponde a nessun parser, la migrazione deve
+    proseguire e il ripiego sul proprietario per difetto deve restare.
+
+    Lo stato si raggiunge dalla API, e questo test lo percorre invece di costruirlo a
+    mano: `POST /api/profiles` valida il parser con `get_parser` (404 se non esiste),
+    ma `DELETE /api/parsers/{name}` **non** guarda i profili che lo nominano. Dopo la
+    cancellazione `profiles.parser` punta nel vuoto. Misurato:
+
+        profiles: [('PIERO', 'Parser_Telegram_XTrader_v1'), ('ALTRO', 'Da_Cancellare')]
+        parsers : ['Parser_Telegram_XTrader_v1']
+
+    Che `delete_parser` lasci il riferimento pendente e- un difetto suo, non della
+    migrazione, e non si corregge qui: cancellare un parser mentre un profilo lo usa
+    riguarda il PR sul dispatch. Qui si vincola che la migrazione **attraversi** quello
+    stato, che e- la regola di questa funzione.
+    """
+    main.save_parser(main.ParserIn(name='Da_Cancellare', header='H'), x_admin_token=servizio)
+    main.save_profile(main.ProfileIn(name='ALTRO', chat_ids=CHAT_B, parser='Da_Cancellare'),
+                      x_admin_token=servizio)
+    main.delete_parser('Da_Cancellare', x_admin_token=servizio)
+
+    c = main.db()
+    orfano = c.execute('SELECT parser FROM profiles WHERE name=?', ('ALTRO',)).fetchone()[0]
+    assert orfano == 'Da_Cancellare', orfano
+    assert c.execute('SELECT name FROM parsers WHERE name=?', (orfano,)).fetchone() is None, (
+        'il parser esiste ancora: il test non parte dallo stato orfano')
+    c.close()
+
+    # La migrazione da zero su quello stato: e- il riavvio del container.
+    main._PERCORSI_MIGRATI.clear()
+    c = main.db()  # non deve sollevare
+
+    utenti = dict(c.execute('SELECT origin_profile, id FROM users').fetchall())
+    assert set(utenti) == {main.PIERO_PROFILE, 'ALTRO'}, utenti
+    senza_utente = c.execute('SELECT name FROM parsers WHERE user_id IS NULL').fetchall()
+    assert senza_utente == [], (
+        f'parser senza utente dopo la migrazione: {senza_utente}. Restano fuori '
+        'dall-indice UNIQUE (user_id, slug), che con user_id NULL non vincola')
+    c.close()
