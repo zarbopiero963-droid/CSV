@@ -442,13 +442,34 @@ def store_signal(c, csv_text_value, parser, profile=PIERO_PROFILE):
 
 
 def parse_message(message, cfg):
+    """Il segnale letto dal messaggio, o `None` se non e' riconoscibile.
+
+    `None` significa «non riconosciuto» e non e' un errore: chi chiama risponde 200
+    con `parser_no_match` sul webhook e 422 sulla rotta di prova. Questa funzione
+    non solleva su un messaggio storto, e la ragione e' che il suo chiamante
+    principale e' pubblico e Telegram RITENTA le consegne fallite.
+
+    *Storia, perche' non si ripeta.* Qui c'era `event.splitlines()[0]`, e su un
+    evento vuoto `''.splitlines()` e' `[]`: `IndexError`, quindi 500, quindi
+    Telegram che riconsegna lo stesso messaggio e solleva di nuovo — un segnale
+    perso e i log pieni di tracce identiche. Quella riga non serviva a niente:
+    `line` viene da `message.splitlines()`, quindi non contiene interruzioni e
+    riestrarne la prima era l'identita-. Non faceva nulla nel caso normale e faceva
+    cadere il servizio nel caso vuoto.
+
+    Il caso raggiungibile non e' il marcatore isolato ma il marcatore in **coda**
+    alla riga (`SQUADRA-A v SQUADRA-B 🆚`): un canale che scrive le squadre prima
+    del marcatore faceva cadere il webhook al primo messaggio.
+    """
     if cfg['header'].lower() not in message.lower():
         return None
     line = next((x.strip() for x in message.splitlines() if '🆚' in x), '')
     if not line:
         return None
     event = line.split('🆚', 1)[1].strip()
-    event = event.splitlines()[0].strip()
+    # Nessun evento dopo il marcatore: non si inventa un nome squadra vuoto.
+    if not event:
+        return None
     # The final " v " is the separator; earlier occurrences remain in a team name.
     ms = list(re.finditer(r'\s+v\s+', event, flags=re.I))
     if ms:
