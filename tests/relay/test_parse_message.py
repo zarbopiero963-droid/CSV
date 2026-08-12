@@ -179,27 +179,66 @@ def _feed(base):
         return r.read()
 
 
-@pytest.fixture(scope='module')
-def servizio(tmp_path_factory):
-    """Il relay col bot, e le consegne firmate col segreto derivato.
+# Un proxy che punta a una porta CHIUSA sul loopback. Serve a impedire che l'avvio
+# del servizio raggiunga `api.telegram.org`, e la ragione e' misurata, non temuta:
+# `_chiama_set_webhook` costruisce l'URL con l'host di Telegram CABLATO nel sorgente
+# e `PUBLIC_URL` finisce solo nel corpo del POST. Puntare `PUBLIC_URL` a un host
+# inesistente quindi NON evita la chiamata — misurato: `HTTPError` in 0,83 s, cioe'
+# Telegram ha risposto. Con questo proxy la richiesta non lascia la macchina.
+# Segnalato da `gpt-5.6-sol` sulla PR #21; la prima versione di questa fixture
+# affermava «senza toccare nulla di reale» ed era falsa.
+PROXY_MORTO = 'http://127.0.0.1:1'
 
-    Serve il bot: SENZA `TELEGRAM_BOT_TOKEN` il webhook rifiuta **ogni** consegna
-    con 403, perche' il segreto non e' derivabile e la #14 e' fail-closed. La prima
-    versione di questa fixture non lo passava e questa docstring affermava
-    l'opposto — «senza bot accetta senza segreto» — - misurato: 403 su tutto, e
-    nessuno dei test HTTP raggiungeva il parser. Il fail-closed dell'header ha i
-    suoi test in `tests/relay/test_webhook.py`: qui serve solo attraversarlo.
+# Fonte unica dell'ambiente del servizio: la fixture lo usa e un test lo ISPEZIONA.
+# Due copie — una nella fixture e una nell'asserzione — sarebbero due copie
+# divergenti domani (regola 3).
+AMBIENTE_DEL_SERVIZIO = {
+    'CSV_ACCESS_TOKEN': TOKEN_DI_PROVA,
+    # Serve il bot: SENZA `TELEGRAM_BOT_TOKEN` il webhook rifiuta ogni consegna con
+    # 403, perche' il segreto non e' derivabile e la #14 e' fail-closed. Misurato:
+    # senza, tutti i test HTTP di questo file davano 403 e nessuno arrivava al parser.
+    'TELEGRAM_BOT_TOKEN': BOT_FINTO,
+    'TELEGRAM_ALLOWED_CHAT_IDS': CHAT,
+    'PUBLIC_URL': 'https://non-esiste.invalid',
+    'HTTPS_PROXY': PROXY_MORTO,
+    'https_proxy': PROXY_MORTO,
+}
 
-    `PUBLIC_URL` punta a un host inesistente di proposito, cosi' la registrazione
-    del webhook fallisce senza toccare nulla di reale: il segreto resta derivabile,
-    che e- la condizione che governa l'enforcement.
+
+@pytest.fixture
+def servizio(tmp_path):
+    """Un relay PER TEST, col bot, e senza uscite verso l'esterno.
+
+    Non piu' `scope='module'`, e la ragione e' un difetto misurato: con un servizio
+    condiviso un test scriveva nel feed e un altro pretendeva la sola intestazione,
+    quindi l'esito dipendeva dall'ORDINE. Verificato invertendo i due:
+
+        pytest ...::test_dopo_un_messaggio_storto... ...::test_un_messaggio_storto_non_scrive...
+        -> 1 failed  «scritta una riga che non doveva esistere»
+
+    Era verde solo per l'ordine del file, e sarebbe diventato rosso al primo
+    `-p randomly` o al primo `--lf`. Segnalato da `gpt-5.6-sol` sulla PR #21.
+
+    Un sottoprocesso per test costa ~1 s: il prezzo giusto per un test che misura
+    quello che dice invece di quello che il vicino ha lasciato.
     """
-    with relay_avviato(tmp_path_factory.mktemp('parse'),
-                       CSV_ACCESS_TOKEN=TOKEN_DI_PROVA,
-                       TELEGRAM_BOT_TOKEN=BOT_FINTO,
-                       TELEGRAM_ALLOWED_CHAT_IDS=CHAT,
-                       PUBLIC_URL='https://non-esiste.invalid') as base:
+    with relay_avviato(tmp_path, **AMBIENTE_DEL_SERVIZIO) as base:
         yield base
+
+
+def test_il_servizio_di_prova_non_puo_chiamare_telegram():
+    """La porta del proxy deve essere CHIUSA, non solo scritta nell'ambiente.
+
+    Senza questa verifica «il proxy impedisce la chiamata» sarebbe un'affermazione:
+    se un domani quella porta fosse in ascolto, le richieste ci passerebbero e la
+    garanzia cadrebbe in silenzio. Qui si misura che una connessione viene rifiutata.
+    """
+    import socket
+    porta = int(PROXY_MORTO.rsplit(':', 1)[1])
+    with socket.socket() as s:
+        s.settimeout(2)
+        with pytest.raises(OSError):
+            s.connect(('127.0.0.1', porta))
 
 
 def test_il_webhook_risponde_200_e_non_500(servizio):
@@ -216,11 +255,30 @@ def test_il_webhook_risponde_200_e_non_500(servizio):
 
 
 def test_un_messaggio_storto_non_scrive_niente_nel_feed(servizio):
-    """E il feed resta a sola intestazione: nessuna riga parziale, nessun BOM perso."""
+    """Il feed PRIMA e DOPO: il messaggio storto non lo cambia.
+
+    Si confronta il DELTA invece di pretendere la sola intestazione in assoluto, e
+    non e' pignoleria: la versione precedente asseriva `count(b'\\r\\n') == 1`, cioe'
+    uno stato globale, e con un servizio condiviso passava solo se nessun altro test
+    aveva scritto prima. Misurando il delta il test dice quello che vuole dire — «quel
+    messaggio non ha scritto» — e non dipende da chi lo precede.
+
+    Il BOM e' scritto `\\ufeff` e non come carattere letterale, come prescrive la
+    regola di codifica: un U+FEFF nel sorgente e' invisibile in un editor. La prima
+    versione di questa riga ne conteneva uno, e l'ho visto solo guardando i byte.
+    """
+    prima = _feed(servizio)
+    assert prima.startswith('\ufeff'.encode('utf-8') + b'"Provider","EventId"'), prima[:40]
+    assert prima.count(b'\r\n') == 1, f'il feed non parte vuoto: {prima!r}'
+
     _consegna(servizio, f'{HEADER_DI_DEFAULT}\n{MARCATORE}')
-    byte = _feed(servizio)
-    assert byte.startswith('﻿'.encode('utf-8') + b'"Provider","EventId"'), byte[:40]
-    assert byte.count(b'\r\n') == 1, f'scritta una riga che non doveva esistere: {byte!r}'
+
+    dopo = _feed(servizio)
+    assert dopo == prima, (
+        'il messaggio storto ha cambiato il feed:\n'
+        f'  prima : {prima!r}\n'
+        f'  dopo  : {dopo!r}'
+    )
 
 
 def test_dopo_un_messaggio_storto_il_servizio_accetta_ancora_quelli_buoni(servizio):
