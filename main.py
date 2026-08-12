@@ -469,6 +469,20 @@ async def avvia_la_registrazione_del_webhook():
     finire — e in quel caso la registrazione non avverrebbe, in silenzio, che e'
     il genere di guasto che questa PR passa il tempo a chiudere.
     """
+    if admin_id_malformato():
+        # Non solleva: un avvio che muore per una variabile scritta male sarebbe peggio del
+        # difetto che segnala. Ma lo dice, perche' l'alternativa e' un proprietario che
+        # ottiene un account vuoto e non ha nessun posto dove leggere il perche'.
+        # `logging.getLogger(...)` e non un `log` di modulo, perche' un `log` di modulo in
+        # questo file NON ESISTE: la prima versione di questa riga lo usava, e sarebbe stata
+        # un `NameError` dentro l'handler di avvio — cioe' un servizio che NON PARTE per una
+        # variabile scritta male. Avrei trasformato un guasto silenzioso in un guasto totale,
+        # dentro la correzione che serviva a renderlo visibile. Misurato prima del commit.
+        logging.getLogger('xtrader.relay').error(
+            "TELEGRAM_ADMIN_ID non e' una sequenza di sole cifre: il login del proprietario "
+            "NON verra' collegato al suo account, e la riparazione idempotente non "
+            "scattera'. Correggere la variabile: solo cifre, senza virgolette, spazi o segni.")
+
     global _COMPITO_REGISTRAZIONE
     if not os.getenv('TELEGRAM_BOT_TOKEN', ''):
         return
@@ -563,6 +577,23 @@ SEGRETO_SESSIONE = (hashlib.sha256(('betrelay-sessione-v1:' + BOT_TOKEN).encode(
 # scartata «il primo login vince» perche' il sito e' pubblico e il primo estraneo
 # erediterebbe parser e feed.
 TELEGRAM_ADMIN_ID = os.getenv('TELEGRAM_ADMIN_ID', '').strip()
+
+
+# Un `TELEGRAM_ADMIN_ID` malformato non solleva e non collega: il confronto con l'`id` che
+# Telegram manda non combacia mai, quindi il proprietario ottiene un account vuoto e la
+# riparazione idempotente non scatta nemmeno — il ramo che ripara e' dietro quel confronto.
+# Le forme sbagliate sono tutte silenziose: virgolette o apici incollati col valore, un `+`
+# davanti, uno spazio in mezzo. Lo `strip()` perdona solo i bordi.
+#
+# Quindi almeno lo si dice all'avvio. `re.fullmatch(r'[0-9]+')` e NON `.isdigit()`: quel
+# metodo accetta anche le cifre di altri alfabeti — `'\u0669\u0668\u0667'.isdigit()` e' `True` — che
+# non combaciano con nessun id Telegram, cioe' proprio il caso che questo controllo esiste
+# per nominare. Segnalato da GPT-5.5 sulla PR #24.
+def admin_id_malformato():
+    """Vero se `TELEGRAM_ADMIN_ID` e' impostato ma non e' una sequenza di sole cifre ASCII."""
+    return bool(TELEGRAM_ADMIN_ID) and re.fullmatch(r'[0-9]+', TELEGRAM_ADMIN_ID) is None
+
+
 
 # L'hash della password dell'accesso di emergenza, nella forma
 # `scrypt$<sale base64>$<derivata base64>`. Nella variabile va l'HASH e non la
@@ -879,7 +910,14 @@ def riconcilia_su_utente(c, da_utente, a_utente):
         c.execute(f'UPDATE {tabella} SET {colonna}=? WHERE {colonna}=?',
                   (a_utente, da_utente))
     _trasferisci_parser(c, da_utente, a_utente)
-    c.execute('UPDATE users SET telegram_id=NULL WHERE id=?', (da_utente,))
+    # `session_version` incrementata sulla riga svuotata: i cookie emessi per quell'account
+    # restano altrimenti validi, e da quel momento aprono una sessione su un utente che non
+    # possiede piu' niente. Appartengono comunque al proprietario, quindi non e' un buco di
+    # sicurezza — e' igiene: `session_version` esiste per invalidare SUBITO, e un account
+    # riconciliato via e' esattamente il caso in cui una sessione va chiusa invece di
+    # scadere da se'. Segnalato come punto da sorvegliare da Claude Fable 5 sulla PR #24.
+    c.execute('UPDATE users SET telegram_id=NULL, session_version=session_version+1'
+              ' WHERE id=?', (da_utente,))
 
 
 def _trasferisci_parser(c, da_utente, a_utente):

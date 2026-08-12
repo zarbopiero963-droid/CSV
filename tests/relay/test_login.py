@@ -1299,6 +1299,24 @@ def test_il_collegamento_dell_admin_RIPARA_un_account_gia_sbagliato(tmp_path, mo
         'la sessione e- stata emessa per l-account sbagliato: il login riesce e la '
         'dashboard resta vuota')
 
+    # TERZO login: la riparazione deve essere idempotente anche verso se stessa. Adesso
+    # `riga[0] == proprietario[0]`, quindi il flusso prende l'ultimo ramo `else` e non
+    # deve rifare niente. Chiesto da CodeRabbit sulla PR #24, e serve: senza, una modifica
+    # futura che rieseguisse la riconciliazione a OGNI richiesta passerebbe i test.
+    terza = main.login_telegram(main.LoginTelegramIn(**_dati_login()))
+    assert terza.status_code == 200
+    ancora = _riga_utente(percorso, 'origin_profile', main.PIERO_PROFILE)
+    assert ancora == dopo_piero, (
+        f'il terzo login ha cambiato lo stato: {dopo_piero} -> {ancora}. La riparazione '
+        'non e- idempotente verso se stessa')
+    c = sqlite3.connect(percorso)
+    riconciliazioni = c.execute("SELECT COUNT(*) FROM admin_audit"
+                                " WHERE action='riconciliato_account_duplicato'").fetchone()[0]
+    c.close()
+    assert riconciliazioni == 1, (
+        f'{riconciliazioni} riparazioni registrate invece di una: il terzo login ha '
+        'ri-riconciliato uno stato gia- a posto')
+
 
 def test_la_riparazione_NON_perde_i_dati_dell_account_sbagliato(tmp_path, monkeypatch):
     """Cio' che l'account nato per errore avesse accumulato deve finire sul proprietario.
@@ -1378,3 +1396,153 @@ def test_un_CLIENTE_non_fa_scattare_la_riparazione(tmp_path, monkeypatch):
     assert suo[0] != piero[0], 'l-estraneo e- entrato nell-account del proprietario'
     assert suo[3] == 0, 'l-estraneo risulta amministratore'
     assert suo[2] is None, 'l-estraneo ha ereditato un origin_profile'
+
+
+@pytest.mark.parametrize('valore', [
+    '"987654321"',      # incollato con le virgolette
+    "'987654321'",      # con gli apici
+    '+987654321',        # col segno, come lo scrive chi pensa a un numero di telefono
+    '987 654 321',       # con gli spazi dentro
+    '٩٨٧',               # cifre arabe-indiane: `.isdigit()` le accetta, Telegram no
+])
+def test_un_TELEGRAM_ADMIN_ID_malformato_viene_RICONOSCIUTO(valore, monkeypatch):
+    """Le quattro forme sbagliate sono tutte silenziose, e la quinta inganna `.isdigit()`.
+
+    Un valore malformato non solleva e non collega: il confronto con l'`id` che Telegram
+    manda non combacia mai, quindi il proprietario ottiene un account vuoto **e la
+    riparazione idempotente non scatta nemmeno**, perche' il ramo che ripara sta dietro
+    quel confronto. E' l'unico modo residuo di restare fuori dal proprio account.
+
+    L'ultimo caso e' il motivo per cui il controllo usa `re.fullmatch(r'[0-9]+')` e non
+    `.isdigit()`: `'٩٨٧'.isdigit()` e' `True`, e quelle cifre non combaciano con nessun id
+    Telegram. Un controllo che accetta il valore sbagliato e' un controllo che non c'e'.
+    Segnalato da GPT-5.5 sulla PR #24.
+    """
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', valore)
+    assert main.admin_id_malformato() is True, (
+        f'{valore!r} non viene riconosciuto come malformato: il proprietario non avra- '
+        'nessun posto dove leggere perche- il suo account risulta vuoto')
+
+
+@pytest.mark.parametrize('valore', ['987654321', '1', '', '  987654321  '])
+def test_un_TELEGRAM_ADMIN_ID_BUONO_non_viene_segnalato(valore, monkeypatch):
+    """Il verso opposto: un avviso che scatta sul valore giusto insegna a ignorarlo.
+
+    La stringa vuota **non** e' malformata: e' la variabile non configurata, che ha il suo
+    comportamento documentato (nessun collegamento, il proprietario resta un utente come
+    gli altri) e non e' un errore da segnalare.
+
+    Gli spazi ai bordi passano perche' il valore vero arriva da `os.getenv(...).strip()`;
+    qui il test li mette per verificare che il controllo non sia piu' severo della lettura.
+    """
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', valore.strip())
+    assert main.admin_id_malformato() is False, f'{valore!r} segnalato a torto'
+
+
+def test_la_riparazione_regge_uno_SLUG_in_collisione(tmp_path, monkeypatch):
+    """Due parser con lo stesso slug, uno per parte: la riconciliazione non deve sollevare.
+
+    Chiesto da GPT-5.5 sulla PR #24, ed e' uno stato raggiungibile: fra il login prematuro
+    e la riparazione, l'account sbagliato e' l'unico in cui il proprietario riesce a
+    entrare, quindi e' anche l'unico su cui puo' creare parser — e li chiamera' come
+    chiamerebbe i suoi.
+
+    `UNIQUE (user_id, slug)` rende quello stato **legale** finche' i due utenti sono
+    distinti, e illegale nell'istante in cui diventano uno: e' esattamente il difetto che
+    `_trasferisci_parser` chiudeva nella #22, `IntegrityError` sul percorso di `migra()`.
+    Qui lo stesso attrezzo serve un percorso nuovo, e questo test lo vincola su quel
+    percorso invece di fidarsi che valga per trasporto.
+    """
+    import sqlite3
+
+    percorso = str(tmp_path / 'collisione.db')
+    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    monkeypatch.setattr(main, 'BOT_TOKEN', BOT_FINTO)
+    monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
+
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', '')
+    main.login_telegram(main.LoginTelegramIn(**_dati_login()))
+    vuoto = _riga_utente(percorso, 'telegram_id', ADMIN_FINTO)[0]
+    piero = _riga_utente(percorso, 'origin_profile', main.PIERO_PROFILE)[0]
+
+    # Lo stesso slug su entrambi: legale adesso, in collisione dopo il travaso.
+    c = sqlite3.connect(percorso)
+    slug_di_piero = c.execute('SELECT slug FROM parsers WHERE user_id=? LIMIT 1',
+                              (piero,)).fetchone()[0]
+    # `header` e' NOT NULL: la prima versione di questo test lo ometteva e falliva con
+    # `IntegrityError: NOT NULL constraint failed: parsers.header`, cioe' misurava il
+    # proprio errore invece del comportamento.
+    c.execute('INSERT INTO parsers(name, header, user_id, slug, ordine, active)'
+              ' VALUES (?,?,?,?,?,1)',
+              ('Parser_creato_nell_account_sbagliato', 'P.Bet. ALTRO', vuoto,
+               slug_di_piero, 99))
+    c.commit()
+    c.close()
+
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', ADMIN_FINTO)
+    try:
+        risposta = main.login_telegram(main.LoginTelegramIn(**_dati_login()))
+    except sqlite3.IntegrityError as e:
+        raise AssertionError(
+            f'la riparazione solleva con due slug uguali ({e}): il proprietario resta '
+            'fuori dal proprio account per un parser che ha creato lui'
+        ) from None
+    assert risposta.status_code == 200
+
+    c = sqlite3.connect(percorso)
+    righe = c.execute('SELECT name, slug FROM parsers WHERE user_id=? ORDER BY name',
+                      (piero,)).fetchall()
+    orfani = c.execute('SELECT COUNT(*) FROM parsers WHERE user_id=?', (vuoto,)).fetchone()[0]
+    c.close()
+
+    nomi = [n for n, _ in righe]
+    assert 'Parser_creato_nell_account_sbagliato' in nomi, (
+        f'il parser creato nell-account sbagliato non e- arrivato al proprietario: {nomi}')
+    assert orfani == 0, f'{orfani} parser sono rimasti sull-account svuotato'
+    slug = [sl for _, sl in righe]
+    assert len(slug) == len(set(slug)), f'due parser dello stesso utente con lo stesso slug: {righe}'
+    # Chi c'era prima tiene il suo: a cambiare nome e- chi arriva, perche- l'altro
+    # potrebbe essere in un URL che qualcuno usa.
+    assert slug_di_piero in slug
+
+
+def test_le_sessioni_dell_account_SVUOTATO_muoiono_con_la_riparazione(tmp_path, monkeypatch):
+    """Un cookie emesso prima della riparazione non deve restare valido dopo.
+
+    Segnalato indipendentemente da Claude Fable 5 e da CodeRabbit sulla PR #24. Non e' un
+    buco di sicurezza — quel cookie appartiene comunque al proprietario — ma e' il sintomo
+    che questa PR esiste per chiudere: con il cookie vecchio continuerebbe a vedere la
+    **dashboard vuota** fino alla scadenza per inattivita', mentre il suo account e' stato
+    riparato. `session_version` esiste per invalidare SUBITO, e un account riconciliato via
+    e' esattamente il caso.
+    """
+    percorso = str(tmp_path / 'sessioni.db')
+    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    monkeypatch.setattr(main, 'BOT_TOKEN', BOT_FINTO)
+    monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
+
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', '')
+    prima = main.login_telegram(main.LoginTelegramIn(**_dati_login()))
+    cookie_vecchio = None
+    for pezzo in (prima.headers.get('set-cookie') or '').split(';'):
+        chiave, _, valore = pezzo.strip().partition('=')
+        if chiave == main.NOME_COOKIE:
+            cookie_vecchio = valore
+    assert cookie_vecchio, 'nessun cookie dal primo login'
+
+    sessione = main.leggi_sessione(cookie_vecchio)
+    vuoto = _riga_utente(percorso, 'telegram_id', ADMIN_FINTO)
+    assert sessione['utente'] == vuoto[0], 'il cookie non e- dell-account vuoto'
+
+    class RichiestaFinta:
+        cookies = {main.NOME_COOKIE: cookie_vecchio}
+
+    assert main.utente_dalla_sessione(RichiestaFinta()) is not None, (
+        'il cookie non era valido nemmeno prima: il test non misura la riparazione')
+
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', ADMIN_FINTO)
+    main.login_telegram(main.LoginTelegramIn(**_dati_login()))
+
+    assert main.utente_dalla_sessione(RichiestaFinta()) is None, (
+        'il cookie emesso per l-account svuotato vale ancora dopo la riparazione: chi lo '
+        'presenta continua a vedere la dashboard vuota che questa PR chiude')
