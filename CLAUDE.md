@@ -304,7 +304,7 @@ review/inline/thread triage · final hard verify.
 > 2. la **creazione** delle label `final-fable-review` e `final-fugu-review`. Senza, aggiungerle via
 >    API dà 404 e il gate finale non si arma.
 >
-> **Stato al 2026-08-11.** Entrambe le azioni sono state fatte dal proprietario. Cosa è **misurato** e
+> **Stato al 12/08/2026.** Entrambe le azioni sono state fatte dal proprietario (l'11/08). Cosa è **misurato** e
 > cosa è **riferito**, perché la differenza è il motivo per cui questo file esiste:
 >
 > | Cosa | Come lo so |
@@ -323,14 +323,14 @@ review/inline/thread triage · final hard verify.
 > si configurano una volta e valgono per sempre; le label si creano una volta e restano nel repo. Ma
 > *applicarle* va rifatto a ogni head stabile: rimuovere e riaggiungere `final-fable-review` e
 > `final-fugu-review` dopo ogni push (vedi «Un push dopo l'armamento rende il gate STANTIO»). Il
-> riarmo gata **solo** le due review finali Fable/Sol — GPT-5.5 gira comunque a ogni push, e i
+> riarmo riguarda **solo** le due review finali Fable/Sol — GPT-5.5 gira comunque a ogni push, e i
 > reviewer GitHub App non dipendono dalle label.
 >
 > Finché Secret o label mancano, l'agente lo dichiara invece di sostenere che le review finali sono
 > state fatte. Il set di file core è vincolato da `tests/safety/test_ai_audit_workflows.py`.
 
 Due reviewer AI forti e costosi (Claude Fable 5, GPT-5.6 Sol) non girano a ogni push come
-GPT-5.5/GLM. Partono:
+GPT-5.5. Partono:
 
 - automaticamente su un push che tocca **file core** di questo repository
   (`main.py`, `web/**`, `requirements.txt`, `Procfile`, `railway.json`) — analizza il
@@ -558,6 +558,35 @@ Quello che **non** cambia: un `[INSUFFICIENT_CONTEXT]` non autorizza ad archivia
 sopra — si verifica coi mezzi che ci sono. L'etichetta dice *da dove viene il dubbio*, non che il
 dubbio sia infondato.
 
+### E c'è un terzo stato: la review troncata in USCITA
+
+I due stati sopra riguardano l'**input** — cosa il modello non ha visto. Ne esiste un terzo che
+riguarda l'**output**: il modello si interrompe a metà della propria review. Quando accade, il
+commento sulla PR comincia con il banner `Output troncato: …`, che riporta il motivo dichiarato
+dall'API (`max_output_tokens`, `content_filter`, o «non dichiarato»).
+
+Come si legge, ed è la parte che conta: **una review con quel banner non è una review completa.**
+Nessuna delle sue omissioni prova niente — non ha finito di guardare. Il banner impedisce anche al
+workflow di pubblicare il marcatore di completamento, così il giro successivo la rifà invece di
+crederla fatta.
+
+*Perché è scritto qui:* fino al 12/08/2026 i due workflow su `v1/responses` (GPT-5.5 e GPT-5.6 Sol)
+riconoscevano il troncamento **solo** se il motivo era `max_output_tokens`. Qualunque altro motivo —
+`content_filter` fra questi — lasciava passare una review parziale come completa, marcata come fatta
+e mai più rifatta: il gate finale avrebbe detto «nessun bloccante» su una review interrotta a metà.
+Segnalato da CodeRabbit sulla PR #20 e corretto in entrambi.
+
+**E il sito segnalato non era l'unico.** Fable 5 sta su Anthropic, dove il campo si chiama
+`stop_reason` e i valori sono altri, ma la condizione aveva la stessa forma sbagliata: nominava il
+solo motivo atteso (`== "max_tokens"`), quindi un `refusal`, un `pause_turn` o una risposta senza
+`stop_reason` producevano «review completa». Adesso tutti e tre i workflow ragionano al contrario —
+si dichiara completa **solo** l'uscita che significa «ho finito» (`end_turn` su Anthropic, `status`
+diverso da `incomplete` su OpenAI), e ogni altro caso, incluso quello sconosciuto, porta il banner.
+È regola 2 applicata: il difetto è stato trovato in un posto e cercato in tutti. I test eseguono
+`call_model` di ciascun workflow con una risposta finta per ciascun motivo, e includono il caso
+«uscita normale» — senza, un `truncated` sempre vero passerebbe tutti gli altri e la review si
+ripagherebbe a ogni push.
+
 **Quanto costano davvero.** Misurato sulla PR #8, sette head, 15 review addebitate: **$2,6247** in
 totale. La distribuzione conta più del totale, perché decide dove risparmiare:
 
@@ -598,27 +627,30 @@ L'attesa a timer fisso (i vecchi 16 minuti) è **abrogata** per decisione del pr
 stato `REVIEW_WINDOW_PENDING` **non si usa più** e non si programma alcun self check-in di
 attesa. Al suo posto vale un'attesa **event-driven**.
 
-Motivo per cui non si merga appena rispondono i veloci: i quattro reviewer sincroni rispondono in
-circa un minuto, ma CodeRabbit pubblica i finding dettagliati (anche Major) minuti dopo. Saltarlo
-significa perdere P1 reali pre-merge.
+Motivo per cui non si merga appena rispondono i veloci: i reviewer sincroni rispondono in circa un
+minuto, ma CodeRabbit pubblica i finding dettagliati (anche Major) minuti dopo. Saltarlo significa
+perdere P1 reali pre-merge.
+
+In questo repository i reviewer sincroni sono **tre** — GPT-5.5, Claude Fable 5, GPT-5.6 Sol —
+perché GLM 5.2 non è importato. Nel Bridge sono quattro: se leggi «quattro reviewer sincroni» da
+qualche parte, quella frase viene da là.
 
 Flusso pre-merge:
 
 1. lavoro completo + check verdi + branch pushato + PR non draft;
-2. far partire i due workflow finali via label — una volta, a head stabile;
-3. leggere gli esiti dei quattro reviewer sincroni;
+2. far partire i due workflow finali via label — una volta, a head stabile. Se mancano i Secret o
+   le label, il passo va dichiarato non eseguibile con quel motivo, non spuntato;
+3. leggere gli esiti dei tre reviewer sincroni;
 4. aspettare che **CodeRabbit abbia completato**: o pubblica commenti inline azionabili, o il
    riepilogo «No actionable comments». L'attesa è legata all'evento, non a un orologio, e non
    blocca il proprietario;
-5. solo con i quattro reviewer + la review reale di CodeRabbit acquisiti → dire al proprietario
+5. solo con i tre reviewer + la review reale di CodeRabbit acquisiti → dire al proprietario
    merge sì/no.
 
-**Oggi, in questo repository:** i passi 2 e 3 valgono, con tre reviewer sincroni invece di quattro
-(GPT-5.5, Fable 5, GPT-5.6 Sol — GLM non è importato). Se mancano i Secret o le label, il passo 2 va
-dichiarato non eseguibile con quel motivo, non spuntato. I passi 4 e 5 valgono comunque, perché
-CodeRabbit è installato sull'account e commenta anche qui: l'attesa del suo completamento è in
-vigore, con il cap anti-stallo qui sotto. Lo stesso per i check di Codacy e DeepSource e per
-un'eventuale review di Codex.
+I passi 4 e 5 valgono anche quando `.github/workflows/` non c'entra nulla, perché CodeRabbit è
+installato sull'account e commenta comunque: l'attesa del suo completamento è in vigore, con il cap
+anti-stallo qui sotto. Lo stesso per i check di Codacy e DeepSource e per un'eventuale review di
+Codex.
 
 - **Codex** = assente per usage limit: non posta mai, non è un gate.
 - **CodeRabbit rate-limited → ASSENTE**, non si aspetta mai (decisione proprietario 2026-07-18):

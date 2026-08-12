@@ -27,6 +27,13 @@ GPT = WORKFLOWS / 'pr-review-gpt55.yml'
 FABLE = WORKFLOWS / 'pr-review-claude-fable5.yml'
 SOL = WORKFLOWS / 'pr-review-gpt56-sol.yml'
 
+# I due workflow che parlano con l'endpoint OpenAI `v1/responses`, e che quindi
+# leggono la stessa forma di risposta: `status`/`incomplete_details`, non
+# `stop_reason` come Anthropic. Ogni difetto nella lettura di quella forma vive
+# per costruzione in DUE posti, e i test che la riguardano vanno su entrambi
+# (regola 2: la classe, non il sito).
+SU_V1_RESPONSES = (GPT, SOL)
+
 # File il cui cambiamento DEVE far spendere il reviewer forte su un push.
 # main.py e' il relay; web/ e' la superficie multiutente e ospita il motore di
 # parsing; Procfile e railway.json espongono il servizio su Internet; le
@@ -1450,9 +1457,17 @@ def test_su_una_PR_mista_il_relay_precede_i_workflow(path):
 # Questi test coprono i tre modi.
 
 def _blocco(path: Path, nome: str) -> str:
-    """Il sorgente di una funzione dello script incorporato, dedentato."""
+    """Il sorgente di una funzione dello script incorporato, dedentato.
+
+    `nome` passa da `re.escape` (chiesto da CodeRabbit sulla PR #20): oggi i nomi
+    passati sono identificatori Python, quindi innocui, ma un nome con un carattere
+    speciale non darebbe un errore — cambierebbe in silenzio cosa cerca la regex, e
+    il modo in cui un test statico fallisce male e- sempre trovare il blocco sbagliato
+    e asserire su quello.
+    """
     sorgente = _script(path)
-    trovato = re.search(rf'^(\s*)def {nome}\(.*?(?=\n\1[A-Za-z_@])', sorgente, re.S | re.M)
+    trovato = re.search(rf'^(\s*)def {re.escape(nome)}\(.*?(?=\n\1[A-Za-z_@])',
+                        sorgente, re.S | re.M)
     assert trovato, f'{path.name}: {nome} non trovata'
     return textwrap.dedent(trovato.group(0))
 
@@ -1484,6 +1499,7 @@ def test_la_richiesta_del_gate_usa_la_forma_di_v1_responses():
     perche' su chat/completions era legittima.
     """
     corpo = _blocco(SOL, 'call_model')
+    codice = _solo_codice(corpo)
     # IL CAMPO CHE PORTA IL PROMPT, e sta per primo perche' e- quello che mi era
     # sfuggito. La prima versione di questo test asseriva `max_output_tokens`,
     # l'assenza di `temperature`, l'endpoint e `store` — cioe' i campi che AVEVO
@@ -1495,28 +1511,34 @@ def test_la_richiesta_del_gate_usa_la_forma_di_v1_responses():
         'il prompt non e- nel campo `input`: su v1/responses e- quello il nome, e '
         '`messages` da- 400 sistematico'
     )
-    assert '"messages"' not in _solo_codice(corpo), (
+    assert '"messages"' not in codice, (
         'residuo di chat/completions: `messages` invece di `input` fa fallire OGNI '
         'chiamata con 400, cioe- il gate finale rosso a ogni armamento'
     )
     assert '"max_output_tokens"' in corpo, 'il tetto di output non e- nella forma di v1/responses'
-    assert '"max_tokens"' not in corpo, (
+    # Ogni assenza si cerca in `codice`, non in `corpo`: un commento che spiega di NON
+    # usare un nome contiene quel nome, e cercarlo nel testo grezzo rende il test rosso
+    # grazie alla documentazione che lo giustifica. Mi e- successo tre volte in un
+    # giorno con questa classe di test, ed e- l'unica ragione per cui `_solo_codice`
+    # esiste. Chiesto da CodeRabbit sulla PR #20 di applicarlo anche a queste tre.
+    assert '"max_tokens"' not in codice, (
         'residuo di chat/completions: `max_tokens` su v1/responses viene ignorato e '
         'il tetto non viene applicato'
     )
-    assert '"temperature"' not in corpo, (
+    assert '"temperature"' not in codice, (
         '`temperature` su un modello reasoning di v1/responses da- 400: gate rosso '
         'per un parametro, non per un difetto'
     )
     assert 'api.openai.com/v1/responses' in corpo, 'endpoint non aggiornato'
-    assert 'openrouter.ai' not in corpo, 'chiama ancora OpenRouter'
+    assert 'openrouter.ai' not in codice, 'chiama ancora OpenRouter'
     assert '"store": False' in corpo, (
         'la richiesta contiene il diff della PR: senza `store: False` resta '
         'memorizzato lato fornitore'
     )
 
 
-def test_il_gate_riconosce_il_troncamento_nella_forma_GIUSTA():
+@pytest.mark.parametrize('path', SU_V1_RESPONSES, ids=lambda p: p.name)
+def test_il_gate_riconosce_il_troncamento_nella_forma_GIUSTA(path):
     """`status=incomplete` + `incomplete_details`, non `finish_reason`.
 
     E' il difetto piu' insidioso della sostituzione: `finish_reason` e' un campo di
@@ -1524,8 +1546,11 @@ def test_il_gate_riconosce_il_troncamento_nella_forma_GIUSTA():
     niente — restituisce `None`, `truncated` resta falso, e una review TRONCATA
     verrebbe pubblicata come completa, col `done_marker` che impedisce di rifarla.
     Cioe' il gate finale direbbe «nessun bloccante» su una review interrotta a meta'.
+
+    Su entrambi i workflow di questo endpoint, non solo sul gate: la stessa lettura
+    vive in due posti per costruzione.
     """
-    corpo = _blocco(SOL, 'call_model')
+    corpo = _blocco(path, 'call_model')
     assert 'incomplete_details' in corpo, 'il troncamento non e- piu- rilevato'
     assert '"status") == "incomplete"' in corpo or "'status') == 'incomplete'" in corpo, \
         'manca il controllo su status=incomplete'
@@ -1594,8 +1619,8 @@ def test_il_gate_dichiara_il_modello_e_l_etichetta_separati():
         'il prezzo dei token dalla cache non e- dichiarato'
 
 
-def _call_model_del_gate(monkeypatch, risposta=None, errore=None):
-    """Esegue `call_model` del gate con una finta `urlopen`.
+def _call_model_del_gate(monkeypatch, risposta=None, errore=None, path=SOL):
+    """Esegue `call_model` di un workflow su `v1/responses` con una finta `urlopen`.
 
     Chiesto da GPT-5.5 nei «test minimi» della PR #20, e la richiesta era giusta: i
     test statici dicono che il payload ha la forma giusta, non che il codice sappia
@@ -1607,6 +1632,12 @@ def _call_model_del_gate(monkeypatch, risposta=None, errore=None):
     fragilita': un ripristino manuale non avviene se l'asserzione solleva prima di
     arrivarci, e tre copie della stessa riga di ripristino sono tre occasioni di
     scriverla male. `monkeypatch` ripristina da se', anche sul fallimento.
+
+    `path` esiste perche' i workflow su questo endpoint sono DUE e leggono la stessa
+    forma di risposta: quando la lettura di quella forma cambia, il test va su
+    entrambi. Il nome della variabile del modello differisce fra i due sorgenti
+    (`MODEL_ID` nel gate, `OPENAI_MODEL` in GPT-5.5), quindi lo spazio dei nomi
+    contiene ambedue: un `NameError` qui sarebbe un test verde-per-caso mai.
     """
     import io
     import json as _json
@@ -1636,6 +1667,7 @@ def _call_model_del_gate(monkeypatch, risposta=None, errore=None):
 
     spazio: dict = {
         'MODEL_ID': 'gpt-5.6-sol',
+        'OPENAI_MODEL': 'gpt-5.5',
         'MAX_OUTPUT_TOKENS': 10_000,
         'BETRELAY_GPT': 'chiave-finta-non-un-segreto',
         'REVIEW_ID': 'gpt56-sol',
@@ -1646,19 +1678,23 @@ def _call_model_del_gate(monkeypatch, risposta=None, errore=None):
         'io': io,
     }
     monkeypatch.setattr(urllib.request, 'urlopen', finta_urlopen)
-    exec(_blocco(SOL, 'call_model'), spazio)  # noqa: S102 - sorgente del repo
+    exec(_blocco(path, 'call_model'), spazio)  # noqa: S102 - sorgente del repo
     return spazio['call_model'], chiamate
 
 
-def test_il_gate_legge_una_risposta_minimale_di_v1_responses(monkeypatch):
+@pytest.mark.parametrize('path', SU_V1_RESPONSES, ids=lambda p: p.name)
+def test_il_gate_legge_una_risposta_minimale_di_v1_responses(monkeypatch, path):
     """`output_text` e `usage` estratti da una risposta della forma nuova.
 
     E la richiesta spedita viene ISPEZIONATA: e' l'unico modo di sapere che il
     payload ha davvero `input` e non `messages`, perche' un `assert` sul sorgente
-    non prova che quel dizionario finisca nel corpo del POST.
+    non prova che quel dizionario finisca nel corpo del POST. Per lo stesso motivo
+    ci si aspetta `store: False` nel corpo spedito e non solo nel sorgente: la
+    richiesta contiene il diff della PR, e «non memorizzare» e' una promessa che
+    vale solo se arriva davvero al fornitore. Chiesto da CodeRabbit sulla PR #20.
     """
     import json as _json
-    call_model, chiamate = _call_model_del_gate(monkeypatch, risposta={
+    call_model, chiamate = _call_model_del_gate(monkeypatch, path=path, risposta={
         'output_text': 'nessun bloccante',
         'status': 'completed',
         'usage': {'input_tokens': 1_000, 'output_tokens': 10},
@@ -1671,33 +1707,195 @@ def test_il_gate_legge_una_risposta_minimale_di_v1_responses(monkeypatch):
     corpo = _json.loads(chiamate[0].data.decode('utf-8'))
     assert 'input' in corpo, f'la richiesta spedita non ha `input`: {sorted(corpo)}'
     assert 'messages' not in corpo, 'la richiesta spedita ha ancora `messages`'
-    assert corpo['model'] == 'gpt-5.6-sol'
+
+    env = {**(_carica(path).get('env') or {}),
+           **(_carica(path)['jobs']['review'].get('env') or {})}
+    atteso = env.get('MODEL_ID') or env.get('OPENAI_MODEL')
+    assert corpo['model'] == atteso, (
+        f'il modello spedito ({corpo["model"]!r}) non e- quello dichiarato '
+        f'nell-env del workflow ({atteso!r})'
+    )
     assert corpo['max_output_tokens'] == 10_000
     assert 'temperature' not in corpo
+    assert corpo.get('store') is False, (
+        'la richiesta spedita non porta `store: False`: il diff della PR resterebbe '
+        f'memorizzato lato fornitore. Corpo: {sorted(corpo)}'
+    )
 
 
-def test_una_risposta_TRONCATA_non_passa_per_completa(monkeypatch):
-    """`status=incomplete` deve mettere il banner che marca la review non completa.
+# `max_output_tokens` e' il motivo ATTESO; `content_filter` e' un motivo che l'API
+# puo' restituire e che la vecchia condizione lasciava passare per completo, perche'
+# pretendeva `status == 'incomplete' AND reason == 'max_output_tokens'`. Il terzo caso
+# e' un `incomplete` che non dichiara affatto il motivo: `incomplete_details` assente,
+# cioe' esattamente la risposta su cui una condizione che legge `reason` inciampa.
+@pytest.mark.parametrize('path', SU_V1_RESPONSES, ids=lambda p: p.name)
+@pytest.mark.parametrize('dettagli', (
+    {'reason': 'max_output_tokens'},
+    {'reason': 'content_filter'},
+    None,
+), ids=('max_output_tokens', 'content_filter', 'senza_motivo'))
+def test_una_risposta_TRONCATA_non_passa_per_completa(monkeypatch, path, dettagli):
+    """`status=incomplete` deve mettere il banner, QUALUNQUE sia il motivo.
 
     Il banner in testa e' cio' che il chiamante controlla con `startswith` per non
     pubblicare il `done_marker`: senza, una review interrotta a meta' verrebbe
     deduplicata come completata e non rifatta mai piu'.
+
+    Il caso `content_filter` e' il finding major di CodeRabbit sulla PR #20, e la
+    condizione precedente lo lasciava passare: chiedeva `status == 'incomplete'`
+    **e** `reason == 'max_output_tokens'`, quindi ogni altro motivo di interruzione
+    produceva `truncated = False`, cioe' una review parziale pubblicata come
+    completa e marcata come fatta. Vale su ENTRAMBI i workflow su questo endpoint,
+    perche' la condizione era identica in due posti (regola 2).
     """
-    call_model, _ = _call_model_del_gate(monkeypatch, risposta={
-        'output_text': 'meta- review',
-        'status': 'incomplete',
-        'incomplete_details': {'reason': 'max_output_tokens'},
-        'usage': {},
-    })
+    risposta = {'output_text': 'meta- review', 'status': 'incomplete', 'usage': {}}
+    if dettagli is not None:
+        risposta['incomplete_details'] = dettagli
+    call_model, _ = _call_model_del_gate(monkeypatch, path=path, risposta=risposta)
     testo, _ = call_model('sistema', 'utente')
 
-    assert testo.startswith('Output troncato'), (
-        f'una review troncata non porta il banner, quindi passerebbe per completa:\n{testo!r}'
+    assert _e_marcata_non_completa(testo, path), (
+        f'una review troncata non e- riconosciuta dal guard del chiamante '
+        f'{_prefissi_guard(path)}, quindi passerebbe per completa:\n{testo!r}'
     )
     assert 'meta- review' in testo, 'il testo parziale e- stato buttato via'
+    # Il motivo va DENTRO il banner: chi legge il commento sulla PR deve sapere se
+    # alzare MAX_OUTPUT_TOKENS o guardare altro. Con un `incomplete` senza dettagli
+    # il banner lo dichiara invece di tacere.
+    atteso = (dettagli or {}).get('reason', 'non dichiarato')
+    assert atteso in testo, f'il motivo {atteso!r} non compare nel banner:\n{testo!r}'
 
 
-def test_un_400_del_fornitore_fa_FALLIRE_e_non_restituisce_una_review(monkeypatch):
+@pytest.mark.parametrize('path', SU_V1_RESPONSES, ids=lambda p: p.name)
+def test_una_risposta_COMPLETA_non_porta_il_banner(monkeypatch, path):
+    """Il contrario del test sopra, e serve.
+
+    Senza, `truncated = True` costante passerebbe tutti i test sul troncamento: ogni
+    review porterebbe il banner, nessun `done_marker` verrebbe mai pubblicato e ogni
+    push rifarebbe la review da zero, pagandola. Un guard fail-closed che scatta
+    sempre non e' un guard, e' un guasto.
+    """
+    call_model, _ = _call_model_del_gate(monkeypatch, path=path, risposta={
+        'output_text': 'nessun bloccante', 'status': 'completed', 'usage': {},
+    })
+    testo, _ = call_model('sistema', 'utente')
+    assert not _e_marcata_non_completa(testo, path), (
+        f'una review COMPLETA e- stata marcata come non completa: nessun done_marker '
+        f'verrebbe pubblicato e la review si ripaga a ogni push.\n{testo!r}'
+    )
+
+
+def _prefissi_guard(path: Path) -> list:
+    """I prefissi che il CHIAMANTE cerca per dichiarare una review non completa.
+
+    Produttore e consumatore del banner stanno in due punti distanti dello stesso
+    file: `call_model` prepone «Output troncato: …», e centinaia di righe piu' sotto
+    il chiamante fa `review.lstrip().startswith((...))` per NON pubblicare il
+    `done_marker`. Sono due letterali indipendenti e nessuno dei due solleva se
+    divergono: riformulare il banner in modo che il guard non lo riconosca piu'
+    lascerebbe passare per completa ogni review troncata — la stessa conseguenza del
+    difetto segnalato da CodeRabbit, per una causa diversa.
+
+    Estrarre i prefissi dal sorgente e asserire su QUELLI, invece di ripetere
+    «Output troncato» nei test, e' cio' che lega i due lati. La prima versione di
+    questo controllo era statica — cercava i banner che iniziavano per «Output
+    troncato» e verificava che il guard li riconoscesse — e passava anche dopo aver
+    rinominato un banner, perche' il rinominato non veniva piu' trovato dalla ricerca
+    stessa. Misurato per sabotaggio, non dedotto.
+    """
+    fuori = _script(path).replace(_blocco(path, 'call_model'), '')
+    guardie = re.findall(r'startswith\(\s*\(?\s*(?:\n\s*)?"([^"]+)"', fuori)
+    assert guardie, f'{path.name}: nessun guard startswith trovato fuori da call_model'
+    return guardie
+
+
+def _e_marcata_non_completa(testo: str, path: Path) -> bool:
+    return any(testo.lstrip().startswith(g) for g in _prefissi_guard(path))
+
+
+def _call_model_di_fable(monkeypatch, risposta):
+    """Come sopra, ma per Fable: Anthropic, quindi `stop_reason` e `content`.
+
+    Esiste perche' la falla del troncamento sotto-rilevato non era solo dei due
+    workflow su `v1/responses`: qui il campo si chiama diversamente e i valori sono
+    altri, ma la condizione aveva la stessa forma sbagliata — nominare il solo
+    motivo atteso. Cercare la CLASSE e non il sito significa arrivare anche qui.
+    """
+    import io
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    class RispostaFinta:
+        def __init__(self, corpo):
+            self._corpo = _json.dumps(corpo).encode('utf-8')
+
+        def read(self):
+            return self._corpo
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    monkeypatch.setattr(urllib.request, 'urlopen',
+                        lambda req, timeout=None: RispostaFinta(risposta))
+    spazio: dict = {
+        'ANTHROPIC_MODEL': 'claude-fable-5',
+        'ANTHROPIC_VERSION': '2023-06-01',
+        'MAX_OUTPUT_TOKENS': 3_000,
+        'BETRELAY_FABLE': 'chiave-finta-non-un-segreto',
+        'REVIEW_ID': 'claude-fable5',
+        'redact': lambda t: t,
+        'json': _json,
+        'time': __import__('time'),
+        'urllib': urllib,
+        'io': io,
+    }
+    exec(_blocco(FABLE, 'call_model'), spazio)  # noqa: S102 - sorgente del repo
+    return spazio['call_model']
+
+
+# `end_turn` e' l'UNICO motivo che significa «ho finito la review». `max_tokens` era
+# l'unico che il codice riconosceva. `refusal` e un `stop_reason` assente sono i due
+# modi in cui una review incompleta passava per completa.
+@pytest.mark.parametrize('stop, troncata', (
+    ('end_turn', False),
+    ('max_tokens', True),
+    ('refusal', True),
+    ('pause_turn', True),
+    (None, True),
+), ids=('end_turn', 'max_tokens', 'refusal', 'pause_turn', 'assente'))
+def test_fable_marca_troncata_ogni_uscita_che_non_sia_end_turn(monkeypatch, stop, troncata):
+    """La stessa falla di CodeRabbit sulla PR #20, sull'altro fornitore.
+
+    Su Anthropic il campo e' `stop_reason` e i valori sono altri, ma il difetto era
+    identico: `truncated = body.get("stop_reason") == "max_tokens"` riconosceva un
+    solo modo di non finire. Un `refusal` — o una risposta senza `stop_reason`, cioe'
+    una forma che non conosciamo — produceva `truncated = False`, quindi una review
+    parziale pubblicata come completa e marcata come fatta dal `done_marker`.
+
+    Il caso `end_turn` e' nell'elenco per la ragione opposta: un `truncated` sempre
+    vero passerebbe tutti gli altri, e vorrebbe dire nessun `done_marker` mai e la
+    review pagata a ogni push.
+    """
+    risposta = {'content': [{'type': 'text', 'text': 'meta- review'}], 'usage': {}}
+    if stop is not None:
+        risposta['stop_reason'] = stop
+    testo, _ = _call_model_di_fable(monkeypatch, risposta)('sistema', 'utente')
+
+    assert _e_marcata_non_completa(testo, FABLE) is troncata, (
+        f'stop_reason={stop!r}: atteso troncata={troncata}, ottenuto:\n{testo!r}'
+    )
+    assert 'meta- review' in testo, 'il testo del modello e- stato buttato via'
+    if troncata:
+        assert (stop or 'non dichiarato') in testo, \
+            f'il motivo non compare nel banner:\n{testo!r}'
+
+
+@pytest.mark.parametrize('path', SU_V1_RESPONSES, ids=lambda p: p.name)
+def test_un_400_del_fornitore_fa_FALLIRE_e_non_restituisce_una_review(monkeypatch, path):
     """Chiesto da GPT-5.5: fail-closed sull'errore del fornitore.
 
     Un 400 non e' un caso da ritentare — la richiesta e' malformata, e ritentarla
@@ -1711,7 +1909,7 @@ def test_un_400_del_fornitore_fa_FALLIRE_e_non_restituisce_una_review(monkeypatc
     """
     import io
     import urllib.error
-    call_model, chiamate = _call_model_del_gate(monkeypatch, errore=urllib.error.HTTPError(
+    call_model, chiamate = _call_model_del_gate(monkeypatch, path=path, errore=urllib.error.HTTPError(
         'https://api.openai.com/v1/responses', 400, 'Bad Request', {},
         io.BytesIO(b'{"error": {"message": "Unknown parameter: messages."}}')))
     with pytest.raises(RuntimeError) as esito:
