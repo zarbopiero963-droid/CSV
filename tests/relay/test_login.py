@@ -1250,10 +1250,11 @@ def test_il_collegamento_dell_admin_RIPARA_un_account_gia_sbagliato(tmp_path, mo
 
     # ORA la variabile arriva — il deploy e' passato — e il proprietario rifa' il login.
     monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', ADMIN_FINTO)
-    # Il consenso all'assorbimento della riga vuota, che dal fail-closed di GPT-5.6 Sol
-    # sulla PR #24 e' un gesto DELIBERATO: senza, il servizio rifiuta con 409 invece di
-    # assorbire, perche' una riga vuota puo' anche essere di un cliente appena iscritto.
-    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_RECONCILE', '1')
+    # Il consenso all'assorbimento della riga vuota: dal fail-closed di GPT-5.6 Sol sulla
+    # PR #24 e' un gesto DELIBERATO — senza, il servizio rifiuta con 409, perche' una riga
+    # vuota puo' anche essere di un cliente appena iscritto — e dal rischio alzato da
+    # GPT-5.5 il valore e' l'ID DELLA RIGA, non un `1` globale.
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_RECONCILE', str(vuoto[0]))
     risposta = main.login_telegram(main.LoginTelegramIn(**_dati_login()))
     assert risposta.status_code == 200
 
@@ -1341,10 +1342,11 @@ def test_la_riparazione_NON_perde_i_dati_dell_account_sbagliato(tmp_path, monkey
     c.close()
 
     monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', ADMIN_FINTO)
-    # Il consenso all'assorbimento della riga vuota, che dal fail-closed di GPT-5.6 Sol
-    # sulla PR #24 e' un gesto DELIBERATO: senza, il servizio rifiuta con 409 invece di
-    # assorbire, perche' una riga vuota puo' anche essere di un cliente appena iscritto.
-    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_RECONCILE', '1')
+    # Il consenso all'assorbimento della riga vuota: dal fail-closed di GPT-5.6 Sol sulla
+    # PR #24 e' un gesto DELIBERATO — senza, il servizio rifiuta con 409, perche' una riga
+    # vuota puo' anche essere di un cliente appena iscritto — e dal rischio alzato da
+    # GPT-5.5 il valore e' l'ID DELLA RIGA, non un `1` globale.
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_RECONCILE', str(vuoto))
     main.login_telegram(main.LoginTelegramIn(**_dati_login()))
 
     c = sqlite3.connect(percorso)
@@ -1579,10 +1581,11 @@ def test_le_sessioni_dell_account_SVUOTATO_muoiono_con_la_riparazione(tmp_path, 
         'il cookie non era valido nemmeno prima: il test non misura la riparazione')
 
     monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', ADMIN_FINTO)
-    # Il consenso all'assorbimento della riga vuota, che dal fail-closed di GPT-5.6 Sol
-    # sulla PR #24 e' un gesto DELIBERATO: senza, il servizio rifiuta con 409 invece di
-    # assorbire, perche' una riga vuota puo' anche essere di un cliente appena iscritto.
-    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_RECONCILE', '1')
+    # Il consenso all'assorbimento della riga vuota: dal fail-closed di GPT-5.6 Sol sulla
+    # PR #24 e' un gesto DELIBERATO — senza, il servizio rifiuta con 409, perche' una riga
+    # vuota puo' anche essere di un cliente appena iscritto — e dal rischio alzato da
+    # GPT-5.5 il valore e' l'ID DELLA RIGA, non un `1` globale.
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_RECONCILE', str(vuoto[0]))
     main.login_telegram(main.LoginTelegramIn(**_dati_login()))
 
     assert main.utente_dalla_sessione(RichiestaFinta()) is None, (
@@ -2147,7 +2150,8 @@ def test_col_CONSENSO_la_riparazione_funziona_ancora(tmp_path, monkeypatch):
     possibile, altrimenti si torna al lockout irreversibile che questa PR chiude — si e'
     solo spostato il difetto invece di correggerlo.
 
-    Il consenso e' `TELEGRAM_ADMIN_RECONCILE=1`, che il proprietario imposta quando LEGGE il
+    Il consenso e' `TELEGRAM_ADMIN_RECONCILE`, che porta l'identificativo della riga da
+    assorbire e che il proprietario imposta quando LEGGE il
     409 e sa che quella riga e' la sua. Non e' burocrazia: e' l'unico dato che il servizio
     non puo' dedurre, perche' con la variabile sbagliata anche la fonte dell'identita' e'
     sbagliata.
@@ -2158,7 +2162,7 @@ def test_col_CONSENSO_la_riparazione_funziona_ancora(tmp_path, monkeypatch):
     vuoto, piero = _cliente_nudo(percorso, monkeypatch, SUO)
 
     monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', SUO)
-    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_RECONCILE', '1')
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_RECONCILE', str(vuoto))
     risposta = main.login_telegram(main.LoginTelegramIn(**_dati_login(id=SUO)))
     utente = json.loads(bytes(risposta.body).decode()).get('utente')
 
@@ -2197,7 +2201,7 @@ def test_il_CONSENSO_non_autorizza_a_fondere_un_account_PIENO(tmp_path, monkeypa
     c.close()
 
     monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', CLIENTE)
-    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_RECONCILE', '1')
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_RECONCILE', str(cliente))
     with pytest.raises(HTTPException) as errore:
         main.login_telegram(main.LoginTelegramIn(**_dati_login(id=CLIENTE)))
     assert errore.value.status_code == 409
@@ -2206,3 +2210,49 @@ def test_il_CONSENSO_non_autorizza_a_fondere_un_account_PIENO(tmp_path, monkeypa
     suoi = c.execute('SELECT COUNT(*) FROM parsers WHERE user_id=?', (cliente,)).fetchone()[0]
     c.close()
     assert suoi == 1, f'il consenso ha travasato {1 - suoi} parser di un cliente'
+
+
+def test_il_CONSENSO_vale_solo_per_LA_RIGA_indicata(tmp_path, monkeypatch):
+    """Rischio alzato da GPT-5.5 sulla PR #24: un consenso globale che resta impostato.
+
+    La prima versione del consenso era `TELEGRAM_ADMIN_RECONCILE=1`, cioe' un interruttore
+    **globale**: autorizzava l'assorbimento di qualunque riga vuota, per sempre. La
+    documentazione diceva di togliere la variabile dopo l'uso, ma una variabile che va
+    ricordata di togliere e' una variabile che resta — e da quel momento il fail-closed non
+    c'era piu': un futuro refuso in `TELEGRAM_ADMIN_ID` verso la riga di un cliente vuoto
+    sarebbe stato assorbito di nuovo, che e' esattamente il bloccante che il consenso doveva
+    chiudere.
+
+    Ora il valore e' l'**identificativo della riga** da assorbire, che il proprietario legge
+    nel `409` (log e `admin_audit`). Vincolarlo alla riga lo rende innocuo se resta
+    impostato, e la ragione e' una proprieta' del codice e non una speranza: la riga assorbita
+    **non viene cancellata**, quindi il suo id non viene mai riusato da un utente nuovo.
+
+    I due valori provati sono i due modi di sbagliare: `'1'` e' l'interruttore globale della
+    prima versione — su cui questo test era ROSSO — e `id+100` e' il consenso dato una volta
+    per un'altra riga e rimasto nell'ambiente.
+    """
+    import sqlite3
+    from fastapi import HTTPException
+
+    for numero, consenso in enumerate(('1', 'ALTRA_RIGA')):
+        percorso = _prepara(tmp_path, monkeypatch, f'consenso_legato_{numero}.db')
+        SUO = '444000444'
+        vuoto, piero = _cliente_nudo(percorso, monkeypatch, SUO)
+
+        monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', SUO)
+        valore = str(vuoto + 100) if consenso == 'ALTRA_RIGA' else consenso
+        monkeypatch.setattr(main, 'TELEGRAM_ADMIN_RECONCILE', valore)
+
+        with pytest.raises(HTTPException) as errore:
+            main.login_telegram(main.LoginTelegramIn(**_dati_login(id=SUO)))
+        assert errore.value.status_code == 409, (
+            f'consenso {valore!r}: {errore.value.status_code} invece di 409. Quel valore non '
+            f'indica la riga {vuoto}, quindi non autorizza questo assorbimento')
+
+        c = sqlite3.connect(percorso)
+        suo = c.execute('SELECT telegram_id FROM users WHERE id=?', (vuoto,)).fetchone()[0]
+        c.close()
+        assert suo == SUO, (
+            f'consenso {valore!r}: la riga e- stata assorbita comunque (telegram_id ora '
+            f'{suo!r})')

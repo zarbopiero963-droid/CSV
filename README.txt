@@ -324,8 +324,10 @@ TELEGRAM_ADMIN_ID: l'ID Telegram numerico del proprietario. Collega il suo login
   aveva accumulato, gli toglie il telegram_id e lo scrive sulla riga PIERO, con una riga
   in admin_audit. Quindi l'ordine fra variabile e login non conta — ma la riparazione
   va AUTORIZZATA, vedi TELEGRAM_ADMIN_RECONCILE qui sotto.
-TELEGRAM_ADMIN_RECONCILE: facoltativa, si imposta a 1 e serve una volta sola. E' il
-  CONSENSO ad assorbire la riga vuota che possiede TELEGRAM_ADMIN_ID.
+TELEGRAM_ADMIN_RECONCILE: facoltativa, serve una volta sola. E' il CONSENSO ad
+  assorbire la riga vuota che possiede TELEGRAM_ADMIN_ID, e il suo valore e'
+  l'IDENTIFICATIVO DI QUELLA RIGA — non un 1. Il numero lo trovi nel messaggio di log
+  che accompagna il 409: dice esattamente quale valore mettere.
   Perche' serve: «la riga e' vuota» distingue un account pieno da uno vuoto, non un
   CLIENTE da una riga nata per errore. Un cliente appena registrato e' vuoto anche lui,
   quindi le due situazioni sono indistinguibili — due righe di users con un'identita'
@@ -336,10 +338,17 @@ TELEGRAM_ADMIN_RECONCILE: facoltativa, si imposta a 1 e serve una volta sola. E'
   Quando nessun dato distingue i due casi, l'unico marcatore affidabile e' il consenso
   di chi sa. Quindi: senza questa variabile il login risponde 409 e NON tocca niente,
   scrivendo nei log e in admin_audit cosa fare.
-  Come si usa: si imposta a 1 SOLO dopo aver letto il 409 e riconosciuto quella riga
-  come propria (login fatto prima che TELEGRAM_ADMIN_ID arrivasse nel processo), si rifa'
-  login, e poi si puo' togliere. Se quella riga NON e' la propria, va corretta invece
-  TELEGRAM_ADMIN_ID.
+  Come si usa: si legge il 409 nei log, si riconosce quella riga come propria (login
+  fatto prima che TELEGRAM_ADMIN_ID arrivasse nel processo), si imposta la variabile con
+  l'identificativo che il log indica, si rifa' login. Se quella riga NON e' la propria,
+  va corretta invece TELEGRAM_ADMIN_ID.
+  Perche' l'ID della riga e non 1: un interruttore globale che la documentazione dice di
+  togliere dopo l'uso e' un interruttore che resta, e da quel momento un refuso futuro
+  in TELEGRAM_ADMIN_ID verso un'altra riga vuota verrebbe assorbito di nuovo — il
+  fail-closed sparirebbe in silenzio. Legato alla riga, un consenso dimenticato e'
+  innocuo: la riga assorbita non viene cancellata, quindi il suo identificativo non
+  viene mai riusato da un utente nuovo. Rischio alzato da GPT-5.5.
+  Puoi togliere la variabile dopo l'uso, ma non e' piu' una precauzione necessaria.
   Cosa NON autorizza: un account che possiede parser o chat resta rifiutato anche col
   consenso. Il consenso dice «quella riga vuota e' mia», non «prenditi i dati di un
   altro».

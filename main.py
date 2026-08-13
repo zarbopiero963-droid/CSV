@@ -915,8 +915,8 @@ def _assegna_slug_e_ordine(c):
             prossimo += 1
 
 
-def riconciliazione_autorizzata():
-    """Vero se il proprietario ha AUTORIZZATO l'assorbimento della riga vuota.
+def riconciliazione_autorizzata(utente):
+    """Vero se il proprietario ha AUTORIZZATO l'assorbimento di QUESTA riga vuota.
 
     Esiste perche' `possiede_qualcosa()` non basta, e il perche' e' una constatazione:
     distingue un account **pieno** da uno vuoto, non un **cliente** da una riga nata per
@@ -930,13 +930,22 @@ def riconciliazione_autorizzata():
 
     Quando nessun dato distingue i due casi, il solo marcatore affidabile e' il consenso di
     chi sa: il proprietario legge il `409`, riconosce quella riga come sua, imposta
-    `TELEGRAM_ADMIN_RECONCILE=1` e rifa' login. Il costo e' una variabile impostata una
-    volta; il guadagno e' che con la variabile sbagliata il servizio **non assorbe niente**,
-    perche' con un ID sbagliato anche la fonte dell'identita' e' sbagliata e non si puo'
-    dedurre nulla da essa. Assente → si fallisce chiusi, che sull'isolamento fra utenti e' il
-    verso obbligato (priorita' 7 di `CLAUDE.md`).
+    `TELEGRAM_ADMIN_RECONCILE` e rifa' login. Il costo e' una variabile impostata una volta;
+    il guadagno e' che con la variabile sbagliata il servizio **non assorbe niente**, perche'
+    con un ID sbagliato anche la fonte dell'identita' e' sbagliata e non si puo' dedurre nulla
+    da essa. Assente → si fallisce chiusi, che sull'isolamento fra utenti e' il verso
+    obbligato (priorita' 7 di `CLAUDE.md`).
+
+    Il valore e' l'**identificativo della riga** da assorbire, non un `1`. La prima versione
+    era un interruttore globale, e GPT-5.5 ha alzato il rischio giusto: la documentazione
+    diceva di togliere la variabile dopo l'uso, ma una variabile che va ricordata di togliere
+    e' una variabile che resta — e da quel momento un refuso futuro in `TELEGRAM_ADMIN_ID`
+    verso una riga vuota veniva assorbito di nuovo, cioe' il fail-closed non c'era piu'.
+    Legato alla riga, un consenso dimenticato e' innocuo, e non per prudenza: la riga
+    assorbita **non viene cancellata**, quindi il suo id non viene mai riusato da un utente
+    nuovo, e il consenso vecchio non puo' combaciare con un caso nuovo.
     """
-    return TELEGRAM_ADMIN_RECONCILE == '1'
+    return TELEGRAM_ADMIN_RECONCILE != '' and TELEGRAM_ADMIN_RECONCILE == str(utente)
 
 
 def possiede_qualcosa(c, utente):
@@ -2021,15 +2030,21 @@ def _decidi_identita(c, data):
                 _annota_admin(c, proprietario[0], 'collegamento_admin_rifiutato',
                               bersaglio=riga[0])
                 raise HTTPException(409, 'configurazione dell\'amministratore incoerente')
-            if not riconciliazione_autorizzata():
+            if not riconciliazione_autorizzata(riga[0]):
                 # La riga e' vuota, ma vuota non significa «nata per errore»: un cliente
                 # appena registrato e' vuoto anche lui. Senza consenso non si assorbe.
+                #
+                # Il log stampa l'identificativo della riga, che e' il valore da mettere
+                # nella variabile: e' un intero interno, non un token ne' un telegram_id,
+                # e senza di lui il proprietario non avrebbe modo di dare un consenso
+                # LEGATO — quindi il consenso tornerebbe globale per forza di cose.
                 logging.getLogger('xtrader.relay').error(
-                    "TELEGRAM_ADMIN_ID e' posseduto da un altro account, VUOTO."
-                    " Assorbimento NON autorizzato, quindi rifiutato: se quella riga e' la"
-                    " tua (login fatto prima che la variabile arrivasse nel processo),"
-                    " imposta TELEGRAM_ADMIN_RECONCILE=1 e rifai login. Se non lo e', quella"
-                    " riga e' di un cliente e va corretta la variabile.")
+                    "TELEGRAM_ADMIN_ID e' posseduto da un altro account, VUOTO"
+                    " (riga %s). Assorbimento NON autorizzato, quindi rifiutato: se quella"
+                    " riga e' la tua (login fatto prima che la variabile arrivasse nel"
+                    " processo), imposta TELEGRAM_ADMIN_RECONCILE=%s e rifai login. Se non"
+                    " lo e', quella riga e' di un cliente e va corretta la variabile.",
+                    riga[0], riga[0])
                 _annota_admin(c, proprietario[0], 'riconciliazione_non_autorizzata',
                               bersaglio=riga[0])
                 raise HTTPException(409, 'configurazione dell\'amministratore incoerente')

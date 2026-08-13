@@ -508,7 +508,8 @@ Il proprietario entra in due modi, e il secondo non è un vezzo:
      **al primo login successivo al cambio**, chiunque lo faccia. Fino a quel login la riga
      porta ancora il vecchio `telegram_id` e le sue sessioni sono valide;
    - **se un altro account possiede già quell'ID, il login è rifiutato con `409` finché il
-     proprietario non autorizza l'assorbimento** con `TELEGRAM_ADMIN_RECONCILE=1`. Il motivo
+     proprietario non autorizza l'assorbimento** con `TELEGRAM_ADMIN_RECONCILE`, il cui valore
+     è l'**identificativo della riga** da assorbire — non un `1`. Il motivo
      è una constatazione, non una cautela: «la riga è vuota» distingue un account pieno da uno
      vuoto, **non un cliente da una riga nata per errore**. Un cliente appena registrato è
      vuoto anche lui, quindi le due situazioni sono due righe di `users` con un'identità
@@ -519,8 +520,14 @@ Il proprietario entra in due modi, e il secondo non è un vezzo:
      affidabile è il consenso di chi sa, e in sua assenza si fallisce chiusi. Bloccante di
      GPT-5.6 Sol sulla PR #24. Il baratto è dichiarato: la riparazione resta possibile ma
      **deliberata** — il proprietario legge il `409` (log + `admin_audit`), imposta la
-     variabile, rifà login, e può toglierla. Alternativa scartata: rifiutare sempre, che
-     riporterebbe al lockout irreversibile che questa PR chiude;
+     variabile col numero che il log gli indica, rifà login. Alternativa scartata: rifiutare
+     sempre, che riporterebbe al lockout irreversibile che questa PR chiude.
+     Il valore è legato alla riga e non è un interruttore globale, per un rischio alzato da
+     GPT-5.5: un `1` che la documentazione dice di togliere dopo l'uso è un `1` che resta, e da
+     quel momento un refuso futuro verso un'altra riga vuota verrebbe assorbito di nuovo — il
+     fail-closed sparirebbe in silenzio. Legato alla riga, un consenso dimenticato è innocuo, e
+     per una proprietà del codice e non per prudenza: la riga assorbita **non viene
+     cancellata**, quindi il suo identificativo non è mai riusato da un utente nuovo;
    - **se la variabile punta a un account che possiede parser o chat, il login è rifiutato**
      con `409` **anche col consenso** — che dice «quella riga vuota è mia», non «prenditi i
      dati di un altro utente». L'account bersaglio resta **intatto**, nessun dato viene travasato e nessun
@@ -540,7 +547,7 @@ Il proprietario entra in due modi, e il secondo non è un vezzo:
    `session_version` due volte — misurato, **un cookie su sei nasce morto**, il login
    «riesce» e la richiesta dopo risponde `401`. Alzato da Fable 5 e Sol indipendentemente. Quindi il collegamento è **idempotente** e l'ordine fra impostare la
    variabile e fare il login **non conta**: il login successivo ripara quello precedente — con
-   il consenso `TELEGRAM_ADMIN_RECONCILE=1` quando la riparazione deve assorbire un'altra riga,
+   il consenso `TELEGRAM_ADMIN_RECONCILE` quando la riparazione deve assorbire un'altra riga,
    perché quella riga potrebbe essere di un cliente (vedi il punto sopra). Senza consenso il
    login non fallisce in silenzio e non consuma niente: risponde `409` e dice cosa fare.
    Autorizzata, `riconcilia_su_utente()` le travasa tutto —
