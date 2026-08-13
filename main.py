@@ -948,6 +948,77 @@ def riconciliazione_autorizzata(utente):
     return TELEGRAM_ADMIN_RECONCILE != '' and TELEGRAM_ADMIN_RECONCILE == str(utente)
 
 
+# Quanti giorni prima della scadenza si avvisa il cliente. Dalla Issue #2.
+GIORNI_PROMEMORIA = 5
+
+# Gli stati dell'accesso, in un posto solo. `in_attesa` e' fra `registrato` e `attivo`:
+# ha chiesto, il proprietario non ha ancora deciso.
+STATI_ACCESSO = ('registrato', 'in_attesa', 'attivo', 'scaduto', 'sospeso')
+
+
+def stato_effettivo(status, access_expires_at, adesso=None):
+    """Lo stato che CONTA adesso, che non e' sempre quello scritto nella colonna.
+
+    **La scadenza e' un istante, non un evento.** Nessun processo passa a mezzanotte a
+    riscrivere `status` delle righe scadute: la colonna resta `'attivo'` per sempre, e chi
+    la legge direttamente racconta una bugia. Misurato prima di questa funzione, su
+    `GET /api/me` di un cliente scaduto il giorno prima:
+
+        {'stato': 'attivo', 'accesso_scade': <ieri>}
+
+    E' il sintomo che la Issue #2 nomina esplicitamente — «pannello che dice attivo e feed
+    vuoto» — e la sua forma peggiore non e' l'etichetta sbagliata nella dashboard: e' che
+    ogni pezzo del servizio decida per conto proprio se una scadenza conta. Il feed direbbe
+    una cosa, il webhook un'altra, il pannello una terza. Per questo la conversione vive qui
+    e in un posto solo (regola 3), e la usano `/api/me`, il feed e il webhook.
+
+    Non tocca il database: `status` resta cio' che il proprietario ha DECISO (`attivo`,
+    `sospeso`), `access_expires_at` resta quando quella decisione finisce. Riscrivere la
+    colonna a ogni lettura sarebbe una scrittura su ogni richiesta, e renderebbe impossibile
+    distinguere «scaduto» da «sospeso a mano».
+    """
+    if status != 'attivo' or not access_expires_at:
+        return status
+    adesso = int(time.time()) if adesso is None else adesso
+    return 'attivo' if int(access_expires_at) > adesso else 'scaduto'
+
+
+def giorni_rimasti(access_expires_at, adesso=None):
+    """I giorni interi che restano, o `None` se non c'e' una scadenza.
+
+    Arrotonda per ECCESSO: a 30 ore dalla scadenza restano «2 giorni» e non «1», perche'
+    troncando, l'ultimo giorno di accesso il cliente leggerebbe «0 giorni rimasti» mentre il
+    feed funziona ancora. Un numero che dice zero su un accesso vivo insegna a non fidarsi
+    del numero. Scaduto → `0`, mai un negativo.
+    """
+    if not access_expires_at:
+        return None
+    adesso = int(time.time()) if adesso is None else adesso
+    mancano = int(access_expires_at) - adesso
+    if mancano <= 0:
+        return 0
+    return -(-mancano // 86400)
+
+
+def nuova_scadenza(access_expires_at, giorni, adesso=None):
+    """La scadenza dopo aver concesso `giorni`, con il caso limite che conta.
+
+    Due rami, e il secondo e' la ragione per cui questa e' una funzione:
+
+        se la scadenza attuale e' nel FUTURO:  si somma a quella (i rinnovi si sommano)
+        altrimenti:                            si riparte da ADESSO
+
+    Senza il secondo ramo, prorogare di 30 giorni un cliente scaduto da due mesi gli
+    darebbe una scadenza **nel passato**: il pannello direbbe «attivo» e il feed sarebbe
+    vuoto, cioe' esattamente lo stato che `stato_effettivo()` esiste per non produrre. E'
+    scritto nella Issue #2 come caso limite da non riscoprire.
+    """
+    adesso = int(time.time()) if adesso is None else adesso
+    base = int(access_expires_at) if access_expires_at and int(access_expires_at) > adesso \
+        else adesso
+    return base + int(giorni) * 86400
+
+
 def possiede_qualcosa(c, utente):
     """Vero se questa riga di `users` e' l'account di QUALCUNO, non una riga nata per errore.
 
@@ -2226,10 +2297,15 @@ def chi_sono(request: Request):
     utente = utente_dalla_sessione(request)
     if not utente:
         raise HTTPException(401, 'sessione assente o scaduta')
+    # `stato_effettivo` e non `utente['status']`: la colonna dice cio' che il proprietario ha
+    # deciso, non se quella decisione e' ancora valida adesso. Misurato prima: un cliente
+    # scaduto ieri leggeva `stato: attivo` con una scadenza nel passato accanto.
     return _rispondi_con_sessione(utente['id'], utente['versione'], {
         'utente': utente['id'], 'nome': utente['first_name'],
-        'stato': utente['status'], 'admin': utente['is_admin'],
-        'accesso_scade': utente['access_expires_at']})
+        'stato': stato_effettivo(utente['status'], utente['access_expires_at']),
+        'admin': utente['is_admin'],
+        'accesso_scade': utente['access_expires_at'],
+        'giorni_rimasti': giorni_rimasti(utente['access_expires_at'])})
 
 
 @app.get('/api/parsers')
