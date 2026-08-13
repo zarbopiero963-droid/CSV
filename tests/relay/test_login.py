@@ -2228,14 +2228,17 @@ def test_il_CONSENSO_vale_solo_per_LA_RIGA_indicata(tmp_path, monkeypatch):
     impostato, e la ragione e' una proprieta' del codice e non una speranza: la riga assorbita
     **non viene cancellata**, quindi il suo id non viene mai riusato da un utente nuovo.
 
-    I due valori provati sono i due modi di sbagliare: `'1'` e' l'interruttore globale della
-    prima versione — su cui questo test era ROSSO — e `id+100` e' il consenso dato una volta
-    per un'altra riga e rimasto nell'ambiente.
+    I valori provati sono i modi di sbagliare: `'1'` e' l'interruttore globale della prima
+    versione — su cui questo test era ROSSO — `id+100` e' il consenso dato una volta per
+    un'altra riga e rimasto nell'ambiente, e gli ultimi tre sono valori che non indicano
+    nessuna riga: una parola, un numero con una lettera attaccata, e soli spazi. Nessuno di
+    loro deve autorizzare niente, e nessuno deve sollevare qualcosa di diverso da un `409`:
+    un `ValueError` da una conversione sarebbe un 500 su un login. Chiesto da GPT-5.5.
     """
     import sqlite3
     from fastapi import HTTPException
 
-    for numero, consenso in enumerate(('1', 'ALTRA_RIGA')):
+    for numero, consenso in enumerate(('1', 'ALTRA_RIGA', 'due', '2x', '  ')):
         percorso = _prepara(tmp_path, monkeypatch, f'consenso_legato_{numero}.db')
         SUO = '444000444'
         vuoto, piero = _cliente_nudo(percorso, monkeypatch, SUO)
