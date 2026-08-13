@@ -933,18 +933,44 @@ def test_ogni_rotta_che_usa_la_SESSIONE_rinnova_anche_il_cookie():
     validazione, lo misurano `test_una_richiesta_valida_RINNOVA_la_scadenza` e
     `test_un_cookie_GIA_scaduto_non_viene_resuscitato_dal_rinnovo`.
 
-    **Il limite che resta, scritto perche' non sia una sorpresa:** una rotta che ottenesse
-    l'utente per vie indirette — una dipendenza FastAPI, un alias, un helper che avvolge
+    **Il limite previsto si e' presentato, e la guardia e' stata estesa.** Questo paragrafo
+    diceva: «una rotta che ottenesse l'utente per vie indirette — un helper che avvolge
     `utente_dalla_sessione` — non nominerebbe quella funzione fra le proprie chiamate e
-    sfuggirebbe. Il giorno che quella forma servira', questa guardia va estesa a
-    riconoscerla, e questo paragrafo e' il promemoria. Il caso dei commenti e delle
-    stringhe invece **e' chiuso**, perche' l'AST non li vede.
+    sfuggirebbe; il giorno che quella forma servira', questa guardia va estesa». Quel giorno
+    e' la PR #26: le rotte dell'accesso su approvazione passano da `_sessione_valida` e
+    `_solo_amministratore`, e `chi_sono` ha smesso di chiamare direttamente
+    `utente_dalla_sessione` per non ricopiarne il controllo (regola 3).
+
+    La guardia non ha taciuto: e' diventata **rossa** dicendo «nessuna rotta chiama
+    `utente_dalla_sessione`: questa guardia non misura niente». Era il caso previsto
+    dall'asserzione anti-vacuita', e ha funzionato — un controllo che si accorge di essere
+    diventato inutile vale piu' di uno che continua a passare.
+
+    Gli avvolgitori sono **derivati e non elencati a mano**: si cercano fra le funzioni del
+    modulo quelle che chiamano `utente_dalla_sessione`, e una rotta che chiama una di loro
+    conta come rotta di sessione. Un helper nuovo entra da se'. Il caso dei commenti e delle
+    stringhe resta chiuso, perche' l'AST non li vede.
 
     Il caso «sorgente non leggibile» e' chiuso in un terzo modo: non viene scartato, viene
     **elencato e fatto fallire**. Oggi tutte le rotte sono ispezionabili, quindi
     l'asserzione e' silenziosa; il giorno che una non lo fosse, il calo di copertura si
     vede invece di succedere.
     """
+    # Gli avvolgitori di `utente_dalla_sessione`, derivati dal modulo: qualunque funzione che
+    # la chiami e' un modo di «usare la sessione», quindi una rotta che chiama quella conta.
+    porte_di_sessione = {'utente_dalla_sessione'}
+    for nome in dir(main):
+        funzione = getattr(main, nome, None)
+        if not callable(funzione) or getattr(funzione, '__module__', None) != 'main':
+            continue
+        chiamate = _funzioni_chiamate(funzione)
+        if chiamate and 'utente_dalla_sessione' in chiamate:
+            porte_di_sessione.add(nome)
+    assert len(porte_di_sessione) > 1, (
+        'nessun avvolgitore di utente_dalla_sessione trovato: la derivazione non funziona e '
+        'la guardia tornerebbe a coprire solo le chiamate dirette'
+    )
+
     inadempienti = []
     guardate = []
     non_ispezionabili = []
@@ -962,7 +988,7 @@ def test_ogni_rotta_che_usa_la_SESSIONE_rinnova_anche_il_cookie():
             # qui la buttava via: la quarta promessa non mantenuta di questo PR.
             non_ispezionabili.append(f'{sorted(getattr(rotta, "methods", []))} {rotta.path}')
             continue
-        if 'utente_dalla_sessione' not in chiamate:
+        if not (chiamate & porte_di_sessione):
             continue
         guardate.append(rotta.path)
         if '_rispondi_con_sessione' not in chiamate:

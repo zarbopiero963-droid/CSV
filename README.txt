@@ -125,7 +125,7 @@ intestazione senza revocare il token.
 
 POST /api/access/request
   Sessione del cliente. Crea la richiesta e mette lo stato 'in_attesa'.
-  409 se ha giu' una richiesta aperta o l'accesso attivo, 403 se e' sospeso.
+  409 se ha gia' una richiesta aperta o l'accesso attivo, 403 se e' sospeso.
   Risponde con {"raggiungibile", "bot"}: "bot" e' il deep link t.me/<bot>?start=accesso.
   IL DEEP LINK NON E' UN ABBELLIMENTO: il bot Telegram non puo' scrivere per primo, quindi
   sendMessage verso chi non ha mai aperto la conversazione FALLISCE. Un cliente che entra
@@ -176,9 +176,10 @@ EFFETTI DELLA SCADENZA
 COSA IL PR 6 NON FA
 La web app in web/ resta con dati finti: collegarla al backend e' un PR successivo.
 Questi endpoint si esercitano via HTTP, e i test lo fanno.
-L'accesso su approvazione (stati registrato/attivo/scaduto, giorni rimasti, pannello
-richieste) e' la Issue #7 e non e' qui: un utente nuovo nasce con status "registrato"
-e non puo' ancora fare nulla.
+L'accesso su approvazione NON e' del PR 6: e' arrivato col PR 7, ed e' descritto qui
+sopra in ACCESSO SU APPROVAZIONE. Questa riga diceva il contrario e contraddiceva la
+sezione nuova nello stesso file — segnalato da CodeRabbit sulla PR #26. Cio' che manca
+ancora sono le SCHERMATE di quel flusso: la web app e' sui dati finti fino al PR 12.
 
 AUTENTICAZIONE
 CSV_ACCESS_TOKEN protegge dieci rotte: i due feed CSV (/xtrader.csv e

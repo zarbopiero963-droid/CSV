@@ -702,8 +702,8 @@ SCHEMA_MULTIUTENTE = (
     ' token_hash TEXT, token_prefix TEXT,'
     " status TEXT NOT NULL DEFAULT 'registrato', access_expires_at INTEGER,"
     ' telegram_reachable INTEGER NOT NULL DEFAULT 0,'
-    # Per quale scadenza e' giu' stato mandato il promemoria. Non un booleano: con un
-    # booleano il secondo rinnovo non avvertirebbe piu', perche' resterebbe «giu' avvisato».
+    # Per quale scadenza e' gia' stato mandato il promemoria. Non un booleano: con un
+    # booleano il secondo rinnovo non avvertirebbe piu', perche' resterebbe «gia' avvisato».
     ' promemoria_per INTEGER,'
     ' session_version INTEGER NOT NULL DEFAULT 1,'
     ' is_admin INTEGER NOT NULL DEFAULT 0,'
@@ -783,7 +783,7 @@ CHIAVE_CHAT = f'telegram_chat_id, {TOPIC_CHAT}'
 # colonna in piu' non cambia nessuna `SELECT` esistente, perche' tutte nominano le
 # colonne che leggono invece di usare `SELECT *`. Verificato prima di scriverle.
 COLONNE_MULTIUTENTE = (
-    # `users` esiste giu' nei database creati dalla PR #22: le colonne che nascono dopo vanno
+    # `users` esiste gia' nei database creati dalla PR #22: le colonne che nascono dopo vanno
     # aggiunte con ALTER, o il servizio le cerca e non le trova.
     ('users', 'promemoria_per', 'INTEGER'),
     ('parsers', 'user_id', 'INTEGER'),
@@ -857,7 +857,7 @@ def migra(c):
     # Una sola richiesta APERTA per utente, imposta dal database e non dal codice: la rilettura
     # dentro `BEGIN IMMEDIATE` copre le richieste che passano da questo processo, l'indice copre
     # anche quelle che non ci passano — un secondo worker, o una scrittura fatta a mano. Le
-    # richieste giu' decise possono essere quante si vuole, perche' sono storia: da qui l'indice
+    # richieste gia' decise possono essere quante si vuole, perche' sono storia: da qui l'indice
     # **parziale**. Chiesto da GPT-5.5.
     c.execute('CREATE UNIQUE INDEX IF NOT EXISTS richiesta_aperta_unica'
               ' ON access_requests(user_id) WHERE decided_at IS NULL')
@@ -884,7 +884,7 @@ def migra(c):
 def _chiudi_richieste_duplicate(c):
     """Lascia UNA richiesta aperta per utente, chiudendo le altre come `duplicata`.
 
-    Serve prima di creare l'indice UNIQUE parziale: su un database che contiene giu' i
+    Serve prima di creare l'indice UNIQUE parziale: su un database che contiene gia' i
     duplicati — cioe' proprio quello prodotto dal difetto che l'indice previene — un
     `CREATE UNIQUE INDEX` solleva, e sollevare dentro `migra()` significa che `db()` non torna
     piu' e il servizio non risponde a nessuna richiesta.
@@ -2487,9 +2487,10 @@ def chi_sono(request: Request):
     autenticata futura deve fare lo stesso — vedi `_rispondi_con_sessione` per il perche'
     non e' un middleware.
     """
-    utente = utente_dalla_sessione(request)
-    if not utente:
-        raise HTTPException(401, 'sessione assente o scaduta')
+    # `_sessione_valida` e non due righe ricopiate: e' lo stesso controllo delle rotte nuove, e
+    # due copie divergono al primo cambio del messaggio o del codice (regola 3). Segnalato da
+    # CodeRabbit sulla PR #26.
+    utente = _sessione_valida(request)
     # `stato_effettivo` e non `utente['status']`: la colonna dice cio' che il proprietario ha
     # deciso, non se quella decisione e' ancora valida adesso. Misurato prima: un cliente
     # scaduto ieri leggeva `stato: attivo` con una scadenza nel passato accanto.
@@ -2551,7 +2552,7 @@ class GiorniIn(BaseModel):
 def chiedi_accesso(request: Request):
     """Il cliente chiede l'accesso. Idempotente per stato, non per chiamata.
 
-    Chi ha giu' una richiesta aperta o l'accesso attivo riceve `409`: senza, un doppio clic
+    Chi ha gia' una richiesta aperta o l'accesso attivo riceve `409`: senza, un doppio clic
     riempirebbe il pannello del proprietario di richieste identiche, e con esse la decisione
     diventerebbe «quale di queste tre approvo?».
 
@@ -2570,8 +2571,13 @@ def chiedi_accesso(request: Request):
     # cioe' esattamente il caso che il 409 esiste per impedire. E' la stessa corsa
     # SELECT-poi-INSERT del login, che la PR #24 ha chiuso con lo stesso strumento, e l'ho
     # ripetuta qui. Alzata indipendentemente da Claude Fable 5 e GPT-5.5 sulla PR #26.
-    c.execute('BEGIN IMMEDIATE')
     try:
+        # `BEGIN IMMEDIATE` sta DENTRO il `try`: sotto contesa quel comando stesso solleva
+        # `database is locked`, e da fuori nessun `except` gira e la connessione non viene
+        # chiusa. E' la stessa correzione che `login_telegram` ha ricevuto sulla PR #24 — dove
+        # la regola e' anche scritta — e l'ho riprodotta in tre rotte nuove: la classe non era
+        # stata cercata. Segnalato da CodeRabbit come Major sulla PR #26.
+        c.execute('BEGIN IMMEDIATE')
         riga = c.execute('SELECT status, access_expires_at, telegram_reachable FROM users'
                          ' WHERE id=?', (utente['id'],)).fetchone()
         if riga is None:
@@ -2622,12 +2628,16 @@ def elenco_richieste(request: Request):
     """
     utente = _solo_amministratore(request)
     c = db()
-    righe = c.execute(
-        'SELECT r.id, r.user_id, r.created_at, u.first_name, u.username, u.status,'
-        ' u.access_expires_at, u.telegram_reachable'
-        ' FROM access_requests r JOIN users u ON u.id = r.user_id'
-        ' WHERE r.decided_at IS NULL ORDER BY r.id').fetchall()
-    c.close()
+    # `try/finally`: un guasto inatteso qui lascerebbe la connessione aperta, e su un processo
+    # che non riparte le connessioni perse si accumulano. Segnalato da CodeRabbit sulla PR #26.
+    try:
+        righe = c.execute(
+            'SELECT r.id, r.user_id, r.created_at, u.first_name, u.username, u.status,'
+            ' u.access_expires_at, u.telegram_reachable'
+            ' FROM access_requests r JOIN users u ON u.id = r.user_id'
+            ' WHERE r.decided_at IS NULL ORDER BY r.id').fetchall()
+    finally:
+        c.close()
     return _rispondi_con_sessione(utente['id'], utente['versione'], {'richieste': [
         {'richiesta': r[0], 'utente': r[1], 'chiesto_il': r[2], 'nome': r[3],
          'username': r[4], 'stato': stato_effettivo(r[5], r[6]),
@@ -2671,13 +2681,18 @@ async def approva_richiesta(richiesta: str, request: Request):
     if not 1 <= dati.giorni <= 3650:
         raise HTTPException(422, 'giorni fuori intervallo')
     c = db()
-    c.execute('BEGIN IMMEDIATE')
     try:
+        # `BEGIN IMMEDIATE` sta DENTRO il `try`: sotto contesa quel comando stesso solleva
+        # `database is locked`, e da fuori nessun `except` gira e la connessione non viene
+        # chiusa. E' la stessa correzione che `login_telegram` ha ricevuto sulla PR #24 — dove
+        # la regola e' anche scritta — e l'ho riprodotta in tre rotte nuove: la classe non era
+        # stata cercata. Segnalato da CodeRabbit come Major sulla PR #26.
+        c.execute('BEGIN IMMEDIATE')
         riga = c.execute('SELECT r.user_id, u.access_expires_at, u.telegram_id'
                          ' FROM access_requests r JOIN users u ON u.id = r.user_id'
                          ' WHERE r.id=? AND r.decided_at IS NULL', (numero,)).fetchone()
         if riga is None:
-            # 404 anche per una richiesta giu' decisa: dall'esterno «non esiste» e «l'hai giu'
+            # 404 anche per una richiesta gia' decisa: dall'esterno «non esiste» e «l'hai gia'
             # decisa» sono lo stesso stato — non c'e' niente da decidere.
             raise HTTPException(404, 'richiesta non trovata')
         scadenza = nuova_scadenza(riga[1], dati.giorni)
@@ -2693,7 +2708,7 @@ async def approva_richiesta(richiesta: str, request: Request):
         # arriva **prima** di qualunque scrittura. Confermare una transazione vuota non fa
         # danno oggi e lo farebbe il giorno in cui una scrittura finisse prima del controllo:
         # e' la differenza con `_decidi_identita`, dove il `commit` serve perche' li' il
-        # rifiuto ha giu' scritto la propria riga di audit. Rilievo di Claude Fable 5.
+        # rifiuto ha gia' scritto la propria riga di audit. Rilievo di Claude Fable 5.
         c.rollback()
         c.close()
         raise
@@ -2729,8 +2744,13 @@ def rifiuta_richiesta(richiesta: str, request: Request):
     amministratore = _solo_amministratore(request)
     numero = _identificativo_o_404(richiesta)
     c = db()
-    c.execute('BEGIN IMMEDIATE')
     try:
+        # `BEGIN IMMEDIATE` sta DENTRO il `try`: sotto contesa quel comando stesso solleva
+        # `database is locked`, e da fuori nessun `except` gira e la connessione non viene
+        # chiusa. E' la stessa correzione che `login_telegram` ha ricevuto sulla PR #24 — dove
+        # la regola e' anche scritta — e l'ho riprodotta in tre rotte nuove: la classe non era
+        # stata cercata. Segnalato da CodeRabbit come Major sulla PR #26.
+        c.execute('BEGIN IMMEDIATE')
         riga = c.execute('SELECT user_id FROM access_requests'
                          ' WHERE id=? AND decided_at IS NULL', (numero,)).fetchone()
         if riga is None:
@@ -2742,7 +2762,11 @@ def rifiuta_richiesta(richiesta: str, request: Request):
         _annota_admin(c, amministratore['id'], 'accesso_rifiutato', bersaglio=riga[0])
         c.commit()
     except HTTPException:
-        c.commit()
+        # `rollback` come nella gemella `approva_richiesta`: il solo `HTTPException` che nasce
+        # qui e' il 404, e arriva prima di ogni scrittura. Avevo corretto una delle due rotte e
+        # lasciato l'altra col `commit` — due percorsi identici con due comportamenti diversi
+        # sono il posto in cui uno dei due diventera' sbagliato. Segnalato da CodeRabbit.
+        c.rollback()
         c.close()
         raise
     except Exception:
@@ -2760,7 +2784,7 @@ def manda_promemoria(request: Request):
 
     `users.promemoria_per` conserva **quale** scadenza e' stata annunciata, e non un booleano:
     con un booleano il secondo rinnovo non avviserebbe mai piu', perche' quella riga
-    resterebbe «giu' avvisata» per il resto della vita del cliente. Cosi' invece
+    resterebbe «gia' avvisata» per il resto della vita del cliente. Cosi' invece
     l'approvazione azzera il campo e il promemoria del ciclo successivo parte da se'.
 
     **Limite dichiarato, e non e' un dettaglio da scoprire in produzione: non c'e' uno
@@ -2788,11 +2812,29 @@ def manda_promemoria(request: Request):
     amministratore = _solo_amministratore(request)
     adesso = int(time.time())
     c = db()
+    try:
+        avvisati, falliti = _giro_di_promemoria(c, adesso)
+        _annota_admin(c, amministratore['id'], 'promemoria_inviati')
+        c.commit()
+    finally:
+        # Il giro fa rete e scritture: un guasto a meta' non deve lasciare la connessione
+        # aperta. Segnalato da CodeRabbit sulla PR #26.
+        c.close()
+    return _rispondi_con_sessione(amministratore['id'], amministratore['versione'],
+                                  {'avvisati': avvisati, 'falliti': falliti})
+
+
+def _giro_di_promemoria(c, adesso):
+    """Il giro vero e proprio: candidati, prenotazione, invio. Restituisce `(avvisati, falliti)`.
+
+    Separato dalla rotta perche' la rotta deve solo garantire che la connessione si chiuda: un
+    corpo lungo dentro un `try/finally` nasconde quale riga puo' sollevare.
+    """
+    avvisati, falliti = [], []
     candidati = c.execute(
         "SELECT id, telegram_id, access_expires_at FROM users WHERE status='attivo'"
         ' AND access_expires_at IS NOT NULL AND is_admin=0'
         ' AND (promemoria_per IS NULL OR promemoria_per != access_expires_at)').fetchall()
-    avvisati, falliti = [], []
     for utente, telegram_id, scadenza in candidati:
         giorni = giorni_rimasti(scadenza, adesso=adesso)
         if giorni is None or not 0 < giorni <= GIORNI_PROMEMORIA:
@@ -2828,19 +2870,27 @@ def manda_promemoria(request: Request):
             # o il cliente non saprebbe mai di stare scadendo proprio nel caso in cui il canale
             # e' rotto. E si registra che non e' raggiungibile, perche' il proprietario deve
             # poterlo contattare a mano.
-            # La `WHERE` porta la prenotazione **nostra**: se nel frattempo il proprietario ha
-            # rinnovato, `promemoria_per` non e' piu' quella e il rilascio non deve toccarla —
-            # cancellerebbe la prenotazione di un ciclo piu' recente, cioe' farebbe rimandare
-            # un avviso giu' mandato. Rilievo di GPT-5.5 sulla PR #26.
-            c.execute('UPDATE users SET promemoria_per=NULL, telegram_reachable=0'
+            # **Due scritture, e separarle e' la sostanza.** Sono due fatti diversi con due
+            # condizioni diverse, e unirli in una sola istruzione ne perde uno:
+            #
+            # - «questo canale non funziona» e' vero SEMPRE: l'invio e' appena fallito. Va
+            #   scritto senza condizioni, perche' e' l'unico modo in cui il proprietario scopre
+            #   che quel cliente va contattato a mano;
+            # - «rilascia la prenotazione» vale solo se la prenotazione e' ancora **la nostra**:
+            #   se nel frattempo il proprietario ha rinnovato, `promemoria_per` porta ormai il
+            #   ciclo nuovo, e cancellarla farebbe rimandare un avviso gia' mandato.
+            #
+            # La prima versione le aveva unite, quindi la condizione governava anche il flag: un
+            # rinnovo durante l'invio fallito lasciava `telegram_reachable` a 1 e il proprietario
+            # non sapeva del canale rotto — e il commento accanto affermava il contrario.
+            # Rilievo di GPT-5.5 (la condizione) e poi di Claude Fable 5 (la regressione che la
+            # mia correzione aveva introdotto), PR #26.
+            c.execute('UPDATE users SET telegram_reachable=0 WHERE id=?', (utente,))
+            c.execute('UPDATE users SET promemoria_per=NULL'
                       ' WHERE id=? AND promemoria_per=?', (utente, scadenza))
             c.commit()
             falliti.append({'utente': utente, 'motivo': motivo})
-    _annota_admin(c, amministratore['id'], 'promemoria_inviati')
-    c.commit()
-    c.close()
-    return _rispondi_con_sessione(amministratore['id'], amministratore['versione'],
-                                  {'avvisati': avvisati, 'falliti': falliti})
+    return avvisati, falliti
 
 
 @app.get('/api/parsers')

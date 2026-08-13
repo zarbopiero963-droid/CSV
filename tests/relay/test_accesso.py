@@ -492,7 +492,7 @@ def test_un_cliente_REGISTRATO_non_ha_NESSUN_feed_da_bloccare(tmp_path, monkeypa
     niente da bloccargli.
 
     Cio' che la linea di scopo protegge sono gli utenti nati `registrato` **dalla migrazione**
-    dai profili che il proprietario aveva giu': quelli hanno un feed che oggi funziona, e
+    dai profili che il proprietario aveva gia': quelli hanno un feed che oggi funziona, e
     bloccarli sarebbe stata una regressione in produzione, non un irrigidimento.
     """
     percorso, utente, _richiesta = _cliente(tmp_path, monkeypatch, 'registrato_senza_feed.db')
@@ -789,7 +789,7 @@ def test_il_promemoria_parte_UNA_VOLTA_per_scadenza(tmp_path, monkeypatch):
     """E la seconda volta riparte, che e' la parte che un booleano sbaglierebbe.
 
     `promemoria_per` conserva **quale** scadenza e' stata annunciata. Con un booleano
-    «giu' avvisato», il cliente riceverebbe l'avviso al primo ciclo e **mai piu'** — e il caso
+    «gia' avvisato», il cliente riceverebbe l'avviso al primo ciclo e **mai piu'** — e il caso
     in cui serve davvero e' il rinnovo numero cinque, non il primo.
     """
     inviati = []
@@ -819,11 +819,11 @@ def test_il_promemoria_parte_UNA_VOLTA_per_scadenza(tmp_path, monkeypatch):
 
 
 def test_il_promemoria_NON_riguarda_chi_ha_tempo_o_e_scaduto(tmp_path, monkeypatch):
-    """Ne' chi ha 40 giorni davanti, ne' chi e' giu' fuori.
+    """Ne' chi ha 40 giorni davanti, ne' chi e' gia' fuori.
 
     Al primo l'avviso e' rumore, e il rumore insegna a ignorare gli avvisi; al secondo e'
     troppo tardi — quello che gli serve e' la schermata di accesso scaduto, non un promemoria
-    di qualcosa che e' giu' successo.
+    di qualcosa che e' gia' successo.
     """
     inviati = []
     percorso, admin_s, cliente_s, cliente = _admin(tmp_path, monkeypatch, 'no_promemoria.db')
@@ -999,7 +999,7 @@ def test_due_richieste_CONCORRENTI_lasciano_UNA_sola_riga_aperta(tmp_path, monke
 
 
 def test_un_database_della_PR22_riceve_la_colonna_del_promemoria(tmp_path, monkeypatch):
-    """Chiesto da GPT-5.5 sulla PR #26: la migrazione su un database che esiste giu'.
+    """Chiesto da GPT-5.5 sulla PR #26: la migrazione su un database che esiste gia'.
 
     `users` e' nata nella PR #22, quindi in produzione la tabella **esiste** e un
     `CREATE TABLE IF NOT EXISTS` non le aggiunge niente: senza la voce in
@@ -1169,7 +1169,7 @@ def test_una_richiesta_persa_per_l_INDICE_da_409_non_500(tmp_path, monkeypatch):
 
 
 def test_la_MIGRAZIONE_non_muore_sui_duplicati_che_deve_correggere(tmp_path, monkeypatch):
-    """Bloccante di Claude Fable 5 sulla PR #26, e la conseguenza era il servizio giu'.
+    """Bloccante di Claude Fable 5 sulla PR #26, e la conseguenza era il servizio gia'.
 
     `CREATE UNIQUE INDEX` su dati che lo violano **solleva**. Quell'istruzione sta dentro
     `migra()`, che gira dentro `db()`: sollevare li' significa che `db()` non torna piu' e il
@@ -1262,7 +1262,7 @@ def test_un_RINNOVO_durante_l_invio_non_perde_la_prenotazione_nuova(tmp_path, mo
     Scenario: prenotiamo il promemoria per la scadenza X, l'invio va male, e nel frattempo il
     proprietario ha rinnovato — quindi `promemoria_per` porta ormai la scadenza Y. Un rilascio
     scritto come `SET promemoria_per=NULL WHERE id=?` cancellerebbe **Y**, e il giro successivo
-    rimanderebbe un avviso per un ciclo di cui il cliente e' giu' stato avvisato.
+    rimanderebbe un avviso per un ciclo di cui il cliente e' gia' stato avvisato.
 
     Il test fa avvenire il rinnovo **durante** l'invio, che e' l'unico momento in cui la finestra
     esiste.
@@ -1280,16 +1280,30 @@ def test_un_RINNOVO_durante_l_invio_non_perde_la_prenotazione_nuova(tmp_path, mo
 
     monkeypatch.setattr(main, 'invia_messaggio_telegram', invio_con_rinnovo)
     c = sqlite3.connect(percorso)
-    c.execute("UPDATE users SET status='attivo', access_expires_at=? WHERE id=?",
-              (int(time.time()) + 2 * GIORNO, cliente))
+    # `telegram_reachable=1` nella preparazione, e non e' un dettaglio: il default della colonna
+    # e' 0, quindi senza questa riga l'asserzione «il flag e- stato azzerato» sarebbe VERA da
+    # sola — misurerebbe il default invece dell'effetto. Misurato: col sabotaggio che riunisce le
+    # due scritture il test passava comunque.
+    c.execute("UPDATE users SET status='attivo', access_expires_at=?, telegram_reachable=1"
+              ' WHERE id=?', (int(time.time()) + 2 * GIORNO, cliente))
     c.commit()
     c.close()
 
     main.manda_promemoria(admin_s)
 
     c = sqlite3.connect(percorso)
-    resta = c.execute('SELECT promemoria_per FROM users WHERE id=?', (cliente,)).fetchone()[0]
+    resta, raggiungibile = c.execute(
+        'SELECT promemoria_per, telegram_reachable FROM users WHERE id=?',
+        (cliente,)).fetchone()
     c.close()
     assert resta == nuova, (
         f'promemoria_per e- {resta!r} invece della prenotazione nuova ({nuova}): il rilascio ha '
         'cancellato la prenotazione di un ciclo piu- recente')
+    # E il flag va azzerato COMUNQUE: l'invio e' fallito, quindi quel canale non funziona, e
+    # questo e' l'unico modo in cui il proprietario lo scopre. La prima correzione del rilascio
+    # aveva unito le due scritture, quindi la condizione governava anche il flag e un rinnovo
+    # durante l'invio lo lasciava a 1 — regressione introdotta dalla correzione precedente,
+    # segnalata da Claude Fable 5.
+    assert raggiungibile == 0, (
+        'telegram_reachable e- ancora 1 dopo un invio fallito: il proprietario non sa che il '
+        'canale verso quel cliente e- rotto')
