@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 import regex as _regex  # come `re`, ma con `timeout=` sui match: vedi _cerca_regex_utente
 
 app = FastAPI(title='XTrader Signal Relay')
@@ -667,7 +667,7 @@ class ParserMioIn(BaseModel):
     # richiesta (isolamento fra utenti). `config` e' la config del motore
     # (`esegui_parser`); `titolo` e' l'etichetta che il cliente vede.
     titolo: str
-    config: dict = {}
+    config: dict = Field(default_factory=dict)
     active: bool = True
 
 
@@ -3355,7 +3355,9 @@ def _slugifica(testo):
     base da disambiguare invece di uno slug vuoto che collide con se stesso.
     """
     base = re.sub(r'[^a-z0-9]+', '-', (testo or '').lower()).strip('-')
-    return base or 'parser'
+    # Un tetto alla lunghezza: un titolo lunghissimo non deve generare uno slug (e
+    # quindi un `name`) senza limite. 60 caratteri bastano a restare leggibile.
+    return (base[:60].strip('-')) or 'parser'
 
 
 def _vista_parser(riga):
@@ -3364,7 +3366,7 @@ def _vista_parser(riga):
     `riga` = (id, slug, titolo, active, config_json, ordine).
     """
     return {'id': riga[0], 'slug': riga[1], 'titolo': riga[2], 'active': bool(riga[3]),
-            'config': json.loads(riga[4]) if riga[4] else None, 'ordine': riga[5]}
+            'config': json.loads(riga[4]) if riga[4] else {}, 'ordine': riga[5]}
 
 
 def _valida_config_parser(config):
@@ -3411,17 +3413,34 @@ def _crea_parser_utente(c, user_id, titolo, config, active):
     allo slug non si rompe con una rinomina. `header` e' '' (NOT NULL dello schema
     legacy), inutile per un parser `config_json`.
     """
-    presi = {r[0] for r in c.execute(
-        'SELECT slug FROM parsers WHERE user_id=?', (user_id,)).fetchall()}
-    slug = _slug_libero(_slugifica(titolo), presi)
-    nome = f'u{user_id}-{slug}'
-    massimo = c.execute('SELECT MAX(ordine) FROM parsers WHERE user_id=?',
-                        (user_id,)).fetchone()[0]
-    ordine = (massimo + 1) if massimo is not None else 0
-    c.execute(
-        'INSERT INTO parsers(name, header, user_id, slug, titolo, config_json, active, ordine)'
-        ' VALUES (?,?,?,?,?,?,?,?)',
-        (nome, '', user_id, slug, titolo, json.dumps(config), 1 if active else 0, ordine))
+    # `_slug_libero` e `MAX(ordine)` sono letti con SELECT separate dall'INSERT: due
+    # POST concorrenti dello stesso utente con lo stesso titolo calcolerebbero lo
+    # stesso slug e il secondo INSERT violerebbe `UNIQUE (user_id, slug)`. Non e' un
+    # 500: si RITENTA, ricalcolando lo slug — la seconda volta la riga dell'altro c'e'
+    # gia' e la disambiguazione da' `-2`. Segnalato da GPT-5.5 e Claude Fable 5 sulla
+    # PR #30; e' la stessa classe della corsa di login, qui risolta col retry perche'
+    # il costo di un secondo tentativo e' trascurabile.
+    nome = None
+    for _ in range(6):
+        presi = {r[0] for r in c.execute(
+            'SELECT slug FROM parsers WHERE user_id=?', (user_id,)).fetchall()}
+        slug = _slug_libero(_slugifica(titolo), presi)
+        candidato = f'u{user_id}-{slug}'
+        massimo = c.execute('SELECT MAX(ordine) FROM parsers WHERE user_id=?',
+                            (user_id,)).fetchone()[0]
+        ordine = (massimo + 1) if massimo is not None else 0
+        try:
+            c.execute(
+                'INSERT INTO parsers(name, header, user_id, slug, titolo, config_json, active, ordine)'
+                ' VALUES (?,?,?,?,?,?,?,?)',
+                (candidato, '', user_id, slug, titolo, json.dumps(config),
+                 1 if active else 0, ordine))
+            nome = candidato
+            break
+        except sqlite3.IntegrityError:
+            continue
+    if nome is None:
+        raise HTTPException(409, 'creazione non riuscita per contesa, riprova')
     # `id` = `rowid`, come fa la migrazione: e' il surrogato stabile a cui punta
     # `parser_chats.parser_id` (dispatch per-utente, PR successivo).
     c.execute('UPDATE parsers SET id=rowid WHERE name=? AND id IS NULL', (nome,))
@@ -3512,12 +3531,20 @@ def elimina_parser_mio(slug: str, request: Request):
     """Elimina un proprio parser. **404** se non e' dell'utente."""
     utente = _sessione_valida(request)
     c = db()
-    cur = c.execute('DELETE FROM parsers WHERE user_id=? AND slug=?', (utente['id'], slug))
-    trovato = cur.rowcount > 0
+    riga = c.execute('SELECT id FROM parsers WHERE user_id=? AND slug=?',
+                     (utente['id'], slug)).fetchone()
+    if not riga:
+        c.close()
+        raise HTTPException(404, 'parser non trovato')
+    # Le associazioni chat→parser puntano a `parsers.id`: si rimuovono con il parser,
+    # o resterebbero orfane e il dispatch per-utente (PR successivo) le seguirebbe.
+    # Oggi `parser_chats` e' vuota (nessun codice la scrive ancora), quindi qui non
+    # cancella niente; c'e' perche' sia corretta quando quel PR la popolera'.
+    # Segnalato da GPT-5.5 e Claude Fable 5 sulla PR #30.
+    c.execute('DELETE FROM parser_chats WHERE parser_id=?', (riga[0],))
+    c.execute('DELETE FROM parsers WHERE user_id=? AND slug=?', (utente['id'], slug))
     c.commit()
     c.close()
-    if not trovato:
-        raise HTTPException(404, 'parser non trovato')
     return _rispondi_con_sessione(utente['id'], utente['versione'], {'ok': True})
 
 

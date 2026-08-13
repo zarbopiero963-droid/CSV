@@ -302,3 +302,105 @@ def test_provare_il_parser_di_un_altro_da_404(servizio):
     stato, _, _ = _chiama(servizio, 'POST', f'/api/me/parsers/{slug}/test', cookie=cookie_b,
                           corpo={'message': 'SEGNALE\nEvento: A v B'})
     assert stato == 404, 'B ha potuto provare il parser di A'
+
+
+# --------------------------------------------------- concorrenza e budget regex
+
+def test_creazioni_CONCORRENTI_stesso_titolo_nessun_500(servizio):
+    """Sei POST concorrenti stesso titolo → sei slug distinti, nessun 500.
+
+    La race segnalata da GPT-5.5 e Claude Fable 5: `_slug_libero` e `MAX(ordine)`
+    sono letti con SELECT separate dall'INSERT, quindi due creazioni simultanee
+    calcolerebbero lo stesso slug e il secondo INSERT violerebbe `UNIQUE(user_id,
+    slug)`. Senza il retry su `IntegrityError` sarebbe un 500. Il servizio gira i
+    gestori sync in un threadpool, quindi la corsa e' raggiungibile davvero.
+    """
+    import threading
+    cookie, _ = _login_a(servizio)
+    numero = 6
+    porta = threading.Barrier(numero)
+    esiti = []
+
+    def prova():
+        porta.wait()
+        stato, corpo, _ = _crea(servizio, cookie, 'Test 1')
+        esiti.append((stato, corpo))
+
+    fili = [threading.Thread(target=prova) for _ in range(numero)]
+    for f in fili:
+        f.start()
+    for f in fili:
+        f.join(30)
+    assert all(not f.is_alive() for f in fili), 'un thread di creazione non ha finito'
+    assert len(esiti) == numero
+    falliti = [c[:140] for s, c in esiti if s != 200]
+    assert not falliti, f'creazioni concorrenti fallite (atteso 200): {falliti}'
+    slugs = sorted(json.loads(c)['slug'] for _, c in esiti)
+    assert len(set(slugs)) == numero, f'slug non distinti sotto contesa: {slugs}'
+
+
+def test_la_creazione_RITENTA_su_collisione_di_slug(tmp_path, monkeypatch):
+    """La corsa sullo slug, resa DETERMINISTICA: collisione forzata → retry → successo.
+
+    Il test HTTP concorrente qui sopra mostra che sotto contesa non si rompe, ma il
+    lock di SQLite spesso serializza le scritture e la collisione non scatta — quindi
+    da solo non e' una prova del retry. Qui la corsa si FORZA: un wrapper della
+    connessione, alla prima INSERT del parser, inserisce di nascosto la stessa riga
+    PRIMA, cosi' l'INSERT vero solleva `IntegrityError`. E' la corsa esatta (un altro
+    POST che prende lo slug fra il SELECT e l'INSERT). Col retry si ricalcola lo slug
+    in «test-1-2» e si riesce; togliendo il retry (`range(1)`) questo test e' rosso.
+    """
+    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'corsa.db'))
+    main._PERCORSI_MIGRATI.discard(main.DB_PATH)
+    reale = main.db()
+    config = {'match': {'type': 'contains', 'value': 'X'},
+              'columns': {'EventName': {'source': 'constant', 'value': 'X'},
+                          'MarketType': {'source': 'constant', 'value': 'Y'},
+                          'SelectionName': {'source': 'constant', 'value': 'Z'},
+                          'BetType': {'source': 'constant', 'value': 'W'}}}
+
+    class ConnCorsa:
+        def __init__(self, sotto):
+            self._sotto = sotto
+            self._corsa_fatta = False
+
+        def execute(self, sql, params=()):
+            if not self._corsa_fatta and sql.lstrip().startswith('INSERT INTO parsers'):
+                self._corsa_fatta = True
+                self._sotto.execute(sql, params)   # l'altro POST vince la corsa
+            return self._sotto.execute(sql, params)
+
+        def __getattr__(self, nome):
+            return getattr(self._sotto, nome)
+
+    parser = main._crea_parser_utente(ConnCorsa(reale), 7, 'Test 1', config, True)
+    reale.close()
+    assert parser['slug'] == 'test-1-2', (
+        f"la creazione non ha ritentato dopo la collisione: slug {parser['slug']!r}, "
+        'atteso «test-1-2»')
+
+
+def test_prova_con_regex_CATASTROFICA_e_limitata(servizio):
+    """`/test` esegue la regex dell'utente sul messaggio dell'utente, ma col budget.
+
+    Una condizione regex catastrofica passa la creazione (il dry-run gira su 'probe',
+    corto e senza 'a'), ma `/test` con un messaggio cattivo eseguirebbe la regex su di
+    esso: dev'essere limitata dal budget di `esegui_parser` (~0,1s), non appendere il
+    worker — altrimenti sarebbe un DoS autenticato. Segnalato da Fable 5 e GPT-5.5.
+    """
+    import time
+    cookie, _ = _login_a(servizio)
+    config = {'match': {'type': 'regex', 'value': '(a|aa)+$'},
+              'columns': {'EventName': {'source': 'constant', 'value': 'X'},
+                          'MarketType': {'source': 'constant', 'value': 'Y'},
+                          'SelectionName': {'source': 'constant', 'value': 'Z'},
+                          'BetType': {'source': 'constant', 'value': 'W'}}}
+    slug = json.loads(_crea(servizio, cookie, 'Cattiva', config=config)[1])['slug']
+    t = time.monotonic()
+    stato, _, _ = _chiama(servizio, 'POST', f'/api/me/parsers/{slug}/test', cookie=cookie,
+                          corpo={'message': 'a' * 60 + 'b'})
+    trascorso = time.monotonic() - t
+    assert stato == 200, stato
+    assert trascorso < 3.0, (
+        f'/test ha impiegato {trascorso:.2f}s su una regex catastrofica: il budget di '
+        f'parser non la limita, ed e- un DoS autenticato')
