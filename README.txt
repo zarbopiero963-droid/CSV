@@ -320,9 +320,28 @@ TELEGRAM_ADMIN_ID: l'ID Telegram numerico del proprietario. Collega il suo login
   Telegram manda, e il confronto non combacia mai.
   SENZA la variabile il login del proprietario crea un account VUOTO e la sua
   dashboard risulta vuota senza errori. Il collegamento e' IDEMPOTENTE: impostando la
-  variabile, il login SUCCESSIVO ripara — travasa quello che l'account sbagliato aveva
-  accumulato, gli toglie il telegram_id e lo scrive sulla riga PIERO, con una riga in
-  admin_audit. Quindi l'ordine fra variabile e login non conta.
+  variabile, il login SUCCESSIVO ripara — travasa le tracce che l'account sbagliato
+  aveva accumulato, gli toglie il telegram_id e lo scrive sulla riga PIERO, con una riga
+  in admin_audit. Quindi l'ordine fra variabile e login non conta.
+
+  L'INVARIANTE, in una frase: se TELEGRAM_ADMIN_ID e' configurato, la riga del
+  proprietario porta QUEL telegram_id, o nessuno. Da lei discendono due comportamenti che
+  non sono dettagli:
+
+  1. CAMBIARE la variabile TOGLIE l'accesso alla vecchia identita', e lo fa al primo
+     login di CHIUNQUE — non solo quando il nuovo ID entra. Il collegamento stantio
+     viene sciolto (telegram_id azzerato, session_version incrementata, riga in
+     admin_audit) e la vecchia identita' torna un cliente qualunque. Prima la revoca
+     scattava solo all'ingresso del nuovo ID: se il nuovo non entrava mai, il vecchio
+     restava amministratore per sempre, e cambiare la variabile era teatro.
+  2. Se la variabile punta a un account che POSSIEDE parser o chat, il login viene
+     RIFIUTATO con 409 e nessuna delle due righe viene toccata. Prima quell'account
+     veniva assorbito: bastava sbagliare una cifra e mettere l'ID di un cliente, e al suo
+     login i suoi parser e le sue chat passavano al proprietario, il suo telegram_id
+     veniva azzerato e lui otteneva is_admin=1 — perdeva tutto E entrava nell'account di
+     un altro. Il rifiuto e' tracciato in admin_audit e spiegato nei log; il messaggio
+     verso chi chiama non nomina utenti ne' identificativi.
+     Segnali e log NON contano come possesso: sono tracce, e seguono l'utente.
   E CAMBIARE il valore REVOCA le sessioni della vecchia identita': il cookie e' legato
   alla riga e a session_version, non al telegram_id, quindi senza la revoca chi era
   entrato con l'identita' precedente conserverebbe ACCESSO AMMINISTRATIVO — e non

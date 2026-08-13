@@ -490,9 +490,32 @@ Il proprietario entra in due modi, e il secondo non è un vezzo:
    riga invece di crearne una nuova. Senza la variabile resterebbero due account: uno
    con tutta la sua roba e nessun modo di entrarci, e uno vuoto in cui entra.
 
-   **È un'invariante, non un ramo**, e la differenza è tutto: «se chi fa login è l'ID
-   dell'amministratore, la riga `PIERO` possiede quel `telegram_id`», qualunque cosa ci
-   sia adesso. Quindi il collegamento è **idempotente** e l'ordine fra impostare la
+   **È un'invariante, non un ramo**, e la differenza è tutto: «se `TELEGRAM_ADMIN_ID` è
+   configurato, la riga `PIERO` porta **quel** `telegram_id`, o nessuno», qualunque cosa ci
+   sia adesso. La formulazione è stata corretta il 13/08/2026: diceva «se chi fa login è
+   l'ID dell'amministratore…», e quel «se» era il difetto — legava l'invariante a **chi
+   entra**, quindi la vecchia identità restava collegata fino all'ingresso della nuova.
+   Verificata a **ogni** login, chiunque lo faccia, l'invariante produce due comportamenti
+   che i gate finali hanno preteso sulla PR #24:
+
+   - **cambiare la variabile toglie l'accesso alla vecchia identità**, subito, sciogliendo
+     il collegamento stantio — `telegram_id` azzerato, `session_version` incrementata, riga
+     in `admin_audit`. Prima la revoca scattava solo all'ingresso del nuovo ID, e se il
+     nuovo non entrava mai il vecchio restava amministratore per sempre: cambiare la
+     variabile era teatro. Bloccante di GPT-5.6 Sol;
+   - **se la variabile punta a un account che possiede parser o chat, il login è rifiutato**
+     con `409` e nessuna riga viene toccata. Prima quell'account veniva assorbito: bastava
+     sbagliare una cifra e metterci l'ID di un cliente, e al suo login i suoi parser e le
+     sue chat passavano al proprietario, il suo `telegram_id` veniva azzerato e lui otteneva
+     `is_admin=1` — **perdeva tutto e entrava nell'account di un altro**, senza un errore da
+     nessuna parte. È la violazione dell'isolamento fra utenti, la priorità 7. Bloccante di
+     Claude Fable 5. Segnali e log **non** contano come possesso: sono tracce, e seguono
+     l'utente. Il criterio è in `possiede_qualcosa()`.
+
+   Tutto il blocco gira dentro un `BEGIN IMMEDIATE`: senza, fra la `SELECT` e le `UPDATE`
+   entra un altro login, e due login concorrenti che cambiano identità incrementano
+   `session_version` due volte — misurato, **un cookie su sei nasce morto**, il login
+   «riesce» e la richiesta dopo risponde `401`. Alzato da Fable 5 e Sol indipendentemente. Quindi il collegamento è **idempotente** e l'ordine fra impostare la
    variabile e fare il login **non conta**: il login successivo ripara quello precedente.
    Se un'altra riga possiede già quell'ID, `riconcilia_su_utente()` le travasa tutto —
    riusando `RIFERIMENTI_UTENTE` e `_trasferisci_parser` della migrazione, un elenco solo

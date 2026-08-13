@@ -897,6 +897,29 @@ def _assegna_slug_e_ordine(c):
             prossimo += 1
 
 
+def possiede_qualcosa(c, utente):
+    """Vero se questa riga di `users` e' l'account di QUALCUNO, non una riga nata per errore.
+
+    Il criterio sono **parser e chat**, perche' sono le due cose che si possiedono: un parser
+    e' una configurazione che quell'utente ha scritto, una chat e' una rivendicazione che ha
+    provato. Segnali e log non contano: sono tracce di passaggio, e nella riconciliazione
+    seguono l'utente senza dire di chi sia l'account.
+
+    Serve perche' la riparazione del collegamento dell'amministratore presumeva che la riga
+    da assorbire fosse **sempre** quella nata per errore. Non lo e': basta che
+    `TELEGRAM_ADMIN_ID` contenga per sbaglio l'ID di un cliente, e al suo login il servizio
+    gli travasava parser e chat sulla riga del proprietario, gli azzerava il `telegram_id` e
+    gli dava `is_admin=1`. Il cliente perdeva tutto **e** otteneva la dashboard di un altro:
+    la violazione dell'isolamento fra utenti che e' la priorita' 7 di `CLAUDE.md`, senza
+    nessun errore a segnalarla. Misurato prima di correggerlo. Bloccante di Claude Fable 5
+    sulla PR #24.
+    """
+    if c.execute('SELECT COUNT(*) FROM parsers WHERE user_id=?', (utente,)).fetchone()[0]:
+        return True
+    return bool(c.execute('SELECT COUNT(*) FROM chats WHERE owner_user_id=?',
+                          (utente,)).fetchone()[0])
+
+
 def riconcilia_su_utente(c, da_utente, a_utente):
     """Travasa tutto da `da_utente` a `a_utente` e libera il suo `telegram_id`.
 
@@ -1848,107 +1871,128 @@ def login_telegram(data: LoginTelegramIn):
         raise HTTPException(401, 'login non valido')
 
     c = db()
+    # `BEGIN IMMEDIATE`: da qui alla `commit()` si legge e si scrive dentro UNA transazione,
+    # e SQLite serializza chi arriva insieme. Senza, fra la `SELECT` e le `UPDATE` c'e' spazio
+    # per un altro login: misurato, due login concorrenti che cambiano identita' incrementano
+    # `session_version` due volte, e **un cookie su sei nasce morto** — il login «riesce», la
+    # richiesta successiva risponde 401, e chi lo subisce non ha modo di capire perche'.
+    # Alzato da Claude Fable 5 e da GPT-5.6 Sol indipendentemente sulla PR #24.
+    c.execute('BEGIN IMMEDIATE')
+    try:
+        utente, versione = _decidi_identita(c, data)
+        c.commit()
+    except HTTPException:
+        # Un `HTTPException` da qui e' una DECISIONE, non un guasto: il rifiuto per
+        # configurazione incoerente, o il 503 dell'account non creato. Si conferma, perche'
+        # dentro la transazione c'e' la riga di `admin_audit` che traccia il rifiuto — e la
+        # prima versione di questo blocco faceva `rollback` su tutto, quindi **cancellava la
+        # traccia della propria decisione**: il proprietario riceveva un login fallito e
+        # nessun posto dove leggere perche'. Misurato da un test che pretendeva quella riga.
+        c.commit()
+        c.close()
+        raise
+    except Exception:
+        # Tutto il resto e' un guasto: la transazione tocca l'identita' di due utenti, e uno
+        # stato scritto a meta' sarebbe peggio di un login rifiutato.
+        c.rollback()
+        c.close()
+        raise
+    c.close()
+    return _rispondi_con_sessione(utente, versione, {'ok': True, 'utente': utente})
+
+
+def _decidi_identita(c, data):
+    """Chi e' chi sta entrando, applicando l'invariante dell'amministratore.
+
+    Restituisce `(utente, versione)` da firmare nel cookie. Gira **dentro** la transazione
+    aperta da chi chiama: legge, scrive, e non fa `commit` — cosi' un rifiuto a meta' non
+    lascia niente.
+
+    L'invariante e' una frase sola: **se `TELEGRAM_ADMIN_ID` e' configurato, la riga del
+    proprietario porta QUEL `telegram_id`, o nessuno.** Da lei discendono tre casi, e i primi
+    due chiudono un difetto misurato che i gate finali hanno trovato sulla PR #24:
+
+    1. la riga porta un'identita' **diversa** da quella configurata → il collegamento e'
+       stantio e si scioglie, **chiunque** stia entrando. Senza, cambiare la variabile non
+       toglieva niente: la vecchia identita' continuava a entrare nell'account del
+       proprietario finche' la nuova non faceva login, e se la nuova non entrava mai, per
+       sempre. Cambiare `TELEGRAM_ADMIN_ID` e' il gesto con cui si toglie l'accesso a
+       un'identita': se non lo toglie, quel gesto e' teatro. Bloccante di GPT-5.6 Sol;
+    2. sta entrando l'identita' configurata e la sua riga non e' quella del proprietario →
+       si collega, riconciliando la riga precedente **solo se non e' l'account di qualcuno**
+       (vedi `possiede_qualcosa`), altrimenti **rifiuta**. Bloccante di Claude Fable 5;
+    3. tutto il resto: cliente nuovo, oppure login successivo.
+    """
     riga = c.execute('SELECT id, session_version FROM users WHERE telegram_id=?',
                      (data.id,)).fetchone()
-    # Il proprietario: il suo account esiste gia' e possiede i suoi parser, ma non ha
-    # `telegram_id` perche' nessuno lo aveva mai saputo. Si ATTACCA a quella riga invece
-    # di crearne una nuova, altrimenti resterebbero due account — uno con tutta la sua
-    # roba e nessun modo di entrarci, e uno vuoto in cui entra.
-    #
-    # E' un'INVARIANTE e non un ramo, e la differenza e' tutto: «se chi fa login e' l'ID
-    # dell'amministratore, la riga PIERO possiede quel telegram_id», qualunque cosa ci sia
-    # adesso. Prima il collegamento viveva dentro `if riga is None`, quindi funzionava solo
-    # se la variabile era impostata PRIMA del primo login: un login fatto troppo presto
-    # creava un account vuoto con quel telegram_id, e da quel momento ogni login successivo
-    # prendeva il ramo `else` e la riga PIERO non veniva collegata mai piu'. Senza via di
-    # ritorno — la riconciliazione della migrazione raggruppa per `origin_profile` e a
-    # quella riga e' cieca, nessun endpoint ripara, un riavvio non ripara — e senza nessun
-    # errore: solo una dashboard vuota. Su Railway lo stato «variabile impostata ma non
-    # arrivata nel processo» si produce da se' quando un build fallisce dopo averla
-    # cambiata, quindi il caso non era ipotetico.
-    #
-    # Idempotente significa che l'ordine non conta e che il login successivo RIPARA quello
-    # precedente.
-    proprietario = None
-    if TELEGRAM_ADMIN_ID and data.id == TELEGRAM_ADMIN_ID:
-        # `telegram_id` nella SELECT perche' serve a sapere se l'identita' CAMBIA: vedi sotto.
+    proprietario = c.execute('SELECT id, session_version, telegram_id FROM users'
+                             ' WHERE origin_profile=?', (PIERO_PROFILE,)).fetchone()
+
+    # CASO 1 — il collegamento stantio si scioglie.
+    if (TELEGRAM_ADMIN_ID and proprietario and proprietario[2]
+            and proprietario[2] != TELEGRAM_ADMIN_ID):
+        c.execute('UPDATE users SET telegram_id=NULL,'
+                  ' session_version=session_version+1 WHERE id=?', (proprietario[0],))
+        # `is_admin` NON si tocca: quella riga resta l'account del proprietario, ed e' da
+        # `is_admin` che dipende il suo accesso con la password. Cio' che si revoca e' il
+        # legame con un'identita' Telegram, non la proprieta' dell'account.
+        _annota_admin(c, proprietario[0], 'identita_telegram_revocata')
         proprietario = c.execute('SELECT id, session_version, telegram_id FROM users'
                                  ' WHERE origin_profile=?', (PIERO_PROFILE,)).fetchone()
+        # Chi stava entrando poteva essere proprio la vecchia identita', e in quel caso la
+        # sua riga era quella del proprietario: adesso non lo e' piu'.
+        riga = c.execute('SELECT id, session_version FROM users WHERE telegram_id=?',
+                         (data.id,)).fetchone()
 
-    if proprietario and (riga is None or riga[0] != proprietario[0]):
+    e_amministratore = bool(TELEGRAM_ADMIN_ID) and data.id == TELEGRAM_ADMIN_ID
+
+    # CASO 2 — l'identita' configurata si collega alla riga del proprietario.
+    if e_amministratore and proprietario and (riga is None or riga[0] != proprietario[0]):
         if riga is not None:
-            # Un'altra riga possiede il telegram_id dell'amministratore: e' l'account nato
-            # da un login fatto troppo presto. Va travasata prima di riscrivere il valore,
-            # perche' la colonna e' UNIQUE.
+            if possiede_qualcosa(c, riga[0]):
+                # Rifiuta invece di scegliere quale dei due utenti derubare. Il messaggio
+                # non nomina utenti ne' identificativi: chi lo riceve e' un cliente
+                # qualunque, e il dettaglio va nel log, che legge il proprietario.
+                logging.getLogger('xtrader.relay').error(
+                    "TELEGRAM_ADMIN_ID punta a un account che possiede parser o chat:"
+                    " collegamento RIFIUTATO per non fondere due utenti. Correggere la"
+                    " variabile con l'ID Telegram del proprietario.")
+                _annota_admin(c, proprietario[0], 'collegamento_admin_rifiutato',
+                              bersaglio=riga[0])
+                raise HTTPException(409, 'configurazione dell\'amministratore incoerente')
             riconcilia_su_utente(c, da_utente=riga[0], a_utente=proprietario[0])
-            # In `admin_audit`, perche' una riparazione silenziosa e' indistinguibile da
-            # un'appropriazione di account: se un giorno questo ramo scattasse quando non
-            # deve, deve restare la traccia di quando e su chi.
             _annota_admin(c, proprietario[0], 'riconciliato_account_duplicato',
                           bersaglio=riga[0])
-        # `telegram_reachable` non compare: prima c'era `telegram_reachable=
-        # telegram_reachable`, che riscrive la colonna col proprio valore e non fa
-        # niente. Suggeriva un'intenzione che il codice non porta. Segnalato da
-        # CodeRabbit sulla PR #23.
-        # Se l'identita' Telegram del proprietario CAMBIA, le sessioni aperte con quella
-        # vecchia vanno revocate. Il cookie e' legato all'`id` della riga e a
-        # `session_version`, non al `telegram_id`: senza l'incremento, chi era entrato con
-        # l'identita' precedente conserva **accesso amministrativo** sulla riga che possiede
-        # i parser. E non scade: `/api/me` rinnova il cookie a ogni richiesta valida, quindi
-        # una sessione tenuta attiva e' immortale.
-        #
-        # Il caso che fa paura non e' ipotetico: se in quella variabile fosse finito l'ID
-        # sbagliato — un estraneo, o un account compromesso — correggerla non gli toglierebbe
-        # il pannello. Cambiare identita' e' esattamente il caso per cui `session_version`
-        # esiste. Bloccante di GPT-5.6 Sol sulla PR #24.
-        #
-        # Solo al CAMBIO, non a ogni login: incrementarla sempre chiuderebbe al proprietario
-        # la sessione sul telefono ogni volta che entra dal computer.
-        cambia_identita = proprietario[2] is not None and proprietario[2] != data.id
         c.execute('UPDATE users SET telegram_id=?, username=?, first_name=?, is_admin=1'
-                  + (', session_version=session_version+1' if cambia_identita else '')
-                  + ' WHERE id=?',
+                  ' WHERE id=?',
                   (data.id, data.username or None, data.first_name or None,
                    proprietario[0]))
-        if cambia_identita:
-            _annota_admin(c, proprietario[0], 'identita_telegram_sostituita')
-        # RILETTA dal database, non calcolata: il cookie che sta per essere emesso viene
-        # firmato con questa versione, e se non fosse quella scritta il login riuscirebbe
-        # emettendo una sessione morta all'istante. Una riga in piu' invece di un `+ 1`
-        # a mano, perche' il valore giusto e' quello che il database ha.
+        # Riletta DOPO le scritture: la versione da firmare e' quella che il database ha
+        # adesso. Firmare quella letta prima produce un cookie che nasce invalido.
         riga = c.execute('SELECT id, session_version FROM users WHERE id=?',
                          (proprietario[0],)).fetchone()
     elif riga is None:
-        # Un cliente nuovo: l'account nasce e non puo' fare niente. L'accesso lo
-        # concede il PR sull'approvazione (#7), non questo.
+        # Un cliente nuovo: l'account nasce e non puo' fare niente. L'accesso lo concede il
+        # PR sull'approvazione (#7), non questo.
         #
-        # `OR IGNORE` piu' la rilettura qui sotto perche' fra il SELECT e questo
-        # INSERT c'e' spazio per un'altra richiesta, e `telegram_id` e' UNIQUE: due
-        # login simultanei di un utente nuovo non davano una riga doppia, davano un
-        # `IntegrityError`, cioe' un 500 a chi perdeva la corsa — al PRIMO accesso di
-        # un cliente, l'unico momento in cui puo' capitare. Il Login Widget in una
-        # pagina ricaricata, o due schede aperte, bastano. Segnalato da Claude
-        # Fable 5 sulla PR #23; la rilettura fa si' che il perdente si attacchi alla
-        # riga del vincitore invece di crearne un'altra.
+        # `OR IGNORE` piu' la rilettura perche' `telegram_id` e' UNIQUE: due login
+        # simultanei di un utente nuovo davano `IntegrityError`, cioe' un 500 a chi perdeva
+        # la corsa, al PRIMO accesso di un cliente. Segnalato da Claude Fable 5 sulla #23.
         c.execute('INSERT OR IGNORE INTO users(telegram_id, username, first_name,'
                   " status) VALUES (?,?,?,'registrato')",
                   (data.id, data.username or None, data.first_name or None))
         riga = c.execute('SELECT id, session_version FROM users WHERE telegram_id=?',
                          (data.id,)).fetchone()
         if riga is None:
-            # Non deve accadere: l'inserimento e' andato o la riga c'era. Se accade,
-            # e' meglio un 503 che un `TypeError` sull'indice di `None`.
-            c.close()
+            # Non deve accadere: l'inserimento e' andato o la riga c'era. Se accade, e'
+            # meglio un 503 che un `TypeError` sull'indice di `None`. La connessione la
+            # chiude chi ha aperto la transazione, dopo il rollback.
             raise HTTPException(503, 'account non creato: riprova')
     else:
         # Login successivi: il nome su Telegram puo' essere cambiato.
         c.execute('UPDATE users SET username=?, first_name=? WHERE id=?',
                   (data.username or None, data.first_name or None, riga[0]))
-    c.commit()
-    utente, versione = riga[0], riga[1]
-    c.close()
-    return _rispondi_con_sessione(utente, versione, {'ok': True, 'utente': utente})
-
+    return riga[0], riga[1]
 
 @app.post('/api/login/password')
 def login_password(data: LoginPasswordIn):

@@ -703,97 +703,56 @@ def test_un_cookie_GIA_scaduto_non_viene_resuscitato_dal_rinnovo(servizio):
         'esiste piu-, perche- basta usarla per annullarla')
 
 
-def test_una_riga_CREATA_FRA_il_SELECT_e_l_INSERT_non_diventa_un_500(tmp_path, monkeypatch):
-    """`SELECT` poi `INSERT` su una colonna UNIQUE: fra i due c'e' spazio per un altro.
+def test_due_PRIMI_login_dello_stesso_utente_nuovo_danno_UNA_riga(tmp_path, monkeypatch):
+    """La corsa `SELECT`-poi-`INSERT` su `telegram_id` UNIQUE, chiusa strutturalmente.
 
-    Segnalato da Claude Fable 5 sulla PR #23, e la finestra e' reale: `users.telegram_id`
-    e' **UNIQUE** — misurato in `SCHEMA_MULTIUTENTE` — quindi due login simultanei di un
-    utente **nuovo** non producono una riga doppia, producono un `IntegrityError`, cioe'
-    un **500** a chi perde la corsa. Al primo accesso di un cliente, che e' l'unico
-    momento in cui puo' accadere. Il caso non e' esotico: il Login Widget in una pagina
-    ricaricata, o due schede aperte, danno due POST ravvicinate.
+    **Questo test e' stato riscritto, e il perche' conta piu' del test.** La versione
+    precedente simulava la corsa con una connessione avvolta che inseriva la riga
+    concorrente subito dopo il `SELECT`, perche' via HTTP la finestra non si apriva mai —
+    30 richieste concorrenti, zero collisioni.
 
-    **Come e' misurata, perche' la strada ovvia non funziona.** Prima ho provato con
-    richieste HTTP davvero concorrenti (6 e 12 thread contro il servizio in
-    sottoprocesso, allineati da una barriera): **30 richieste, tutte 200, zero
-    collisioni**. La finestra c'e' ma non si apre da fuori — l'event loop di uvicorn
-    distanzia gli handler piu' di quanto duri il lavoro su SQLite, che e' sotto il
-    millisecondo. Un test a thread sarebbe rimasto verde prima e dopo la correzione,
-    cioe' decorativo: e' esattamente cio' che `CLAUDE.md` vieta.
+    Da quando `login_telegram` apre `BEGIN IMMEDIATE`, quella simulazione **non e' piu'
+    possibile**: la connessione intrusa riceve `database is locked`, cioe' SQLite rifiuta di
+    far entrare uno scrittore dentro la nostra transazione. La finestra non e' stata
+    schermata da un controllo: e' stata chiusa dalla forma della transazione. Un test che
+    inseriva a mano dentro quella finestra descriveva un mondo che non c'e' piu', e tenerlo
+    verde con un `try/except` sarebbe stato mascherare la correzione invece di misurarla.
 
-    Quindi la corsa la riproduco nel punto in cui esiste: una connessione avvolta che,
-    **subito dopo** il `SELECT` su `telegram_id`, inserisce la riga concorrente. Il
-    `fetchone()` restituisce `None` — al momento dell'`execute` la riga non c'era — e il
-    codice entra nel ramo che inserisce trovandosi la chiave gia' occupata. E' la
-    finestra, non una sua imitazione.
+    Cio' che resta da vincolare e' l'esito, e questo test lo misura con thread veri: due o
+    piu' primi login dello stesso utente nuovo devono dare **una** riga e nessun 500, senza
+    dipendere da quale arriva prima. `INSERT OR IGNORE` piu' la rilettura restano la
+    correzione della #23; `BEGIN IMMEDIATE` e' la cintura che rende la corsa irraggiungibile.
     """
     import sqlite3
+    import threading
 
-    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'corsa.db'))
-    monkeypatch.setattr(main, 'BOT_TOKEN', BOT_FINTO)
-    monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
-    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', '')  # un CLIENTE, non il proprietario
-
-    vera = main.db
-    intruso = {'fatto': False}
-
-    class Avvolta:
-        """Una connessione normale, tranne che apre la finestra una volta sola."""
-
-        def __init__(self, c):
-            self._c = c
-
-        def execute(self, sql, *resto):
-            esito = self._c.execute(sql, *resto)
-            if not intruso['fatto'] and 'FROM users WHERE telegram_id' in sql:
-                intruso['fatto'] = True
-                altra = vera()
-                altra.execute('INSERT INTO users(telegram_id, status)'
-                              " VALUES (?, 'registrato')", ('555000222',))
-                altra.commit()
-                altra.close()
-            return esito
-
-        def __getattr__(self, nome):
-            return getattr(self._c, nome)
-
-    monkeypatch.setattr(main, 'db', lambda: Avvolta(vera()))
+    percorso = _prepara(tmp_path, monkeypatch, 'primi_login.db')
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', '')
+    main.db().close()  # la migrazione prima, o i thread la corrono insieme
 
     dati = _dati_login(id='555000222', first_name='Cliente')
-    try:
-        risposta = main.login_telegram(main.LoginTelegramIn(**dati))
-    except sqlite3.IntegrityError as e:
-        raise AssertionError(
-            f'login concorrente -> IntegrityError ({e}), che via HTTP e- un 500: il '
-            'SELECT-poi-INSERT su telegram_id UNIQUE non regge la corsa. Serve un '
-            'inserimento idempotente piu- una rilettura'
-        ) from None
+    esiti = []
+    porta = threading.Barrier(6)
 
-    assert risposta.status_code == 200, risposta.status_code
+    def prova():
+        porta.wait()
+        try:
+            esiti.append(main.login_telegram(main.LoginTelegramIn(**dati)).status_code)
+        except Exception as e:
+            esiti.append(f'{type(e).__name__}:{getattr(e, "status_code", "")}')
 
-    # E la riga resta UNA: il perdente si attacca a quella del vincitore, non ne crea
-    # un'altra ne- sovrascrive la sua.
-    c = sqlite3.connect(tmp_path / 'corsa.db')
-    righe = c.execute('SELECT COUNT(*) FROM users WHERE telegram_id=?',
-                      ('555000222',)).fetchone()[0]
+    fili = [threading.Thread(target=prova) for _ in range(6)]
+    for f in fili:
+        f.start()
+    for f in fili:
+        f.join(timeout=30)
+
+    assert set(esiti) == {200}, f'login concorrenti di un utente nuovo: {esiti}'
+    c = sqlite3.connect(percorso)
+    righe = c.execute('SELECT COUNT(*) FROM users WHERE telegram_id=?', ('555000222',)).fetchone()[0]
     c.close()
     assert righe == 1, f'{righe} righe per lo stesso telegram_id invece di una'
-    assert intruso['fatto'], 'la finestra non e- stata aperta: il test non misura niente'
 
-
-# --------------------------------------------- `compare_digest` e le stringhe non ASCII
-#
-# Tre siti, tutti su input che arriva da fuori. Segnalati da Claude Fable 5 (uno) e da
-# CodeRabbit (tutti tre) sulla PR #23.
-#
-# La cosa che rende questa classe grave non e' il difetto, e' che era GIA' SCRITTA in
-# questo file. Il docstring di `auth()`, da luglio, dice: «passando le STRINGHE,
-# compare_digest solleverebbe TypeError su una non ASCII, e un token con un accento
-# diventerebbe un 500 invece di un 401 — un modo per far scrivere una traccia nei log con
-# un solo parametro di query». Poi ho scritto tre confronti nuovi, tutti su stringhe, due
-# dei quali su valori che li scrive l'attaccante. La lezione era imparata e documentata, e
-# non ha impedito niente: e' esattamente il caso della regola 2 — trovato il sito, non
-# cercata la classe.
 
 @pytest.mark.parametrize('valore', ['ö' * 64, 'firma-con-è', '🆚' * 8])
 def test_un_hash_NON_ASCII_dal_widget_rifiuta_invece_di_SOLLEVARE(valore):
@@ -1341,10 +1300,18 @@ def test_la_riparazione_NON_perde_i_dati_dell_account_sbagliato(tmp_path, monkey
     vuoto = _riga_utente(percorso, 'telegram_id', ADMIN_FINTO)[0]
     piero = _riga_utente(percorso, 'origin_profile', main.PIERO_PROFILE)[0]
 
-    # Roba dell'account sbagliato: una chat rivendicata e una riga di log.
+    # Tracce lasciate sull'account sbagliato: un segnale e una riga di log.
+    #
+    # NON una chat e NON un parser, e la distinzione e' il cuore della correzione arrivata
+    # dopo: quelli sono cio' che si POSSIEDE, e una riga che li possiede e' l'account di
+    # qualcuno — quindi oggi la riconciliazione la RIFIUTA invece di assorbirla (vedi
+    # `test_un_account_con_PARSER_viene_RIFIUTATO_non_assorbito`). La prima versione di
+    # questo test dava una chat all'account sbagliato, e con la semantica nuova finiva nel
+    # rifiuto: l'ho corretto sulle tracce, che e' il caso che la riparazione deve servire.
     c = sqlite3.connect(percorso)
-    c.execute('INSERT INTO chats(telegram_chat_id, title, owner_user_id) VALUES (?,?,?)',
-              ('-100999', 'Canale del proprietario', vuoto))
+    c.execute("INSERT INTO signals(csv, parser, profile, user_id, expires_at)"
+              " VALUES ('riga','p',?,?,?)",
+              (main.PIERO_PROFILE, vuoto, 9999999999))
     c.execute('INSERT INTO message_logs(user_id, text, esito) VALUES (?,?,?)',
               (vuoto, 'un messaggio', 'ok'))
     c.commit()
@@ -1354,15 +1321,14 @@ def test_la_riparazione_NON_perde_i_dati_dell_account_sbagliato(tmp_path, monkey
     main.login_telegram(main.LoginTelegramIn(**_dati_login()))
 
     c = sqlite3.connect(percorso)
-    chat = c.execute('SELECT owner_user_id FROM chats WHERE telegram_chat_id=?',
-                     ('-100999',)).fetchone()[0]
+    chat = c.execute("SELECT user_id FROM signals WHERE csv='riga'").fetchone()[0]
     log = c.execute('SELECT user_id FROM message_logs WHERE text=?', ('un messaggio',)).fetchone()[0]
     audit = c.execute("SELECT admin_user_id, target_user_id FROM admin_audit"
                       " WHERE action='riconciliato_account_duplicato'").fetchone()
     rimasto = c.execute('SELECT telegram_id FROM users WHERE id=?', (vuoto,)).fetchone()[0]
     c.close()
 
-    assert chat == piero, f'la chat e- rimasta all-account sbagliato (owner {chat}, atteso {piero})'
+    assert chat == piero, f'il segnale e- rimasto all-account sbagliato (user {chat}, atteso {piero})'
     assert log == piero, f'il log e- rimasto all-account sbagliato (user {log}, atteso {piero})'
     assert audit == (piero, vuoto), (
         f'la riparazione non e- tracciata in admin_audit: {audit}. Una riparazione '
@@ -1489,71 +1455,60 @@ def test_gli_spazi_ai_bordi_li_toglie_la_LETTURA_non_il_controllo(tmp_path):
     assert righe[1] == 'False', 'un valore buono con spazi ai bordi risulta malformato'
 
 
-def test_la_riparazione_regge_uno_SLUG_in_collisione(tmp_path, monkeypatch):
-    """Due parser con lo stesso slug, uno per parte: la riconciliazione non deve sollevare.
+def test_un_account_con_PARSER_viene_RIFIUTATO_non_assorbito(tmp_path, monkeypatch):
+    """Un account che possiede un parser e' di qualcuno: si rifiuta, non si assorbe.
 
-    Chiesto da GPT-5.5 sulla PR #24, ed e' uno stato raggiungibile: fra il login prematuro
-    e la riparazione, l'account sbagliato e' l'unico in cui il proprietario riesce a
-    entrare, quindi e' anche l'unico su cui puo' creare parser — e li chiamera' come
-    chiamerebbe i suoi.
+    **Questo test ha preso il posto di uno che misurava la cosa sbagliata.** La versione
+    precedente dava un parser all'account nato per errore e pretendeva che la riconciliazione
+    ne ri-disambiguasse lo slug — cioe' dava per buono che assorbirlo fosse giusto. Poi il
+    gate finale ha mostrato che quel presupposto e' la violazione dell'isolamento fra utenti:
+    se `TELEGRAM_ADMIN_ID` contiene per sbaglio l'ID di un cliente, assorbire significa
+    derubarlo. Ora un account con parser o chat **non si tocca**.
 
-    `UNIQUE (user_id, slug)` rende quello stato **legale** finche' i due utenti sono
-    distinti, e illegale nell'istante in cui diventano uno: e' esattamente il difetto che
-    `_trasferisci_parser` chiudeva nella #22, `IntegrityError` sul percorso di `migra()`.
-    Qui lo stesso attrezzo serve un percorso nuovo, e questo test lo vincola su quel
-    percorso invece di fidarsi che valga per trasporto.
+    La copertura sulla collisione degli slug non e' andata perduta: `_trasferisci_parser`
+    resta esercitata sul percorso della migrazione da
+    `tests/relay/test_schema.py::test_il_trasferimento_dei_parser_regge_uno_SLUG_in_collisione`
+    e da `test_piu_slug_in_collisione_ricevono_suffissi_DETERMINISTICI`. Quello che cambia e'
+    che dal percorso del **login** quel caso non si raggiunge piu', perche' viene rifiutato
+    prima.
     """
     import sqlite3
+    from fastapi import HTTPException
 
-    percorso = str(tmp_path / 'collisione.db')
-    monkeypatch.setattr(main, 'DB_PATH', percorso)
-    monkeypatch.setattr(main, 'BOT_TOKEN', BOT_FINTO)
-    monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
-
+    percorso = _prepara(tmp_path, monkeypatch, 'con_parser.db')
     monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', '')
     main.login_telegram(main.LoginTelegramIn(**_dati_login()))
-    vuoto = _riga_utente(percorso, 'telegram_id', ADMIN_FINTO)[0]
-    piero = _riga_utente(percorso, 'origin_profile', main.PIERO_PROFILE)[0]
 
-    # Lo stesso slug su entrambi: legale adesso, in collisione dopo il travaso.
     c = sqlite3.connect(percorso)
-    slug_di_piero = c.execute('SELECT slug FROM parsers WHERE user_id=? LIMIT 1',
-                              (piero,)).fetchone()[0]
-    # `header` e' NOT NULL: la prima versione di questo test lo ometteva e falliva con
-    # `IntegrityError: NOT NULL constraint failed: parsers.header`, cioe' misurava il
-    # proprio errore invece del comportamento.
-    c.execute('INSERT INTO parsers(name, header, user_id, slug, ordine, active)'
-              ' VALUES (?,?,?,?,?,1)',
-              ('Parser_creato_nell_account_sbagliato', 'P.Bet. ALTRO', vuoto,
-               slug_di_piero, 99))
+    vuoto = c.execute('SELECT id FROM users WHERE telegram_id=?', (ADMIN_FINTO,)).fetchone()[0]
+    piero = c.execute('SELECT id FROM users WHERE origin_profile=?',
+                      (main.PIERO_PROFILE,)).fetchone()[0]
+    c.execute("INSERT INTO parsers(name, header, user_id, slug, ordine, active)"
+              " VALUES ('Parser_suo','P.Bet. SUO',?,'parser-suo',77,1)", (vuoto,))
     c.commit()
     c.close()
 
     monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', ADMIN_FINTO)
-    try:
-        risposta = main.login_telegram(main.LoginTelegramIn(**_dati_login()))
-    except sqlite3.IntegrityError as e:
-        raise AssertionError(
-            f'la riparazione solleva con due slug uguali ({e}): il proprietario resta '
-            'fuori dal proprio account per un parser che ha creato lui'
-        ) from None
-    assert risposta.status_code == 200
+    with pytest.raises(HTTPException) as scoppio:
+        main.login_telegram(main.LoginTelegramIn(**_dati_login()))
+    assert scoppio.value.status_code == 409, scoppio.value.status_code
+    # Il messaggio non nomina utenti ne- identificativi: chi lo riceve puo- essere un
+    # cliente qualunque, e il dettaglio sta nel log del proprietario.
+    assert 'utente' not in str(scoppio.value.detail).lower()
 
     c = sqlite3.connect(percorso)
-    righe = c.execute('SELECT name, slug FROM parsers WHERE user_id=? ORDER BY name',
-                      (piero,)).fetchall()
-    orfani = c.execute('SELECT COUNT(*) FROM parsers WHERE user_id=?', (vuoto,)).fetchone()[0]
+    assert c.execute('SELECT COUNT(*) FROM parsers WHERE user_id=?',
+                     (vuoto,)).fetchone()[0] == 1, 'il parser e- stato travasato'
+    assert c.execute('SELECT telegram_id FROM users WHERE id=?',
+                     (vuoto,)).fetchone()[0] == ADMIN_FINTO, 'il telegram_id e- stato azzerato'
+    assert c.execute('SELECT telegram_id FROM users WHERE id=?',
+                     (piero,)).fetchone()[0] is None, 'la riga del proprietario si e- collegata'
+    tracciato = c.execute("SELECT COUNT(*) FROM admin_audit"
+                          " WHERE action='collegamento_admin_rifiutato'").fetchone()[0]
     c.close()
-
-    nomi = [n for n, _ in righe]
-    assert 'Parser_creato_nell_account_sbagliato' in nomi, (
-        f'il parser creato nell-account sbagliato non e- arrivato al proprietario: {nomi}')
-    assert orfani == 0, f'{orfani} parser sono rimasti sull-account svuotato'
-    slug = [sl for _, sl in righe]
-    assert len(slug) == len(set(slug)), f'due parser dello stesso utente con lo stesso slug: {righe}'
-    # Chi c'era prima tiene il suo: a cambiare nome e- chi arriva, perche- l'altro
-    # potrebbe essere in un URL che qualcuno usa.
-    assert slug_di_piero in slug
+    assert tracciato == 1, (
+        'il rifiuto non e- tracciato in admin_audit: il proprietario non ha modo di sapere '
+        'che la sua variabile e- sbagliata, e il login del cliente fallisce senza spiegazione')
 
 
 def test_le_sessioni_dell_account_SVUOTATO_muoiono_con_la_riparazione(tmp_path, monkeypatch):
@@ -1707,3 +1662,193 @@ def test_un_login_RIPETUTO_con_lo_stesso_id_non_butta_fuori_gli_altri_dispositiv
         'un secondo login con lo STESSO id ha invalidato la sessione precedente: il '
         'proprietario si troverebbe buttato fuori dal telefono ogni volta che entra dal '
         'computer')
+
+
+def _prepara(tmp_path, monkeypatch, nome='iso.db'):
+    """Un relay in processo con database proprio, bot e segreto finti."""
+    percorso = str(tmp_path / nome)
+    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    monkeypatch.setattr(main, 'BOT_TOKEN', BOT_FINTO)
+    monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
+    return percorso
+
+
+def test_l_id_di_un_CLIENTE_come_admin_non_ne_fonde_l_account(tmp_path, monkeypatch):
+    """**Violazione dell'isolamento fra utenti**, la priorita' 7 di `CLAUDE.md`.
+
+    Bloccante di Claude Fable 5 sulla PR #24, e misurato prima di correggerlo: bastava che
+    il proprietario sbagliasse una cifra di `TELEGRAM_ADMIN_ID` e ci finisse l'ID di un
+    cliente. Al login di quel cliente:
+
+        parser rimasti a lui: 0 | passati a PIERO: 2
+        la chat di lui appartiene a: PIERO
+        riga PIERO: telegram_id del cliente, is_admin=1
+        riga del cliente: telegram_id azzerato
+
+    Il cliente perdeva tutto **e** otteneva la dashboard del proprietario. Irreversibile,
+    e senza nessun errore: per il proprietario sembrava che il collegamento fosse andato.
+
+    La riparazione idempotente presumeva che la riga da assorbire fosse **sempre**
+    l'account nato per errore. Non lo e': un account che possiede parser o chat e' di
+    qualcuno. Quindi ora la riconciliazione avviene solo se la riga non possiede niente di
+    cio' che rende un account un account, e altrimenti **rifiuta** — senza toccare nessuna
+    delle due righe, perche' fra sbagliare in un verso e sbagliare nell'altro c'e' la
+    differenza fra un login rifiutato e un utente derubato.
+    """
+    import sqlite3
+    percorso = _prepara(tmp_path, monkeypatch, 'cliente_come_admin.db')
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', '')
+
+    cliente = _dati_login(id='555000777', first_name='Marco')
+    main.login_telegram(main.LoginTelegramIn(**cliente))
+    c = sqlite3.connect(percorso)
+    marco = c.execute("SELECT id FROM users WHERE telegram_id='555000777'").fetchone()[0]
+    piero = c.execute("SELECT id FROM users WHERE origin_profile=?",
+                      (main.PIERO_PROFILE,)).fetchone()[0]
+    c.execute("INSERT INTO parsers(name,header,user_id,slug,ordine,active)"
+              " VALUES ('Parser_di_Marco','P.Bet. MARCO',?,'parser-di-marco',50,1)", (marco,))
+    c.execute("INSERT INTO chats(telegram_chat_id,title,owner_user_id)"
+              " VALUES ('-100777','Canale di Marco',?)", (marco,))
+    c.commit()
+    c.close()
+
+    # Il proprietario sbaglia la variabile e ci mette l'ID di Marco.
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', '555000777')
+    from fastapi import HTTPException
+    try:
+        main.login_telegram(main.LoginTelegramIn(**cliente))
+        rifiutato = None
+    except HTTPException as e:
+        rifiutato = e.status_code
+
+    c = sqlite3.connect(percorso)
+    riga_piero = c.execute('SELECT telegram_id, is_admin FROM users WHERE id=?', (piero,)).fetchone()
+    riga_marco = c.execute('SELECT telegram_id FROM users WHERE id=?', (marco,)).fetchone()
+    suoi = c.execute('SELECT COUNT(*) FROM parsers WHERE user_id=?', (marco,)).fetchone()[0]
+    sua_chat = c.execute("SELECT owner_user_id FROM chats WHERE telegram_chat_id='-100777'").fetchone()[0]
+    c.close()
+
+    assert riga_piero[0] is None, (
+        f'la riga del proprietario ha preso il telegram_id del cliente: {riga_piero}. '
+        'Il cliente entra nell-account del proprietario')
+    assert riga_marco[0] == '555000777', (
+        'il cliente ha perso il proprio telegram_id: non riesce piu- a entrare da nessuna parte')
+    assert suoi == 1, f'{suoi} parser rimasti al cliente invece di 1: i suoi dati sono stati travasati'
+    assert sua_chat == marco, 'la chat del cliente e- passata al proprietario'
+    assert rifiutato is not None, (
+        'il login e- riuscito: con una variabile sbagliata il servizio deve RIFIUTARE, non '
+        'scegliere quale dei due utenti derubare')
+
+
+def test_cambiare_la_variabile_TOGLIE_l_accesso_alla_vecchia_identita(tmp_path, monkeypatch):
+    """La revoca non puo' dipendere dal fatto che il NUOVO id faccia login.
+
+    Bloccante di GPT-5.6 Sol sulla PR #24, misurato prima di correggerlo: cambiata la
+    variabile, il vecchio ID rifaceva login e otteneva ancora `utente: 1`, cioe' la riga
+    del proprietario, con la sua dashboard e i suoi parser. La revoca introdotta nel commit
+    precedente scattava solo quando il **nuovo** ID entrava — e se il nuovo non entra mai,
+    il vecchio resta amministratore per sempre.
+
+    Cambiare `TELEGRAM_ADMIN_ID` e' il gesto con cui si TOGLIE l'accesso a un'identita': se
+    non lo toglie, quel gesto e' teatro. Ora l'invariante e' verificata a ogni login,
+    chiunque lo faccia: se la riga del proprietario porta un `telegram_id` diverso da
+    quello configurato, il collegamento e' stantio e viene sciolto.
+    """
+    import sqlite3
+    percorso = _prepara(tmp_path, monkeypatch, 'revoca_vecchio.db')
+    VECCHIO, NUOVO = '111000111', '222000222'
+
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', VECCHIO)
+    main.login_telegram(main.LoginTelegramIn(**_dati_login(id=VECCHIO)))
+    c = sqlite3.connect(percorso)
+    piero = c.execute('SELECT id, telegram_id FROM users WHERE origin_profile=?',
+                      (main.PIERO_PROFILE,)).fetchone()
+    c.close()
+    assert piero[1] == VECCHIO, 'il primo login non ha collegato: il test non misura la revoca'
+
+    # Il proprietario cambia la variabile PROPRIO per togliere l'accesso al vecchio ID.
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', NUOVO)
+
+    from fastapi import HTTPException
+    try:
+        risposta = main.login_telegram(main.LoginTelegramIn(**_dati_login(id=VECCHIO)))
+        utente = json.loads(bytes(risposta.body).decode()).get('utente')
+    except HTTPException:
+        utente = None
+
+    c = sqlite3.connect(percorso)
+    dopo = c.execute('SELECT telegram_id FROM users WHERE id=?', (piero[0],)).fetchone()[0]
+    c.close()
+
+    assert utente != piero[0], (
+        f'il VECCHIO id entra ancora nell-account del proprietario (utente {utente}): '
+        'cambiare la variabile non gli ha tolto niente')
+    assert dopo != VECCHIO, (
+        f'la riga del proprietario porta ancora il vecchio telegram_id ({dopo}): il '
+        'collegamento stantio sopravvive, quindi la revoca non e- avvenuta')
+
+
+def test_due_primi_login_CONCORRENTI_dell_admin_non_uccidono_il_cookie(tmp_path, monkeypatch):
+    """`SELECT` e `UPDATE` non atomici sul percorso della riparazione.
+
+    Alzato da Claude Fable 5 e da GPT-5.6 Sol indipendentemente sulla PR #24, e il sintomo
+    che Sol nomina e' il piu' insidioso: due login concorrenti incrementano `session_version`
+    **due volte**, quindi il cookie firmato dal primo nasce con la versione 2 mentre il
+    database e' a 3 — il login «riesce» e il cookie e' morto. L'utente vede una schermata
+    di accesso riuscito e la richiesta successiva risponde 401.
+
+    Il test pretende che **ogni** cookie emesso da un login riuscito sia valido subito dopo.
+    E' l'unica formulazione che coglie il difetto senza dipendere da quale thread arriva
+    prima.
+    """
+    import threading
+    percorso = _prepara(tmp_path, monkeypatch, 'concorrenti.db')
+
+    # Lo scenario deve essere un CAMBIO di identita', non un primo login: `cambia_identita`
+    # e' falsa quando la riga PIERO non ha ancora un telegram_id, quindi due primi login
+    # concorrenti non incrementano niente e non misurerebbero il difetto. La prima versione
+    # di questo test faceva esattamente quell'errore e passava verde.
+    VECCHIO, NUOVO = '111000111', '222000222'
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', VECCHIO)
+    main.login_telegram(main.LoginTelegramIn(**_dati_login(id=VECCHIO)))
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', NUOVO)
+
+    dati = _dati_login(id=NUOVO)
+    esiti = []
+    porta = threading.Barrier(6)
+
+    def prova():
+        porta.wait()
+        try:
+            r = main.login_telegram(main.LoginTelegramIn(**dati))
+            cookie = None
+            for pezzo in (r.headers.get('set-cookie') or '').split(';'):
+                chiave, _, valore = pezzo.strip().partition('=')
+                if chiave == main.NOME_COOKIE:
+                    cookie = valore
+            esiti.append(('ok', cookie))
+        except Exception as e:
+            esiti.append((type(e).__name__, getattr(e, 'status_code', None)))
+
+    fili = [threading.Thread(target=prova) for _ in range(6)]
+    for f in fili:
+        f.start()
+    for f in fili:
+        f.join(timeout=30)
+
+    guasti = [e for e in esiti if e[0] != 'ok']
+    assert not guasti, f'login concorrenti hanno sollevato: {guasti}'
+
+    class Richiesta:
+        cookies = {}
+
+    morti = []
+    for _, cookie in esiti:
+        Richiesta.cookies = {main.NOME_COOKIE: cookie}
+        if main.utente_dalla_sessione(Richiesta()) is None:
+            morti.append(cookie)
+    assert not morti, (
+        f'{len(morti)} cookie su {len(esiti)} sono nati morti: session_version e- stata '
+        'incrementata da un login concorrente dopo la firma, quindi il login «riesce» e la '
+        'richiesta successiva risponde 401')
