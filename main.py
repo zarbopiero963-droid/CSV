@@ -722,6 +722,14 @@ SCHEMA_MULTIUTENTE = (
     'CREATE TABLE IF NOT EXISTS access_requests (id INTEGER PRIMARY KEY AUTOINCREMENT,'
     ' user_id INTEGER, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,'
     ' decided_at INTEGER, decided_by INTEGER, granted_days INTEGER, outcome TEXT)',
+    # Una sola richiesta APERTA per utente, imposta dal database e non dal codice. La logica
+    # applicativa che rilegge lo stato dentro `BEGIN IMMEDIATE` basta per le richieste che
+    # passano da questo processo; questo indice basta anche per quelle che non ci passano — un
+    # secondo worker, un domani un secondo processo, o una scrittura fatta a mano. Chiesto da
+    # GPT-5.5 sulla PR #26, e la forma e' un indice UNIQUE **parziale**: le richieste giu'
+    # decise possono essere quante si vuole, perche' sono storia.
+    'CREATE UNIQUE INDEX IF NOT EXISTS richiesta_aperta_unica'
+    ' ON access_requests(user_id) WHERE decided_at IS NULL',
     'CREATE TABLE IF NOT EXISTS admin_audit (id INTEGER PRIMARY KEY AUTOINCREMENT,'
     ' admin_user_id INTEGER, target_user_id INTEGER, action TEXT,'
     ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP)',
@@ -2521,24 +2529,37 @@ def chiedi_accesso(request: Request):
     `users.telegram_reachable` diventa 1.
     """
     utente = _sessione_valida(request)
-    stato = stato_effettivo(utente['status'], utente['access_expires_at'])
-    if stato == 'attivo':
-        raise HTTPException(409, 'accesso giu\' attivo')
-    if stato == 'in_attesa':
-        raise HTTPException(409, 'richiesta giu\' in corso')
-    if stato == 'sospeso':
-        # Un sospeso non rientra da se' chiedendo di nuovo: la sospensione e' una decisione
-        # del proprietario, e una richiesta che la aggirasse la renderebbe inutile.
-        raise HTTPException(403, 'accesso sospeso')
     c = db()
+    # Lo stato si rilegge **dentro** `BEGIN IMMEDIATE`, e non basta quello che la sessione ha
+    # letto un istante prima: fra la lettura e l'inserimento c'e' spazio per un altro clic, e
+    # due richieste concorrenti passavano entrambe il controllo e inserivano due righe aperte —
+    # cioe' esattamente il caso che il 409 esiste per impedire. E' la stessa corsa
+    # SELECT-poi-INSERT del login, che la PR #24 ha chiuso con lo stesso strumento, e l'ho
+    # ripetuta qui. Alzata indipendentemente da Claude Fable 5 e GPT-5.5 sulla PR #26.
     c.execute('BEGIN IMMEDIATE')
     try:
+        riga = c.execute('SELECT status, access_expires_at, telegram_reachable FROM users'
+                         ' WHERE id=?', (utente['id'],)).fetchone()
+        if riga is None:
+            raise HTTPException(401, 'sessione assente o scaduta')
+        stato = stato_effettivo(riga[0], riga[1])
+        if stato == 'attivo':
+            raise HTTPException(409, 'accesso giu\' attivo')
+        if stato == 'in_attesa':
+            raise HTTPException(409, 'richiesta giu\' in corso')
+        if stato == 'sospeso':
+            # Un sospeso non rientra da se' chiedendo di nuovo: la sospensione e' una decisione
+            # del proprietario, e una richiesta che la aggirasse la renderebbe inutile.
+            raise HTTPException(403, 'accesso sospeso')
         c.execute('INSERT INTO access_requests(user_id) VALUES (?)', (utente['id'],))
         c.execute("UPDATE users SET status='in_attesa' WHERE id=?", (utente['id'],))
+        raggiungibile = bool(riga[2])
         c.commit()
-        raggiungibile = bool(c.execute('SELECT telegram_reachable FROM users WHERE id=?',
-                                       (utente['id'],)).fetchone()[0])
     except Exception:
+        # Anche sugli `HTTPException`: qui, a differenza di `_decidi_identita`, nessuna
+        # scrittura precede il rifiuto, quindi non c'e' nessuna traccia da salvare — e
+        # confermare una transazione vuota su un percorso d'errore e' l'abitudine che il giorno
+        # in cui una scrittura ci finisce davanti la rende persistente. Rilievo di Fable 5.
         c.rollback()
         c.close()
         raise
@@ -2625,7 +2646,12 @@ async def approva_richiesta(richiesta: str, request: Request):
         _annota_admin(c, amministratore['id'], 'accesso_approvato', bersaglio=riga[0])
         c.commit()
     except HTTPException:
-        c.commit()      # un rifiuto e' una DECISIONE: la sua traccia deve sopravvivere
+        # `rollback` e non `commit`: il solo `HTTPException` che nasce qui dentro e' il 404, e
+        # arriva **prima** di qualunque scrittura. Confermare una transazione vuota non fa
+        # danno oggi e lo farebbe il giorno in cui una scrittura finisse prima del controllo:
+        # e' la differenza con `_decidi_identita`, dove il `commit` serve perche' li' il
+        # rifiuto ha giu' scritto la propria riga di audit. Rilievo di Claude Fable 5.
+        c.rollback()
         c.close()
         raise
     except Exception:
@@ -2633,8 +2659,13 @@ async def approva_richiesta(richiesta: str, request: Request):
         c.close()
         raise
 
-    notificato, motivo = invia_messaggio_telegram(
-        riga[2], f'Accesso attivato: {dati.giorni} giorni. Buon lavoro.')
+    # In un thread: questa rotta e' `async`, quindi gira sul loop, e `invia_messaggio_telegram`
+    # aspetta la rete fino a dieci secondi. Sul loop quei dieci secondi fermerebbero **tutte**
+    # le richieste del processo, feed compreso. Segnalato da GPT-5.5 sulla PR #26; e' lo stesso
+    # motivo per cui il webhook chiama `assicura_registrazione` con `to_thread`.
+    notificato, motivo = await asyncio.to_thread(
+        invia_messaggio_telegram, riga[2],
+        f'Accesso attivato: {dati.giorni} giorni. Buon lavoro.')
     if not notificato:
         c.execute('UPDATE users SET telegram_reachable=0 WHERE id=?', (riga[0],))
         c.commit()
@@ -2678,6 +2709,58 @@ def rifiuta_richiesta(richiesta: str, request: Request):
     c.close()
     return _rispondi_con_sessione(amministratore['id'], amministratore['versione'],
                                   {'ok': True, 'utente': riga[0], 'stato': 'registrato'})
+
+
+@app.post('/api/admin/promemoria')
+def manda_promemoria(request: Request):
+    """Avvisa chi sta per scadere. **Una volta per scadenza**, non una volta per sempre.
+
+    `users.promemoria_per` conserva **quale** scadenza e' stata annunciata, e non un booleano:
+    con un booleano il secondo rinnovo non avviserebbe mai piu', perche' quella riga
+    resterebbe «giu' avvisata» per il resto della vita del cliente. Cosi' invece
+    l'approvazione azzera il campo e il promemoria del ciclo successivo parte da se'.
+
+    **Limite dichiarato, e non e' un dettaglio da scoprire in produzione: non c'e' uno
+    scheduler.** Questo servizio non ha un processo che si sveglia a ogni ora, e i due percorsi
+    che girano da soli sono il feed (che XTrader interroga a raffica: metterci un invio
+    Telegram lo renderebbe lento e fragile) e il webhook (che dipende dai messaggi dei canali).
+    Quindi questa rotta va **chiamata**, dal proprietario o da un job programmato su Railway.
+    Finche' non viene chiamata, nessun promemoria parte: e' un compito che aspetta, non un
+    compito perso. La riga in `admin_audit` dice quando e' stato fatto l'ultimo giro.
+
+    Un invio fallito **non** consuma il promemoria: `promemoria_per` si scrive solo se il
+    messaggio e' partito, cosi' il giro successivo riprova. E' il contrario di quello che si
+    fa con il freno del login, dove il tentativo si consuma prima: la' il rischio e' che
+    qualcuno provi troppe volte, qui il rischio e' che il cliente non sappia che scade.
+    """
+    amministratore = _solo_amministratore(request)
+    adesso = int(time.time())
+    c = db()
+    candidati = c.execute(
+        "SELECT id, telegram_id, access_expires_at FROM users WHERE status='attivo'"
+        ' AND access_expires_at IS NOT NULL AND is_admin=0'
+        ' AND (promemoria_per IS NULL OR promemoria_per != access_expires_at)').fetchall()
+    avvisati, falliti = [], []
+    for utente, telegram_id, scadenza in candidati:
+        giorni = giorni_rimasti(scadenza, adesso=adesso)
+        if giorni is None or not 0 < giorni <= GIORNI_PROMEMORIA:
+            continue
+        riuscito, motivo = invia_messaggio_telegram(
+            telegram_id,
+            f'Il tuo accesso scade fra {giorni} giorni. Scrivi per rinnovare.')
+        if riuscito:
+            c.execute('UPDATE users SET promemoria_per=? WHERE id=?', (scadenza, utente))
+            avvisati.append(utente)
+        else:
+            # Non si consuma: al prossimo giro si riprova. E si registra che quel cliente non
+            # e' raggiungibile, perche' il proprietario deve poterlo contattare a mano.
+            c.execute('UPDATE users SET telegram_reachable=0 WHERE id=?', (utente,))
+            falliti.append({'utente': utente, 'motivo': motivo})
+    _annota_admin(c, amministratore['id'], 'promemoria_inviati')
+    c.commit()
+    c.close()
+    return _rispondi_con_sessione(amministratore['id'], amministratore['versione'],
+                                  {'avvisati': avvisati, 'falliti': falliti})
 
 
 @app.get('/api/parsers')

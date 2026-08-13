@@ -781,3 +781,261 @@ def test_i_giorni_FUORI_INTERVALLO_vengono_rifiutati(tmp_path, monkeypatch):
             asyncio.run(main.approva_richiesta(
                 str(numero), _CorpoFinto(admin_s, {'giorni': giorni})))
         assert errore.value.status_code == 422, f'{giorni} giorni accettati'
+
+
+# ------------------------------------------------------------ il promemoria a 5 giorni
+
+def test_il_promemoria_parte_UNA_VOLTA_per_scadenza(tmp_path, monkeypatch):
+    """E la seconda volta riparte, che e' la parte che un booleano sbaglierebbe.
+
+    `promemoria_per` conserva **quale** scadenza e' stata annunciata. Con un booleano
+    «giu' avvisato», il cliente riceverebbe l'avviso al primo ciclo e **mai piu'** — e il caso
+    in cui serve davvero e' il rinnovo numero cinque, non il primo.
+    """
+    inviati = []
+    percorso, admin_s, cliente_s, cliente = _admin(tmp_path, monkeypatch, 'promemoria.db')
+    monkeypatch.setattr(main, 'invia_messaggio_telegram',
+                        lambda chat_id, testo, *a, **k: (inviati.append(testo), (True, None))[1])
+    c = sqlite3.connect(percorso)
+    c.execute("UPDATE users SET status='attivo', access_expires_at=? WHERE id=?",
+              (int(time.time()) + 3 * GIORNO, cliente))
+    c.commit()
+    c.close()
+
+    assert _corpo(main.manda_promemoria(admin_s))['avvisati'] == [cliente]
+    assert len(inviati) == 1 and '3 giorni' in inviati[0], inviati
+    # Rieseguito subito: nessun secondo avviso per la stessa scadenza.
+    assert _corpo(main.manda_promemoria(admin_s))['avvisati'] == []
+    assert len(inviati) == 1, f'{len(inviati)} avvisi per la stessa scadenza'
+
+    # Il proprietario rinnova: il promemoria del ciclo NUOVO deve poter partire.
+    c = sqlite3.connect(percorso)
+    c.execute('UPDATE users SET access_expires_at=?, promemoria_per=NULL WHERE id=?',
+              (int(time.time()) + 2 * GIORNO, cliente))
+    c.commit()
+    c.close()
+    assert _corpo(main.manda_promemoria(admin_s))['avvisati'] == [cliente]
+    assert len(inviati) == 2, 'dopo un rinnovo il promemoria non e- ripartito'
+
+
+def test_il_promemoria_NON_riguarda_chi_ha_tempo_o_e_scaduto(tmp_path, monkeypatch):
+    """Ne' chi ha 40 giorni davanti, ne' chi e' giu' fuori.
+
+    Al primo l'avviso e' rumore, e il rumore insegna a ignorare gli avvisi; al secondo e'
+    troppo tardi — quello che gli serve e' la schermata di accesso scaduto, non un promemoria
+    di qualcosa che e' giu' successo.
+    """
+    inviati = []
+    percorso, admin_s, cliente_s, cliente = _admin(tmp_path, monkeypatch, 'no_promemoria.db')
+    monkeypatch.setattr(main, 'invia_messaggio_telegram',
+                        lambda *a, **k: (inviati.append(1), (True, None))[1])
+    for scadenza in (int(time.time()) + 40 * GIORNO, int(time.time()) - GIORNO):
+        c = sqlite3.connect(percorso)
+        c.execute("UPDATE users SET status='attivo', access_expires_at=?, promemoria_per=NULL"
+                  ' WHERE id=?', (scadenza, cliente))
+        c.commit()
+        c.close()
+        assert _corpo(main.manda_promemoria(admin_s))['avvisati'] == [], scadenza
+    assert inviati == [], f'{len(inviati)} avvisi mandati a chi non li deve ricevere'
+
+
+def test_un_promemoria_FALLITO_non_si_consuma(tmp_path, monkeypatch):
+    """Se l'invio non parte, il giro successivo riprova.
+
+    Il contrario di cio' che si fa col freno del login, dove il tentativo si consuma **prima**
+    della verifica: la' il rischio e' che qualcuno provi troppe volte, qui il rischio e' che il
+    cliente non sappia che sta scadendo. Consumare un promemoria non partito significherebbe
+    perderlo per sempre proprio nel caso in cui il canale e' rotto.
+    """
+    percorso, admin_s, cliente_s, cliente = _admin(tmp_path, monkeypatch, 'promemoria_ko.db')
+    monkeypatch.setattr(main, 'invia_messaggio_telegram', lambda *a, **k: (False, 'rifiutata'))
+    c = sqlite3.connect(percorso)
+    c.execute("UPDATE users SET status='attivo', access_expires_at=? WHERE id=?",
+              (int(time.time()) + 2 * GIORNO, cliente))
+    c.commit()
+    c.close()
+
+    esito = _corpo(main.manda_promemoria(admin_s))
+    assert esito['avvisati'] == [] and esito['falliti'], esito
+    c = sqlite3.connect(percorso)
+    riga = c.execute('SELECT promemoria_per, telegram_reachable FROM users WHERE id=?',
+                     (cliente,)).fetchone()
+    c.close()
+    assert riga[0] is None, (
+        'il promemoria e- stato segnato come inviato anche se non e- partito: il cliente non '
+        'sapra- mai che sta scadendo')
+    assert riga[1] == 0, 'il cliente non e- stato segnato come non raggiungibile'
+
+
+# ----------------------------------------------- il canale verso Telegram, da solo
+
+def test_un_rifiuto_di_TELEGRAM_con_200_viene_riconosciuto(tmp_path, monkeypatch):
+    """Il codice HTTP non basta: Telegram rifiuta con `200` e `ok: false`.
+
+    Ed e' proprio la forma del caso che conta — «il bot non puo' scrivere per primo» arriva
+    cosi', non come un errore di rete. Un controllo che guardasse solo lo stato HTTP direbbe
+    «inviato» a ogni approvazione mai consegnata.
+    """
+    import io
+
+    class RispostaFinta(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(main, 'BOT_TOKEN', BOT_FINTO)
+    monkeypatch.setattr('urllib.request.urlopen',
+                        lambda *a, **k: RispostaFinta(
+                            b'{"ok": false, "description": "bot can\'t initiate conversation"}'))
+    riuscito, motivo = main.invia_messaggio_telegram('555000555', 'ciao')
+    assert riuscito is False, 'un rifiuto con HTTP 200 e- stato letto come consegna riuscita'
+    assert motivo and 'rifiutato' in motivo
+
+    monkeypatch.setattr('urllib.request.urlopen',
+                        lambda *a, **k: RispostaFinta(b'{"ok": true, "result": {}}'))
+    assert main.invia_messaggio_telegram('555000555', 'ciao') == (True, None)
+
+
+def test_il_motivo_non_contiene_il_TOKEN_del_bot(tmp_path, monkeypatch):
+    """Un `HTTPError` di Telegram fa eco all'URL, e l'URL porta il token nel percorso.
+
+    Per questo il motivo riporta il **tipo** dell'eccezione e non il suo testo: il tipo dice al
+    proprietario se e' rete o rifiuto, il testo direbbe anche il token del bot — e quel motivo
+    finisce in una risposta API.
+    """
+    import urllib.error
+
+    def esplode(*a, **k):
+        raise urllib.error.HTTPError(
+            f'https://api.telegram.org/bot{BOT_FINTO}/sendMessage', 400, 'Bad Request',
+            {}, None)
+
+    monkeypatch.setattr(main, 'BOT_TOKEN', BOT_FINTO)
+    monkeypatch.setattr('urllib.request.urlopen', esplode)
+    riuscito, motivo = main.invia_messaggio_telegram('555000555', 'ciao')
+    assert riuscito is False
+    assert BOT_FINTO not in motivo and BOT_FINTO.split(':')[1] not in motivo, (
+        f'il motivo contiene il token del bot: {motivo!r}')
+
+
+def test_START_da_chat_privata_rende_il_cliente_RAGGIUNGIBILE(tmp_path, monkeypatch):
+    """L'unico modo di sapere che il bot puo' scrivere a qualcuno, e la sua unica eccezione.
+
+    Telegram non offre nessun modo di CHIEDERE se il bot puo' scrivere a una persona: lo si
+    scopre provando, o lo si registra quando la persona scrive. Questo ramo registra.
+
+    Il test misura anche il confine: quella consegna **non** scrive un segnale e **non** finisce
+    nel log dei messaggi. Il filtro delle chat resta quello che era — qui non si cerca nessun
+    parser e non si guarda nessun profilo.
+    """
+    percorso, _admin_s, _cliente_s, cliente = _admin(tmp_path, monkeypatch, 'start.db')
+    monkeypatch.setattr(main, 'SEGRETO_WEBHOOK', main.webhook_secret(BOT_FINTO))
+    import asyncio
+
+    class Richiesta:
+        headers = {'X-Telegram-Bot-Api-Secret-Token': main.webhook_secret(BOT_FINTO)}
+
+        async def json(self):
+            return {'message': {'chat': {'id': 555000555, 'type': 'private'},
+                                'from': {'id': 555000555},
+                                'text': '/start accesso'}}
+
+    esito = asyncio.run(main.telegram_webhook(Richiesta()))
+    assert esito.get('start') is True, esito
+    c = sqlite3.connect(percorso)
+    riga = c.execute('SELECT telegram_reachable FROM users WHERE id=?', (cliente,)).fetchone()
+    segnali = c.execute('SELECT COUNT(*) FROM signals').fetchone()[0]
+    log = c.execute('SELECT COUNT(*) FROM message_logs').fetchone()[0]
+    c.close()
+    assert riga[0] == 1, 'il cliente non e- stato segnato come raggiungibile'
+    assert segnali == 0, 'un /start ha scritto un segnale: il filtro delle chat e- indebolito'
+    assert log == 0, 'un /start e- finito nel log dei messaggi dei canali'
+
+
+def test_due_richieste_CONCORRENTI_lasciano_UNA_sola_riga_aperta(tmp_path, monkeypatch):
+    """Corsa alzata indipendentemente da Claude Fable 5 e GPT-5.5 sulla PR #26.
+
+    Lo stato veniva letto dalla sessione **prima** della transazione: fra quella lettura e
+    l'inserimento c'e' spazio per un altro clic, quindi due richieste concorrenti passavano
+    entrambe il controllo e inserivano due righe aperte — il caso che il `409` esiste per
+    impedire. E' la stessa corsa SELECT-poi-INSERT del login che la PR #24 ha chiuso, ripetuta
+    da me qui: la classe di difetto non e' stata cercata, e questo test la fissa.
+
+    Il test pretende **una** riga aperta e almeno un rifiuto, non sei successi: sotto contesa il
+    comportamento giusto e' che uno vinca e gli altri sappiano di aver perso.
+    """
+    import threading
+    percorso, _admin_s, cliente_s, cliente = _admin(tmp_path, monkeypatch, 'corsa.db')
+    esiti = []
+    porta = threading.Barrier(6)
+
+    def prova():
+        porta.wait()
+        try:
+            main.chiedi_accesso(cliente_s)
+            esiti.append('ok')
+        except Exception as e:
+            esiti.append(getattr(e, 'status_code', type(e).__name__))
+
+    fili = [threading.Thread(target=prova) for _ in range(6)]
+    for f in fili:
+        f.start()
+    for f in fili:
+        f.join(timeout=30)
+    vivi = [f for f in fili if f.is_alive()]
+    assert not vivi, f'{len(vivi)} thread non hanno finito'
+    assert len(esiti) == len(fili), f'{len(esiti)} esiti per {len(fili)} richieste'
+
+    c = sqlite3.connect(percorso)
+    aperte = c.execute('SELECT COUNT(*) FROM access_requests'
+                       ' WHERE user_id=? AND decided_at IS NULL', (cliente,)).fetchone()[0]
+    c.close()
+    assert aperte == 1, (
+        f'{aperte} richieste aperte per lo stesso cliente: sei clic insieme hanno aggirato il '
+        f'409. Esiti: {esiti}')
+    assert esiti.count('ok') == 1, f'{esiti.count("ok")} richieste riuscite invece di una'
+
+
+def test_un_database_della_PR22_riceve_la_colonna_del_promemoria(tmp_path, monkeypatch):
+    """Chiesto da GPT-5.5 sulla PR #26: la migrazione su un database che esiste giu'.
+
+    `users` e' nata nella PR #22, quindi in produzione la tabella **esiste** e un
+    `CREATE TABLE IF NOT EXISTS` non le aggiunge niente: senza la voce in
+    `COLONNE_MULTIUTENTE`, `promemoria_per` non esisterebbe e la prima approvazione
+    risponderebbe 500 con «no such column». Il test simula quel database creando la tabella
+    **senza** la colonna nuova, poi fa girare la migrazione.
+    """
+    percorso = str(tmp_path / 'vecchio.db')
+    c = sqlite3.connect(percorso)
+    c.execute('CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT,'
+              ' origin_profile TEXT UNIQUE, telegram_id TEXT UNIQUE, username TEXT,'
+              ' first_name TEXT, slug TEXT UNIQUE, token_hash TEXT, token_prefix TEXT,'
+              " status TEXT NOT NULL DEFAULT 'registrato', access_expires_at INTEGER,"
+              ' telegram_reachable INTEGER NOT NULL DEFAULT 0,'
+              ' session_version INTEGER NOT NULL DEFAULT 1,'
+              ' is_admin INTEGER NOT NULL DEFAULT 0, created_at DATETIME)')
+    c.execute("INSERT INTO users(telegram_id, status) VALUES ('555000555','attivo')")
+    c.commit()
+    c.close()
+    assert 'promemoria_per' not in _colonne(percorso, 'users'), 'il test non parte dal vecchio'
+
+    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    main.db().close()
+
+    assert 'promemoria_per' in _colonne(percorso, 'users'), (
+        'la migrazione non aggiunge promemoria_per a un database che esiste giu-: la prima '
+        'approvazione risponderebbe 500 con «no such column»')
+    c = sqlite3.connect(percorso)
+    resta = c.execute("SELECT status FROM users WHERE telegram_id='555000555'").fetchone()[0]
+    c.close()
+    assert resta == 'attivo', 'la migrazione ha alterato una riga che esisteva giu-'
+
+
+def _colonne(percorso, tabella):
+    c = sqlite3.connect(percorso)
+    nomi = {r[1] for r in c.execute(f'PRAGMA table_info({tabella})')}
+    c.close()
+    return nomi

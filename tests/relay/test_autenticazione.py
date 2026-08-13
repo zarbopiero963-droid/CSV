@@ -96,6 +96,7 @@ ROTTE_CON_AUTENTICAZIONE_PROPRIA = {
     ('GET', '/api/admin/requests'): 404,
     ('POST', '/api/admin/requests/{richiesta}/approva'): 404,
     ('POST', '/api/admin/requests/{richiesta}/rifiuta'): 404,
+    ('POST', '/api/admin/promemoria'): 404,
 }
 
 # I MOUNT sono un'altra cosa dalle rotte, e vanno dichiarati a parte: non hanno

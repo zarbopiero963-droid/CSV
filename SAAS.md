@@ -257,6 +257,65 @@ veda.
 7. Stesso messaggio, stessa chat, parser diversi: due elaborazioni indipendenti e
    due CSV distinti. Chi non riconosce il messaggio lo ignora senza toccare nulla.
 
+## Scadenza dell'accesso
+
+Dal PR 7, e la regola che tiene tutto insieme è una: **la scadenza è un istante, non un
+evento.** Nessun processo passa a riscrivere `status` quando una data passa, quindi la colonna
+resta `'attivo'` per sempre e chi la legge direttamente mente. Misurato prima della correzione,
+su `GET /api/me` di un cliente scaduto il giorno prima: `{'stato': 'attivo', 'accesso_scade':
+<ieri>}` — il sintomo che questa Issue chiama «pannello che dice attivo e feed vuoto».
+
+La conversione vive in `stato_effettivo()` e in un posto solo, e la usano `/api/me`, il feed e
+il webhook. Non perché sia elegante: se ogni pezzo decidesse per conto proprio, il pannello
+direbbe una cosa e il feed un'altra, e nessuno dei due sarebbe sbagliato in modo visibile.
+
+| Cosa | Comportamento alla scadenza |
+|---|---|
+| Feed CSV | `200` con **sola intestazione** e BOM. **Non** `401`: per XTrader un errore HTTP è un guasto da segnalare, mentre «nessun segnale» è uno stato normale che gestisce da sé |
+| Token del feed | **non revocato.** «Scaduto» e «revocato» sono stati diversi: revocare costringerebbe il cliente a riconfigurare XTrader a ogni rinnovo. Così il rinnovo è cambiare una data |
+| Webhook | i messaggi delle sue chat non vengono elaborati **e non finiscono nei log**: quel log è una funzione del servizio, non un archivio |
+| Il feed stesso | **non viene toccato** dal webhook: allo svuotamento ci pensa il TTL di 90 secondi, che è l'unico che deve toccarlo |
+| Stato scritto a mano | `sospeso` e `registrato` **non** vengono riscritti dal tempo: sono decisioni del proprietario, e se la scadenza le sovrascrivesse il pannello perderebbe la sola informazione che dice perché quel cliente è fuori |
+
+**Cosa blocca e cosa no, con la ragione.** Bloccano `scaduto` e `sospeso`. **Non**
+`registrato`, ed è una linea di scopo dichiarata: i feed per profilo esistono da prima di
+questo flusso e i loro utenti sono nati `registrato` dalla migrazione, quindi bloccarli adesso
+spegnerebbe in silenzio un feed che oggi funziona — una regressione in produzione per applicare
+una regola che riguarda clienti che ancora non esistono. E non è un buco: un cliente che si
+registra col Login Widget nasce con `origin_profile` `NULL`, i profili li crea **solo** il
+proprietario, quindi non ha nessun feed da bloccare. «Un utente nuovo non può fare nulla»
+diventa vincolante nel PR 8, quando il feed passa all'utente.
+
+Il **proprietario** (`is_admin`) non ha un abbonamento e il suo feed non dipende da nessuna
+scadenza: è quello che XTrader interroga in produzione, e farlo dipendere da una data
+significherebbe che una riga sbagliata nel database lo spegne senza un errore da nessuna parte.
+
+**I rinnovi si sommano** se la scadenza è nel futuro, altrimenti ripartono da oggi. Senza il
+secondo ramo, prorogare di 30 giorni un cliente scaduto da due mesi gli darebbe una scadenza
+**nel passato**: di nuovo «attivo» nel pannello e feed vuoto.
+
+**Il bot non può scrivere per primo**, ed è la trappola 1 di questa Issue: `sendMessage`
+fallisce verso chi non ha mai aperto la conversazione col bot. Quindi la richiesta di accesso
+restituisce un **deep link** (`t.me/<bot>?start=accesso`, da `TELEGRAM_BOT_USERNAME`), e quando
+il cliente preme Start la consegna arriva al webhook, che mette `telegram_reachable` a 1. Quel
+ramo del webhook **non indebolisce il filtro delle chat**: non tocca `signals`, non cerca
+parser, non guarda `profiles` e non scrive nei log dei messaggi — scrive un booleano su una riga
+di `users` trovata per il `telegram_id` che Telegram stessa attesta nella consegna.
+
+E l'**errore di invio non viene ingoiato**: l'approvazione risponde `notificato: false` col
+motivo e azzera `telegram_reachable`, perché un invio fallito in silenzio produce lo stato
+peggiore — il proprietario crede di aver avvisato, il cliente non sa di essere attivo, e nessuno
+dei due ha modo di accorgersene. L'accesso però **resta concesso**: è stato deciso, e una
+decisione non si annulla perché l'avviso non è partito.
+
+**Il promemoria ha un limite dichiarato:** non c'è uno scheduler. `POST /api/admin/promemoria`
+va **chiamata** — dal proprietario o da un job programmato su Railway — e finché non viene
+chiamata nessun promemoria parte. È un compito che aspetta, non un compito perso. I due percorsi
+che girerebbero da soli sono il feed (che XTrader interroga a raffica: un invio Telegram lì lo
+renderebbe lento e fragile) e il webhook (che dipende dai messaggi dei canali), e nessuno dei
+due è il posto giusto. `users.promemoria_per` conserva **quale** scadenza è stata annunciata e
+non un booleano: con un booleano il secondo rinnovo non avviserebbe mai più.
+
 ## Token dei feed
 
 - Generati con almeno 18 byte casuali, prefisso `xt_`.
@@ -450,7 +509,7 @@ web app non lo riceve e non lo conserva mai.
 
 ### Le rotte di sessione che esistono davvero
 
-Dal PR 6. Quattro rotte, e sono le **uniche** del servizio con un'autenticazione
+Dal PR 6, piu' quelle del PR 7. Sono le **uniche** del servizio con un'autenticazione
 propria: tutte le altre sono o pubbliche, o protette da `auth()` col token unico
 descritto sotto. La distinzione non è narrativa — è una delle tre categorie che
 `tests/relay/test_autenticazione.py` verifica coprano **ogni** rotta dichiarata
@@ -465,6 +524,13 @@ passare inosservata.
 | *entrambe* | | `503` anche se manca `TELEGRAM_BOT_TOKEN`: il segreto dei cookie deriva da lì, quindi non c'è nessuna sessione da emettere |
 | `POST /api/logout` | cancella il cookie | niente: è pubblica di proposito |
 | `GET /api/me` | chi è l'utente della sessione | `401 sessione assente o scaduta` |
+| | restituisce `stato` **effettivo** e `giorni_rimasti`: dal PR 7 la colonna `status` non basta, perché la scadenza è un istante che nessun processo riscrive | |
+| `POST /api/access/request` | il cliente chiede l'accesso | `401`; `409` se ha già una richiesta aperta o l'accesso attivo; `403` se è sospeso |
+| `GET /api/admin/requests` | le richieste da decidere | **`404`** a chi non è l'amministratore |
+| `POST /api/admin/requests/{id}/approva` | concede `{"giorni": n}` | **`404`**; `422` sui giorni fuori da `1..3650` o sul corpo malformato |
+| `POST /api/admin/requests/{id}/rifiuta` | torna `registrato`, così può richiedere | **`404`** |
+| `POST /api/admin/promemoria` | avvisa chi scade entro 5 giorni | **`404`** |
+| *le quattro del pannello* | | `404` e non `403`, perché un `403` conferma a un estraneo che il pannello sta lì. Per la stessa ragione corpo e `id` di percorso si leggono **a mano dopo** il controllo della sessione: lasciati a FastAPI, un estraneo riceveva `422`, cioè la stessa conferma per un'altra via — trovato dalla guardia sulle rotte, PR #26 |
 
 `POST /api/logout` è pubblica **per scelta**, non per dimenticanza: cancella un cookie
 e non legge nulla. Metterle una serratura significherebbe che chi ha un cookie
@@ -959,7 +1025,8 @@ senza doppio ruolo.
 | Fatto | **Login Telegram reale e sessioni** (PR 6): le quattro rotte di «Le rotte di sessione che esistono davvero», il cookie firmato, le due porte del proprietario, e la NON-relazione fra sessione e feed. Manca il resto di M3: la web app è ancora sui dati finti |
 | M1 | Token hashati, verifica chat, feed per utente, compatibilità `/xtrader.csv`. **Postgres differito** e non più urgente: i dati persistono già, `DB_PATH` in produzione è `/data/signals.db` dentro il volume (misurato il 12/08/2026) |
 | M2 | Motore di parsing generico in Python, endpoint di test, dispatch multi-parser nel webhook |
-| M3 | Accesso su approvazione, la web app collegata al backend |
+| Fatto | **Accesso su approvazione** (PR 7), lato server: `stato_effettivo` / `giorni_rimasti` / `nuova_scadenza` come fonte unica, la richiesta del cliente col deep link del bot, la decisione del proprietario con i giorni liberi e l'errore di invio **non ingoiato**, il promemoria a 5 giorni una volta per scadenza, e gli effetti della scadenza su feed e webhook. Il **token non viene revocato** alla scadenza |
+| M3 | La web app collegata al backend: le schermate di questo flusso (richiesta, giorni rimasti, accesso scaduto) non esistono ancora — il prototipo è sui dati finti |
 | M4 | Log persistenti, sospensione, suggerimento AI lato server, abbonamenti |
 
 ## Facciata pubblica
