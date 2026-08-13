@@ -97,6 +97,16 @@ ROTTE_CON_AUTENTICAZIONE_PROPRIA = {
     ('POST', '/api/admin/requests/{richiesta}/approva'): 404,
     ('POST', '/api/admin/requests/{richiesta}/rifiuta'): 404,
     ('POST', '/api/admin/promemoria'): 404,
+    # I parser dell'utente: autenticazione a SESSIONE, non col token del feed. Senza
+    # cookie valido → 401 come `/api/me`. Le due rotte col corpo (POST, PUT) lo leggono
+    # a mano DOPO il controllo della sessione, o FastAPI risponderebbe 422 al corpo
+    # finto prima di arrivare al 401 — la stessa conferma «questa rotta esiste» che le
+    # `/api/admin/*` evitano.
+    ('GET', '/api/me/parsers'): 401,
+    ('POST', '/api/me/parsers'): 401,
+    ('PUT', '/api/me/parsers/{slug}'): 401,
+    ('DELETE', '/api/me/parsers/{slug}'): 401,
+    ('POST', '/api/me/parsers/{slug}/test'): 401,
 }
 
 # I MOUNT sono un'altra cosa dalle rotte, e vanno dichiarati a parte: non hanno

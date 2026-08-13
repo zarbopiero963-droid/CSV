@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 import regex as _regex  # come `re`, ma con `timeout=` sui match: vedi _cerca_regex_utente
 
 app = FastAPI(title='XTrader Signal Relay')
@@ -661,6 +661,15 @@ class ProfileIn(BaseModel):
     chat_ids: str
     parser: str = DEFAULT_PARSER
 
+class ParserMioIn(BaseModel):
+    # L'input di un parser creato/modificato dall'utente della sessione. NON contiene
+    # `user_id`: il proprietario viene SEMPRE dalla sessione, mai dal corpo della
+    # richiesta (isolamento fra utenti). `config` e' la config del motore
+    # (`esegui_parser`); `titolo` e' l'etichetta che il cliente vede.
+    titolo: str
+    config: dict = Field(default_factory=dict)
+    active: bool = True
+
 
 # Le tre tabelle con cui il servizio e' nato. Restano con QUESTI nomi e questa
 # forma: gli endpoint le leggono, e questa migrazione non cambia il comportamento
@@ -790,6 +799,11 @@ COLONNE_MULTIUTENTE = (
     ('parsers', 'user_id', 'INTEGER'),
     ('parsers', 'slug', 'TEXT'),
     ('parsers', 'config_json', 'TEXT'),
+    # Il titolo che il cliente vede e sceglie. `name` (PRIMARY KEY globale, eredita'
+    # dello schema legacy) deve restare univoco fra TUTTI gli utenti, quindi non puo'
+    # essere il titolo: due clienti possono chiamare «Test 1» il proprio parser. Il
+    # titolo sta qui; l'identita' interna e' `(user_id, slug)`.
+    ('parsers', 'titolo', 'TEXT'),
     ('parsers', 'active', 'INTEGER DEFAULT 1'),
     # `ordine` decide chi vince quando due parser dello stesso utente riconoscono
     # lo stesso messaggio. Serve un ORDER BY esplicito, e va mostrato in UI.
@@ -1318,6 +1332,12 @@ def _completa_colonne_nuove(c, profilo_proprietario):
     # `id` dal `rowid`, in una colonna vera: il `rowid` puo' cambiare con un VACUUM,
     # quindi memorizzarlo e' l'unico modo perche' un riferimento resti valido.
     c.execute('UPDATE parsers SET id=rowid WHERE id IS NULL')
+    # `titolo` retrocompilato dal `name` per le righe legacy (schema pre-`titolo`): la
+    # colonna e' additiva e nullable, ma il contratto API dichiara `titolo: str` e il
+    # proprietario loggato vedrebbe `titolo: null` sul parser PIERO di default. Il `name`
+    # e' un'etichetta onesta e non inventa dati; solo le righe a NULL, quindi idempotente
+    # e mai sovrascrive un titolo scelto. Bloccante di GPT-5.6 Sol sulla PR #30.
+    c.execute('UPDATE parsers SET titolo = name WHERE titolo IS NULL')
     _assegna_slug_e_ordine(c)
 
 
@@ -3323,6 +3343,297 @@ def test_parser(name: str, data: MessageIn, x_admin_token: str | None = Header(N
 @app.post('/api/test-message')
 def test_message(data: MessageIn, x_admin_token: str | None = Header(None), parser: str = Query(DEFAULT_PARSER)):
     return test_parser(parser, data, x_admin_token)
+
+
+# --------------------------------------------------------------------------- #
+#  Parser dell'utente: CRUD legato alla SESSIONE, non al token admin.
+#
+#  Le rotte `/api/parsers*` qui sopra sono admin-token e globali (le usa il
+#  proprietario). Queste `/api/me/parsers*` sono la faccia per-utente: ogni cliente
+#  vede e tocca SOLO i propri parser (`user_id` dalla sessione, 404 sui parser di un
+#  altro). Sono la base che la web app chiamera' al posto dei dati finti.
+# --------------------------------------------------------------------------- #
+
+def _slugifica(testo):
+    """Un titolo → uno slug base: minuscolo, solo `a-z0-9-`, senza `-` ai bordi.
+
+    Vuoto o fatto di soli simboli → `'parser'`, cosi' `_slug_libero` ha sempre una
+    base da disambiguare invece di uno slug vuoto che collide con se stesso.
+    """
+    base = re.sub(r'[^a-z0-9]+', '-', (testo or '').lower()).strip('-')
+    # Un tetto alla lunghezza: un titolo lunghissimo non deve generare uno slug (e
+    # quindi un `name`) senza limite. 60 caratteri bastano a restare leggibile.
+    return (base[:60].strip('-')) or 'parser'
+
+
+def _vista_parser(riga):
+    """La vista pubblica di un parser: mai il `name` interno, mai `user_id`.
+
+    `riga` = (id, slug, titolo, active, config_json, ordine).
+    """
+    return {'id': riga[0], 'slug': riga[1], 'titolo': riga[2], 'active': bool(riga[3]),
+            'config': json.loads(riga[4]) if riga[4] else {}, 'ordine': riga[5]}
+
+
+def _valida_config_parser(config):
+    """Controlla una config al confine di SCRITTURA, con un errore chiaro all'utente.
+
+    Due livelli. **Struttura:** deve essere un oggetto, con `match`/`columns` oggetti e
+    ogni regola di colonna un oggetto — cosi' `null`, `[]`, `columns: []` danno un 422
+    esplicito invece di un `AttributeError`. **Esecuzione:** un dry-run su un messaggio
+    di prova, che scova i valori storti che la struttura non vede (un `pattern` o un
+    valore non-stringa che farebbe sollevare `esegui_parser`).
+
+    E' la validazione che CodeRabbit ha chiesto sulla PR #29, messa nel posto giusto:
+    la creazione, dove l'utente riceve il motivo. Il fail-safe largo di
+    `elabora_messaggio` resta come seconda rete sul percorso del webhook.
+    """
+    if not isinstance(config, dict):
+        raise HTTPException(422, 'config deve essere un oggetto')
+    match = config.get('match')
+    if match is not None and not isinstance(match, dict):
+        raise HTTPException(422, 'config.match deve essere un oggetto')
+    colonne = config.get('columns')
+    if colonne is not None and not isinstance(colonne, dict):
+        raise HTTPException(422, 'config.columns deve essere un oggetto')
+    for nome, regola in (colonne or {}).items():
+        if not isinstance(regola, dict):
+            raise HTTPException(422, f'la regola della colonna {nome!r} deve essere un oggetto')
+    # Numeri JSON non-finiti (`NaN`, `Infinity`): `request.json()` li accetta e
+    # `json.dumps` di default li serializza come JSON NON standard. Verrebbero scritti,
+    # ma `JSONResponse` li rifiuta quando riserializza `config` a ogni lista/creazione:
+    # l'utente si troverebbe un **500 su OGNI risposta** che include quel parser — e
+    # `esegui_parser('probe', ...)` non li tocca, perche' un campo inutilizzato non viene
+    # mai letto dal motore. Si rifiutano qui, alla SCRITTURA, con un 422. Bloccante Major
+    # di CodeRabbit sulla PR #30.
+    try:
+        json.dumps(config, allow_nan=False)
+    except (ValueError, TypeError):
+        raise HTTPException(422, 'config contiene numeri non validi: NaN e Infinity non sono ammessi') from None
+    # Dry-run: la config deve ESEGUIRE senza sollevare. Il tempo-regex e' limitato dal
+    # budget di `esegui_parser`, quindi anche un pattern cattivo qui e' innocuo.
+    try:
+        esegui_parser('probe', config)
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(422, 'config non eseguibile: controlla la condizione e le regole delle colonne') from None
+
+
+def _crea_parser_utente(c, user_id, titolo, config, active):
+    """Crea un parser di proprieta' di `user_id` e ne restituisce la vista pubblica.
+
+    Il `name` (PRIMARY KEY globale, eredita' dello schema legacy) va reso univoco fra
+    TUTTI gli utenti. Si deriva da `(user_id, slug)`, che l'indice UNIQUE garantisce
+    univoco per utente, quindi `u{user_id}-{slug}` e' univoco globale. Lo `slug` e'
+    l'identita' STABILE: non cambia se il titolo viene modificato, cosi' un riferimento
+    allo slug non si rompe con una rinomina. `header` e' '' (NOT NULL dello schema
+    legacy), inutile per un parser `config_json`.
+    """
+    # `_slug_libero` e `MAX(ordine)` sono letti con SELECT separate dall'INSERT: due
+    # POST concorrenti dello stesso utente con lo stesso titolo calcolerebbero lo
+    # stesso slug e il secondo INSERT violerebbe `UNIQUE (user_id, slug)`. Non e' un
+    # 500: si RITENTA, ricalcolando lo slug — la seconda volta la riga dell'altro c'e'
+    # gia' e la disambiguazione da' `-2`. Segnalato da GPT-5.5 e Claude Fable 5 sulla
+    # PR #30; e' la stessa classe della corsa di login, qui risolta col retry perche'
+    # il costo di un secondo tentativo e' trascurabile.
+    nome = None
+    falliti = set()   # slug gia' bruciati: da NON ricalcolare
+    for _ in range(8):
+        presi = falliti | {r[0] for r in c.execute(
+            'SELECT slug FROM parsers WHERE user_id=?', (user_id,)).fetchall()}
+        slug = _slug_libero(_slugifica(titolo), presi)
+        candidato = f'u{user_id}-{slug}'
+        try:
+            # `ordine` calcolato NELLA INSERT, non con un SELECT separato: due POST
+            # concorrenti leggerebbero lo stesso `MAX(ordine)` e salverebbero ordini
+            # duplicati (precedenza ambigua fra i parser dello stesso utente). La
+            # sottoquery gira dentro il lock di scrittura dell'INSERT, quindi e'
+            # atomica. Segnalato da GPT-5.6 Sol sulla PR #30.
+            c.execute(
+                'INSERT INTO parsers(name, header, user_id, slug, titolo, config_json, active, ordine)'
+                ' VALUES (?,?,?,?,?,?,?,'
+                ' (SELECT COALESCE(MAX(ordine), -1) + 1 FROM parsers WHERE user_id=?))',
+                (candidato, '', user_id, slug, titolo, json.dumps(config),
+                 1 if active else 0, user_id))
+            nome = candidato
+            break
+        except sqlite3.IntegrityError:
+            # Puo' essere la corsa su `UNIQUE(user_id, slug)` OPPURE una collisione sul
+            # `name` (PRIMARY KEY globale): un parser legacy o admin chiamato gia'
+            # `u{user_id}-{slug}` non comparirebbe fra gli slug dell'utente, quindi
+            # ricalcolare dagli SOLI suoi slug darebbe all'infinito lo stesso nome. Si
+            # segna lo slug come bruciato: il giro dopo `_slug_libero` ne prende un
+            # altro e il nome cambia. Segnalato da Claude Fable 5 sulla PR #30.
+            falliti.add(slug)
+            continue
+    if nome is None:
+        raise HTTPException(409, 'creazione non riuscita per contesa, riprova')
+    # `id` = `rowid`, come fa la migrazione: e' il surrogato stabile a cui punta
+    # `parser_chats.parser_id` (dispatch per-utente, PR successivo).
+    c.execute('UPDATE parsers SET id=rowid WHERE name=? AND id IS NULL', (nome,))
+    riga = c.execute('SELECT id, slug, titolo, active, config_json, ordine'
+                     ' FROM parsers WHERE name=?', (nome,)).fetchone()
+    return _vista_parser(riga)
+
+
+@app.get('/api/me/parsers')
+def lista_parser_miei(request: Request):
+    """I parser dell'utente della sessione — MAI quelli di un altro."""
+    utente = _sessione_valida(request)
+    c = db()
+    righe = c.execute(
+        'SELECT id, slug, titolo, active, config_json, ordine FROM parsers'
+        ' WHERE user_id=? ORDER BY ordine, slug', (utente['id'],)).fetchall()
+    c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'],
+                                  [_vista_parser(r) for r in righe])
+
+
+async def _parser_in_dal_corpo(request):
+    """`ParserMioIn` dal corpo JSON, o `422` — senza mai riportare il corpo ricevuto.
+
+    Letto qui e non nella firma della rotta: con `data: ParserMioIn` FastAPI
+    validerebbe il corpo PRIMA del controllo di sessione, e un estraneo riceverebbe
+    422 invece di 401 — la stessa conferma «questa rotta esiste» che il 401 serve a non
+    dare. Stesso motivo, e stessa guardia (`test_autenticazione.py`), delle rotte
+    `/api/admin/*`. `user_id`/`id` nel corpo vengono ignorati: il proprietario viene
+    dalla sessione (Pydantic scarta i campi non dichiarati). Un corpo assente o non
+    JSON → 422, come farebbe FastAPI.
+    """
+    try:
+        return ParserMioIn(**(await request.json()))
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(422, 'corpo non valido: serve {"titolo": ..., "config": {...}}')
+
+
+@app.post('/api/me/parsers')
+async def crea_parser_mio(request: Request):
+    """Crea un parser per l'utente della sessione. `user_id` viene DALLA SESSIONE."""
+    utente = _sessione_valida(request)
+    dati = await _parser_in_dal_corpo(request)
+    titolo = dati.titolo.strip()
+    if not titolo:
+        raise HTTPException(422, 'titolo mancante')
+    _valida_config_parser(dati.config)
+    c = db()
+    # `try/finally`: `_crea_parser_utente` puo' sollevare 409 (contesa esaurita), e
+    # senza il `finally` la connessione resterebbe aperta con la transazione in corso,
+    # rischiando un lock sulle richieste successive. Segnalato da Claude Fable 5, PR #30.
+    try:
+        parser = _crea_parser_utente(c, utente['id'], titolo, dati.config, dati.active)
+        c.commit()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'], parser)
+
+
+@app.put('/api/me/parsers/{slug}')
+async def modifica_parser_mio(slug: str, request: Request):
+    """Modifica un proprio parser. **404** (non 403) se lo slug non e' dell'utente.
+
+    Lo `slug` non cambia con una rinomina del titolo: e' l'identita' stabile.
+    """
+    utente = _sessione_valida(request)
+    dati = await _parser_in_dal_corpo(request)
+    titolo = dati.titolo.strip()
+    if not titolo:
+        raise HTTPException(422, 'titolo mancante')
+    _valida_config_parser(dati.config)
+    c = db()
+    try:
+        riga = c.execute('SELECT id FROM parsers WHERE user_id=? AND slug=?',
+                         (utente['id'], slug)).fetchone()
+        if not riga:
+            raise HTTPException(404, 'parser non trovato')
+        c.execute('UPDATE parsers SET titolo=?, config_json=?, active=?'
+                  ' WHERE user_id=? AND slug=?',
+                  (titolo, json.dumps(dati.config), 1 if dati.active else 0, utente['id'], slug))
+        nuova = c.execute('SELECT id, slug, titolo, active, config_json, ordine'
+                          ' FROM parsers WHERE user_id=? AND slug=?',
+                          (utente['id'], slug)).fetchone()
+        if nuova is None:
+            # Una DELETE concorrente (rotta sync, threadpool anyio) ha svuotato la riga
+            # fra il SELECT iniziale e l'UPDATE: la corsa l'ha vinta la cancellazione.
+            # **404**, come se lo slug non ci fosse — non un 500 da `_vista_parser(None)`.
+            # Bloccante di GPT-5.6 Sol sulla PR #30.
+            raise HTTPException(404, 'parser non trovato')
+        c.commit()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'], _vista_parser(nuova))
+
+
+@app.delete('/api/me/parsers/{slug}')
+def elimina_parser_mio(slug: str, request: Request):
+    """Elimina un proprio parser. **404** se non e' dell'utente."""
+    utente = _sessione_valida(request)
+    c = db()
+    try:
+        riga = c.execute('SELECT id FROM parsers WHERE user_id=? AND slug=?',
+                         (utente['id'], slug)).fetchone()
+        if not riga:
+            raise HTTPException(404, 'parser non trovato')
+        # Le associazioni chat→parser puntano a `parsers.id`: si rimuovono col parser,
+        # o resterebbero orfane e il dispatch per-utente (PR successivo) le seguirebbe.
+        # Oggi `parser_chats` e' vuota (nessun codice la scrive ancora), quindi qui non
+        # cancella niente; c'e' perche' sia corretta quando quel PR la popolera'.
+        # Segnalato da GPT-5.5 e Claude Fable 5 sulla PR #30.
+        c.execute('DELETE FROM parser_chats WHERE parser_id=?', (riga[0],))
+        c.execute('DELETE FROM parsers WHERE user_id=? AND slug=?', (utente['id'], slug))
+        c.commit()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'], {'ok': True})
+
+
+@app.post('/api/me/parsers/{slug}/test')
+async def prova_parser_mio(slug: str, request: Request):
+    """Prova un messaggio contro un proprio parser, A SECCO: niente scrittura nel feed.
+
+    Restituisce `matched`, `missing`, `complete` e — se completo — il `csv` e l'`event`.
+    E' la base del motore diagnostico «perche' non ha fatto il parser»: il cliente vede
+    se la condizione ha combaciato e quali colonne obbligatorie mancano, senza toccare
+    il feed di nessuno. `esegui_parser` e' avvolto: una config che sollevasse da' un
+    esito diagnostico, non un 500.
+
+    Il corpo si legge a mano DOPO il controllo di sessione — come POST/PUT — o
+    FastAPI validerebbe `MessageIn` prima e un estraneo con corpo malformato
+    riceverebbe 422 invece di 401, rivelando che la rotta esiste. Segnalato da
+    Claude Fable 5 e GPT-5.6 Sol sulla PR #30.
+    """
+    utente = _sessione_valida(request)
+    try:
+        dati = MessageIn(**(await request.json()))
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(422, 'corpo non valido: serve {"message": "..."}')
+    c = db()
+    try:
+        riga = c.execute('SELECT config_json FROM parsers WHERE user_id=? AND slug=?',
+                         (utente['id'], slug)).fetchone()
+    finally:
+        c.close()
+    if not riga:
+        raise HTTPException(404, 'parser non trovato')
+    try:
+        config = json.loads(riga[0]) if riga[0] else {}
+        risultato = esegui_parser(dati.message, config)
+    except Exception:
+        return _rispondi_con_sessione(utente['id'], utente['versione'],
+                                      {'matched': False, 'missing': [], 'complete': False,
+                                       'errore': 'config non eseguibile'})
+    corpo = {'matched': risultato['matched'], 'missing': risultato['missing'],
+             'complete': risultato['complete']}
+    if risultato['complete']:
+        row = ['' if v is None else v for v in risultato['row']]
+        corpo['event'] = str(row[HEADERS.index('EventName')])
+        corpo['csv'] = make_csv(row)
+    return _rispondi_con_sessione(utente['id'], utente['versione'], corpo)
+
 
 @app.post('/telegram/webhook')
 async def telegram_webhook(request: Request):
