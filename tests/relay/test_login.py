@@ -2523,9 +2523,12 @@ def test_il_FEED_non_fa_scattare_la_revoca(tmp_path, monkeypatch):
 
     # L'invariante e' violata: la variabile e' cambiata e la riga porta ancora la vecchia.
     monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', NUOVO)
-    monkeypatch.setattr(main, 'TOKEN', 'token-di-prova-non-un-segreto')
+    # `TOKEN_DI_PROVA` e non il letterale: il valore vive in `tests/ambiente.py`, che e' la
+    # fonte unica per chiunque debba interrogare una rotta protetta (regola 3). Ricopiarlo qui
+    # era una seconda copia dello stesso valore.
+    monkeypatch.setattr(main, 'TOKEN', TOKEN_DI_PROVA)
 
-    risposta = main.xtrader_csv(token='token-di-prova-non-un-segreto')
+    risposta = main.xtrader_csv(token=TOKEN_DI_PROVA)
     assert risposta.status_code == 200, f'il feed ha risposto {risposta.status_code}'
 
     c = sqlite3.connect(percorso)
