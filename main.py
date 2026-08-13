@@ -1010,12 +1010,19 @@ def stato_effettivo(status, access_expires_at, adesso=None):
     colonna a ogni lettura sarebbe una scrittura su ogni richiesta, e renderebbe impossibile
     distinguere «scaduto» da «sospeso a mano».
     """
-    if status != 'attivo' or access_expires_at is None or access_expires_at == '':
+    if status != 'attivo' or access_expires_at is None:
         return status
     scadenza = _istante(access_expires_at)
     if scadenza is None:
-        # Illeggibile: `scaduto`, non `attivo`. Un accesso di cui non si sa quando finisce
-        # non e' un accesso senza fine — quello e' `NULL`, che e' il caso del proprietario.
+        # Illeggibile: `scaduto`, non `attivo`. Un accesso di cui non si sa quando finisce non
+        # e' un accesso senza fine — quello e' `NULL`, e **solo** `NULL`.
+        #
+        # La prima versione trattava anche la stringa vuota come «nessuna scadenza», cioe'
+        # come `NULL`: un `attivo` con `''` restava attivo **per sempre**. Fail-open, e nella
+        # stessa funzione il cui commento diceva il contrario — la forma di difetto che
+        # `CLAUDE.md` racconta come «l'affermazione e la sua smentita nello stesso posto».
+        # Peggio: l'avevo cementata in un test che pretendeva quel comportamento. Bloccante
+        # di Claude Fable 5 sulla PR #26.
         return 'scaduto'
     adesso = int(time.time()) if adesso is None else adesso
     return 'attivo' if scadenza > adesso else 'scaduto'

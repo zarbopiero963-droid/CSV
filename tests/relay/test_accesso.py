@@ -351,8 +351,15 @@ def test_una_scadenza_ILLEGGIBILE_blocca_invece_di_aprire(tmp_path, monkeypatch)
     accesso di cui non si sa quando finisce non e' un accesso infinito. Il caso «senza fine»
     si scrive `NULL`, ed e' il proprietario.
     """
-    assert main.stato_effettivo('attivo', '', adesso=1_000_000) == 'attivo', (
-        'una stringa vuota e- «nessuna scadenza», come NULL: e- lo stato del proprietario')
+    # La stringa vuota vale **scaduto**, non «nessuna scadenza». La prima versione di questo
+    # test pretendeva il contrario, cioe' cementava un fail-open: un `attivo` con `''` restava
+    # attivo per sempre. Bloccante di Claude Fable 5 sulla PR #26, e aveva ragione — «nessuna
+    # scadenza» si scrive `NULL`, e solo `NULL`, perche' quello lo scrive una decisione mentre
+    # `''` lo scrive un difetto.
+    assert main.stato_effettivo('attivo', '', adesso=1_000_000) == 'scaduto', (
+        'una stringa vuota lascia l-accesso attivo per sempre: fail-open')
+    assert main.stato_effettivo('attivo', None, adesso=1_000_000) == 'attivo', (
+        'NULL e- «nessuna scadenza», ed e- lo stato del proprietario')
     assert main.stato_effettivo('attivo', 'domani', adesso=1_000_000) == 'scaduto', (
         'una scadenza illeggibile ha lasciato l-accesso attivo: fail-open')
     assert main.giorni_rimasti('domani', adesso=1_000_000) is None
@@ -445,3 +452,127 @@ def test_lo_stesso_messaggio_di_un_cliente_ATTIVO_viene_elaborato(tmp_path, monk
     esito = _consegna_in_processo('-100999', MESSAGGIO)
     assert 'ignored' not in esito or esito.get('ignored') != 'access_scaduto', (
         f'il messaggio di un cliente ATTIVO e- stato rifiutato per accesso: {esito}')
+
+
+def test_un_cliente_SOSPESO_e_bloccato_come_uno_scaduto(tmp_path, monkeypatch):
+    """Chiesto da GPT-5.5 sulla PR #26: `sospeso` era coperto solo dalla lista, non da un test.
+
+    `sospeso` e' l'unico stato che il proprietario mette a mano per tagliare l'accesso
+    **subito**, senza aspettare una scadenza: se non bloccasse, quel gesto sarebbe teatro
+    esattamente come lo era cambiare `TELEGRAM_ADMIN_ID` prima della PR #24. E deve bloccare
+    **anche con una scadenza nel futuro**, altrimenti sospendere un cliente appena rinnovato
+    non farebbe niente — che e' proprio il caso in cui si sospende.
+    """
+    percorso = str(tmp_path / 'sospeso.db')
+    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    monkeypatch.setattr(main, 'TOKEN', TOKEN_DI_PROVA)
+    monkeypatch.setattr(main, 'SEGRETO_WEBHOOK', main.webhook_secret(BOT_FINTO))
+    main.db().close()
+    _profilo_di_un_cliente(percorso, scadenza=int(time.time()) + 30 * GIORNO,
+                           stato='sospeso')
+
+    corpo = bytes(main.named_profile_csv('MARCO', token=TOKEN_DI_PROVA).body)
+    assert corpo == main.empty_csv().encode('utf-8'), (
+        f'il feed di un cliente SOSPESO consegna ancora il segnale: {corpo[:120]!r}')
+    esito = _consegna_in_processo('-100999', MESSAGGIO)
+    assert esito.get('ignored') == 'access_sospeso', (
+        f'il messaggio di un cliente SOSPESO e- stato elaborato: {esito}')
+
+
+def test_un_cliente_REGISTRATO_non_ha_NESSUN_feed_da_bloccare(tmp_path, monkeypatch):
+    """La misura che sostiene la linea di scopo, invece di un'affermazione nel commento.
+
+    GPT-5.5 l'ha alzata come bloccante: «`registrato` e `in_attesa` continuano a ricevere il
+    feed». La frase e' vera come lettura del codice e **vuota** come rischio, e la differenza
+    e' verificabile: un utente `registrato` non ha nessun feed da ricevere. Il feed di oggi e'
+    per **profilo**, i profili li crea solo il proprietario (`POST /api/profiles` chiede
+    `X-Admin-Token`), e il legame utente-profilo lo scrive la migrazione. Un cliente che si
+    registra col Login Widget nasce quindi con `origin_profile` NULL e senza profilo: non c'e'
+    niente da bloccargli.
+
+    Cio' che la linea di scopo protegge sono gli utenti nati `registrato` **dalla migrazione**
+    dai profili che il proprietario aveva giu': quelli hanno un feed che oggi funziona, e
+    bloccarli sarebbe stata una regressione in produzione, non un irrigidimento.
+    """
+    percorso, utente, _richiesta = _cliente(tmp_path, monkeypatch, 'registrato_senza_feed.db')
+    c = sqlite3.connect(percorso)
+    riga = c.execute('SELECT status, origin_profile FROM users WHERE id=?',
+                     (utente,)).fetchone()
+    profili = c.execute('SELECT COUNT(*) FROM profiles').fetchone()[0]
+    c.close()
+    assert riga[0] == 'registrato', f'un cliente nuovo nasce {riga[0]!r} invece di registrato'
+    assert riga[1] is None, (
+        f'un cliente registrato col Login Widget ha origin_profile={riga[1]!r}: se un utente '
+        'nuovo potesse arrivare a un profilo, la linea di scopo gli darebbe un feed')
+    # Esiste solo il profilo PIERO, creato dal seed: nessuna rotta pubblica ne crea altri.
+    assert profili == 1, f'{profili} profili invece del solo PIERO'
+
+
+def test_origin_profile_e_UNIQUE_quindi_la_lettura_e_DETERMINISTICA(tmp_path, monkeypatch):
+    """Rischio alzato da GPT-5.5: «`SELECT ... WHERE origin_profile=?` senza unicita'».
+
+    Il rischio sarebbe reale — con due righe per lo stesso profilo, la `SELECT` senza
+    `ORDER BY` sceglierebbe non deterministicamente fra un utente sospeso e uno attivo, e il
+    feed si aprirebbe o si chiuderebbe a caso. Non lo e' perche' `users.origin_profile` e'
+    dichiarato **UNIQUE** nello schema: lo stato che rende ambigua la lettura non esiste.
+
+    Il test misura il vincolo invece di fidarsi di averlo scritto: se un domani qualcuno
+    togliesse `UNIQUE` da quella colonna, questo diventa rosso e la lettura va irrigidita.
+    """
+    percorso = str(tmp_path / 'unique.db')
+    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    main.db().close()
+    c = sqlite3.connect(percorso)
+    with pytest.raises(sqlite3.IntegrityError):
+        c.execute("INSERT INTO users(origin_profile, status) VALUES (?, 'attivo')",
+                  (main.PIERO_PROFILE,))
+    c.close()
+
+
+def test_un_segnale_STANTIO_non_riemerge_quando_l_accesso_torna(tmp_path, monkeypatch):
+    """Terzo rilievo di Claude Fable 5 sulla PR #26: il ramo bloccato salta la pulizia.
+
+    L'osservazione e' esatta — mentre l'accesso e' bloccato nessuno cancella i segnali oltre
+    il TTL — e la conseguenza che ne trae non lo e': il segnale stantio **non** puo' essere
+    consegnato. In `profile_csv` la `DELETE` dei segnali scaduti sta **prima** della `SELECT`,
+    quindi la prima richiesta dopo lo sblocco pulisce e poi legge: non c'e' un momento in cui
+    una riga oltre il TTL viene servita.
+
+    Questo test misura quell'ordine, che e' la ragione per cui il ramo bloccato puo'
+    permettersi di non scrivere niente — e non scrivere e' cio' che si vuole: XTrader
+    interroga il feed a raffica, e una `DELETE` con `commit` per ogni interrogazione di un
+    cliente bloccato sarebbe una scrittura continua per un feed che non consegna nulla.
+    """
+    percorso = str(tmp_path / 'stantio.db')
+    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    monkeypatch.setattr(main, 'TOKEN', TOKEN_DI_PROVA)
+    main.db().close()
+    _profilo_di_un_cliente(percorso, scadenza=int(time.time()) - GIORNO)
+
+    # Il segnale invecchia oltre il TTL mentre l'accesso e' bloccato.
+    c = sqlite3.connect(percorso)
+    c.execute("UPDATE signals SET expires_at=? WHERE profile='MARCO'",
+              (int(time.time()) - 300,))
+    c.commit()
+    c.close()
+    assert bytes(main.named_profile_csv('MARCO', token=TOKEN_DI_PROVA).body) \
+        == main.empty_csv().encode('utf-8'), 'il feed bloccato ha consegnato qualcosa'
+
+    # Il proprietario rinnova: la PRIMA richiesta dopo lo sblocco non deve consegnare il
+    # segnale vecchio.
+    c = sqlite3.connect(percorso)
+    c.execute("UPDATE users SET access_expires_at=? WHERE origin_profile='MARCO'",
+              (int(time.time()) + 30 * GIORNO,))
+    c.commit()
+    c.close()
+
+    corpo = bytes(main.named_profile_csv('MARCO', token=TOKEN_DI_PROVA).body)
+    assert corpo == main.empty_csv().encode('utf-8'), (
+        f'un segnale oltre il TTL e- riemerso al rinnovo: {corpo[:120]!r}')
+    c = sqlite3.connect(percorso)
+    restano = c.execute("SELECT COUNT(*) FROM signals WHERE profile='MARCO'").fetchone()[0]
+    c.close()
+    assert restano == 0, f'{restano} segnali stantii sopravvivono alla prima lettura'
