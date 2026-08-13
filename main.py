@@ -956,6 +956,39 @@ GIORNI_PROMEMORIA = 5
 STATI_ACCESSO = ('registrato', 'in_attesa', 'attivo', 'scaduto', 'sospeso')
 
 
+# Gli stati in cui il feed NON consegna segnali e il webhook non elabora. Sono i due in cui
+# l'accesso c'era e non c'e' piu': `scaduto` per il tempo, `sospeso` per decisione.
+#
+# `registrato` e `in_attesa` **non** sono qui, ed e' una scelta di scopo dichiarata: i feed
+# per profilo esistono da prima del flusso di approvazione, e i loro utenti sono nati
+# `registrato` dalla migrazione (`_travasa_nel_multiutente`). Bloccarli adesso spegnerebbe in
+# silenzio un feed che oggi funziona — cioe' romperei la produzione per applicare una regola
+# che riguarda clienti che ancora non esistono. La Issue #2 per la PR 7 parla di **scaduto**;
+# «un utente nuovo non puo' fare nulla» diventa vincolante nella PR 8, quando il feed passa
+# all'utente e nessun feed legacy dipende piu' da questo.
+ACCESSI_BLOCCATI = ('scaduto', 'sospeso')
+
+
+def _istante(valore):
+    """Un istante letto dal database, o `None` se quel valore non e' un istante.
+
+    SQLite ha tipi dinamici: la colonna e' `INTEGER` ma niente vieta che una versione futura
+    ci scriva `''`. `int('')` solleva, e su `/api/me` diventerebbe un **500** su una rotta che
+    dovrebbe solo dire chi sei. Rischio alzato da GPT-5.5 sulla PR #26.
+
+    Chi legge decide cosa fare del `None`, e le due decisioni sono opposte per costruzione:
+    `stato_effettivo()` tratta un valore illeggibile come **scaduto** (fail-closed: un accesso
+    che non si sa quando finisce non e' un accesso infinito), `giorni_rimasti()` restituisce
+    `None` perche' non ha un numero da dare.
+    """
+    if valore is None:
+        return None
+    try:
+        return int(valore)
+    except (TypeError, ValueError):
+        return None
+
+
 def stato_effettivo(status, access_expires_at, adesso=None):
     """Lo stato che CONTA adesso, che non e' sempre quello scritto nella colonna.
 
@@ -977,10 +1010,15 @@ def stato_effettivo(status, access_expires_at, adesso=None):
     colonna a ogni lettura sarebbe una scrittura su ogni richiesta, e renderebbe impossibile
     distinguere «scaduto» da «sospeso a mano».
     """
-    if status != 'attivo' or not access_expires_at:
+    if status != 'attivo' or access_expires_at is None or access_expires_at == '':
         return status
+    scadenza = _istante(access_expires_at)
+    if scadenza is None:
+        # Illeggibile: `scaduto`, non `attivo`. Un accesso di cui non si sa quando finisce
+        # non e' un accesso senza fine — quello e' `NULL`, che e' il caso del proprietario.
+        return 'scaduto'
     adesso = int(time.time()) if adesso is None else adesso
-    return 'attivo' if int(access_expires_at) > adesso else 'scaduto'
+    return 'attivo' if scadenza > adesso else 'scaduto'
 
 
 def giorni_rimasti(access_expires_at, adesso=None):
@@ -991,10 +1029,11 @@ def giorni_rimasti(access_expires_at, adesso=None):
     feed funziona ancora. Un numero che dice zero su un accesso vivo insegna a non fidarsi
     del numero. Scaduto → `0`, mai un negativo.
     """
-    if not access_expires_at:
+    scadenza = _istante(access_expires_at)
+    if scadenza is None:
         return None
     adesso = int(time.time()) if adesso is None else adesso
-    mancano = int(access_expires_at) - adesso
+    mancano = scadenza - adesso
     if mancano <= 0:
         return 0
     return -(-mancano // 86400)
@@ -1014,9 +1053,35 @@ def nuova_scadenza(access_expires_at, giorni, adesso=None):
     scritto nella Issue #2 come caso limite da non riscoprire.
     """
     adesso = int(time.time()) if adesso is None else adesso
-    base = int(access_expires_at) if access_expires_at and int(access_expires_at) > adesso \
-        else adesso
+    attuale = _istante(access_expires_at)
+    base = attuale if attuale is not None and attuale > adesso else adesso
     return base + int(giorni) * 86400
+
+
+def accesso_bloccato_del_profilo(c, profilo):
+    """Lo stato che BLOCCA il feed di questo profilo, o `None` se non c'e' niente da bloccare.
+
+    Il profilo e' l'unita' del feed di oggi; l'utente e' l'unita' dell'abbonamento. Il ponte
+    fra i due e' `users.origin_profile`, scritto dalla migrazione. Passa all'utente nella
+    PR 8 della Issue #2, e allora questa funzione cambia sorgente ma non significato — per
+    questo la decisione sta qui e non dentro il feed.
+
+    Due casi restituiscono `None` di proposito:
+
+    - **nessun utente collegato al profilo.** Un profilo senza riga in `users` non ha un
+      abbonamento da far scadere, e sospendergli il feed per assenza di dati sarebbe una
+      regressione provocata dalla mancanza di un'informazione;
+    - **il proprietario** (`is_admin`). Il suo accesso non e' un abbonamento: se dipendesse da
+      una scadenza, una riga sbagliata nel database spegnerebbe il feed che XTrader interroga
+      in produzione. E' la stessa ragione per cui `is_admin` non viene toccato dalla revoca
+      dell'identita' Telegram.
+    """
+    riga = c.execute('SELECT status, access_expires_at, is_admin FROM users'
+                     ' WHERE origin_profile=?', (profilo,)).fetchone()
+    if riga is None or riga[2]:
+        return None
+    stato = stato_effettivo(riga[0], riga[1])
+    return stato if stato in ACCESSI_BLOCCATI else None
 
 
 def possiede_qualcosa(c, utente):
@@ -1635,6 +1700,16 @@ def profile_csv(profile, token):
     auth(token)
     c = db()
     get_profile(c, profile)
+    # Accesso scaduto o sospeso: **sola intestazione**, e `200`. Non `401`, che per XTrader
+    # e' un guasto da segnalare invece di «nessun segnale»; non un feed vuoto senza BOM, che
+    # e' un CSV rotto. Il token **non** viene revocato: «scaduto» e «revocato» sono stati
+    # diversi, e revocare costringerebbe il cliente a riconfigurare XTrader a ogni rinnovo
+    # (Issue #2). Cosi' il rinnovo e' istantaneo: cambia una data e il feed riprende.
+    bloccato = accesso_bloccato_del_profilo(c, profile)
+    if bloccato:
+        c.close()
+        return Response(empty_csv(), media_type='text/csv',
+                        headers={'Cache-Control': 'no-store'})
     c.execute("DELETE FROM signals WHERE profile=? AND expires_at IS NOT NULL AND expires_at <= strftime('%s','now')", (profile,))
     c.commit()
     r = c.execute('SELECT csv FROM signals WHERE profile=? ORDER BY id DESC LIMIT 1', (profile,)).fetchone()
@@ -2489,6 +2564,15 @@ async def telegram_webhook(request: Request):
     if not profile:
         c.close()
         return {'ok': True, 'ignored': 'chat_not_allowed'}
+    # Accesso scaduto o sospeso: non si elabora e **non si registra nel log**. Il log dei
+    # messaggi e' una funzione del servizio, non un archivio: continuare a riempirlo per chi
+    # non ha accesso significherebbe conservare i messaggi dei suoi canali senza dargli
+    # niente in cambio. E il feed resta com'era — non si svuota e non si aggiorna: allo
+    # scadere ci pensa il TTL di 90 secondi, che e' l'unico che deve toccarlo.
+    bloccato = accesso_bloccato_del_profilo(c, profile['name'])
+    if bloccato:
+        c.close()
+        return {'ok': True, 'ignored': f'access_{bloccato}'}
     cfg = get_parser(c, profile['parser'])
     parsed = parse_message(text, cfg)
     if not parsed:

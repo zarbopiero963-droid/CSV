@@ -39,7 +39,8 @@ RADICE = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(RADICE))
 
 import main  # noqa: E402 - dopo l'inserimento del percorso
-from tests.ambiente import CHIAVI_PERICOLOSE  # noqa: E402
+from tests.ambiente import CHIAVI_PERICOLOSE, TOKEN_DI_PROVA  # noqa: E402
+from tests.relay.test_csv_contract import RIGA_VALIDA  # noqa: E402
 
 # Importati da `test_login.py` e NON ricopiati: la firma del Login Widget, il bot finto e il
 # segreto atteso sono la stessa cosa in tutti i test che hanno bisogno di una sessione, e due
@@ -48,6 +49,19 @@ from tests.relay.test_login import (  # noqa: E402
     BOT_FINTO, SEGRETO_ATTESO, _dati_login)
 
 GIORNO = 86400
+
+
+def _riga_con_evento(evento):
+    """La riga CSV canonica con un `EventName` riconoscibile.
+
+    Parte da `RIGA_VALIDA` di `test_csv_contract.py` invece di comporre una riga a mano:
+    `make_csv()` vuole una RIGA di 14 valori, e passandogli un dizionario scriveva le CHIAVI
+    come riga — `verify_csv` degradava il feed a sola intestazione e il test sul cliente
+    scaduto sarebbe passato per il motivo sbagliato. Misurato scrivendolo male.
+    """
+    riga = list(RIGA_VALIDA)
+    riga[main.HEADERS.index('EventName')] = evento
+    return riga
 
 
 @pytest.fixture(autouse=True)
@@ -206,3 +220,228 @@ def test_API_ME_riporta_i_giorni_a_un_cliente_ATTIVO(tmp_path, monkeypatch):
     assert corpo['stato'] == 'attivo'
     assert corpo['giorni_rimasti'] == 10, (
         f"giorni_rimasti={corpo['giorni_rimasti']!r} invece di 10")
+
+
+# ------------------------------------------- la scadenza arriva al feed e al webhook
+
+def _profilo_di_un_cliente(percorso, nome_profilo='MARCO', scadenza=None,
+                           stato='attivo'):
+    """Un profilo con feed, con dentro un segnale vivo, intestato a un cliente NON admin."""
+    c = sqlite3.connect(percorso)
+    c.execute('INSERT OR IGNORE INTO profiles(name,chat_ids,parser) VALUES (?,?,?)',
+              (nome_profilo, '-100999', main.DEFAULT_PARSER))
+    c.execute('INSERT INTO users(origin_profile, slug, first_name, status,'
+              ' access_expires_at, is_admin) VALUES (?,?,?,?,?,0)',
+              (nome_profilo, nome_profilo.lower(), nome_profilo, stato, scadenza))
+    c.execute('INSERT INTO signals(csv, parser, profile, expires_at) VALUES (?,?,?,?)',
+              (main.make_csv(_riga_con_evento('Tizio v Caio')),
+               main.DEFAULT_PARSER, nome_profilo, int(time.time()) + 90))
+    c.commit()
+    c.close()
+
+
+def test_il_feed_di_un_cliente_SCADUTO_torna_SOLA_INTESTAZIONE(tmp_path, monkeypatch):
+    """Bloccante di Claude Fable 5 sulla PR #26, e aveva ragione: la funzione non basta.
+
+    `stato_effettivo()` diceva la verita' e il feed non la guardava, quindi un cliente
+    scaduto continuava a ricevere i segnali. E' il difetto peggiore di questa PR, perche' e'
+    l'unica cosa che l'abbonamento deve davvero governare.
+
+    Tre asserzioni, e ognuna esclude un modo sbagliato di negare l'accesso:
+
+    - `200`, **non** `401`: per XTrader un errore HTTP e' un guasto da segnalare, mentre
+      «nessun segnale» e' uno stato normale che gestisce da se';
+    - i byte cominciano col **BOM** e con l'intestazione: un corpo vuoto sarebbe un CSV rotto;
+    - il **token non e' revocato** — la riga in `users` conserva `token_hash`, e al rinnovo il
+      cliente non deve riconfigurare XTrader.
+    """
+    percorso = str(tmp_path / 'feed_scaduto.db')
+    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    monkeypatch.setattr(main, 'TOKEN', TOKEN_DI_PROVA)
+    main.db().close()
+    _profilo_di_un_cliente(percorso, scadenza=int(time.time()) - GIORNO)
+
+    risposta = main.named_profile_csv('MARCO', token=TOKEN_DI_PROVA)
+    assert risposta.status_code == 200, (
+        f'il feed di un cliente scaduto risponde {risposta.status_code}: per XTrader e- un '
+        'guasto, non «nessun segnale»')
+    corpo = bytes(risposta.body)
+    assert corpo == main.empty_csv().encode('utf-8'), (
+        f'il feed di un cliente scaduto consegna ancora un segnale: {corpo[:120]!r}')
+    # `main.CSV_BOM` e non un U+FEFF letterale: la «REGOLA CODIFICA» di `CLAUDE.md` lo vieta
+    # nei sorgenti — e' invisibile in un editor — e `tests/safety/test_codifica.py` lo cerca
+    # anche qui. L'ho scritto letterale alla prima stesura, e la guardia esiste per questo.
+    assert corpo.startswith(main.CSV_BOM.encode('utf-8') + b'"Provider"'), (
+        f'il feed scaduto non e- un CSV valido: {corpo[:40]!r}')
+
+
+def test_lo_stesso_feed_ATTIVO_consegna_il_segnale(tmp_path, monkeypatch):
+    """Il verso opposto, senza cui il test sopra passerebbe anche con il feed sempre vuoto."""
+    percorso = str(tmp_path / 'feed_attivo.db')
+    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    monkeypatch.setattr(main, 'TOKEN', TOKEN_DI_PROVA)
+    main.db().close()
+    _profilo_di_un_cliente(percorso, scadenza=int(time.time()) + 10 * GIORNO)
+
+    corpo = bytes(main.named_profile_csv('MARCO', token=TOKEN_DI_PROVA).body)
+    assert b'Tizio v Caio' in corpo, (
+        f'il feed di un cliente ATTIVO non consegna il segnale: {corpo[:120]!r}')
+
+
+def test_il_feed_del_PROPRIETARIO_non_dipende_da_una_scadenza(tmp_path, monkeypatch):
+    """`is_admin` non ha un abbonamento, e questo test difende la produzione.
+
+    Il feed del profilo PIERO e' quello che XTrader interroga adesso. Se dipendesse da
+    `access_expires_at`, una riga sbagliata nel database lo spegnerebbe — e il sintomo
+    sarebbe «XTrader non riceve piu' niente» senza nessun errore da nessuna parte.
+    """
+    percorso = str(tmp_path / 'feed_admin.db')
+    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    monkeypatch.setattr(main, 'TOKEN', TOKEN_DI_PROVA)
+    main.db().close()
+
+    c = sqlite3.connect(percorso)
+    # Una scadenza nel passato sulla riga del proprietario: non deve cambiare niente.
+    c.execute("UPDATE users SET access_expires_at=? WHERE origin_profile=?",
+              (int(time.time()) - 30 * GIORNO, main.PIERO_PROFILE))
+    c.execute('INSERT INTO signals(csv, parser, profile, expires_at) VALUES (?,?,?,?)',
+              (main.make_csv(_riga_con_evento('Suo v Segnale')),
+               main.DEFAULT_PARSER, main.PIERO_PROFILE, int(time.time()) + 90))
+    c.commit()
+    c.close()
+
+    corpo = bytes(main.xtrader_csv(token=TOKEN_DI_PROVA).body)
+    assert b'Suo v Segnale' in corpo, (
+        f'il feed del proprietario e- stato spento da una scadenza: {corpo[:120]!r}')
+
+
+def test_un_profilo_SENZA_utente_collegato_continua_a_funzionare(tmp_path, monkeypatch):
+    """Assenza di dati non e' scadenza.
+
+    Un profilo senza riga in `users` non ha un abbonamento da far scadere: negargli il feed
+    sarebbe una regressione provocata da un'informazione che manca, non da una decisione.
+    """
+    percorso = str(tmp_path / 'feed_orfano.db')
+    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    monkeypatch.setattr(main, 'TOKEN', TOKEN_DI_PROVA)
+    main.db().close()
+    c = sqlite3.connect(percorso)
+    c.execute('INSERT INTO profiles(name,chat_ids,parser) VALUES (?,?,?)',
+              ('ORFANO', '-100888', main.DEFAULT_PARSER))
+    c.execute('INSERT INTO signals(csv, parser, profile, expires_at) VALUES (?,?,?,?)',
+              (main.make_csv(_riga_con_evento('Orfa v No')),
+               main.DEFAULT_PARSER, 'ORFANO', int(time.time()) + 90))
+    c.commit()
+    c.close()
+
+    corpo = bytes(main.named_profile_csv('ORFANO', token=TOKEN_DI_PROVA).body)
+    assert b'Orfa v No' in corpo, f'feed negato a un profilo senza utente: {corpo[:120]!r}'
+
+
+def test_una_scadenza_ILLEGGIBILE_blocca_invece_di_aprire(tmp_path, monkeypatch):
+    """Rischio alzato da GPT-5.5 sulla PR #26, e la direzione del rimedio conta.
+
+    SQLite ha tipi dinamici: `access_expires_at` e' `INTEGER` ma niente vieta che ci finisca
+    `''`. Prima, `int('')` sollevava — quindi `/api/me` avrebbe risposto **500** su una rotta
+    che deve solo dire chi sei. Ora un valore illeggibile vale **scaduto**, non attivo: un
+    accesso di cui non si sa quando finisce non e' un accesso infinito. Il caso «senza fine»
+    si scrive `NULL`, ed e' il proprietario.
+    """
+    assert main.stato_effettivo('attivo', '', adesso=1_000_000) == 'attivo', (
+        'una stringa vuota e- «nessuna scadenza», come NULL: e- lo stato del proprietario')
+    assert main.stato_effettivo('attivo', 'domani', adesso=1_000_000) == 'scaduto', (
+        'una scadenza illeggibile ha lasciato l-accesso attivo: fail-open')
+    assert main.giorni_rimasti('domani', adesso=1_000_000) is None
+    # E la rotta non solleva piu': era un 500 su /api/me.
+    percorso, utente, richiesta = _cliente(tmp_path, monkeypatch, 'me_illeggibile.db')
+    c = sqlite3.connect(percorso)
+    c.execute("UPDATE users SET status='attivo', access_expires_at='domani' WHERE id=?",
+              (utente,))
+    c.commit()
+    c.close()
+    import json
+    corpo = json.loads(bytes(main.chi_sono(richiesta).body).decode())
+    assert corpo['stato'] == 'scaduto'
+    assert corpo['giorni_rimasti'] is None
+
+
+def _consegna_in_processo(chat_id, testo):
+    """Una consegna di Telegram, chiamando l'handler in processo.
+
+    In processo e non via HTTP come `tests/relay/test_webhook.py`: quel file avvia il
+    servizio in sottoprocesso perche' misura il rifiuto **sul servizio vero**, con le sue
+    intestazioni. Qui il soggetto e' la decisione sull'accesso, che sta dentro l'handler, e
+    un sottoprocesso aggiungerebbe soltanto tempo e un altro database da preparare.
+    """
+    import asyncio
+
+    class Richiesta:
+        headers = {'X-Telegram-Bot-Api-Secret-Token': main.webhook_secret(BOT_FINTO)}
+
+        async def json(self):
+            return {'message': {'chat': {'id': int(chat_id)}, 'text': testo}}
+
+    return asyncio.run(main.telegram_webhook(Richiesta()))
+
+
+MESSAGGIO = ('P.Bet. PREMACHT 0,5HT\nTizio v Caio 🆚 Tizio v Caio\nOver 1,5 goal\n@ 1,85')
+
+
+def test_un_messaggio_di_un_cliente_SCADUTO_non_viene_elaborato(tmp_path, monkeypatch):
+    """Bloccante di Claude Fable 5 sulla PR #26, sull'altro percorso: il webhook.
+
+    Alla scadenza il servizio non deve piu' elaborare i messaggi delle chat di quel cliente,
+    e non deve nemmeno **registrarli**: il log dei messaggi e' una funzione del servizio, non
+    un archivio, e continuare a riempirlo per chi non ha accesso significherebbe conservare i
+    messaggi dei suoi canali senza dargli niente in cambio.
+
+    E il feed **non** viene toccato: non si svuota e non si aggiorna. Allo svuotamento ci
+    pensa il TTL di 90 secondi, che e' l'unico che deve toccarlo — un webhook che azzerasse
+    il feed a ogni messaggio di un cliente scaduto sarebbe una scrittura provocata
+    dall'esterno su un percorso che deve restare fermo.
+    """
+    percorso = str(tmp_path / 'webhook_scaduto.db')
+    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    monkeypatch.setattr(main, 'TOKEN', TOKEN_DI_PROVA)
+    monkeypatch.setattr(main, 'SEGRETO_WEBHOOK', main.webhook_secret(BOT_FINTO))
+    main.db().close()
+    _profilo_di_un_cliente(percorso, scadenza=int(time.time()) - GIORNO)
+
+    c = sqlite3.connect(percorso)
+    prima = c.execute("SELECT csv FROM signals WHERE profile='MARCO'").fetchone()[0]
+    c.close()
+
+    esito = _consegna_in_processo('-100999', MESSAGGIO)
+    assert esito.get('ignored') == 'access_scaduto', (
+        f'il messaggio di un cliente scaduto e- stato elaborato: {esito}')
+
+    c = sqlite3.connect(percorso)
+    dopo = c.execute("SELECT csv FROM signals WHERE profile='MARCO'").fetchone()
+    log = c.execute('SELECT COUNT(*) FROM message_logs').fetchone()[0]
+    c.close()
+    assert dopo is not None and dopo[0] == prima, (
+        'il feed del cliente scaduto e- stato toccato dal webhook: allo svuotamento ci pensa '
+        'il TTL, non una consegna')
+    assert log == 0, (
+        f'{log} righe in message_logs per un cliente senza accesso: il log e- una funzione '
+        'del servizio, non un archivio')
+
+
+def test_lo_stesso_messaggio_di_un_cliente_ATTIVO_viene_elaborato(tmp_path, monkeypatch):
+    """Il verso opposto: senza, il test sopra passerebbe anche se il webhook fosse rotto."""
+    percorso = str(tmp_path / 'webhook_attivo.db')
+    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    monkeypatch.setattr(main, 'TOKEN', TOKEN_DI_PROVA)
+    monkeypatch.setattr(main, 'SEGRETO_WEBHOOK', main.webhook_secret(BOT_FINTO))
+    main.db().close()
+    _profilo_di_un_cliente(percorso, scadenza=int(time.time()) + 10 * GIORNO)
+
+    esito = _consegna_in_processo('-100999', MESSAGGIO)
+    assert 'ignored' not in esito or esito.get('ignored') != 'access_scaduto', (
+        f'il messaggio di un cliente ATTIVO e- stato rifiutato per accesso: {esito}')
