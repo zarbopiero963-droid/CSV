@@ -1691,14 +1691,18 @@ def parse_message(message, cfg):
 # quelli del parser di produzione, la corrispondenza e' esatta.
 
 # Colonne senza le quali la riga sarebbe pericolosamente incompleta per XTrader.
-# **Sono due, non quattro**, e la scelta viene da `web/engine.js`, che e' la fonte
-# del contratto (regola 3): `Price` non e' obbligatoria perche' il parser oggi in
-# produzione la lascia vuota — la quota la mette XTrader dal proprio book, quindi
-# pretenderla bloccherebbe i segnali reali. La Issue #2 elencava quattro
-# obbligatorie: quella lista e' la specifica su carta, questa e' il codice
-# eseguibile, e dove divergono comanda il codice finche' il proprietario non
-# decide di cambiarle in ENTRAMBI i motori nello stesso PR.
-COLONNE_OBBLIGATORIE = ['Provider', 'EventName']
+# QUATTRO, decise dal proprietario il 13/08/2026 (Issue #2, riconfermate su #25):
+# l'evento, il TIPO di mercato su cui XTrader decide, la selezione, e se puntare o
+# bancare. `Provider` non e' obbligatoria (e' sempre la costante "XTrader", quindi
+# pretenderla non protegge da nulla); `Price` non lo e' (la quota la mette XTrader);
+# `MarketName` non lo e' (e' l'etichetta, non il codice — l'obbligatoria e'
+# `MarketType`).
+#
+# La stessa lista di `REQUIRED_COLUMNS` in `web/engine.js`, cambiata nello stesso
+# momento: `tests/engine/test_engine_contract.py` fa girare i due motori sugli
+# stessi casi e le due liste devono coincidere, o un utente vedrebbe «completo» nel
+# browser e feed vuoto in produzione.
+COLONNE_OBBLIGATORIE = ['EventName', 'MarketType', 'SelectionName', 'BetType']
 
 
 def _taglia_codepoint(testo, n):

@@ -272,21 +272,34 @@ caso('parser: marcatore senza evento, confronto col motore Python', () => {
   return esiti;
 });
 
-caso('parser: Provider di soli spazi vale come mancante', () => {
+caso('parser: una obbligatoria di soli spazi vale come mancante', () => {
   const cfg = configProduzione();
   // Stessa classe di difetto su una colonna alimentata da una costante: una
-  // costante fatta di spazi e- una configurazione vuota, non un valore.
-  cfg.columns.Provider = { source: 'constant', value: '   ' };
+  // costante fatta di spazi e- una configurazione vuota, non un valore. Si prova
+  // su `MarketType`, una delle QUATTRO obbligatorie (prima era `Provider`, che
+  // obbligatoria non e- piu').
+  cfg.columns.MarketType = { source: 'constant', value: '   ' };
   const r = runParser(MSG_VALIDO, cfg);
-  eq(r.missing.includes('Provider'), true, 'Provider di soli spazi va elencato come mancante');
-  eq(r.complete, false, 'nessuna riga con Provider di soli spazi');
+  eq(r.missing.includes('MarketType'), true, 'MarketType di soli spazi va elencato come mancante');
+  eq(r.complete, false, 'nessuna riga con una obbligatoria di soli spazi');
   return r.missing;
 });
 
-caso('parser: Price NON e- obbligatoria (main.py la lascia vuota)', () => {
+caso('parser: Provider e Price NON sono obbligatorie', () => {
   if (!Array.isArray(REQUIRED_COLUMNS)) throw new Error('engine.js non esporta REQUIRED_COLUMNS');
-  eq(REQUIRED_COLUMNS.includes('Price'), false,
-     'il parser di produzione non produce Price: richiederla bloccherebbe i segnali reali');
+  // `Provider` e' sempre la costante "XTrader" e non protegge da nulla; `Price` la
+  // mette XTrader dal proprio book. Pretenderle bloccherebbe segnali validi.
+  eq(REQUIRED_COLUMNS.includes('Provider'), false, 'Provider non e- obbligatoria');
+  eq(REQUIRED_COLUMNS.includes('Price'), false, 'Price non e- obbligatoria');
+  return REQUIRED_COLUMNS;
+});
+
+caso('parser: le QUATTRO obbligatorie sono quelle decise dal proprietario', () => {
+  // La lista, verbatim: se qualcuno la cambia in un motore solo, questo caso lo
+  // vede — e il confronto JS/Python la tiene identica all'altro motore.
+  eq([...REQUIRED_COLUMNS].sort(),
+     ['BetType', 'EventName', 'MarketType', 'SelectionName'],
+     'le quattro colonne obbligatorie decise su #2/#25');
   return REQUIRED_COLUMNS;
 });
 

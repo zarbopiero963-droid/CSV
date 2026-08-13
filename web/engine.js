@@ -120,10 +120,21 @@ export function matches(message, cond) {
 }
 
 // Colonne senza le quali la riga sarebbe pericolosamente incompleta per XTrader.
-// Price NON e' qui: il parser oggi in produzione (main.py) la lascia vuota perche'
-// la quota la mette XTrader dal proprio book, quindi pretenderla bloccherebbe i
-// segnali reali.
-export const REQUIRED_COLUMNS = ['Provider', 'EventName'];
+// QUATTRO, decise dal proprietario il 13/08/2026 (Issue #2, riconfermate su #25):
+// sono le colonne che rendono un segnale una scommessa eseguibile — l'evento, il
+// TIPO di mercato su cui XTrader decide, la selezione, e se puntare o bancare.
+//
+// `Provider` NON e' qui, anche se prima lo era: e' sempre una costante ("XTrader")
+// e pretenderla non protegge da nulla. `Price` non e' qui: la quota la mette
+// XTrader dal proprio book, quindi pretenderla bloccherebbe i segnali reali.
+// `MarketName` non e' qui: e' l'etichetta leggibile, mentre `MarketType` e' il
+// codice su cui XTrader agisce — pretendere la prima invece del secondo era
+// l'errore di trascrizione nella nota di #25.
+//
+// Cambiato in ENTRAMBI i motori (qui e `COLONNE_OBBLIGATORIE` in main.py) nello
+// stesso momento, col test di confronto che li tiene identici: due liste che
+// divergono darebbero a un utente «completo» nel browser e feed vuoto in produzione.
+export const REQUIRED_COLUMNS = ['EventName', 'MarketType', 'SelectionName', 'BetType'];
 
 // Esegue il parser sul messaggio.
 //

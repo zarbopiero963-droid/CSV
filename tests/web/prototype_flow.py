@@ -127,9 +127,33 @@ with sync_playwright() as pw:
     assert ev2 == 'Inter - Milan', f'EventName trasformato={ev2!r}'
     shot(pg, '09-eventname-trasformato')
 
-    # salta fino al riepilogo
-    for _ in range(12):
+    # Verso il riepilogo, ma NON a vuoto: dal 13/08/2026 le colonne obbligatorie sono
+    # quattro (EventName, MarketType, SelectionName, BetType), quindi un parser che
+    # lascia MarketType/SelectionName/BetType vuote e' «incompleto» e non manda segnali.
+    # Si impostano come costanti, com'e' un parser vero. Sono le colonne dopo EventName:
+    # MarketId, MarketName, MarketType, SelectionId, SelectionName, Handicap, Price,
+    # MinPrice, MaxPrice, BetType, Points, poi il riepilogo.
+    def _avanti():
         pg.click('[data-act="wiz-next"]')
+        pg.wait_for_timeout(120)
+
+    def _costante(valore):
+        pg.click('[data-act="wiz-mode"][data-mode="constant"]')
+        pg.fill('#rule-const', valore)
+        pg.wait_for_timeout(120)
+
+    _avanti()                       # MarketId
+    _avanti()                       # MarketName
+    _avanti(); _costante('OVER_UNDER_15')     # MarketType (obbligatoria)
+    _avanti()                       # SelectionId
+    _avanti(); _costante('Over 1,5 goal')     # SelectionName (obbligatoria)
+    _avanti()                       # Handicap
+    _avanti()                       # Price
+    _avanti()                       # MinPrice
+    _avanti()                       # MaxPrice
+    _avanti(); _costante('PUNTA')             # BetType (obbligatoria)
+    _avanti()                       # Points
+    _avanti()                       # riepilogo
     pg.wait_for_selector('#test-msg')
     shot(pg, '10-riepilogo')
 
