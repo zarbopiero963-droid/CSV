@@ -2259,3 +2259,244 @@ def test_il_CONSENSO_vale_solo_per_LA_RIGA_indicata(tmp_path, monkeypatch):
         assert suo == SUO, (
             f'consenso {valore!r}: la riga e- stata assorbita comunque (telegram_id ora '
             f'{suo!r})')
+
+
+def test_cambiare_la_variabile_UCCIDE_la_sessione_senza_aspettare_un_login(tmp_path,
+                                                                          monkeypatch):
+    """Bloccante di GPT-5.6 Sol sulla PR #24, terzo giro sullo stesso tema e ancora reale.
+
+    La revoca del collegamento stantio viveva **solo** dentro `/api/login/telegram`. Quindi
+    dopo aver cambiato `TELEGRAM_ADMIN_ID` la vecchia identita' perdeva l'accesso al
+    **prossimo login** — di chiunque — ma il cookie che aveva **giaÌ€** in mano restava valido
+    fino a quel momento. E non scadeva da se': `GET /api/me` rinnova il cookie a ogni
+    richiesta valida, quindi una sessione tenuta attiva e' immortale.
+
+    Il caso che conta e' quello per cui la revoca esiste: in quella variabile e' finito l'ID
+    di un estraneo, o l'account del proprietario e' stato compromesso, e lui la corregge per
+    tagliargli l'accesso. Se l'estraneo ha una sessione aperta, correggere la variabile non
+    gli toglie niente finche' qualcuno non rifa' login — e chi ha il pannello aperto non ha
+    nessun motivo di rifare login.
+
+    Ora l'invariante e' verificata **anche sul percorso della sessione**: la prima richiesta
+    autenticata che arriva dopo il cambio scioglie il collegamento e invalida il cookie. La
+    prima richiesta puo' essere proprio quella dell'estranea, che quindi si chiude da se'.
+    """
+    import sqlite3
+    percorso = _prepara(tmp_path, monkeypatch, 'revoca_senza_login.db')
+    VECCHIO, NUOVO = '111000111', '222000222'
+
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', VECCHIO)
+    risposta = main.login_telegram(main.LoginTelegramIn(**_dati_login(id=VECCHIO)))
+    cookie = None
+    for pezzo in (risposta.headers.get('set-cookie') or '').split(';'):
+        chiave, _, valore = pezzo.strip().partition('=')
+        if chiave == main.NOME_COOKIE:
+            cookie = valore
+    assert cookie, 'nessun cookie dal login'
+
+    class Richiesta:
+        cookies = {main.NOME_COOKIE: cookie}
+
+    assert main.utente_dalla_sessione(Richiesta()) is not None, (
+        'il cookie non era valido nemmeno prima del cambio: il test non misura la revoca')
+
+    # Il proprietario cambia la variabile PER tagliare l'accesso, e NESSUNO rifa' login.
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', NUOVO)
+
+    assert main.utente_dalla_sessione(Richiesta()) is None, (
+        'la sessione della vecchia identita- e- ancora valida dopo il cambio: chi ha il '
+        'pannello aperto lo conserva, e non scade perche- ogni richiesta rinnova il cookie')
+
+    c = sqlite3.connect(percorso)
+    del_proprietario = c.execute('SELECT telegram_id FROM users WHERE origin_profile=?',
+                                 (main.PIERO_PROFILE,)).fetchone()[0]
+    revoche = c.execute("SELECT COUNT(*) FROM admin_audit"
+                        " WHERE action='identita_telegram_revocata'").fetchone()[0]
+    c.close()
+    assert del_proprietario is None, (
+        f'il collegamento stantio sopravvive (telegram_id {del_proprietario!r})')
+    assert revoche == 1, f'{revoche} revoche tracciate invece di una'
+
+
+def test_la_revoca_dalla_SESSIONE_non_si_ripete_a_ogni_richiesta(tmp_path, monkeypatch):
+    """Una revoca che si ripete e' una scrittura a ogni richiesta, e un audit illeggibile.
+
+    Il percorso della sessione e' quello di OGNI richiesta autenticata del sito: se la
+    condizione restasse vera dopo aver sciolto, ogni richiesta incrementerebbe
+    `session_version` e aggiungerebbe una riga in `admin_audit`. Il test tiene la proprieta'
+    che rende sicuro metterci una scrittura: dopo lo scioglimento `telegram_id` e' NULL,
+    quindi il ramo non scatta piu'.
+    """
+    import sqlite3
+    percorso = _prepara(tmp_path, monkeypatch, 'revoca_una_volta.db')
+    VECCHIO, NUOVO = '111000111', '222000222'
+
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', VECCHIO)
+    risposta = main.login_telegram(main.LoginTelegramIn(**_dati_login(id=VECCHIO)))
+    cookie = None
+    for pezzo in (risposta.headers.get('set-cookie') or '').split(';'):
+        chiave, _, valore = pezzo.strip().partition('=')
+        if chiave == main.NOME_COOKIE:
+            cookie = valore
+
+    class Richiesta:
+        cookies = {main.NOME_COOKIE: cookie}
+
+    def versione_del_proprietario():
+        c = sqlite3.connect(percorso)
+        valore = c.execute('SELECT session_version FROM users WHERE origin_profile=?',
+                           (main.PIERO_PROFILE,)).fetchone()[0]
+        c.close()
+        return valore
+
+    # Il valore ASSOLUTO non c'entra — `session_version` ha `DEFAULT 1` nello schema, e un
+    # test che lo asserisce misura il default invece dell'incremento. Cio' che conta e' che
+    # cinque richieste producano UN incremento, non cinque.
+    prima = versione_del_proprietario()
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', NUOVO)
+    for _ in range(5):
+        main.utente_dalla_sessione(Richiesta())
+    dopo = versione_del_proprietario()
+
+    c = sqlite3.connect(percorso)
+    revoche = c.execute("SELECT COUNT(*) FROM admin_audit"
+                        " WHERE action='identita_telegram_revocata'").fetchone()[0]
+    c.close()
+    assert revoche == 1, (
+        f'{revoche} righe di revoca dopo cinque richieste: il ramo scatta a ogni richiesta, '
+        'quindi ogni pagina del sito scrive nel database e sporca admin_audit')
+    assert dopo == prima + 1, (
+        f'session_version e- passata da {prima} a {dopo} in cinque richieste: viene '
+        'incrementata in loop, quindi ogni pagina del sito invalida la sessione successiva')
+
+
+def test_la_revoca_dalla_SESSIONE_e_sicura_in_CORSA(tmp_path, monkeypatch):
+    """La revoca sta sul percorso di OGNI richiesta, quindi arriva concorrente per costruzione.
+
+    Il docstring di `revoca_identita_stantia()` afferma che l'`UPDATE` col valore stantio
+    nella `WHERE` rende la revoca sicura senza transazione. Quell'affermazione non era
+    misurata: togliendo la `WHERE` i due test sequenziali restavano **verdi**, perche' in
+    sequenza il controllo precedente basta. Un'affermazione non misurata in un docstring e'
+    esattamente cio' che `CLAUDE.md` racconta a proposito del BOM, quindi la misuro.
+
+    Sei richieste insieme sulla stessa sessione: la revoca deve avvenire **una volta sola** —
+    un incremento di `session_version` e una riga di audit. Senza la `WHERE`, sei richieste
+    che leggono lo stesso valore stantio incrementano fino a sei volte e scrivono fino a sei
+    revoche per la stessa revoca.
+    """
+    import sqlite3
+    import threading
+    percorso = _prepara(tmp_path, monkeypatch, 'revoca_in_corsa.db')
+    VECCHIO, NUOVO = '111000111', '222000222'
+
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', VECCHIO)
+    risposta = main.login_telegram(main.LoginTelegramIn(**_dati_login(id=VECCHIO)))
+    cookie = None
+    for pezzo in (risposta.headers.get('set-cookie') or '').split(';'):
+        chiave, _, valore = pezzo.strip().partition('=')
+        if chiave == main.NOME_COOKIE:
+            cookie = valore
+
+    class Richiesta:
+        cookies = {main.NOME_COOKIE: cookie}
+
+    c = sqlite3.connect(percorso)
+    prima = c.execute('SELECT session_version FROM users WHERE origin_profile=?',
+                      (main.PIERO_PROFILE,)).fetchone()[0]
+    c.close()
+
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', NUOVO)
+    esiti = []
+    porta = threading.Barrier(6)
+
+    def prova():
+        porta.wait()
+        try:
+            esiti.append(('ok', main.utente_dalla_sessione(Richiesta())))
+        except Exception as e:
+            esiti.append((type(e).__name__, str(e)))
+
+    fili = [threading.Thread(target=prova) for _ in range(6)]
+    for f in fili:
+        f.start()
+    _attendi_tutti(fili, esiti)
+
+    guasti = [e for e in esiti if e[0] != 'ok']
+    assert not guasti, f'richieste concorrenti hanno sollevato: {guasti}'
+    assert all(valore is None for _, valore in esiti), (
+        f'una richiesta concorrente ha ottenuto una sessione valida dopo la revoca: {esiti}')
+
+    c = sqlite3.connect(percorso)
+    dopo = c.execute('SELECT session_version FROM users WHERE origin_profile=?',
+                     (main.PIERO_PROFILE,)).fetchone()[0]
+    revoche = c.execute("SELECT COUNT(*) FROM admin_audit"
+                        " WHERE action='identita_telegram_revocata'").fetchone()[0]
+    c.close()
+    assert revoche == 1, (
+        f'{revoche} revoche per una sola revoca: sei richieste concorrenti hanno letto lo '
+        'stesso valore stantio e scritto ognuna la propria')
+    assert dopo == prima + 1, (
+        f'session_version e- passata da {prima} a {dopo}: incrementata piu- di una volta '
+        'dalla stessa revoca')
+
+
+def test_la_WHERE_anti_corsa_serve_DAVVERO(tmp_path, monkeypatch):
+    """L'interleaving che il test a sei thread NON produce, imposto a mano.
+
+    Storia di questo test, perche' e' il punto: il test concorrente qui sopra passava **anche
+    togliendo** la `WHERE` col valore stantio. Quindi non misurava la proprieta' che il
+    docstring di `revoca_identita_stantia()` afferma — sei thread in Python si serializzano
+    abbastanza che il secondo rilegga `telegram_id` gia' NULL, e la corsa non si presenta.
+    Un'affermazione non misurata resta un'affermazione, e questo file esiste per non averne.
+
+    Qui l'interleaving e' imposto: la richiesta «lenta» ha letto il valore stantio e, nel
+    momento esatto in cui sta per scrivere, un'altra richiesta completa la revoca. Con la
+    `WHERE` la lenta aggiorna **zero righe** e non scrive niente; senza, incrementa
+    `session_version` una seconda volta e aggiunge una seconda riga di audit per la stessa
+    revoca — cioe' butta fuori anche la sessione nata dopo la revoca.
+    """
+    import sqlite3
+    percorso = _prepara(tmp_path, monkeypatch, 'interleaving.db')
+    VECCHIO, NUOVO = '111000111', '222000222'
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', VECCHIO)
+    main.login_telegram(main.LoginTelegramIn(**_dati_login(id=VECCHIO)))
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', NUOVO)
+
+    c = sqlite3.connect(percorso)
+    prima = c.execute('SELECT session_version FROM users WHERE origin_profile=?',
+                      (main.PIERO_PROFILE,)).fetchone()[0]
+    c.close()
+
+    vera = main.db()
+    in_mezzo = []
+
+    class Lenta:
+        """La connessione di chi ha letto il valore stantio e scrive un attimo dopo."""
+
+        def execute(self, sql, *args):
+            if sql.startswith('UPDATE users SET telegram_id=NULL') and not in_mezzo:
+                in_mezzo.append(True)
+                altra = sqlite3.connect(percorso)
+                assert main.revoca_identita_stantia(altra) is not None, (
+                    'la richiesta che arriva in mezzo non ha revocato: il test non produce '
+                    'l-interleaving che descrive')
+                altra.commit()
+                altra.close()
+            return vera.execute(sql, *args)
+
+    assert main.revoca_identita_stantia(Lenta()) is None, (
+        'la richiesta lenta ha creduto di revocare una revoca GIA- avvenuta')
+    vera.commit()
+    vera.close()
+    assert in_mezzo, 'l-interleaving non e- avvenuto: il test non misura niente'
+
+    c = sqlite3.connect(percorso)
+    dopo = c.execute('SELECT session_version FROM users WHERE origin_profile=?',
+                     (main.PIERO_PROFILE,)).fetchone()[0]
+    revoche = c.execute("SELECT COUNT(*) FROM admin_audit"
+                        " WHERE action='identita_telegram_revocata'").fetchone()[0]
+    c.close()
+    assert revoche == 1, f'{revoche} revoche per una sola revoca'
+    assert dopo == prima + 1, (
+        f'session_version da {prima} a {dopo}: la richiesta lenta ha incrementato una seconda '
+        'volta, quindi butta fuori anche una sessione nata DOPO la revoca')

@@ -504,9 +504,22 @@ Il proprietario entra in due modi, e il secondo non è un vezzo:
      nuovo non entrava mai il vecchio restava amministratore per sempre: cambiare la
      variabile era teatro. Bloccante di GPT-5.6 Sol. Precisione richiesta da CodeRabbit sulla
      PR #24, perché «subito» non era vero e la differenza è misurabile: cambiare la variabile
-     **non scrive nel database** — il servizio la legge all'avvio e la revoca viene applicata
-     **al primo login successivo al cambio**, chiunque lo faccia. Fino a quel login la riga
-     porta ancora il vecchio `telegram_id` e le sue sessioni sono valide;
+     **non scrive nel database** — il servizio la legge all'avvio, e la revoca viene applicata
+     **alla prima richiesta autenticata che arriva dopo il cambio**, che sia un login o una
+     qualunque pagina del sito. La formulazione precedente diceva «al primo login», ed era il
+     residuo che GPT-5.6 Sol ha alzato al terzo giro: applicandola solo al login, chi aveva
+     **già** un cookie amministrativo lo conservava — e non scadeva, perché ogni richiesta
+     valida rinnova il cookie, quindi una sessione tenuta aperta è immortale. Nel caso per cui
+     la revoca esiste (nella variabile è finito l'ID di un estraneo, o l'account è compromesso)
+     l'estraneo col pannello aperto non ha nessun motivo di rifare login, quindi non perdeva
+     niente. Ora la sua stessa prossima richiesta chiude la sua sessione: l'invariante vive in
+     `revoca_identita_stantia()`, chiamata dal login **e** da `utente_dalla_sessione()` —
+     una funzione sola, perché due copie divergono (regola 3). La scrittura sul percorso di
+     lettura non si ripete, perché dopo lo scioglimento `telegram_id` è `NULL`, e non si
+     duplica in corsa, perché l'`UPDATE` porta il valore stantio nella `WHERE`: entrambe le
+     proprietà sono misurate, la seconda con un interleaving imposto a mano dopo aver
+     constatato che sei thread non la producono. Il feed non è toccato: `/xtrader.csv` non ha
+     sessione;
    - **se un altro account possiede già quell'ID, il login è rifiutato con `409` finché il
      proprietario non autorizza l'assorbimento** con `TELEGRAM_ADMIN_RECONCILE`, il cui valore
      è l'**identificativo della riga** da assorbire — non un `1`. Il motivo

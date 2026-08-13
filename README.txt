@@ -361,14 +361,21 @@ TELEGRAM_ADMIN_RECONCILE: facoltativa, serve una volta sola. E' il CONSENSO ad
   non sono dettagli:
 
   1. CAMBIARE la variabile TOGLIE l'accesso alla vecchia identita', e la revoca viene
-     APPLICATA al primo login successivo al cambio, di CHIUNQUE — non solo quando il
-     nuovo ID entra. Cambiare la variabile non scrive nel database: il servizio la legge
-     all'avvio, e fino a quel primo login la riga porta ancora il vecchio telegram_id e
-     le sue sessioni sono valide. Poi il collegamento stantio viene sciolto (telegram_id
-     azzerato, session_version incrementata, riga in admin_audit) e la vecchia identita'
-     torna un cliente qualunque. Prima la revoca scattava solo all'ingresso del nuovo ID:
-     se il nuovo non entrava mai, il vecchio restava amministratore per sempre, e
-     cambiare la variabile era teatro.
+     APPLICATA alla PRIMA RICHIESTA AUTENTICATA che arriva dopo il cambio: un login, o
+     una qualunque pagina del sito, di CHIUNQUE. Cambiare la variabile non scrive nel
+     database — il servizio la legge all'avvio — quindi fino a quella richiesta la riga
+     porta ancora il vecchio telegram_id. Poi il collegamento stantio viene sciolto
+     (telegram_id azzerato, session_version incrementata, riga in admin_audit) e la
+     vecchia identita' torna un cliente qualunque.
+     Due versioni precedenti erano insufficienti, ed e' utile sapere perche': prima la
+     revoca scattava solo all'ingresso del NUOVO ID, quindi se il nuovo non entrava mai il
+     vecchio restava amministratore per sempre; poi scattava a ogni LOGIN, ma chi aveva
+     gia' un cookie amministrativo lo conservava — e non scadeva, perche' ogni richiesta
+     valida rinnova il cookie, quindi una sessione tenuta aperta e' immortale. Chi ha il
+     pannello aperto non ha nessun motivo di rifare login. Ora la sua stessa prossima
+     richiesta chiude la sua sessione.
+     Il feed non e' toccato: /xtrader.csv non ha sessione, quindi la revoca non lo
+     riguarda.
      SVUOTARE la variabile invece NON scioglie niente, ed e' deliberato: vuota significa
      «nessuna invariante dichiarata», non «revoca». Sciogliendo, la riga del proprietario
      resterebbe senza telegram_id e nessun ramo potrebbe ricollegarla — al login dopo

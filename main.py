@@ -1817,6 +1817,13 @@ def utente_dalla_sessione(request):
     if not sessione:
         return None
     c = db()
+    # L'invariante dell'amministratore vale ANCHE qui, e non solo al login: senza, cambiare
+    # `TELEGRAM_ADMIN_ID` non toglieva niente a chi aveva gia' una sessione aperta, che non
+    # scade perche' ogni richiesta valida rinnova il cookie. Ultimo bloccante di GPT-5.6 Sol
+    # sulla PR #24. Va PRIMA della lettura della riga, cosi' la `session_version` letta e'
+    # quella incrementata e questa stessa richiesta cade.
+    if revoca_identita_stantia(c) is not None:
+        c.commit()
     riga = c.execute('SELECT id, session_version, status, is_admin, first_name,'
                      ' access_expires_at FROM users WHERE id=?',
                      (sessione['utente'],)).fetchone()
@@ -1957,6 +1964,61 @@ def login_telegram(data: LoginTelegramIn):
     return _rispondi_con_sessione(utente, versione, {'ok': True, 'utente': utente})
 
 
+def revoca_identita_stantia(c):
+    """Scioglie il collegamento fra la riga del proprietario e un'identita' non piu' quella
+    configurata. Restituisce l'id della riga toccata, o `None` se non c'era niente da fare.
+
+    E' l'invariante dell'amministratore ridotta a una funzione sola, perche' va applicata in
+    **due** posti e la regola 3 di `CLAUDE.md` vale anche qui:
+
+    - al login (`_decidi_identita`, CASO 1);
+    - **su ogni richiesta autenticata del sito** (`utente_dalla_sessione`).
+
+    Il secondo posto e' l'ultimo bloccante di GPT-5.6 Sol sulla PR #24, e il difetto era
+    questo: applicandola solo al login, dopo aver cambiato `TELEGRAM_ADMIN_ID` la vecchia
+    identita' perdeva l'accesso al prossimo login **di chiunque**, ma il cookie che aveva
+    gia' in mano restava valido fino a quel momento — e non scadeva, perche' ogni richiesta
+    valida rinnova il cookie, quindi una sessione tenuta aperta e' immortale. Nel caso per cui
+    la revoca esiste — nella variabile e' finito l'ID di un estraneo, o l'account e'
+    compromesso — l'estraneo col pannello aperto non ha nessun motivo di rifare login, quindi
+    non perdeva niente. Ora la prima richiesta autenticata dopo il cambio scioglie il
+    collegamento, e quella richiesta puo' essere proprio la sua: si chiude da se'.
+
+    **Perche' una scrittura sul percorso di lettura non e' un problema qui.** Scatta solo
+    quando la condizione e' vera, e dopo lo scioglimento `telegram_id` e' NULL: la condizione
+    diventa falsa e non si ripete piu' (misurato in
+    `test_la_revoca_dalla_SESSIONE_non_si_ripete_a_ogni_richiesta`). Riguarda solo le rotte
+    del sito, mai `/xtrader.csv`, che non ha sessione — la NON-relazione fra sessione e feed
+    resta intatta.
+
+    **Ed e' sicura in corsa senza transazione:** l'`UPDATE` porta il valore stantio nella
+    `WHERE`, quindi fra due richieste concorrenti solo una tocca una riga, e la riga di audit
+    la scrive solo chi ha vinto. Senza quel `WHERE`, due richieste avrebbero incrementato
+    `session_version` due volte e scritto due revoche per la stessa revoca — e la seconda
+    butterebbe fuori anche una sessione nata DOPO la revoca. Misurato in
+    `test_la_WHERE_anti_corsa_serve_DAVVERO`, che impone l'interleaving a mano: il test a sei
+    thread passava anche **senza** la `WHERE`, perche' sei thread si serializzano abbastanza
+    che il secondo rilegga `telegram_id` gia' NULL. Un docstring che afferma una proprieta'
+    non misurata e' il difetto che questo repository ha gia' pagato una volta.
+    """
+    if not (TELEGRAM_ADMIN_ID and not admin_id_malformato()):
+        return None
+    riga = c.execute('SELECT id, telegram_id FROM users WHERE origin_profile=?',
+                     (PIERO_PROFILE,)).fetchone()
+    if not riga or not riga[1] or riga[1] == TELEGRAM_ADMIN_ID:
+        return None
+    cursore = c.execute('UPDATE users SET telegram_id=NULL,'
+                        ' session_version=session_version+1'
+                        ' WHERE id=? AND telegram_id=?', (riga[0], riga[1]))
+    if not cursore.rowcount:
+        return None
+    # `is_admin` NON si tocca: quella riga resta l'account del proprietario, ed e' da
+    # `is_admin` che dipende il suo accesso con la password. Cio' che si revoca e' il legame
+    # con un'identita' Telegram, non la proprieta' dell'account.
+    _annota_admin(c, riga[0], 'identita_telegram_revocata')
+    return riga[0]
+
+
 def _decidi_identita(c, data):
     """Chi e' chi sta entrando, applicando l'invariante dell'amministratore.
 
@@ -1994,15 +2056,10 @@ def _decidi_identita(c, data):
     # `test_un_ADMIN_ID_malformato_NON_scioglie_un_collegamento_BUONO`.
     admin_configurato = bool(TELEGRAM_ADMIN_ID) and not admin_id_malformato()
 
-    # CASO 1 — il collegamento stantio si scioglie.
-    if (admin_configurato and proprietario and proprietario[2]
-            and proprietario[2] != TELEGRAM_ADMIN_ID):
-        c.execute('UPDATE users SET telegram_id=NULL,'
-                  ' session_version=session_version+1 WHERE id=?', (proprietario[0],))
-        # `is_admin` NON si tocca: quella riga resta l'account del proprietario, ed e' da
-        # `is_admin` che dipende il suo accesso con la password. Cio' che si revoca e' il
-        # legame con un'identita' Telegram, non la proprieta' dell'account.
-        _annota_admin(c, proprietario[0], 'identita_telegram_revocata')
+    # CASO 1 — il collegamento stantio si scioglie. La decisione e la scrittura stanno in
+    # `revoca_identita_stantia()`, perche' la stessa invariante va applicata anche su ogni
+    # richiesta autenticata del sito: due copie sarebbero due copie che divergono (regola 3).
+    if revoca_identita_stantia(c) is not None:
         proprietario = c.execute('SELECT id, session_version, telegram_id FROM users'
                                  ' WHERE origin_profile=?', (PIERO_PROFILE,)).fetchone()
         # Chi stava entrando poteva essere proprio la vecchia identita', e in quel caso la
