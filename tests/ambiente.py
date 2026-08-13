@@ -40,6 +40,12 @@ CHIAVI_PERICOLOSE = (
     # passerebbe o fallirebbe secondo chi lo esegue.
     'TELEGRAM_ADMIN_ID',
     'ADMIN_PASSWORD_HASH',
+    # Il consenso all'assorbimento della riga vuota, dalla PR #24. Ereditarlo
+    # capovolgerebbe l'esito di due test opposti — uno pretende il rifiuto senza
+    # consenso, l'altro la riparazione con — quindi con la variabile nell'ambiente il
+    # primo diventerebbe rosso su una macchina e verde su un'altra. Una variabile che
+    # decide un ramo va portata dal test, non ereditata.
+    'TELEGRAM_ADMIN_RECONCILE',
 )
 
 # Il token che i test PORTANO, invece di ereditare quello del proprietario.

@@ -1250,6 +1250,10 @@ def test_il_collegamento_dell_admin_RIPARA_un_account_gia_sbagliato(tmp_path, mo
 
     # ORA la variabile arriva — il deploy e' passato — e il proprietario rifa' il login.
     monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', ADMIN_FINTO)
+    # Il consenso all'assorbimento della riga vuota, che dal fail-closed di GPT-5.6 Sol
+    # sulla PR #24 e' un gesto DELIBERATO: senza, il servizio rifiuta con 409 invece di
+    # assorbire, perche' una riga vuota puo' anche essere di un cliente appena iscritto.
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_RECONCILE', '1')
     risposta = main.login_telegram(main.LoginTelegramIn(**_dati_login()))
     assert risposta.status_code == 200
 
@@ -1337,6 +1341,10 @@ def test_la_riparazione_NON_perde_i_dati_dell_account_sbagliato(tmp_path, monkey
     c.close()
 
     monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', ADMIN_FINTO)
+    # Il consenso all'assorbimento della riga vuota, che dal fail-closed di GPT-5.6 Sol
+    # sulla PR #24 e' un gesto DELIBERATO: senza, il servizio rifiuta con 409 invece di
+    # assorbire, perche' una riga vuota puo' anche essere di un cliente appena iscritto.
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_RECONCILE', '1')
     main.login_telegram(main.LoginTelegramIn(**_dati_login()))
 
     c = sqlite3.connect(percorso)
@@ -1571,6 +1579,10 @@ def test_le_sessioni_dell_account_SVUOTATO_muoiono_con_la_riparazione(tmp_path, 
         'il cookie non era valido nemmeno prima: il test non misura la riparazione')
 
     monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', ADMIN_FINTO)
+    # Il consenso all'assorbimento della riga vuota, che dal fail-closed di GPT-5.6 Sol
+    # sulla PR #24 e' un gesto DELIBERATO: senza, il servizio rifiuta con 409 invece di
+    # assorbire, perche' una riga vuota puo' anche essere di un cliente appena iscritto.
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_RECONCILE', '1')
     main.login_telegram(main.LoginTelegramIn(**_dati_login()))
 
     assert main.utente_dalla_sessione(RichiestaFinta()) is None, (
@@ -2056,3 +2068,141 @@ def test_un_LOCK_sul_database_non_LASCIA_APERTA_la_connessione(tmp_path, monkeyp
     assert chiuse, (
         'la connessione non e- stata chiusa: un login perso per lock perde un descrittore, e '
         'sotto contesa la perdita si accumula fino a esaurire i descrittori del processo')
+
+
+def _cliente_nudo(percorso, monkeypatch, id_cliente):
+    """Un cliente registrato che non possiede ANCORA niente, e la riga del proprietario."""
+    import sqlite3
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', '')
+    main.login_telegram(main.LoginTelegramIn(**_dati_login(id=id_cliente)))
+    c = sqlite3.connect(percorso)
+    cliente = c.execute('SELECT id FROM users WHERE telegram_id=?', (id_cliente,)).fetchone()[0]
+    piero = c.execute('SELECT id FROM users WHERE origin_profile=?',
+                      (main.PIERO_PROFILE,)).fetchone()[0]
+    parser = c.execute('SELECT COUNT(*) FROM parsers WHERE user_id=?', (cliente,)).fetchone()[0]
+    chat = c.execute('SELECT COUNT(*) FROM chats WHERE owner_user_id=?',
+                     (cliente,)).fetchone()[0]
+    c.close()
+    assert (parser, chat) == (0, 0), 'il cliente possiede qualcosa: non e- il caso in esame'
+    return cliente, piero
+
+
+def test_un_cliente_che_non_possiede_NIENTE_non_viene_assorbito(tmp_path, monkeypatch):
+    """Bloccante di GPT-5.6 Sol sulla PR #24, ed e' reale: `possiede_qualcosa` non basta.
+
+    Il criterio «possiede parser o chat» distingue un account pieno da uno vuoto, non un
+    **cliente** da una riga nata per errore. Un cliente appena registrato non possiede ancora
+    niente — e' lo stato normale di chi si iscrive — quindi era indistinguibile dalla riga
+    vuota del proprietario. Misurato prima della correzione, con `TELEGRAM_ADMIN_ID` che per
+    un refuso conteneva l'ID di quel cliente: al suo login la sua riga veniva svuotata del
+    `telegram_id` e la sua identita' Telegram finiva sulla riga del proprietario con
+    `is_admin=1`. **Il cliente entrava nella dashboard del proprietario**, che e' la
+    violazione dell'isolamento fra utenti, priorita' 7 di `CLAUDE.md`.
+
+    Nessun dato distingue i due casi: sono due righe di `users` con un'identita' e nient'altro.
+    Quando nessun dato distingue, l'unico marcatore affidabile e' il **consenso del
+    proprietario**, e in sua assenza si fallisce chiusi — vedi
+    `test_col_CONSENSO_la_riparazione_funziona_ancora` per il verso opposto.
+    """
+    import sqlite3
+    from fastapi import HTTPException
+    percorso = _prepara(tmp_path, monkeypatch, 'cliente_nudo.db')
+    CLIENTE = '777000777'
+    cliente, piero = _cliente_nudo(percorso, monkeypatch, CLIENTE)
+
+    # Il refuso: nella variabile finisce l'ID del cliente invece di quello del proprietario.
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', CLIENTE)
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_RECONCILE', '')
+
+    with pytest.raises(HTTPException) as errore:
+        main.login_telegram(main.LoginTelegramIn(**_dati_login(id=CLIENTE)))
+    assert errore.value.status_code == 409, (
+        f'il login del cliente ha risposto {errore.value.status_code} invece di 409')
+
+    c = sqlite3.connect(percorso)
+    suo = c.execute('SELECT telegram_id, is_admin FROM users WHERE id=?', (cliente,)).fetchone()
+    del_proprietario = c.execute('SELECT telegram_id FROM users WHERE id=?',
+                                 (piero,)).fetchone()[0]
+    tracciato = c.execute("SELECT COUNT(*) FROM admin_audit WHERE target_user_id=?",
+                          (cliente,)).fetchone()[0]
+    c.close()
+
+    assert suo[0] == CLIENTE, (
+        f'la riga del cliente e- stata svuotata del suo telegram_id (ora {suo[0]!r}): '
+        'un refuso del proprietario gli ha tolto il suo account')
+    assert del_proprietario is None, (
+        f'l-identita- del cliente e- finita sulla riga del proprietario ({del_proprietario!r}): '
+        'al suo prossimo login il cliente entra nella dashboard di un altro con is_admin=1')
+    assert tracciato == 1, (
+        'il rifiuto non e- tracciato in admin_audit: il proprietario non ha modo di sapere '
+        'che la sua variabile e- sbagliata')
+
+
+def test_col_CONSENSO_la_riparazione_funziona_ancora(tmp_path, monkeypatch):
+    """Il verso opposto, e senza di lui il fail-closed avrebbe rotto cio' che la PR ripara.
+
+    Il caso legittimo esiste: il proprietario ha fatto login PRIMA che
+    `TELEGRAM_ADMIN_ID` arrivasse nel processo, quindi una riga vuota possiede il suo
+    `telegram_id` e i suoi parser stanno su un'altra. Quella riparazione deve restare
+    possibile, altrimenti si torna al lockout irreversibile che questa PR chiude — si e'
+    solo spostato il difetto invece di correggerlo.
+
+    Il consenso e' `TELEGRAM_ADMIN_RECONCILE=1`, che il proprietario imposta quando LEGGE il
+    409 e sa che quella riga e' la sua. Non e' burocrazia: e' l'unico dato che il servizio
+    non puo' dedurre, perche' con la variabile sbagliata anche la fonte dell'identita' e'
+    sbagliata.
+    """
+    import sqlite3
+    percorso = _prepara(tmp_path, monkeypatch, 'con_consenso.db')
+    SUO = '888000888'
+    vuoto, piero = _cliente_nudo(percorso, monkeypatch, SUO)
+
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', SUO)
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_RECONCILE', '1')
+    risposta = main.login_telegram(main.LoginTelegramIn(**_dati_login(id=SUO)))
+    utente = json.loads(bytes(risposta.body).decode()).get('utente')
+
+    c = sqlite3.connect(percorso)
+    del_proprietario = c.execute('SELECT telegram_id, is_admin FROM users WHERE id=?',
+                                 (piero,)).fetchone()
+    svuotata = c.execute('SELECT telegram_id FROM users WHERE id=?', (vuoto,)).fetchone()[0]
+    c.close()
+
+    assert utente == piero, (
+        f'col consenso il proprietario non entra nel proprio account (utente {utente}, atteso '
+        f'{piero}): il fail-closed ha rotto la riparazione invece di renderla deliberata')
+    assert del_proprietario == (SUO, 1), (
+        f'la riga del proprietario non e- stata collegata: {del_proprietario!r}')
+    assert svuotata is None, 'la riga assorbita conserva il telegram_id, che e- UNIQUE'
+
+
+def test_il_CONSENSO_non_autorizza_a_fondere_un_account_PIENO(tmp_path, monkeypatch):
+    """Il consenso dice «quella riga vuota e' mia», non «prenditi i dati di chiunque».
+
+    Un account che possiede parser o chat resta rifiutato **anche** col consenso: il
+    proprietario che imposta la variabile non puo' avere inteso «travasa i parser di un
+    cliente sul mio account», e fra le due letture possibili si prende quella che non deruba
+    nessuno.
+    """
+    import sqlite3
+    from fastapi import HTTPException
+    percorso = _prepara(tmp_path, monkeypatch, 'consenso_pieno.db')
+    CLIENTE = '999000999'
+    cliente, piero = _cliente_nudo(percorso, monkeypatch, CLIENTE)
+
+    c = sqlite3.connect(percorso)
+    c.execute("INSERT INTO parsers(name,header,user_id,slug,ordine,active)"
+              " VALUES ('Il_suo_parser','P.Bet. SUO',?,'il-suo-parser',50,1)", (cliente,))
+    c.commit()
+    c.close()
+
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', CLIENTE)
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_RECONCILE', '1')
+    with pytest.raises(HTTPException) as errore:
+        main.login_telegram(main.LoginTelegramIn(**_dati_login(id=CLIENTE)))
+    assert errore.value.status_code == 409
+
+    c = sqlite3.connect(percorso)
+    suoi = c.execute('SELECT COUNT(*) FROM parsers WHERE user_id=?', (cliente,)).fetchone()[0]
+    c.close()
+    assert suoi == 1, f'il consenso ha travasato {1 - suoi} parser di un cliente'

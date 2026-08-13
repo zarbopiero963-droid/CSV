@@ -578,6 +578,11 @@ SEGRETO_SESSIONE = (hashlib.sha256(('betrelay-sessione-v1:' + BOT_TOKEN).encode(
 # erediterebbe parser e feed.
 TELEGRAM_ADMIN_ID = os.getenv('TELEGRAM_ADMIN_ID', '').strip()
 
+# Il CONSENSO del proprietario ad assorbire la riga che possiede quell'ID. Assente il
+# servizio rifiuta con `409` invece di travasare: vedi `riconciliazione_autorizzata()` per
+# il motivo, che e' l'unico caso in cui un dato non puo' distinguere due situazioni.
+TELEGRAM_ADMIN_RECONCILE = os.getenv('TELEGRAM_ADMIN_RECONCILE', '').strip()
+
 
 # Un `TELEGRAM_ADMIN_ID` malformato non solleva e non collega: il confronto con l'`id` che
 # Telegram manda non combacia mai, quindi il proprietario ottiene un account vuoto e la
@@ -908,6 +913,30 @@ def _assegna_slug_e_ordine(c):
         if ordine is None:
             c.execute('UPDATE parsers SET ordine=? WHERE name=?', (prossimo, nome))
             prossimo += 1
+
+
+def riconciliazione_autorizzata():
+    """Vero se il proprietario ha AUTORIZZATO l'assorbimento della riga vuota.
+
+    Esiste perche' `possiede_qualcosa()` non basta, e il perche' e' una constatazione:
+    distingue un account **pieno** da uno vuoto, non un **cliente** da una riga nata per
+    errore. Un cliente appena registrato non possiede ancora niente — e' lo stato normale di
+    chi si iscrive — quindi la sua riga e' indistinguibile dalla riga vuota che nasce quando
+    il proprietario fa login prima che `TELEGRAM_ADMIN_ID` arrivi nel processo: due righe di
+    `users` con un'identita' Telegram e nient'altro. Misurato con la variabile che per un
+    refuso contiene l'ID di un cliente: al suo login la sua riga veniva svuotata e la sua
+    identita' finiva sulla riga del proprietario con `is_admin=1`, cioe' **il cliente entrava
+    nella dashboard del proprietario**. Bloccante di GPT-5.6 Sol sulla PR #24.
+
+    Quando nessun dato distingue i due casi, il solo marcatore affidabile e' il consenso di
+    chi sa: il proprietario legge il `409`, riconosce quella riga come sua, imposta
+    `TELEGRAM_ADMIN_RECONCILE=1` e rifa' login. Il costo e' una variabile impostata una
+    volta; il guadagno e' che con la variabile sbagliata il servizio **non assorbe niente**,
+    perche' con un ID sbagliato anche la fonte dell'identita' e' sbagliata e non si puo'
+    dedurre nulla da essa. Assente → si fallisce chiusi, che sull'isolamento fra utenti e' il
+    verso obbligato (priorita' 7 di `CLAUDE.md`).
+    """
+    return TELEGRAM_ADMIN_RECONCILE == '1'
 
 
 def possiede_qualcosa(c, utente):
@@ -1977,15 +2006,31 @@ def _decidi_identita(c, data):
     # CASO 2 — l'identita' configurata si collega alla riga del proprietario.
     if e_amministratore and proprietario and (riga is None or riga[0] != proprietario[0]):
         if riga is not None:
+            # Rifiuta invece di scegliere quale dei due utenti derubare. Il messaggio verso
+            # chi chiama non nomina utenti ne' identificativi: chi lo riceve e' un cliente
+            # qualunque, e il dettaglio va nel log e in `admin_audit`, che legge il
+            # proprietario. Due motivi distinti, tracciati distinti, perche' il rimedio
+            # differisce: correggere la variabile, oppure autorizzare l'assorbimento.
             if possiede_qualcosa(c, riga[0]):
-                # Rifiuta invece di scegliere quale dei due utenti derubare. Il messaggio
-                # non nomina utenti ne' identificativi: chi lo riceve e' un cliente
-                # qualunque, e il dettaglio va nel log, che legge il proprietario.
                 logging.getLogger('xtrader.relay').error(
                     "TELEGRAM_ADMIN_ID punta a un account che possiede parser o chat:"
                     " collegamento RIFIUTATO per non fondere due utenti. Correggere la"
-                    " variabile con l'ID Telegram del proprietario.")
+                    " variabile con l'ID Telegram del proprietario."
+                    " TELEGRAM_ADMIN_RECONCILE non autorizza questo caso: il consenso"
+                    " riguarda una riga VUOTA, non i dati di un altro utente.")
                 _annota_admin(c, proprietario[0], 'collegamento_admin_rifiutato',
+                              bersaglio=riga[0])
+                raise HTTPException(409, 'configurazione dell\'amministratore incoerente')
+            if not riconciliazione_autorizzata():
+                # La riga e' vuota, ma vuota non significa «nata per errore»: un cliente
+                # appena registrato e' vuoto anche lui. Senza consenso non si assorbe.
+                logging.getLogger('xtrader.relay').error(
+                    "TELEGRAM_ADMIN_ID e' posseduto da un altro account, VUOTO."
+                    " Assorbimento NON autorizzato, quindi rifiutato: se quella riga e' la"
+                    " tua (login fatto prima che la variabile arrivasse nel processo),"
+                    " imposta TELEGRAM_ADMIN_RECONCILE=1 e rifai login. Se non lo e', quella"
+                    " riga e' di un cliente e va corretta la variabile.")
+                _annota_admin(c, proprietario[0], 'riconciliazione_non_autorizzata',
                               bersaglio=riga[0])
                 raise HTTPException(409, 'configurazione dell\'amministratore incoerente')
             riconcilia_su_utente(c, da_utente=riga[0], a_utente=proprietario[0])

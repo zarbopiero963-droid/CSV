@@ -322,7 +322,30 @@ TELEGRAM_ADMIN_ID: l'ID Telegram numerico del proprietario. Collega il suo login
   dashboard risulta vuota senza errori. Il collegamento e' IDEMPOTENTE: impostando la
   variabile, il login SUCCESSIVO ripara — travasa le tracce che l'account sbagliato
   aveva accumulato, gli toglie il telegram_id e lo scrive sulla riga PIERO, con una riga
-  in admin_audit. Quindi l'ordine fra variabile e login non conta.
+  in admin_audit. Quindi l'ordine fra variabile e login non conta — ma la riparazione
+  va AUTORIZZATA, vedi TELEGRAM_ADMIN_RECONCILE qui sotto.
+TELEGRAM_ADMIN_RECONCILE: facoltativa, si imposta a 1 e serve una volta sola. E' il
+  CONSENSO ad assorbire la riga vuota che possiede TELEGRAM_ADMIN_ID.
+  Perche' serve: «la riga e' vuota» distingue un account pieno da uno vuoto, non un
+  CLIENTE da una riga nata per errore. Un cliente appena registrato e' vuoto anche lui,
+  quindi le due situazioni sono indistinguibili — due righe di users con un'identita'
+  Telegram e nient'altro. Assorbire d'ufficio significava: se nella variabile finisce per
+  refuso l'ID di un cliente, al suo login la sua riga viene svuotata e la sua identita'
+  finisce sulla riga del proprietario con is_admin=1, cioe' IL CLIENTE ENTRA NELLA
+  DASHBOARD DEL PROPRIETARIO. Misurato. E' la violazione dell'isolamento fra utenti.
+  Quando nessun dato distingue i due casi, l'unico marcatore affidabile e' il consenso
+  di chi sa. Quindi: senza questa variabile il login risponde 409 e NON tocca niente,
+  scrivendo nei log e in admin_audit cosa fare.
+  Come si usa: si imposta a 1 SOLO dopo aver letto il 409 e riconosciuto quella riga
+  come propria (login fatto prima che TELEGRAM_ADMIN_ID arrivasse nel processo), si rifa'
+  login, e poi si puo' togliere. Se quella riga NON e' la propria, va corretta invece
+  TELEGRAM_ADMIN_ID.
+  Cosa NON autorizza: un account che possiede parser o chat resta rifiutato anche col
+  consenso. Il consenso dice «quella riga vuota e' mia», non «prenditi i dati di un
+  altro».
+  Nota operativa Railway: aggiungere o togliere il NOME di una variabile invalida la
+  cache di build (misurato), quindi conviene accorparla ad altre modifiche di variabili
+  invece di fare due deploy.
 
   L'INVARIANTE, in una frase: se TELEGRAM_ADMIN_ID e' configurato, la riga del
   proprietario porta QUEL telegram_id, o nessuno. Da lei discendono due comportamenti che
