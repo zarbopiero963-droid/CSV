@@ -424,16 +424,29 @@ essere tutto personale del cliente».
 
 Lo `re` di stdlib non ha timeout, perciò le due chiamate su pattern dell'utente
 passano da `_cerca_regex_utente`, che usa il modulo **`regex`** (dipendenza pinnata
-in `requirements.txt`) con un deadline duro (`REGEX_TIMEOUT_UTENTE = 0.1s`). Allo
-scadere, il match viene interrotto e vale «nessuna corrispondenza»: il messaggio di
-**quel** cliente non produce segnale, ma il worker resta libero per gli altri. Sia
-il timeout sia un errore di compilazione danno lo stesso esito, mai un'eccezione che
-diventi un 500. È una **asimmetria voluta** rispetto a `web/engine.js` (che gira nel
-browser del singolo utente, sulla sua macchina, e non ha un worker condiviso da
-proteggere): la anteprima non ha timeout, il server sì.
+in `requirements.txt`) con un deadline duro. Allo scadere, il match viene interrotto
+e vale «nessuna corrispondenza»: il messaggio di **quel** cliente non produce
+segnale, ma il worker resta libero per gli altri. Sia il timeout sia un errore di
+compilazione danno lo stesso esito, mai un'eccezione che diventi un 500. È una
+**asimmetria voluta** rispetto a `web/engine.js` (che gira nel browser del singolo
+utente, sulla sua macchina, e non ha un worker condiviso da proteggere): la
+anteprima non ha timeout, il server sì.
 
-Il timeout copre il singolo match — il caso «un pattern blocca tutti». Contro un
-cliente che **inonda** di messaggi cattivi servirebbe un **rate-limit per-utente**,
+Il deadline è a **due livelli**, e serve il secondo: `REGEX_TIMEOUT_UTENTE = 0.1s`
+è il tetto del **singolo match**, ma `esegui_parser` valuta una condizione **più 14
+colonne** — fino a 15 regex. Col solo tetto per-match, un parser con 15 regex
+catastrofiche sommerebbe **1,5s** (misurato) bloccando l'event loop per quel
+messaggio. Perciò `esegui_parser` fissa un **budget di parser** condiviso
+(`REGEX_BUDGET_PARSER_S = 0.1s`, un istante `time.monotonic`) e lo passa a ogni
+match: ciascuno usa il minimo fra il tetto per-match e il tempo che resta, e quando
+il budget è esaurito i match successivi non partono. L'intera esecuzione resta
+quindi ~0,1s comunque siano scritte le regole.
+
+Restano fuori due cose, entrambe dichiarate: la **config malformata** (JSON valido
+ma non un oggetto-parser, `match`/`columns` storti, valori non-stringa) è gestita
+dal fail-safe di `elabora_messaggio`, che la trasforma in «nessun segnale» invece
+che in un 500; e il caso di un cliente che **inonda** di molti messaggi cattivi, che
+il budget-per-messaggio non copre — lì servirà un **rate-limit per-utente**,
 rimandato per decisione del proprietario.
 
 Il contratto con XTrader: 14 colonne, tutti i campi tra virgolette, separatore

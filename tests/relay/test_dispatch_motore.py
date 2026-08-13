@@ -233,6 +233,70 @@ def test_config_json_NON_VALIDO_da_None_e_non_solleva():
     assert main.elabora_messaggio('SEGNALE\nEvento: A v B', cfg) is None
 
 
+def test_config_json_STRUTTURA_valida_ma_VALORI_storti_da_None_non_solleva():
+    """JSON valido, ma valori che fanno sollevare il motore → None, non 500.
+
+    `config_json` la scrive l'utente (col passo 3). Un valore regex NON stringa
+    (`123`, `["a"]`) fa sollevare `_regex.search` con `TypeError`, e una condizione
+    `contains` con valore numerico fa sollevare `.lower()` con `AttributeError`:
+    eccezioni che `_cerca_regex_utente` (fail-safe stretto sul solo match) non
+    intercetta. Nel webhook diventerebbero un 500 che Telegram ritenta in loop —
+    e, peggio, la config storta di UN cliente romperebbe l'elaborazione per gli
+    altri. Deve valere «parser_no_match». Segnalato da GPT-5.5 sulla PR #29.
+    """
+    for valore in (123, ['a'], {'x': 1}):
+        cfg = _cfg_web({'match': {'type': 'regex', 'value': valore},
+                        'columns': {'EventName': {'source': 'constant', 'value': 'X'}}})
+        assert main.elabora_messaggio('SEGNALE\nEvento: A v B', cfg) is None, (
+            f'valore regex {valore!r}: atteso None, ha sollevato o prodotto segnale')
+    # Condizione `contains` con valore non-stringa: `.lower()` solleva.
+    cfg = _cfg_web({'match': {'type': 'contains', 'value': 999},
+                    'columns': {'EventName': {'source': 'constant', 'value': 'X'}}})
+    assert main.elabora_messaggio('qualcosa 999', cfg) is None
+
+
+def test_config_json_STRUTTURA_non_oggetto_da_None():
+    """JSON valido ma non un oggetto-parser: `null`, `[]`, `match`/`columns` storti.
+
+    `json.loads` accetta `null` → None, `[]` → lista, e oggetti con `columns: []` o
+    `match: 5`. Il motore ci chiama `.get()` sopra e solleverebbe `AttributeError`.
+    Il fail-safe di `elabora_messaggio` deve trasformarli tutti in «nessun segnale»,
+    mai un 500. Segnalato da CodeRabbit sulla PR #29.
+    """
+    for grezzo in ('null', '[]', '"stringa"', '42',
+                   '{"match": 5, "columns": {}}',
+                   '{"columns": []}',
+                   '{"match": {"type": "contains", "value": "X"}, "columns": [1, 2]}',
+                   '{"match": {"type": "contains", "value": "X"}, "columns": {"EventName": 7}}'):
+        cfg = {'name': 'x', 'header': '', 'config_json': grezzo}
+        assert main.elabora_messaggio('X qualunque', cfg) is None, (
+            f'config {grezzo!r}: atteso None (parser_no_match), non un 500')
+
+
+def test_molte_regex_catastrofiche_in_UN_parser_restano_in_UN_budget():
+    """Budget di parser: 15 regex catastrofiche non sommano 15 × 0.1s.
+
+    Il timeout per-match da solo lascerebbe un parser malato bloccare l'event loop
+    per ~1.5s a messaggio (misurato: una condizione + 14 colonne regex catastrofiche
+    = 1.50s). Con il budget di parser condiviso l'intera `esegui_parser` resta ~0.1s.
+    Il caso «molti messaggi» resta il rate-limit per-utente, rimandato. Segnalato da
+    CodeRabbit sulla PR #29.
+    """
+    colonne = {c: {'source': 'regex', 'pattern': REGEX_CATASTROFICA, 'group': 0}
+               for c in main.HEADERS}
+    cfg = _cfg_web({'match': {'type': 'regex', 'value': REGEX_CATASTROFICA},
+                    'columns': colonne})
+    t = time.monotonic()
+    esito = main.elabora_messaggio(SOGGETTO_CATTIVO, cfg)
+    trascorso = time.monotonic() - t
+    assert esito is None, 'nessuna regex combacia: atteso nessun segnale'
+    # Senza budget sarebbero ~1.5s; con budget ~0.1s. 0.6s separa i due mondi e
+    # lascia margine per un runner lento.
+    assert trascorso < 0.6, (
+        f'{trascorso:.2f}s per un parser con 15 regex catastrofiche: il budget di '
+        f'parser non ha tenuto, e il worker resta bloccato ~1.5s a messaggio')
+
+
 # --------------------------------------------------- isolamento: uno non blocca l'altro
 
 def test_un_parser_con_regex_CATTIVA_non_blocca_un_altro_parser():

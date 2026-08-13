@@ -54,10 +54,15 @@ Le rotte che creano parser con config_json dalla web app arrivano piu' avanti;
 finche' non esistono, in produzione tutti i parser sono "senza config_json".
 
 Le regex di un parser configurabile (condizione o colonna) le scrive l'utente e
-girano sul worker condiviso: hanno un TIMEOUT DURO (0,1 s, modulo regex). Un pattern
+girano sul worker condiviso: hanno un TIMEOUT DURO (modulo regex, che lo `re` di
+stdlib non ha). Il deadline e' a due livelli: 0,1 s per singolo match, e un BUDGET DI
+PARSER di 0,1 s condiviso fra la condizione e le 14 colonne, cosi' un parser con
+molte regex catastrofiche non somma i timeout (misurato: 1,5 s su 15 regex senza il
+budget) e l'intera elaborazione di un messaggio resta ~0,1 s. Un pattern
 catastrofico di un cliente scade e non produce segnale PER LUI, ma non blocca il
-parsing degli altri clienti. Un cliente che inonda di messaggi cattivi non e' ancora
-coperto (servira' un rate-limit per-utente).
+parsing degli altri clienti. Una config malformata (JSON valido ma storto) da'
+"parser_no_match", non un 500. Un cliente che INONDA di molti messaggi cattivi non
+e' ancora coperto (servira' un rate-limit per-utente).
 
 INSERIMENTO MANUALE (usa il parser predefinito o quello indicato)
 POST /api/test-message?parser=Parser_Telegram_XTrader_v1
