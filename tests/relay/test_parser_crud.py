@@ -381,32 +381,39 @@ def test_la_creazione_RITENTA_su_collisione_di_slug(tmp_path, monkeypatch):
 
 
 def test_DELETE_pulisce_parser_chats_e_solo_quelle(servizio, tmp_path):
-    """La cancellazione rimuove le associazioni chat DEL parser, e solo quelle.
+    """La cancellazione rimuove le associazioni chat DEL parser, e solo quelle —
+    né quelle di un altro parser dello stesso utente, né quelle di un ALTRO UTENTE.
 
     `parser_chats` è vuota oggi (nessun codice la scrive ancora), quindi la si popola
     a mano nel DB del sottoprocesso per esercitare la pulizia aggiunta come fix del
     bloccante (GPT-5.5, Fable 5): un parser cancellato non deve lasciare associazioni
-    orfane che il dispatch futuro seguirebbe. E la pulizia è **scoped** all'`id` del
-    parser cancellato: le associazioni di un altro parser restano.
+    orfane che il dispatch futuro seguirebbe. La pulizia è **scoped** all'`id` del
+    parser cancellato — e il caso cross-utente (chiesto da GPT-5.5) lo dimostra:
+    l'eliminazione di un parser dell'utente A non tocca le associazioni di B.
     """
     import sqlite3
-    cookie, _ = _login_a(servizio)
-    p1 = json.loads(_crea(servizio, cookie, 'Uno')[1])
-    p2 = json.loads(_crea(servizio, cookie, 'Due')[1])
+    cookie_a, _ = _login_a(servizio)
+    cookie_b, _ = _login_b(servizio)
+    a1 = json.loads(_crea(servizio, cookie_a, 'Uno')[1])
+    a2 = json.loads(_crea(servizio, cookie_a, 'Due')[1])
+    b1 = json.loads(_crea(servizio, cookie_b, 'Di B')[1])
 
     db = sqlite3.connect(tmp_path / 'signals.db')
-    db.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (?,?)', (p1['id'], 111))
-    db.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (?,?)', (p2['id'], 222))
+    for pid, chat in ((a1['id'], 111), (a2['id'], 222), (b1['id'], 333)):
+        db.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (?,?)', (pid, chat))
     db.commit()
     db.close()
 
-    assert _chiama(servizio, 'DELETE', f'/api/me/parsers/{p1["slug"]}', cookie=cookie)[0] == 200
+    # A elimina il proprio parser a1.
+    assert _chiama(servizio, 'DELETE', f'/api/me/parsers/{a1["slug"]}', cookie=cookie_a)[0] == 200
 
     db = sqlite3.connect(tmp_path / 'signals.db')
     restano = sorted(r[0] for r in db.execute('SELECT parser_id FROM parser_chats').fetchall())
     db.close()
-    assert restano == [p2['id']], (
-        f'DELETE ha lasciato orfani o rimosso le associazioni sbagliate: {restano}')
+    # Resta l'altro parser di A e — soprattutto — quello di B, intatto.
+    assert restano == sorted([a2['id'], b1['id']]), (
+        f'DELETE ha lasciato orfani o toccato associazioni di un altro (anche di un '
+        f'altro UTENTE): {restano}')
 
 
 def test_prova_con_regex_CATASTROFICA_e_limitata(servizio):
