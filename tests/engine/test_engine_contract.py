@@ -209,3 +209,24 @@ def test_ci_sono_abbastanza_casi_di_confronto(casi):
     assert esportato and esportato['ok'], 'caso di confronto assente o fallito'
     assert len(esportato['dettaglio']) >= 10, (
         f'solo {len(esportato["dettaglio"])} casi di confronto: il guardiano copre troppo poco')
+
+
+def test_le_QUATTRO_obbligatorie_in_Python_sono_verbatim():
+    """La lista Python, verbatim, decisa dal proprietario (Issue #2/#25).
+
+    Il confronto JS/Python lega i RISULTATI (`missing`/`complete`): se le due liste
+    fossero sbagliate nello STESSO modo, quel confronto passerebbe comunque. Questo
+    caso invece pinna la lista Python parola per parola, e il caso gemello in
+    `engine_cases.mjs` pinna quella JS: insieme, una divergenza fra le due — o una
+    deriva di entrambe dalla decisione — diventa rossa. Chiesto da Claude Fable 5
+    sulla PR #28.
+    """
+    import importlib
+    import sys
+    sys.path.insert(0, str(RADICE))
+    main = importlib.import_module('main')
+    assert main.COLONNE_OBBLIGATORIE == ['EventName', 'MarketType', 'SelectionName', 'BetType'], (
+        f'COLONNE_OBBLIGATORIE e- {main.COLONNE_OBBLIGATORIE}, non le quattro decise su #2/#25')
+    # Provider e Price NON sono obbligatorie: pretenderle bloccherebbe segnali validi.
+    assert 'Provider' not in main.COLONNE_OBBLIGATORIE
+    assert 'Price' not in main.COLONNE_OBBLIGATORIE

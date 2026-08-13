@@ -1739,8 +1739,8 @@ TRASFORMAZIONI_MOTORE = {
     'lower': lambda v, t: v.lower(),
     'comma_to_dot': lambda v, t: v.replace(',', '.', 1),
     'dot_to_comma': lambda v, t: v.replace('.', ',', 1),
-    'digits_only': lambda v, t: (re.search(r'[0-9.,]+', v).group(0)
-                                 if re.search(r'[0-9.,]+', v) else ''),
+    'digits_only': lambda v, t: (lambda m: m.group(0) if m else '')(
+        re.search(r'[0-9.,]+', v)),
 }
 
 
@@ -1752,9 +1752,9 @@ def _riga_con_ancora(message, ancora):
     e' l'`undefined` di JS, e chi chiama lo distingue dal valore vuoto.
     """
     needle = (ancora or '').lower()
-    for l in re.split(r'\r?\n', message):
-        if needle in l.lower():
-            return l
+    for riga in re.split(r'\r?\n', message):
+        if needle in riga.lower():
+            return riga
     return None
 
 
@@ -1858,8 +1858,15 @@ def esegui_parser(message, config):
     colonne = config.get('columns') or {}
     matched = condizione_soddisfatta(message, config.get('match'))
     row = [_estrai_valore(message, colonne.get(c)) for c in HEADERS]
-    mancanti = [c for c in COLONNE_OBBLIGATORIE
-                if not str(row[HEADERS.index(c)] or '').strip()]
+    # `None`→'' e basta, NON `or ''`: JS usa `String(v ?? '')`, che sostituisce
+    # solo null/undefined. Con `or ''` una costante `0` o `False` (JSON validi)
+    # sarebbe letta come vuota qui e valorizzata in JS — i due motori
+    # divergerebbero su `missing` e `complete`, cioe' l-utente vedrebbe «completo»
+    # nel browser e feed vuoto in produzione. Segnalato da CodeRabbit, PR #28.
+    def _vuota(valore):
+        return not str('' if valore is None else valore).strip()
+
+    mancanti = [c for c in COLONNE_OBBLIGATORIE if _vuota(row[HEADERS.index(c)])]
     return {'matched': matched, 'row': row, 'missing': mancanti,
             'complete': matched and not mancanti}
 

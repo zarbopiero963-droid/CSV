@@ -365,9 +365,12 @@ caso('descrizione regola: leggibile e non solleva', () => {
 // ingressi non sono ricopiati in Python (regola 3) e la divergenza, se c'e',
 // diventa rossa nominando il caso.
 function casiConfronto() {
-  const casi = [];
+  // Nome distinto dall'array `casi` a livello di modulo (in cui `caso` inserisce):
+  // ombreggiarlo funzionava, ma una modifica futura qui dentro rischierebbe l-array
+  // sbagliato. Segnalato da CodeRabbit sulla PR #28.
+  const confronti = [];
   const aggiungi = (nome, message, config) =>
-    casi.push({ nome, message, config, atteso: runParser(message, config) });
+    confronti.push({ nome, message, config, atteso: runParser(message, config) });
 
   const prod = configProduzione();
   aggiungi('prod: messaggio valido → completo', MSG_VALIDO, prod);
@@ -454,7 +457,21 @@ function casiConfronto() {
       EventName: { source: 'constant', value: 'X' },
       Points: { source: 'regex', pattern: '([', group: 1 } },
   });
-  return casi;
+  // Una obbligatoria valorizzata con la COSTANTE 0 (JSON valido). In JS
+  // `String(0 ?? '')` e' '0' → colonna PRESENTE; con lo `str(0 or '')` di Python
+  // sarebbe '' → colonna MANCANTE, e i due motori divergerebbero su `missing` e
+  // `complete`. E' la divergenza che il gemello Python deve replicare: la riga
+  // resta `0` in entrambi, e il valore obbligatorio non e' vuoto. Il motore Python
+  // usa quindi `?? ''` (solo None/undefined), non `or ''`. CodeRabbit, PR #28.
+  aggiungi('obbligatoria = costante 0 → PRESENTE, non mancante (0 e- valorizzato)', 'x', {
+    match: { type: 'contains', value: 'x' },
+    columns: { ...soloEmpty,
+      EventName: { source: 'constant', value: 0 },
+      MarketType: { source: 'constant', value: 'OVER_UNDER_15' },
+      SelectionName: { source: 'constant', value: 'Over 1,5' },
+      BetType: { source: 'constant', value: 'PUNTA' } },
+  });
+  return confronti;
 }
 
 caso('motore: casi di confronto per il gemello Python', () => casiConfronto());
