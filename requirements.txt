@@ -1,3 +1,8 @@
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 pydantic==2.10.6
+# Motore di parsing: le regex dei parser sono fornite dagli utenti e girano sul
+# worker condiviso. `regex` ha `timeout=` sui match (lo `re` di stdlib no), che
+# impedisce a un pattern catastrofico di bloccare TUTTI i clienti. Vedi
+# `_cerca_regex_utente` in main.py.
+regex==2026.7.19
