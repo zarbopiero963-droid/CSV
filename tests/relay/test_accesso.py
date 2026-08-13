@@ -1307,3 +1307,67 @@ def test_un_RINNOVO_durante_l_invio_non_perde_la_prenotazione_nuova(tmp_path, mo
     assert raggiungibile == 0, (
         'telegram_reachable e- ancora 1 dopo un invio fallito: il proprietario non sa che il '
         'canale verso quel cliente e- rotto')
+
+
+@pytest.mark.parametrize('rotta', ['richiesta', 'approva', 'rifiuta'])
+def test_un_LOCK_su_BEGIN_non_lascia_aperta_la_connessione(rotta, tmp_path, monkeypatch):
+    """Chiesto da GPT-5.5 sulla PR #26, e vale perche' fissa la CLASSE, non il sito.
+
+    `BEGIN IMMEDIATE` stava fuori dal `try` in tutte e tre queste rotte: sotto contesa quel
+    comando stesso solleva `database is locked`, nessun `except` gira e la connessione resta
+    aperta. E' la stessa correzione che `login_telegram` aveva ricevuto sulla PR #24, e l'ho
+    riprodotta tre volte — la classe non era stata cercata, e senza un test parametrizzato la
+    prossima rotta la riprodurrebbe una quarta.
+
+    Si misura con una connessione finta che solleva su `BEGIN`, perche' e' l'unico modo di
+    OSSERVARE la chiusura: un test che tiene un lock vero vede l'eccezione ma non puo' vedere se
+    la connessione e' stata chiusa.
+    """
+    import asyncio
+    percorso, admin_s, cliente_s, cliente = _admin(tmp_path, monkeypatch, f'lock_{rotta}.db')
+    if rotta != 'richiesta':
+        main.chiedi_accesso(cliente_s)
+        numero = str(_corpo(main.elenco_richieste(admin_s))['richieste'][0]['richiesta'])
+
+    vera = main.db()
+    # Si contano APERTURE e CHIUSURE, non solo le chiusure: `utente_dalla_sessione` apre una
+    # connessione propria e la chiude, quindi «qualcuno ha chiamato close» e' vero comunque e
+    # l'asserzione sarebbe VACUA. Misurato: con la prima versione del test il sabotaggio —
+    # `BEGIN IMMEDIATE` rimesso fuori dal `try` — passava verde.
+    aperte, chiuse = [], []
+
+    class ConnessioneCheSiRifiuta:
+        def __init__(self):
+            aperte.append(self)
+
+        def execute(self, sql, *args):
+            if sql.startswith('BEGIN'):
+                raise sqlite3.OperationalError('database is locked')
+            return vera.execute(sql, *args)
+
+        def commit(self):
+            return vera.commit()
+
+        def rollback(self):
+            return vera.rollback()
+
+        def close(self):
+            chiuse.append(self)
+
+    monkeypatch.setattr(main, 'db', ConnessioneCheSiRifiuta)
+    with pytest.raises(sqlite3.OperationalError):
+        if rotta == 'richiesta':
+            main.chiedi_accesso(cliente_s)
+        elif rotta == 'approva':
+            asyncio.run(main.approva_richiesta(numero, _CorpoFinto(admin_s, {'giorni': 7})))
+        else:
+            main.rifiuta_richiesta(numero, admin_s)
+    vera.close()
+
+    assert len(aperte) >= 2, (
+        f'{len(aperte)} connessioni aperte: la rotta {rotta} non e- arrivata ad aprire la '
+        'propria, quindi il test non misura la sua chiusura')
+    assert len(chiuse) == len(aperte), (
+        f'la rotta {rotta} ha aperto {len(aperte)} connessioni e chiuso {len(chiuse)}: quando '
+        'BEGIN IMMEDIATE solleva, la connessione resta aperta. Ogni richiesta persa per contesa '
+        'perde un descrittore, e sotto contesa la perdita si accumula fino a esaurirli')
