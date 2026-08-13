@@ -394,6 +394,61 @@ dalla configurazione, sarebbe corretto solo per i parser configurati bene. **Il
 motore Python deve normalizzare allo stesso modo**, o le due implementazioni
 divergono sul caso limite invece che sul caso normale, cioè dove nessuno guarda.
 
+### Il server usa la config: il dispatcher `elabora_messaggio`
+
+Il webhook e la rotta di prova (`POST /api/parsers/{name}/test`) non chiamano più
+`parse_message` direttamente, ma passano da `elabora_messaggio(message, cfg)`:
+
+- un parser **con** `config_json` gira sul motore configurabile (`esegui_parser`):
+  se il risultato è `complete`, la sua `row` diventa il CSV del feed; altrimenti
+  nessun segnale, come un `parse_message` che torna `None`;
+- un parser **senza** `config_json` — PIERO e ogni parser legacy — resta su
+  `parse_message`, **byte per byte com'era**. Il feed di produzione (`/xtrader.csv`)
+  non cambia, ed è l'invariante che `tests/relay/test_dispatch_motore.py` vincola
+  confrontando il dispatcher con `parse_message` sul parser legacy.
+
+`config_json` era una colonna **morta** (creata dalla migrazione, mai letta né
+scritta): da ora il server la legge. Le rotte che la **scrivono** — la creazione di
+un parser dalla web app — arrivano col passo successivo (M3); finché non esistono,
+in produzione nessun parser ha `config_json` e il dispatcher instrada tutto su
+`parse_message`, quindi il comportamento è identico a prima.
+
+### ReDoS: il timeout sulle regex dell'utente
+
+Le regex dei parser (condizione `type: regex` e sorgente colonna `source: regex`)
+le scrivono gli utenti e girano sul worker Railway **condiviso**. Un pattern con
+backtracking catastrofico bloccherebbe il parsing di **tutti** i clienti, non solo
+di chi l'ha scritto — il rischio di isolamento segnalato da Claude Fable 5 e GPT-5.6
+Sol, e la richiesta esplicita del proprietario: «non deve bloccare a tutti, deve
+essere tutto personale del cliente».
+
+Lo `re` di stdlib non ha timeout, perciò le due chiamate su pattern dell'utente
+passano da `_cerca_regex_utente`, che usa il modulo **`regex`** (dipendenza pinnata
+in `requirements.txt`) con un deadline duro. Allo scadere, il match viene interrotto
+e vale «nessuna corrispondenza»: il messaggio di **quel** cliente non produce
+segnale, ma il worker resta libero per gli altri. Sia il timeout sia un errore di
+compilazione danno lo stesso esito, mai un'eccezione che diventi un 500. È una
+**asimmetria voluta** rispetto a `web/engine.js` (che gira nel browser del singolo
+utente, sulla sua macchina, e non ha un worker condiviso da proteggere): la
+anteprima non ha timeout, il server sì.
+
+Il deadline è a **due livelli**, e serve il secondo: `REGEX_TIMEOUT_UTENTE = 0.1s`
+è il tetto del **singolo match**, ma `esegui_parser` valuta una condizione **più 14
+colonne** — fino a 15 regex. Col solo tetto per-match, un parser con 15 regex
+catastrofiche sommerebbe **1,5s** (misurato) bloccando l'event loop per quel
+messaggio. Perciò `esegui_parser` fissa un **budget di parser** condiviso
+(`REGEX_BUDGET_PARSER_S = 0.1s`, un istante `time.monotonic`) e lo passa a ogni
+match: ciascuno usa il minimo fra il tetto per-match e il tempo che resta, e quando
+il budget è esaurito i match successivi non partono. L'intera esecuzione resta
+quindi ~0,1s comunque siano scritte le regole.
+
+Restano fuori due cose, entrambe dichiarate: la **config malformata** (JSON valido
+ma non un oggetto-parser, `match`/`columns` storti, valori non-stringa) è gestita
+dal fail-safe di `elabora_messaggio`, che la trasforma in «nessun segnale» invece
+che in un 500; e il caso di un cliente che **inonda** di molti messaggi cattivi, che
+il budget-per-messaggio non copre — lì servirà un **rate-limit per-utente**,
+rimandato per decisione del proprietario.
+
 Il contratto con XTrader: 14 colonne, tutti i campi tra virgolette, separatore
 virgola, terminatore CRLF, **UTF-8 con BOM**.
 

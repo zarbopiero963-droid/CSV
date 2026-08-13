@@ -42,6 +42,28 @@ le squadre prima - lasciava l'evento vuoto e faceva sollevare il parser. Se un
 canale era scritto cosi', ogni suo messaggio dava 500 e nessun segnale arrivava
 mai: il sintomo era il servizio che risponde e il feed che resta vuoto.
 
+DUE MOTORI DI PARSING: LEGACY E CONFIGURABILE
+Il webhook e la rotta di prova passano da elabora_messaggio, che sceglie:
+- parser CON config_json  -> motore configurabile (esegui_parser): la condizione e
+  la mappatura delle 14 colonne stanno nella config JSON, non nel codice. Se il
+  risultato e' completo (le quattro colonne obbligatorie valorizzate) diventa il
+  feed, altrimenti "parser_no_match".
+- parser SENZA config_json -> parser storico (parse_message), byte per byte com'era.
+  E' il caso di PIERO e di /xtrader.csv: NON cambia niente.
+Le rotte che creano parser con config_json dalla web app arrivano piu' avanti;
+finche' non esistono, in produzione tutti i parser sono "senza config_json".
+
+Le regex di un parser configurabile (condizione o colonna) le scrive l'utente e
+girano sul worker condiviso: hanno un TIMEOUT DURO (modulo regex, che lo `re` di
+stdlib non ha). Il deadline e' a due livelli: 0,1 s per singolo match, e un BUDGET DI
+PARSER di 0,1 s condiviso fra la condizione e le 14 colonne, cosi' un parser con
+molte regex catastrofiche non somma i timeout (misurato: 1,5 s su 15 regex senza il
+budget) e l'intera elaborazione di un messaggio resta ~0,1 s. Un pattern
+catastrofico di un cliente scade e non produce segnale PER LUI, ma non blocca il
+parsing degli altri clienti. Una config malformata (JSON valido ma storto) da'
+"parser_no_match", non un 500. Un cliente che INONDA di molti messaggi cattivi non
+e' ancora coperto (servira' un rate-limit per-utente).
+
 INSERIMENTO MANUALE (usa il parser predefinito o quello indicato)
 POST /api/test-message?parser=Parser_Telegram_XTrader_v1
 Header: X-Admin-Token: TOKEN

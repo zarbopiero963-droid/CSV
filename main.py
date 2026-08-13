@@ -4,6 +4,7 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
+import regex as _regex  # come `re`, ma con `timeout=` sui match: vedi _cerca_regex_utente
 
 app = FastAPI(title='XTrader Signal Relay')
 
@@ -1758,23 +1759,79 @@ def _riga_con_ancora(message, ancora):
     return None
 
 
+# Timeout duro (secondi) per OGNI match di una regex FORNITA DALL'UTENTE. Il worker
+# Railway e' condiviso fra tutti i clienti: senza un deadline, un pattern con
+# backtracking catastrofico scritto da un cliente bloccherebbe il parsing di TUTTI,
+# non solo il suo — il rischio di isolamento segnalato da Claude Fable 5 e GPT-5.6
+# Sol, e la richiesta esplicita del proprietario («non deve bloccare a tutti, deve
+# essere tutto personale del cliente»). Il modulo `regex` interrompe il match allo
+# scadere del deadline. Misurato: `(a|aa)+$` su ~60 'a' scade qui invece di
+# appendere il processo; `re` di stdlib non ha timeout e per questo non si usa sui
+# pattern dell'utente. 0.1s e' ampio per una regex sana e stretto per una malata.
+REGEX_TIMEOUT_UTENTE = 0.1
+
+# Budget TOTALE di tempo-regex per UNA esecuzione del parser (una condizione + 14
+# colonne). Il solo timeout per-match non basta: un parser con molte regex
+# catastrofiche sommerebbe 15 × 0.1s = 1.5s, bloccando l'event loop per QUEL
+# messaggio (misurato). Con un budget di parser condiviso fra tutti i match della
+# stessa esecuzione, l'intera `esegui_parser` resta ~0.1s comunque siano scritte le
+# regole. Il caso «molti messaggi» resta il rate-limit per-utente, rimandato per
+# decisione del proprietario. Segnalato da CodeRabbit sulla PR #29.
+REGEX_BUDGET_PARSER_S = 0.1
+
+
+def _cerca_regex_utente(pattern, message, flags, scadenza=None):
+    """`regex.search` su un pattern dell'UTENTE, con timeout duro e fail-safe.
+
+    Un pattern catastrofico di un cliente scade e restituisce None: il SUO
+    messaggio non produce segnale, ma il worker resta libero per gli altri clienti
+    — l'isolamento che il proprietario ha chiesto. Sia un errore di compilazione sia
+    il timeout danno None, mai un'eccezione che risalga all'handler: la
+    condizione/colonna risulta semplicemente non soddisfatta, esattamente come
+    faceva il vecchio `except re.error` piu' stretto.
+
+    `scadenza` (un istante `time.monotonic`) è il **budget di parser**: se passato,
+    il timeout di questo match è il minimo fra `REGEX_TIMEOUT_UTENTE` e il tempo che
+    resta, e se il budget è già esaurito il match non parte nemmeno. Così una
+    condizione più 14 colonne tutte catastrofiche non sommano i loro timeout: la
+    somma resta il budget. Senza `scadenza` vale il solo timeout per-match — è la
+    chiamata diretta della funzione, fuori da `esegui_parser`.
+    """
+    if scadenza is not None:
+        rimanente = scadenza - time.monotonic()
+        if rimanente <= 0:
+            return None
+        timeout = min(REGEX_TIMEOUT_UTENTE, rimanente)
+    else:
+        timeout = REGEX_TIMEOUT_UTENTE
+    try:
+        return _regex.search(pattern, message, flags=flags, timeout=timeout)
+    except (_regex.error, TimeoutError):
+        return None
+
+
 def _flag_regex(flags):
-    """I flag JS (`'i'`, `'im'`, …) tradotti nei flag di Python.
+    """I flag JS (`'i'`, `'im'`, …) tradotti nei flag del modulo `regex`.
 
     `'i'` e' il default in engine.js (`rule.flags || 'i'`). `'g'` e `'u'` non
-    hanno un equivalente utile qui — la ricerca di Python non e' globale, e le
-    stringhe sono gia' unicode — e vengono ignorati, non tradotti in un errore.
+    hanno un equivalente utile qui — la ricerca non e' globale, e le stringhe sono
+    gia' unicode — e vengono ignorati, non tradotti in un errore. I flag sono
+    quelli di `_regex` perche' e' `_regex.search` a riceverli (vedi
+    `_cerca_regex_utente`), non lo `re` di stdlib.
     """
-    mappa = {'i': re.I, 'm': re.M, 's': re.S, 'x': re.X}
+    mappa = {'i': _regex.I, 'm': _regex.M, 's': _regex.S, 'x': _regex.X}
     risultato = 0
     for f in (flags or 'i'):
         risultato |= mappa.get(f, 0)
     return risultato
 
 
-def _estrai_valore(message, regola):
+def _estrai_valore(message, regola, scadenza=None):
     """Il valore grezzo di una colonna dal messaggio, poi le trasformazioni
     (`extractValue`).
+
+    `scadenza` è il budget di parser condiviso, passato solo al match regex (vedi
+    `_cerca_regex_utente`); le altre sorgenti non eseguono regex dell'utente.
 
     I casi che restituiscono PRIMA delle trasformazioni sono deliberati e copiati
     da JS: riga non trovata e regex che non combacia (o non compila) danno `''`
@@ -1803,10 +1860,11 @@ def _estrai_valore(message, regola):
         else:
             v = riga
     elif sorgente == 'regex':
-        try:
-            m = re.search(regola.get('pattern', ''), message, _flag_regex(regola.get('flags')))
-        except re.error:
-            return ''
+        # Pattern dell'utente → timeout duro (worker condiviso), dentro il budget di
+        # parser. Errore o scadenza danno None, cioe' colonna vuota, come prima
+        # faceva `except re.error`.
+        m = _cerca_regex_utente(regola.get('pattern', ''), message,
+                                _flag_regex(regola.get('flags')), scadenza)
         if not m:
             return ''
         gruppo = regola.get('group', 1)
@@ -1826,19 +1884,19 @@ def _estrai_valore(message, regola):
     return v
 
 
-def condizione_soddisfatta(message, cond):
+def condizione_soddisfatta(message, cond, scadenza=None):
     """Il messaggio appartiene a questo parser? (`matches`).
 
     Senza condizione o senza valore → `False`: un parser senza condizione non
-    rivendica ogni messaggio, non rivendica nessuno.
+    rivendica ogni messaggio, non rivendica nessuno. `scadenza` è il budget di
+    parser condiviso (vedi `_cerca_regex_utente`).
     """
     if not cond or not cond.get('value'):
         return False
     if cond.get('type') == 'regex':
-        try:
-            return re.search(cond['value'], message, re.I) is not None
-        except re.error:
-            return False
+        # Pattern dell'utente → timeout duro (worker condiviso), dentro il budget di
+        # parser. Errore o scadenza danno None → False: messaggio non rivendicato.
+        return _cerca_regex_utente(cond['value'], message, _regex.I, scadenza) is not None
     return cond['value'].lower() in message.lower()
 
 
@@ -1855,9 +1913,14 @@ def esegui_parser(message, config):
     obbligatoria fatta di soli spazi e' vuota, anche se l'utente non ha messo un
     `trim` fra le trasformazioni.
     """
+    # Un solo budget di tempo-regex per l'INTERA esecuzione (condizione + 14
+    # colonne): senza, un parser con molte regex catastrofiche sommerebbe i timeout
+    # per-match (misurato 1.5s su 15 regex) e bloccherebbe l'event loop per quel
+    # messaggio. Ogni `_cerca_regex_utente` sotto riceve questa scadenza condivisa.
+    scadenza = time.monotonic() + REGEX_BUDGET_PARSER_S
     colonne = config.get('columns') or {}
-    matched = condizione_soddisfatta(message, config.get('match'))
-    row = [_estrai_valore(message, colonne.get(c)) for c in HEADERS]
+    matched = condizione_soddisfatta(message, config.get('match'), scadenza)
+    row = [_estrai_valore(message, colonne.get(c), scadenza) for c in HEADERS]
     # `None`→'' e basta, NON `or ''`: JS usa `String(v ?? '')`, che sostituisce
     # solo null/undefined. Con `or ''` una costante `0` o `False` (JSON validi)
     # sarebbe letta come vuota qui e valorizzata in JS — i due motori
@@ -1869,6 +1932,53 @@ def esegui_parser(message, config):
     mancanti = [c for c in COLONNE_OBBLIGATORIE if _vuota(row[HEADERS.index(c)])]
     return {'matched': matched, 'row': row, 'missing': mancanti,
             'complete': matched and not mancanti}
+
+
+def elabora_messaggio(message, cfg):
+    """Dispatcher unico: `config_json` → motore configurabile; altrimenti legacy.
+
+    PIERO e ogni parser SENZA `config_json` restano su `parse_message`, byte per
+    byte com'erano: il feed di produzione (`/xtrader.csv`) non cambia — e nessun
+    test di questo repository sul contratto CSV di PIERO deve muoversi. I parser
+    creati dalla web app scrivono `config_json` e girano su `esegui_parser`.
+
+    Un solo punto d'ingresso per il webhook e per la rotta di prova, cosi' la
+    regola «guarda `complete`, non `matched`» (un messaggio riconosciuto ma senza
+    evento non deve produrre una riga) vive in un posto solo.
+
+    Restituisce `{'event', 'csv'}` come `parse_message`, oppure None quando non
+    c'e' segnale: condizione non soddisfatta, obbligatoria mancante, o
+    `config_json` non decodificabile. None non solleva: e' l'`ignored:
+    parser_no_match` dell'handler, non un 500.
+    """
+    grezzo = cfg.get('config_json')
+    if not grezzo:
+        return parse_message(message, cfg)
+    # TUTTO il percorso del motore sta sotto un solo try, e la cattura e' larga di
+    # proposito. `config_json` la scrive l'utente (dalla web app): un JSON valido ma
+    # malformato per il motore — senza `columns`, con `match` non-dict, un `pattern`
+    # o un valore non-stringa, una struttura che fa sollevare `esegui_parser` — non
+    # deve MAI diventare un 500. Telegram ritenta i 500 in loop, e — la ragione che
+    # conta — la config storta di UN cliente non deve poter rompere l'elaborazione
+    # per TUTTI gli altri profili dello stesso bot. Vale «parser_no_match»: nessun
+    # segnale per quel cliente, il worker libero per gli altri. Segnalato da GPT-5.5
+    # e Claude Fable 5 sulla PR #29 (isolamento «non deve bloccare a tutti»).
+    try:
+        config = json.loads(grezzo)
+        risultato = esegui_parser(message, config)
+        if not risultato['complete']:
+            return None
+        # `esegui_parser` puo' lasciare valori non-stringa nella riga (una costante
+        # JSON `0`/`False`): il feed li serializza via `make_csv`, che quota tutto.
+        # `None` → '' per non scrivere la stringa "None" nel CSV.
+        row = ['' if v is None else v for v in risultato['row']]
+        csv_riga = make_csv(row)
+        evento = str(row[HEADERS.index('EventName')])
+    except Exception:  # noqa: BLE001 - fail-safe deliberato, vedi commento sopra
+        logging.getLogger('xtrader.relay').warning(
+            'config parser non elaborabile: nessun segnale prodotto')
+        return None
+    return {'event': evento, 'csv': csv_riga}
 
 
 def auth(token):
@@ -1918,10 +2028,10 @@ def auth(token):
 
 
 def get_parser(c, name):
-    r = c.execute('SELECT name,header,market_name,market_type,selection_name,handicap,bet_type FROM parsers WHERE name=?', (name,)).fetchone()
+    r = c.execute('SELECT name,header,market_name,market_type,selection_name,handicap,bet_type,config_json FROM parsers WHERE name=?', (name,)).fetchone()
     if not r:
         raise HTTPException(404, 'Parser non trovato')
-    return dict(zip(['name','header','market_name','market_type','selection_name','handicap','bet_type'], r))
+    return dict(zip(['name','header','market_name','market_type','selection_name','handicap','bet_type','config_json'], r))
 
 
 def get_profile(c, name):
@@ -3201,7 +3311,7 @@ def test_parser(name: str, data: MessageIn, x_admin_token: str | None = Header(N
     auth(x_admin_token)
     c = db()
     cfg = get_parser(c, name)
-    parsed = parse_message(data.message, cfg)
+    parsed = elabora_messaggio(data.message, cfg)
     if not parsed:
         c.close()
         raise HTTPException(422, 'Messaggio non riconosciuto da questo parser')
@@ -3321,7 +3431,7 @@ async def telegram_webhook(request: Request):
         c.close()
         return {'ok': True, 'ignored': f'access_{bloccato}'}
     cfg = get_parser(c, profile['parser'])
-    parsed = parse_message(text, cfg)
+    parsed = elabora_messaggio(text, cfg)
     if not parsed:
         c.close()
         return {'ok': True, 'ignored': 'parser_no_match'}
