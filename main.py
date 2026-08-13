@@ -3399,6 +3399,17 @@ def _valida_config_parser(config):
     for nome, regola in (colonne or {}).items():
         if not isinstance(regola, dict):
             raise HTTPException(422, f'la regola della colonna {nome!r} deve essere un oggetto')
+    # Numeri JSON non-finiti (`NaN`, `Infinity`): `request.json()` li accetta e
+    # `json.dumps` di default li serializza come JSON NON standard. Verrebbero scritti,
+    # ma `JSONResponse` li rifiuta quando riserializza `config` a ogni lista/creazione:
+    # l'utente si troverebbe un **500 su OGNI risposta** che include quel parser — e
+    # `esegui_parser('probe', ...)` non li tocca, perche' un campo inutilizzato non viene
+    # mai letto dal motore. Si rifiutano qui, alla SCRITTURA, con un 422. Bloccante Major
+    # di CodeRabbit sulla PR #30.
+    try:
+        json.dumps(config, allow_nan=False)
+    except (ValueError, TypeError):
+        raise HTTPException(422, 'config contiene numeri non validi: NaN e Infinity non sono ammessi') from None
     # Dry-run: la config deve ESEGUIRE senza sollevare. Il tempo-regex e' limitato dal
     # budget di `esegui_parser`, quindi anche un pattern cattivo qui e' innocuo.
     try:
@@ -3406,7 +3417,7 @@ def _valida_config_parser(config):
     except HTTPException:
         raise
     except Exception:
-        raise HTTPException(422, 'config non eseguibile: controlla la condizione e le regole delle colonne')
+        raise HTTPException(422, 'config non eseguibile: controlla la condizione e le regole delle colonne') from None
 
 
 def _crea_parser_utente(c, user_id, titolo, config, active):

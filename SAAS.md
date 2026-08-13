@@ -604,10 +604,12 @@ Regole, tutte vincolate da `tests/relay/test_parser_crud.py`:
   pre-`titolo`, es. il parser PIERO di default): nessun parser esistente resta con
   `titolo: null`, così il contratto `titolo: str` vale anche per chi era già a database.
 - La **`config`** viene validata alla scrittura: struttura (oggetto, `match`/`columns`
-  oggetti, ogni regola un oggetto) **e** un dry-run di `esegui_parser`, così i valori
-  storti danno un **422** con il motivo invece di un parser che scarta in silenzio. È
-  la validazione che CodeRabbit ha chiesto, al confine giusto; il fail-safe di
-  `elabora_messaggio` resta come seconda rete sul webhook.
+  oggetti, ogni regola un oggetto), **numeri finiti** (`NaN`/`Infinity` → 422: li
+  accetterebbe `request.json()` ma `JSONResponse` li rifiuta poi in lettura, dando un
+  500 su ogni lista/creazione che include quel parser) **e** un dry-run di
+  `esegui_parser`, così i valori storti danno un **422** con il motivo invece di un
+  parser che scarta in silenzio. È la validazione che CodeRabbit ha chiesto, al confine
+  giusto; il fail-safe di `elabora_messaggio` resta come seconda rete sul webhook.
 - `POST …/test` è **a secco**: non scrive nel feed di nessuno. Restituisce
   `matched`/`missing`/`complete` — la base del motore diagnostico «perché non ha fatto
   il parser» — e, se completo, l'`event` e il `csv`.

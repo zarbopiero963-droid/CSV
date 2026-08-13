@@ -238,7 +238,7 @@ def test_due_utenti_STESSO_titolo_nessuna_collisione(servizio):
 
 def test_user_id_viene_dalla_SESSIONE_non_dal_corpo(servizio):
     """Un `user_id` nel corpo non deve poter assegnare il parser a un altro utente."""
-    cookie_a, id_a = _login_a(servizio)
+    cookie_a, _ = _login_a(servizio)
     cookie_b, id_b = _login_b(servizio)
 
     # A crea, ma prova a intestare il parser a B mettendo user_id nel corpo.
@@ -573,15 +573,22 @@ def test_PUT_che_perde_la_corsa_con_una_DELETE_da_404_non_500(tmp_path, monkeypa
         def __getattr__(self, nome):
             return getattr(self._sotto, nome)
 
-    monkeypatch.setattr(main, 'db', lambda: ConnCorsaDelete(reale))
+    corsa = ConnCorsaDelete(reale)
+    monkeypatch.setattr(main, 'db', lambda: corsa)
     monkeypatch.setattr(main, '_sessione_valida', lambda r: {'id': 1, 'versione': 1})
 
     class Req:
         async def json(self):
             return {'titolo': 'Rinominato', 'config': config}
 
-    with pytest.raises(main.HTTPException) as e:
-        asyncio.run(main.modifica_parser_mio(slug, Req()))
+    try:
+        with pytest.raises(main.HTTPException) as e:
+            asyncio.run(main.modifica_parser_mio(slug, Req()))
+    finally:
+        reale.close()
+    # Senza questa asserzione il test passerebbe A VUOTO se l'UPDATE venisse riscritto e
+    # il wrapper non intercettasse piu' nulla: la guardia 404 non sarebbe esercitata.
+    assert corsa._fatta, 'la DELETE forzata non e- scattata: il test non prova la guardia'
     assert e.value.status_code == 404, (
         f'PUT che perde la corsa con una DELETE: atteso 404, ricevuto '
         f'{e.value.status_code}')
@@ -615,3 +622,29 @@ def test_la_migrazione_retrocompila_il_titolo_dei_parser_legacy(tmp_path, monkey
     conn.close()
     assert riga is not None and riga[0], (
         f'la migrazione non ha retrocompilato il titolo del parser legacy: {riga!r}')
+
+
+def test_config_con_NaN_o_Infinity_da_422_e_non_viene_MAI_scritta(servizio):
+    """Numeri JSON non-finiti nella config → **422** alla scrittura, mai memorizzati.
+
+    `request.json()` accetta `NaN`/`Infinity` (Python li ammette) e `json.dumps` di
+    default li scriverebbe come JSON NON standard; poi `JSONResponse` li rifiuta quando
+    riserializza la config, e l'utente prenderebbe un **500 su OGNI lista/creazione** che
+    include quel parser. `esegui_parser` non li tocca (campo inutilizzato), quindi la
+    guardia dev'essere un `json.dumps(config, allow_nan=False)` esplicito alla scrittura.
+    Bloccante Major di CodeRabbit sulla PR #30.
+
+    Fail-first: sul codice VECCHIO la POST torna **500** (config scritta, poi la risposta
+    non si riserializza) invece di 422.
+    """
+    cookie, _ = _login_a(servizio)
+    for cattivo in (float('nan'), float('inf'), float('-inf')):
+        cfg = {'match': {'type': 'contains', 'value': 'X'},
+               'columns': {'EventName': {'source': 'constant', 'value': 'X'}},
+               'inutile': cattivo}
+        stato, corpo, _ = _crea(servizio, cookie, 'Cattiva', config=cfg)
+        assert stato == 422, (
+            f'config con {cattivo!r}: atteso 422, ricevuto {stato} ({corpo[:120]!r})')
+    # E nessun parser e' stato scritto: la lista dell'utente resta vuota.
+    assert json.loads(_chiama(servizio, 'GET', '/api/me/parsers', cookie=cookie)[1]) == [], (
+        'una config non-finita e- stata scritta comunque: la lista non e- vuota')
