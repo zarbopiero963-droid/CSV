@@ -312,12 +312,101 @@ TELEGRAM_ALLOWED_CHAT_IDS: chat_id iniziali del profilo PIERO, separati da virgo
   il profilo PIERO, e una variabile per cliente imporrebbe un rideploy.
 TELEGRAM_ADMIN_ID: l'ID Telegram numerico del proprietario. Collega il suo login
   all'utente che possiede i suoi parser: quella riga ha origin_profile='PIERO' e
-  nessun telegram_id, perche' nessuno lo aveva mai saputo. SENZA questa variabile il
-  primo login del proprietario crea un secondo account VUOTO, e la sua dashboard
-  risulta vuota senza nessun errore da nessuna parte. Si trova scrivendo al bot e
+  nessun telegram_id, perche' nessuno lo aveva mai saputo. Si trova scrivendo al bot e
   aprendo https://api.telegram.org/bot<TOKEN>/getUpdates: e' message.from.id.
   Non e' un segreto — chiunque riceva un suo messaggio lo conosce — ma decide chi e'
-  l'amministratore.
+  l'amministratore. Deve contenere SOLO CIFRE: spazi e newline ai bordi sono tolti,
+  ma virgolette, apici, un + o uno spazio interno lo rendono diverso dall'id che
+  Telegram manda, e il confronto non combacia mai.
+  SENZA la variabile il login del proprietario crea un account VUOTO e la sua
+  dashboard risulta vuota senza errori. Il collegamento e' IDEMPOTENTE: impostando la
+  variabile, il login SUCCESSIVO ripara — travasa le tracce che l'account sbagliato
+  aveva accumulato, gli toglie il telegram_id e lo scrive sulla riga PIERO, con una riga
+  in admin_audit. Quindi l'ordine fra variabile e login non conta — ma la riparazione
+  va AUTORIZZATA, vedi TELEGRAM_ADMIN_RECONCILE qui sotto.
+TELEGRAM_ADMIN_RECONCILE: facoltativa, serve una volta sola. E' il CONSENSO ad
+  assorbire la riga vuota che possiede TELEGRAM_ADMIN_ID, e il suo valore e'
+  l'IDENTIFICATIVO DI QUELLA RIGA — non un 1. Il numero lo trovi nel messaggio di log
+  che accompagna il 409: dice esattamente quale valore mettere.
+  Perche' serve: «la riga e' vuota» distingue un account pieno da uno vuoto, non un
+  CLIENTE da una riga nata per errore. Un cliente appena registrato e' vuoto anche lui,
+  quindi le due situazioni sono indistinguibili — due righe di users con un'identita'
+  Telegram e nient'altro. Assorbire d'ufficio significava: se nella variabile finisce per
+  refuso l'ID di un cliente, al suo login la sua riga viene svuotata e la sua identita'
+  finisce sulla riga del proprietario con is_admin=1, cioe' IL CLIENTE ENTRA NELLA
+  DASHBOARD DEL PROPRIETARIO. Misurato. E' la violazione dell'isolamento fra utenti.
+  Quando nessun dato distingue i due casi, l'unico marcatore affidabile e' il consenso
+  di chi sa. Quindi: senza questa variabile il login risponde 409 e NON tocca niente,
+  scrivendo nei log e in admin_audit cosa fare.
+  Come si usa: si legge il 409 nei log, si riconosce quella riga come propria (login
+  fatto prima che TELEGRAM_ADMIN_ID arrivasse nel processo), si imposta la variabile con
+  l'identificativo che il log indica, si rifa' login. Se quella riga NON e' la propria,
+  va corretta invece TELEGRAM_ADMIN_ID.
+  Perche' l'ID della riga e non 1: un interruttore globale che la documentazione dice di
+  togliere dopo l'uso e' un interruttore che resta, e da quel momento un refuso futuro
+  in TELEGRAM_ADMIN_ID verso un'altra riga vuota verrebbe assorbito di nuovo — il
+  fail-closed sparirebbe in silenzio. Legato alla riga, un consenso dimenticato e'
+  innocuo: la riga assorbita non viene cancellata, quindi il suo identificativo non
+  viene mai riusato da un utente nuovo. Rischio alzato da GPT-5.5.
+  Puoi togliere la variabile dopo l'uso, ma non e' piu' una precauzione necessaria.
+  Cosa NON autorizza: un account che possiede parser o chat resta rifiutato anche col
+  consenso. Il consenso dice «quella riga vuota e' mia», non «prenditi i dati di un
+  altro».
+  Nota operativa Railway: aggiungere o togliere il NOME di una variabile invalida la
+  cache di build (misurato), quindi conviene accorparla ad altre modifiche di variabili
+  invece di fare due deploy.
+
+  L'INVARIANTE, in una frase: se TELEGRAM_ADMIN_ID e' configurato, la riga del
+  proprietario porta QUEL telegram_id, o nessuno. Da lei discendono due comportamenti che
+  non sono dettagli:
+
+  1. CAMBIARE la variabile TOGLIE l'accesso alla vecchia identita', e la revoca viene
+     APPLICATA alla PRIMA RICHIESTA AUTENTICATA che arriva dopo il cambio: un login, o
+     una qualunque pagina del sito, di CHIUNQUE. Cambiare la variabile non scrive nel
+     database — il servizio la legge all'avvio — quindi fino a quella richiesta la riga
+     porta ancora il vecchio telegram_id. Poi il collegamento stantio viene sciolto
+     (telegram_id azzerato, session_version incrementata, riga in admin_audit) e la
+     vecchia identita' torna un cliente qualunque.
+     Due versioni precedenti erano insufficienti, ed e' utile sapere perche': prima la
+     revoca scattava solo all'ingresso del NUOVO ID, quindi se il nuovo non entrava mai il
+     vecchio restava amministratore per sempre; poi scattava a ogni LOGIN, ma chi aveva
+     gia' un cookie amministrativo lo conservava — e non scadeva, perche' ogni richiesta
+     valida rinnova il cookie, quindi una sessione tenuta aperta e' immortale. Chi ha il
+     pannello aperto non ha nessun motivo di rifare login. Ora la sua stessa prossima
+     richiesta chiude la sua sessione.
+     Il feed non e' toccato: /xtrader.csv non ha sessione, quindi la revoca non lo
+     riguarda.
+     SVUOTARE la variabile invece NON scioglie niente, ed e' deliberato: vuota significa
+     «nessuna invariante dichiarata», non «revoca». Sciogliendo, la riga del proprietario
+     resterebbe senza telegram_id e nessun ramo potrebbe ricollegarla — al login dopo
+     nascerebbe un secondo account. Un valore MALFORMATO (virgolette prese incollando
+     nel pannello, spazi interni, cifre non ASCII, zero iniziale) e' trattato come NON
+     configurato per la stessa ragione: applicare l'invariante su un valore con cui
+     nessun collegamento nuovo puo' nascere scioglieva quello buono e faceva nascere un
+     account vuoto, cioe' un refuso nel pannello chiudeva il proprietario fuori dal
+     proprio account.
+  2. Se la variabile punta a un account che POSSIEDE parser o chat, il login viene
+     RIFIUTATO con 409: l'account bersaglio resta INTATTO, nessun dato viene travasato e
+     nessun telegram_id viene spostato (il collegamento stantio del proprietario, se
+     c'era, puo' essere stato sciolto al punto 1, che riguarda un'altra riga).
+     Prima quell'account
+     veniva assorbito: bastava sbagliare una cifra e mettere l'ID di un cliente, e al suo
+     login i suoi parser e le sue chat passavano al proprietario, il suo telegram_id
+     veniva azzerato e lui otteneva is_admin=1 — perdeva tutto E entrava nell'account di
+     un altro. Il rifiuto e' tracciato in admin_audit e spiegato nei log; il messaggio
+     verso chi chiama non nomina utenti ne' identificativi.
+     Segnali e log NON contano come possesso: sono tracce, e seguono l'utente.
+  E CAMBIARE il valore REVOCA le sessioni della vecchia identita': il cookie e' legato
+  alla riga e a session_version, non al telegram_id, quindi senza la revoca chi era
+  entrato con l'identita' precedente conserverebbe ACCESSO AMMINISTRATIVO — e non
+  scadrebbe, perche' GET /api/me rinnova il cookie a ogni richiesta valida, quindi una
+  sessione tenuta attiva e' immortale. Se in quella variabile fosse finito l'ID di un
+  estraneo, correggerla ora glielo toglie. La revoca scatta al CAMBIO e non a ogni
+  login: altrimenti entrare dal computer chiuderebbe la sessione sul telefono.
+  Fino al 12/08/2026 non era cosi': il collegamento viveva dentro «if riga is None»,
+  quindi valeva solo al PRIMO login, e un login fatto troppo presto lasciava il
+  proprietario fuori dal proprio account IN MODO IRREVERSIBILE — nessun endpoint
+  riparava, un riavvio non riparava, e serviva scrivere a mano nel database.
 ADMIN_PASSWORD_HASH: facoltativa. L'accesso di emergenza, utente 'administrator',
   per entrare nel pannello quando Telegram non e' disponibile. Contiene l'HASH e mai
   la password: la dashboard di Railway e' leggibile da chi ha accesso al progetto, e

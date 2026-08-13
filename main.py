@@ -469,6 +469,20 @@ async def avvia_la_registrazione_del_webhook():
     finire — e in quel caso la registrazione non avverrebbe, in silenzio, che e'
     il genere di guasto che questa PR passa il tempo a chiudere.
     """
+    if admin_id_malformato():
+        # Non solleva: un avvio che muore per una variabile scritta male sarebbe peggio del
+        # difetto che segnala. Ma lo dice, perche' l'alternativa e' un proprietario che
+        # ottiene un account vuoto e non ha nessun posto dove leggere il perche'.
+        # `logging.getLogger(...)` e non un `log` di modulo, perche' un `log` di modulo in
+        # questo file NON ESISTE: la prima versione di questa riga lo usava, e sarebbe stata
+        # un `NameError` dentro l'handler di avvio — cioe' un servizio che NON PARTE per una
+        # variabile scritta male. Avrei trasformato un guasto silenzioso in un guasto totale,
+        # dentro la correzione che serviva a renderlo visibile. Misurato prima del commit.
+        logging.getLogger('xtrader.relay').error(
+            "TELEGRAM_ADMIN_ID non e' una sequenza di sole cifre: il login del proprietario "
+            "NON verra' collegato al suo account, e la riparazione idempotente non "
+            "scattera'. Correggere la variabile: solo cifre, senza virgolette, spazi o segni.")
+
     global _COMPITO_REGISTRAZIONE
     if not os.getenv('TELEGRAM_BOT_TOKEN', ''):
         return
@@ -563,6 +577,40 @@ SEGRETO_SESSIONE = (hashlib.sha256(('betrelay-sessione-v1:' + BOT_TOKEN).encode(
 # scartata «il primo login vince» perche' il sito e' pubblico e il primo estraneo
 # erediterebbe parser e feed.
 TELEGRAM_ADMIN_ID = os.getenv('TELEGRAM_ADMIN_ID', '').strip()
+
+# Il CONSENSO del proprietario ad assorbire la riga che possiede quell'ID. Assente il
+# servizio rifiuta con `409` invece di travasare: vedi `riconciliazione_autorizzata()` per
+# il motivo, che e' l'unico caso in cui un dato non puo' distinguere due situazioni.
+TELEGRAM_ADMIN_RECONCILE = os.getenv('TELEGRAM_ADMIN_RECONCILE', '').strip()
+
+
+# Un `TELEGRAM_ADMIN_ID` malformato non solleva e non collega: il confronto con l'`id` che
+# Telegram manda non combacia mai, quindi il proprietario ottiene un account vuoto e la
+# riparazione idempotente non scatta nemmeno — il ramo che ripara e' dietro quel confronto.
+# Le forme sbagliate sono tutte silenziose: virgolette o apici incollati col valore, un `+`
+# davanti, uno spazio in mezzo. Lo `strip()` perdona solo i bordi.
+#
+# Quindi almeno lo si dice all'avvio, con una regex e NON con `.isdigit()`: quel
+# metodo accetta anche le cifre di altri alfabeti — `'\u0669\u0668\u0667'.isdigit()` e' `True` — che
+# non combaciano con nessun id Telegram, cioe' proprio il caso che questo controllo esiste
+# per nominare. Segnalato da GPT-5.5 sulla PR #24.
+#
+# Questo commento nominava `[0-9]+`, cioe' la regex di UN GIRO PRIMA: la forma effettiva
+# e' `[1-9][0-9]*` e il docstring qui sotto spiega perche'. Un commento che nomina un
+# codice diverso da quello che gli sta accanto e' la forma piu' piccola del difetto che
+# `CLAUDE.md` racconta due volte — l'affermazione e la sua smentita nello stesso file — e
+# resta un difetto anche quando e' piccola. Segnalato da Claude Fable 5 sulla PR #24.
+def admin_id_malformato():
+    """Vero se `TELEGRAM_ADMIN_ID` e' impostato ma non puo' combaciare con un id Telegram.
+
+    `[1-9][0-9]*` e non `[0-9]+`: uno zero iniziale passa come cifra ma Telegram manda
+    `1234`, non `001234`, quindi il confronto fra stringhe non combacia **mai** — un valore
+    accettato dal controllo e inutile in produzione, cioe' il caso peggiore per un controllo.
+    Esclude anche `0`, che non e' l'id di nessuno. Segnalato da GPT-5.5 sulla PR #24.
+    """
+    return bool(TELEGRAM_ADMIN_ID) and re.fullmatch(r'[1-9][0-9]*', TELEGRAM_ADMIN_ID) is None
+
+
 
 # L'hash della password dell'accesso di emergenza, nella forma
 # `scrypt$<sale base64>$<derivata base64>`. Nella variabile va l'HASH e non la
@@ -706,6 +754,19 @@ RIFERIMENTI_UTENTE = (
     ('admin_audit', 'admin_user_id'),
     ('admin_audit', 'target_user_id'),
 )
+
+# Le colonne di `admin_audit` NON si travasano quando si RIPARA un account: le altre sono
+# **dati** dell'utente e vanno dove vanno i dati, quelle due sono **storia**. Riscritte, un
+# `collegamento_admin_rifiutato` registrato contro la riga X diventa un rifiuto del
+# proprietario contro se stesso — auto-referenziale, cioe' inutile proprio nel momento in cui
+# serve, perche' `admin_audit` e' l'unico posto dove il proprietario legge PERCHE' un login e'
+# stato rifiutato. La MIGRAZIONE invece deve riscriverle: la' la riga perdente perde
+# `origin_profile` e i suoi riferimenti resterebbero orfani. Segnalato da CodeRabbit sulla
+# PR #24. Derivato e non riscritto a mano: una colonna nuova entra da `RIFERIMENTI_UTENTE`,
+# che e' vincolato dal test dello schema, e arriva qui da se'.
+RIFERIMENTI_DATI_UTENTE = tuple((tabella, colonna)
+                                for tabella, colonna in RIFERIMENTI_UTENTE
+                                if tabella != 'admin_audit')
 
 # I nomi che per convenzione riferiscono un utente. Il test li usa per trovare le colonne
 # che DOVREBBERO essere in `RIFERIMENTI_UTENTE`.
@@ -852,6 +913,98 @@ def _assegna_slug_e_ordine(c):
         if ordine is None:
             c.execute('UPDATE parsers SET ordine=? WHERE name=?', (prossimo, nome))
             prossimo += 1
+
+
+def riconciliazione_autorizzata(utente):
+    """Vero se il proprietario ha AUTORIZZATO l'assorbimento di QUESTA riga vuota.
+
+    Esiste perche' `possiede_qualcosa()` non basta, e il perche' e' una constatazione:
+    distingue un account **pieno** da uno vuoto, non un **cliente** da una riga nata per
+    errore. Un cliente appena registrato non possiede ancora niente — e' lo stato normale di
+    chi si iscrive — quindi la sua riga e' indistinguibile dalla riga vuota che nasce quando
+    il proprietario fa login prima che `TELEGRAM_ADMIN_ID` arrivi nel processo: due righe di
+    `users` con un'identita' Telegram e nient'altro. Misurato con la variabile che per un
+    refuso contiene l'ID di un cliente: al suo login la sua riga veniva svuotata e la sua
+    identita' finiva sulla riga del proprietario con `is_admin=1`, cioe' **il cliente entrava
+    nella dashboard del proprietario**. Bloccante di GPT-5.6 Sol sulla PR #24.
+
+    Quando nessun dato distingue i due casi, il solo marcatore affidabile e' il consenso di
+    chi sa: il proprietario legge il `409`, riconosce quella riga come sua, imposta
+    `TELEGRAM_ADMIN_RECONCILE` e rifa' login. Il costo e' una variabile impostata una volta;
+    il guadagno e' che con la variabile sbagliata il servizio **non assorbe niente**, perche'
+    con un ID sbagliato anche la fonte dell'identita' e' sbagliata e non si puo' dedurre nulla
+    da essa. Assente → si fallisce chiusi, che sull'isolamento fra utenti e' il verso
+    obbligato (priorita' 7 di `CLAUDE.md`).
+
+    Il valore e' l'**identificativo della riga** da assorbire, non un `1`. La prima versione
+    era un interruttore globale, e GPT-5.5 ha alzato il rischio giusto: la documentazione
+    diceva di togliere la variabile dopo l'uso, ma una variabile che va ricordata di togliere
+    e' una variabile che resta — e da quel momento un refuso futuro in `TELEGRAM_ADMIN_ID`
+    verso una riga vuota veniva assorbito di nuovo, cioe' il fail-closed non c'era piu'.
+    Legato alla riga, un consenso dimenticato e' innocuo, e non per prudenza: la riga
+    assorbita **non viene cancellata**, quindi il suo id non viene mai riusato da un utente
+    nuovo, e il consenso vecchio non puo' combaciare con un caso nuovo.
+    """
+    return TELEGRAM_ADMIN_RECONCILE != '' and TELEGRAM_ADMIN_RECONCILE == str(utente)
+
+
+def possiede_qualcosa(c, utente):
+    """Vero se questa riga di `users` e' l'account di QUALCUNO, non una riga nata per errore.
+
+    Il criterio sono **parser e chat**, perche' sono le due cose che si possiedono: un parser
+    e' una configurazione che quell'utente ha scritto, una chat e' una rivendicazione che ha
+    provato. Segnali e log non contano: sono tracce di passaggio, e nella riconciliazione
+    seguono l'utente senza dire di chi sia l'account.
+
+    Serve perche' la riparazione del collegamento dell'amministratore presumeva che la riga
+    da assorbire fosse **sempre** quella nata per errore. Non lo e': basta che
+    `TELEGRAM_ADMIN_ID` contenga per sbaglio l'ID di un cliente, e al suo login il servizio
+    gli travasava parser e chat sulla riga del proprietario, gli azzerava il `telegram_id` e
+    gli dava `is_admin=1`. Il cliente perdeva tutto **e** otteneva la dashboard di un altro:
+    la violazione dell'isolamento fra utenti che e' la priorita' 7 di `CLAUDE.md`, senza
+    nessun errore a segnalarla. Misurato prima di correggerlo. Bloccante di Claude Fable 5
+    sulla PR #24.
+    """
+    if c.execute('SELECT COUNT(*) FROM parsers WHERE user_id=?', (utente,)).fetchone()[0]:
+        return True
+    return bool(c.execute('SELECT COUNT(*) FROM chats WHERE owner_user_id=?',
+                          (utente,)).fetchone()[0])
+
+
+def riconcilia_su_utente(c, da_utente, a_utente):
+    """Travasa tutto da `da_utente` a `a_utente` e libera il suo `telegram_id`.
+
+    Esiste perche' il collegamento del proprietario deve essere **idempotente**: se una
+    riga sbagliata possiede il suo `telegram_id`, non basta scrivere quel valore sulla riga
+    giusta — `users.telegram_id` e' UNIQUE, quindi va prima liberato. E cio' che quella
+    riga avesse accumulato non va perso, da cui il travaso invece di una `DELETE`.
+
+    Riusa `RIFERIMENTI_DATI_UTENTE` e `_trasferisci_parser` della migrazione (regola 3):
+    `RIFERIMENTI_DATI_UTENTE` e' *derivato* da `RIFERIMENTI_UTENTE` togliendo le due colonne
+    di `admin_audit`, che sono storia e non dati (vedi il commento sulla costante). Derivato e
+    non ricopiato: il test che verifica la completezza di `RIFERIMENTI_UTENTE` copre quindi
+    anche questa funzione, e una colonna nuova arriva qui da se'.
+
+    La riga perdente **non** viene cancellata: le si azzera `telegram_id` e resta un
+    account senza niente. Una `DELETE` sarebbe irreversibile e potrebbe orfanare una
+    colonna che nessuno ha ancora aggiunto a `RIFERIMENTI_UTENTE`; un `NULL` no. E' la
+    scelta prudente in una funzione che nasce per riparare, non per fare pulizia.
+
+    Non fa `commit`: la libera chi chiama, perche' questa operazione deve stare nella
+    stessa transazione della scrittura che segue.
+    """
+    for tabella, colonna in RIFERIMENTI_DATI_UTENTE:
+        c.execute(f'UPDATE {tabella} SET {colonna}=? WHERE {colonna}=?',
+                  (a_utente, da_utente))
+    _trasferisci_parser(c, da_utente, a_utente)
+    # `session_version` incrementata sulla riga svuotata: i cookie emessi per quell'account
+    # restano altrimenti validi, e da quel momento aprono una sessione su un utente che non
+    # possiede piu' niente. Appartengono comunque al proprietario, quindi non e' un buco di
+    # sicurezza — e' igiene: `session_version` esiste per invalidare SUBITO, e un account
+    # riconciliato via e' esattamente il caso in cui una sessione va chiusa invece di
+    # scadere da se'. Segnalato come punto da sorvegliare da Claude Fable 5 sulla PR #24.
+    c.execute('UPDATE users SET telegram_id=NULL, session_version=session_version+1'
+              ' WHERE id=?', (da_utente,))
 
 
 def _trasferisci_parser(c, da_utente, a_utente):
@@ -1664,6 +1817,13 @@ def utente_dalla_sessione(request):
     if not sessione:
         return None
     c = db()
+    # L'invariante dell'amministratore vale ANCHE qui, e non solo al login: senza, cambiare
+    # `TELEGRAM_ADMIN_ID` non toglieva niente a chi aveva gia' una sessione aperta, che non
+    # scade perche' ogni richiesta valida rinnova il cookie. Ultimo bloccante di GPT-5.6 Sol
+    # sulla PR #24. Va PRIMA della lettura della riga, cosi' la `session_version` letta e'
+    # quella incrementata e questa stessa richiesta cade.
+    if revoca_identita_stantia(c) is not None:
+        c.commit()
     riga = c.execute('SELECT id, session_version, status, is_admin, first_name,'
                      ' access_expires_at FROM users WHERE id=?',
                      (sessione['utente'],)).fetchone()
@@ -1770,58 +1930,216 @@ def login_telegram(data: LoginTelegramIn):
         raise HTTPException(401, 'login non valido')
 
     c = db()
+    # `BEGIN IMMEDIATE`: da qui alla `commit()` si legge e si scrive dentro UNA transazione,
+    # e SQLite serializza chi arriva insieme. Senza, fra la `SELECT` e le `UPDATE` c'e' spazio
+    # per un altro login: misurato, due login concorrenti che cambiano identita' incrementano
+    # `session_version` due volte, e **un cookie su sei nasce morto** — il login «riesce», la
+    # richiesta successiva risponde 401, e chi lo subisce non ha modo di capire perche'.
+    # Alzato da Claude Fable 5 e da GPT-5.6 Sol indipendentemente sulla PR #24.
+    # `BEGIN IMMEDIATE` sta DENTRO il `try`: sotto contesa quel comando stesso solleva
+    # `database is locked`, e da fuori nessuno chiuderebbe la connessione — ogni login perso
+    # per lock perderebbe un descrittore, su un container che non riparte mai. Rilievo di
+    # Claude Fable 5 sulla PR #24.
+    try:
+        c.execute('BEGIN IMMEDIATE')
+        utente, versione = _decidi_identita(c, data)
+        c.commit()
+    except HTTPException:
+        # Un `HTTPException` da qui e' una DECISIONE, non un guasto: il rifiuto per
+        # configurazione incoerente, o il 503 dell'account non creato. Si conferma, perche'
+        # dentro la transazione c'e' la riga di `admin_audit` che traccia il rifiuto — e la
+        # prima versione di questo blocco faceva `rollback` su tutto, quindi **cancellava la
+        # traccia della propria decisione**: il proprietario riceveva un login fallito e
+        # nessun posto dove leggere perche'. Misurato da un test che pretendeva quella riga.
+        c.commit()
+        c.close()
+        raise
+    except Exception:
+        # Tutto il resto e' un guasto: la transazione tocca l'identita' di due utenti, e uno
+        # stato scritto a meta' sarebbe peggio di un login rifiutato.
+        c.rollback()
+        c.close()
+        raise
+    c.close()
+    return _rispondi_con_sessione(utente, versione, {'ok': True, 'utente': utente})
+
+
+def revoca_identita_stantia(c):
+    """Scioglie il collegamento fra la riga del proprietario e un'identita' non piu' quella
+    configurata. Restituisce l'id della riga toccata, o `None` se non c'era niente da fare.
+
+    E' l'invariante dell'amministratore ridotta a una funzione sola, perche' va applicata in
+    **due** posti e la regola 3 di `CLAUDE.md` vale anche qui:
+
+    - al login (`_decidi_identita`, CASO 1);
+    - **su ogni richiesta autenticata del sito** (`utente_dalla_sessione`).
+
+    Il secondo posto e' l'ultimo bloccante di GPT-5.6 Sol sulla PR #24, e il difetto era
+    questo: applicandola solo al login, dopo aver cambiato `TELEGRAM_ADMIN_ID` la vecchia
+    identita' perdeva l'accesso al prossimo login **di chiunque**, ma il cookie che aveva
+    gia' in mano restava valido fino a quel momento — e non scadeva, perche' ogni richiesta
+    valida rinnova il cookie, quindi una sessione tenuta aperta e' immortale. Nel caso per cui
+    la revoca esiste — nella variabile e' finito l'ID di un estraneo, o l'account e'
+    compromesso — l'estraneo col pannello aperto non ha nessun motivo di rifare login, quindi
+    non perdeva niente. Ora la prima richiesta autenticata dopo il cambio scioglie il
+    collegamento, e quella richiesta puo' essere proprio la sua: si chiude da se'.
+
+    **Perche' una scrittura sul percorso di lettura non e' un problema qui.** Scatta solo
+    quando la condizione e' vera, e dopo lo scioglimento `telegram_id` e' NULL: la condizione
+    diventa falsa e non si ripete piu' (misurato in
+    `test_la_revoca_dalla_SESSIONE_non_si_ripete_a_ogni_richiesta`). Riguarda solo le rotte
+    del sito, mai `/xtrader.csv`, che non ha sessione — la NON-relazione fra sessione e feed
+    resta intatta.
+
+    **Ed e' sicura in corsa senza transazione:** l'`UPDATE` porta il valore stantio nella
+    `WHERE`, quindi fra due richieste concorrenti solo una tocca una riga, e la riga di audit
+    la scrive solo chi ha vinto. Senza quel `WHERE`, due richieste avrebbero incrementato
+    `session_version` due volte e scritto due revoche per la stessa revoca — e la seconda
+    butterebbe fuori anche una sessione nata DOPO la revoca. Misurato in
+    `test_la_WHERE_anti_corsa_serve_DAVVERO`, che impone l'interleaving a mano: il test a sei
+    thread passava anche **senza** la `WHERE`, perche' sei thread si serializzano abbastanza
+    che il secondo rilegga `telegram_id` gia' NULL. Un docstring che afferma una proprieta'
+    non misurata e' il difetto che questo repository ha gia' pagato una volta.
+    """
+    if not (TELEGRAM_ADMIN_ID and not admin_id_malformato()):
+        return None
+    riga = c.execute('SELECT id, telegram_id FROM users WHERE origin_profile=?',
+                     (PIERO_PROFILE,)).fetchone()
+    if not riga or not riga[1] or riga[1] == TELEGRAM_ADMIN_ID:
+        return None
+    cursore = c.execute('UPDATE users SET telegram_id=NULL,'
+                        ' session_version=session_version+1'
+                        ' WHERE id=? AND telegram_id=?', (riga[0], riga[1]))
+    if not cursore.rowcount:
+        return None
+    # `is_admin` NON si tocca: quella riga resta l'account del proprietario, ed e' da
+    # `is_admin` che dipende il suo accesso con la password. Cio' che si revoca e' il legame
+    # con un'identita' Telegram, non la proprieta' dell'account.
+    _annota_admin(c, riga[0], 'identita_telegram_revocata')
+    return riga[0]
+
+
+def _decidi_identita(c, data):
+    """Chi e' chi sta entrando, applicando l'invariante dell'amministratore.
+
+    Restituisce `(utente, versione)` da firmare nel cookie. Gira **dentro** la transazione
+    aperta da chi chiama: legge, scrive, e non fa `commit` — cosi' un rifiuto a meta' non
+    lascia niente.
+
+    L'invariante e' una frase sola: **se `TELEGRAM_ADMIN_ID` e' configurato, la riga del
+    proprietario porta QUEL `telegram_id`, o nessuno.** Da lei discendono tre casi, e i primi
+    due chiudono un difetto misurato che i gate finali hanno trovato sulla PR #24:
+
+    1. la riga porta un'identita' **diversa** da quella configurata → il collegamento e'
+       stantio e si scioglie, **chiunque** stia entrando. Senza, cambiare la variabile non
+       toglieva niente: la vecchia identita' continuava a entrare nell'account del
+       proprietario finche' la nuova non faceva login, e se la nuova non entrava mai, per
+       sempre. Cambiare `TELEGRAM_ADMIN_ID` e' il gesto con cui si toglie l'accesso a
+       un'identita': se non lo toglie, quel gesto e' teatro. Bloccante di GPT-5.6 Sol;
+    2. sta entrando l'identita' configurata e la sua riga non e' quella del proprietario →
+       si collega, riconciliando la riga precedente **solo se non e' l'account di qualcuno**
+       (vedi `possiede_qualcosa`), altrimenti **rifiuta**. Bloccante di Claude Fable 5;
+    3. tutto il resto: cliente nuovo, oppure login successivo.
+    """
     riga = c.execute('SELECT id, session_version FROM users WHERE telegram_id=?',
                      (data.id,)).fetchone()
-    if riga is None:
-        # Il proprietario: il suo account esiste gia' e possiede i suoi parser, ma non
-        # ha `telegram_id` perche' nessuno lo aveva mai saputo. Si ATTACCA a quella
-        # riga invece di crearne una nuova, altrimenti resterebbero due account — uno
-        # con tutta la sua roba e nessun modo di entrarci, e uno vuoto in cui entra.
-        proprietario = None
-        if TELEGRAM_ADMIN_ID and data.id == TELEGRAM_ADMIN_ID:
-            proprietario = c.execute('SELECT id, session_version FROM users'
-                                     ' WHERE origin_profile=?', (PIERO_PROFILE,)).fetchone()
-        if proprietario:
-            # `telegram_reachable` non compare: prima c'era `telegram_reachable=
-            # telegram_reachable`, che riscrive la colonna col proprio valore e non fa
-            # niente. Suggeriva un'intenzione che il codice non porta. Segnalato da
-            # CodeRabbit sulla PR #23.
-            c.execute('UPDATE users SET telegram_id=?, username=?, first_name=?,'
-                      ' is_admin=1 WHERE id=?',
-                      (data.id, data.username or None, data.first_name or None,
-                       proprietario[0]))
-            riga = proprietario
-        else:
-            # Un cliente nuovo: l'account nasce e non puo' fare niente. L'accesso lo
-            # concede il PR sull'approvazione (#7), non questo.
-            #
-            # `OR IGNORE` piu' la rilettura qui sotto perche' fra il SELECT e questo
-            # INSERT c'e' spazio per un'altra richiesta, e `telegram_id` e' UNIQUE: due
-            # login simultanei di un utente nuovo non davano una riga doppia, davano un
-            # `IntegrityError`, cioe' un 500 a chi perdeva la corsa — al PRIMO accesso di
-            # un cliente, l'unico momento in cui puo' capitare. Il Login Widget in una
-            # pagina ricaricata, o due schede aperte, bastano. Segnalato da Claude
-            # Fable 5 sulla PR #23; la rilettura fa si' che il perdente si attacchi alla
-            # riga del vincitore invece di crearne un'altra.
-            c.execute('INSERT OR IGNORE INTO users(telegram_id, username, first_name,'
-                      " status) VALUES (?,?,?,'registrato')",
-                      (data.id, data.username or None, data.first_name or None))
-            riga = c.execute('SELECT id, session_version FROM users WHERE telegram_id=?',
-                             (data.id,)).fetchone()
-            if riga is None:
-                # Non deve accadere: l'inserimento e' andato o la riga c'era. Se accade,
-                # e' meglio un 503 che un `TypeError` sull'indice di `None`.
-                c.close()
-                raise HTTPException(503, 'account non creato: riprova')
+    proprietario = c.execute('SELECT id, session_version, telegram_id FROM users'
+                             ' WHERE origin_profile=?', (PIERO_PROFILE,)).fetchone()
+
+    # Un valore malformato non descrive NESSUNA identita': applicare l'invariante su di esso
+    # scioglie un collegamento buono senza poterne creare uno nuovo, perche' CASO 2 confronta
+    # `data.id` con lo stesso valore e non combacia mai — quindi il proprietario resta fuori
+    # dal proprio account e gliene nasce uno vuoto, per un refuso nel pannello Railway.
+    # `admin_id_malformato()` esisteva gia' e segnalava soltanto, all'avvio: un controllo che
+    # nomina il problema ma non lo previene. Trovato indipendentemente da GPT-5.6 Sol e da
+    # CodeRabbit sulla PR #24, e misurato in
+    # `test_un_ADMIN_ID_malformato_NON_scioglie_un_collegamento_BUONO`.
+    admin_configurato = bool(TELEGRAM_ADMIN_ID) and not admin_id_malformato()
+
+    # CASO 1 — il collegamento stantio si scioglie. La decisione e la scrittura stanno in
+    # `revoca_identita_stantia()`, perche' la stessa invariante va applicata anche su ogni
+    # richiesta autenticata del sito: due copie sarebbero due copie che divergono (regola 3).
+    if revoca_identita_stantia(c) is not None:
+        proprietario = c.execute('SELECT id, session_version, telegram_id FROM users'
+                                 ' WHERE origin_profile=?', (PIERO_PROFILE,)).fetchone()
+        # Chi stava entrando poteva essere proprio la vecchia identita', e in quel caso la
+        # sua riga era quella del proprietario: adesso non lo e' piu'.
+        riga = c.execute('SELECT id, session_version FROM users WHERE telegram_id=?',
+                         (data.id,)).fetchone()
+
+    e_amministratore = admin_configurato and data.id == TELEGRAM_ADMIN_ID
+
+    # CASO 2 — l'identita' configurata si collega alla riga del proprietario.
+    if e_amministratore and proprietario and (riga is None or riga[0] != proprietario[0]):
+        if riga is not None:
+            # Rifiuta invece di scegliere quale dei due utenti derubare. Il messaggio verso
+            # chi chiama non nomina utenti ne' identificativi: chi lo riceve e' un cliente
+            # qualunque, e il dettaglio va nel log e in `admin_audit`, che legge il
+            # proprietario. Due motivi distinti, tracciati distinti, perche' il rimedio
+            # differisce: correggere la variabile, oppure autorizzare l'assorbimento.
+            if possiede_qualcosa(c, riga[0]):
+                logging.getLogger('xtrader.relay').error(
+                    "TELEGRAM_ADMIN_ID punta a un account che possiede parser o chat:"
+                    " collegamento RIFIUTATO per non fondere due utenti. Correggere la"
+                    " variabile con l'ID Telegram del proprietario."
+                    " TELEGRAM_ADMIN_RECONCILE non autorizza questo caso: il consenso"
+                    " riguarda una riga VUOTA, non i dati di un altro utente.")
+                _annota_admin(c, proprietario[0], 'collegamento_admin_rifiutato',
+                              bersaglio=riga[0])
+                raise HTTPException(409, 'configurazione dell\'amministratore incoerente')
+            if not riconciliazione_autorizzata(riga[0]):
+                # La riga e' vuota, ma vuota non significa «nata per errore»: un cliente
+                # appena registrato e' vuoto anche lui. Senza consenso non si assorbe.
+                #
+                # Il log stampa l'identificativo della riga, che e' il valore da mettere
+                # nella variabile: e' un intero interno, non un token ne' un telegram_id,
+                # e senza di lui il proprietario non avrebbe modo di dare un consenso
+                # LEGATO — quindi il consenso tornerebbe globale per forza di cose.
+                logging.getLogger('xtrader.relay').error(
+                    "TELEGRAM_ADMIN_ID e' posseduto da un altro account, VUOTO"
+                    " (riga %s). Assorbimento NON autorizzato, quindi rifiutato: se quella"
+                    " riga e' la tua (login fatto prima che la variabile arrivasse nel"
+                    " processo), imposta TELEGRAM_ADMIN_RECONCILE=%s e rifai login. Se non"
+                    " lo e', quella riga e' di un cliente e va corretta la variabile.",
+                    riga[0], riga[0])
+                _annota_admin(c, proprietario[0], 'riconciliazione_non_autorizzata',
+                              bersaglio=riga[0])
+                raise HTTPException(409, 'configurazione dell\'amministratore incoerente')
+            riconcilia_su_utente(c, da_utente=riga[0], a_utente=proprietario[0])
+            _annota_admin(c, proprietario[0], 'riconciliato_account_duplicato',
+                          bersaglio=riga[0])
+        c.execute('UPDATE users SET telegram_id=?, username=?, first_name=?, is_admin=1'
+                  ' WHERE id=?',
+                  (data.id, data.username or None, data.first_name or None,
+                   proprietario[0]))
+        # Riletta DOPO le scritture: la versione da firmare e' quella che il database ha
+        # adesso. Firmare quella letta prima produce un cookie che nasce invalido.
+        riga = c.execute('SELECT id, session_version FROM users WHERE id=?',
+                         (proprietario[0],)).fetchone()
+    elif riga is None:
+        # Un cliente nuovo: l'account nasce e non puo' fare niente. L'accesso lo concede il
+        # PR sull'approvazione (#7), non questo.
+        #
+        # `OR IGNORE` piu' la rilettura perche' `telegram_id` e' UNIQUE: due login
+        # simultanei di un utente nuovo davano `IntegrityError`, cioe' un 500 a chi perdeva
+        # la corsa, al PRIMO accesso di un cliente. Segnalato da Claude Fable 5 sulla #23.
+        c.execute('INSERT OR IGNORE INTO users(telegram_id, username, first_name,'
+                  " status) VALUES (?,?,?,'registrato')",
+                  (data.id, data.username or None, data.first_name or None))
+        riga = c.execute('SELECT id, session_version FROM users WHERE telegram_id=?',
+                         (data.id,)).fetchone()
+        if riga is None:
+            # Non deve accadere: l'inserimento e' andato o la riga c'era. Se accade, e'
+            # meglio un 503 che un `TypeError` sull'indice di `None`. La connessione la
+            # chiude chi ha aperto la transazione, e un `HTTPException` prende il ramo che
+            # CONFERMA: e' una decisione, non un guasto. Il commento diceva «dopo il
+            # rollback» ed era rimasto indietro di un commit — segnalato da CodeRabbit.
+            raise HTTPException(503, 'account non creato: riprova')
     else:
         # Login successivi: il nome su Telegram puo' essere cambiato.
         c.execute('UPDATE users SET username=?, first_name=? WHERE id=?',
                   (data.username or None, data.first_name or None, riga[0]))
-    c.commit()
-    utente, versione = riga[0], riga[1]
-    c.close()
-    return _rispondi_con_sessione(utente, versione, {'ok': True, 'utente': utente})
-
+    return riga[0], riga[1]
 
 @app.post('/api/login/password')
 def login_password(data: LoginPasswordIn):

@@ -489,6 +489,132 @@ Il proprietario entra in due modi, e il secondo non è un vezzo:
    dice «questo ID è il proprietario», e il codice **attacca** il `telegram_id` a quella
    riga invece di crearne una nuova. Senza la variabile resterebbero due account: uno
    con tutta la sua roba e nessun modo di entrarci, e uno vuoto in cui entra.
+
+   **È un'invariante, non un ramo**, e la differenza è tutto: «se `TELEGRAM_ADMIN_ID` è
+   configurato, la riga `PIERO` porta **quel** `telegram_id`, o nessuno», qualunque cosa ci
+   sia adesso. La formulazione è stata corretta il 13/08/2026: diceva «se chi fa login è
+   l'ID dell'amministratore…», e quel «se» era il difetto — legava l'invariante a **chi
+   entra**, quindi la vecchia identità restava collegata fino all'ingresso della nuova.
+   Verificata a **ogni** login, chiunque lo faccia, l'invariante produce due comportamenti
+   che i gate finali hanno preteso sulla PR #24:
+
+   - **cambiare la variabile toglie l'accesso alla vecchia identità** sciogliendo il
+     collegamento stantio — `telegram_id` azzerato, `session_version` incrementata, riga in
+     `admin_audit`. Prima la revoca scattava solo all'ingresso del **nuovo** ID, e se il
+     nuovo non entrava mai il vecchio restava amministratore per sempre: cambiare la
+     variabile era teatro. Bloccante di GPT-5.6 Sol. Precisione richiesta da CodeRabbit sulla
+     PR #24, perché «subito» non era vero e la differenza è misurabile: cambiare la variabile
+     **non scrive nel database** — il servizio la legge all'avvio, e la revoca viene applicata
+     **alla prima richiesta autenticata che arriva dopo il cambio**, che sia un login o una
+     qualunque pagina del sito. La formulazione precedente diceva «al primo login», ed era il
+     residuo che GPT-5.6 Sol ha alzato al terzo giro: applicandola solo al login, chi aveva
+     **già** un cookie amministrativo lo conservava — e non scadeva, perché ogni richiesta
+     valida rinnova il cookie, quindi una sessione tenuta aperta è immortale. Nel caso per cui
+     la revoca esiste (nella variabile è finito l'ID di un estraneo, o l'account è compromesso)
+     l'estraneo col pannello aperto non ha nessun motivo di rifare login, quindi non perdeva
+     niente. Ora la sua stessa prossima richiesta chiude la sua sessione: l'invariante vive in
+     `revoca_identita_stantia()`, chiamata dal login **e** da `utente_dalla_sessione()` —
+     una funzione sola, perché due copie divergono (regola 3). La scrittura sul percorso di
+     lettura non si ripete, perché dopo lo scioglimento `telegram_id` è `NULL`, e non si
+     duplica in corsa, perché l'`UPDATE` porta il valore stantio nella `WHERE`: entrambe le
+     proprietà sono misurate, la seconda con un interleaving imposto a mano dopo aver
+     constatato che sei thread non la producono. Il feed non è toccato: `/xtrader.csv` non ha
+     sessione;
+   - **se un altro account possiede già quell'ID, il login è rifiutato con `409` finché il
+     proprietario non autorizza l'assorbimento** con `TELEGRAM_ADMIN_RECONCILE`, il cui valore
+     è l'**identificativo della riga** da assorbire — non un `1`. Il motivo
+     è una constatazione, non una cautela: «la riga è vuota» distingue un account pieno da uno
+     vuoto, **non un cliente da una riga nata per errore**. Un cliente appena registrato è
+     vuoto anche lui, quindi le due situazioni sono due righe di `users` con un'identità
+     Telegram e nient'altro — indistinguibili. Assorbire d'ufficio significava che un refuso
+     nella variabile, con dentro l'ID di un cliente, gli svuotava la riga e portava la sua
+     identità sull'account del proprietario con `is_admin=1`: **il cliente entrava nella
+     dashboard del proprietario**. Misurato. Quando nessun dato distingue, il solo marcatore
+     affidabile è il consenso di chi sa, e in sua assenza si fallisce chiusi. Bloccante di
+     GPT-5.6 Sol sulla PR #24. Il baratto è dichiarato: la riparazione resta possibile ma
+     **deliberata** — il proprietario legge il `409` (log + `admin_audit`), imposta la
+     variabile col numero che il log gli indica, rifà login. Alternativa scartata: rifiutare
+     sempre, che riporterebbe al lockout irreversibile che questa PR chiude.
+     Il valore è legato alla riga e non è un interruttore globale, per un rischio alzato da
+     GPT-5.5: un `1` che la documentazione dice di togliere dopo l'uso è un `1` che resta, e da
+     quel momento un refuso futuro verso un'altra riga vuota verrebbe assorbito di nuovo — il
+     fail-closed sparirebbe in silenzio. Legato alla riga, un consenso dimenticato è innocuo, e
+     per una proprietà del codice e non per prudenza: la riga assorbita **non viene
+     cancellata**, quindi il suo identificativo non è mai riusato da un utente nuovo;
+   - **se la variabile punta a un account che possiede parser o chat, il login è rifiutato**
+     con `409` **anche col consenso** — che dice «quella riga vuota è mia», non «prenditi i
+     dati di un altro utente». L'account bersaglio resta **intatto**, nessun dato viene travasato e nessun
+     `telegram_id` viene spostato. Resta possibile che il collegamento stantio del
+     proprietario sia già stato sciolto nello stesso login, perché quello è il punto
+     precedente e riguarda un'altra riga (precisione richiesta da CodeRabbit sulla PR #24).
+     Prima quell'account veniva assorbito: bastava
+     sbagliare una cifra e metterci l'ID di un cliente, e al suo login i suoi parser e le
+     sue chat passavano al proprietario, il suo `telegram_id` veniva azzerato e lui otteneva
+     `is_admin=1` — **perdeva tutto e entrava nell'account di un altro**, senza un errore da
+     nessuna parte. È la violazione dell'isolamento fra utenti, la priorità 7. Bloccante di
+     Claude Fable 5. Segnali e log **non** contano come possesso: sono tracce, e seguono
+     l'utente. Il criterio è in `possiede_qualcosa()`.
+
+   Tutto il blocco gira dentro un `BEGIN IMMEDIATE`: senza, fra la `SELECT` e le `UPDATE`
+   entra un altro login, e due login concorrenti che cambiano identità incrementano
+   `session_version` due volte — misurato, **un cookie su sei nasce morto**, il login
+   «riesce» e la richiesta dopo risponde `401`. Alzato da Fable 5 e Sol indipendentemente. Quindi il collegamento è **idempotente** e l'ordine fra impostare la
+   variabile e fare il login **non conta**: il login successivo ripara quello precedente — con
+   il consenso `TELEGRAM_ADMIN_RECONCILE` quando la riparazione deve assorbire un'altra riga,
+   perché quella riga potrebbe essere di un cliente (vedi il punto sopra). Senza consenso il
+   login non fallisce in silenzio e non consuma niente: risponde `409` e dice cosa fare.
+   Autorizzata, `riconcilia_su_utente()` le travasa tutto —
+   riusando `_trasferisci_parser` e `RIFERIMENTI_DATI_UTENTE`, che è *derivato* da
+   `RIFERIMENTI_UTENTE` della migrazione e non ricopiato (regola 3): una colonna nuova entra
+   dall'elenco vincolato dal test dello schema e arriva qui da sé. La differenza fra i due
+   elenchi sono le due colonne di `admin_audit`, che la riparazione **non** riscrive: le altre
+   sono dati dell'utente e seguono i dati, quelle sono storia, e una riga
+   `collegamento_admin_rifiutato` riscritta diventerebbe un rifiuto del proprietario contro se
+   stesso — inutile proprio dove serve, perché `admin_audit` è l'unico posto in cui il
+   proprietario legge perché un login è stato rifiutato (segnalato da CodeRabbit sulla PR #24).
+   La migrazione invece deve riscriverle, perché là la riga perdente perde `origin_profile` e i
+   suoi riferimenti resterebbero orfani. Poi la riparazione le azzera il `telegram_id`, che è
+   UNIQUE, e scrive una riga in
+   `admin_audit`: una riparazione silenziosa sarebbe indistinguibile da
+   un'appropriazione di account. La riga perdente **non** viene cancellata, perché un
+   `NULL` è reversibile e una `DELETE` no, e le sue sessioni muoiono con un incremento di
+   `session_version`.
+
+   **E cambiare `TELEGRAM_ADMIN_ID` revoca le sessioni dell'identità precedente.** Il cookie
+   è legato all'`id` della riga e a `session_version`, non al `telegram_id`: senza
+   l'incremento, chi era entrato con l'identità vecchia conserverebbe **accesso
+   amministrativo** sulla riga che possiede i parser — e non scadrebbe, perché `GET /api/me`
+   rinnova il cookie a ogni richiesta valida, quindi una sessione tenuta attiva è immortale.
+   Il caso non è ipotetico: se in quella variabile fosse finito l'ID sbagliato — un estraneo,
+   o un account compromesso — correggerla non gli toglierebbe il pannello. La revoca la
+   provoca il **cambio di valore**, non un login qualunque: è applicata al primo login
+   successivo al cambio e non a ogni login, altrimenti entrare dal computer chiuderebbe la
+   sessione sul telefono. Bloccante di GPT-5.6 Sol sulla PR #24.
+
+   **Due cose che invece NON revocano, e sono deliberate.** *Svuotare* la variabile non
+   scioglie niente: vuota significa «nessuna invariante dichiarata», non «revoca», e
+   scioglierla lascerebbe la riga `PIERO` senza `telegram_id` senza poterla ricollegare — al
+   login successivo nascerebbe un secondo account, cioè lo stesso lockout del punto qui
+   sotto. Il gesto per togliere l'accesso a un'identità è **cambiare** il valore, non
+   cancellarlo (chiesto da GPT-5.6 Sol sulla PR #24, e la risposta è misurata in
+   `test_SVUOTARE_la_variabile_non_scioglie_il_collegamento`). Un valore **malformato** —
+   virgolette prese incollando nel pannello, spazi interni, cifre non ASCII, zero iniziale —
+   viene trattato come *non configurato*: `admin_id_malformato()` lo riconosce e il login
+   **non applica l'invariante**. Prima la applicava sul valore grezzo, e il risultato era il
+   peggiore possibile: il collegamento buono veniva sciolto, `CASO 2` non poteva ricrearlo
+   perché confronta `data.id` con lo stesso valore malformato, e al proprietario nasceva un
+   account vuoto — **un refuso nel pannello Railway lo chiudeva fuori dal proprio account**,
+   col solo avviso di una riga di log all'avvio. Trovato indipendentemente da GPT-5.6 Sol e da
+   CodeRabbit sulla PR #24.
+
+   *Fino al 12/08/2026 il collegamento viveva dentro `if riga is None`, quindi valeva solo
+   al primo login.* Un login fatto prima che la variabile fosse **arrivata nel processo** —
+   stato che su Railway si produce da sé quando un build fallisce dopo un cambio di
+   variabile — creava un account vuoto con quel `telegram_id`, e da lì ogni login successivo
+   prendeva il ramo `else`: la riga `PIERO` non veniva collegata mai più. Irreversibile per
+   il proprietario, e senza nessun errore: solo una dashboard vuota. La riconciliazione della
+   migrazione non aiutava, perché raggruppa per `origin_profile` e quella riga ha
+   `origin_profile` NULL.
 2. **Password** (`ADMIN_PASSWORD_HASH`), utente fisso `administrator`. Esiste perché
    con il solo login Telegram un guasto di Telegram, o la perdita di quell'account,
    chiuderebbero il proprietario fuori dal proprio pannello.

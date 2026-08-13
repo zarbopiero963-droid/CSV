@@ -47,6 +47,17 @@ ESTENSIONI = ('.py', '.js', '.mjs', '.html', '.css', '.json', '.yml', '.yaml')
 
 BOM = '\ufeff'
 
+# I documenti, per il solo controllo sugli omografi. Il test sul BOM li esclude di
+# proposito (vedi `ESTENSIONI`), ma un omografo in un documento va trovato lo stesso:
+# e' li' che l'ho commesso.
+DOCUMENTI = ('README.txt', 'README.MD', 'SAAS.md', 'CLAUDE.md')
+
+# Le lettere che si SCRIVONO come quelle latine e non lo sono. Solo alfabeti, non le
+# cifre: `tests/relay/test_login.py` contiene cifre arabo-indiane come dato di prova
+# deliberato, ed e' il test che dimostra perche' il controllo su
+# `TELEGRAM_ADMIN_ID` non usa `.isdigit()`.
+ALFABETI_OMOGRAFI = ('CYRILLIC', 'GREEK', 'ARMENIAN', 'CHEROKEE')
+
 
 def _per_voce() -> dict:
     """I file scansionati, RAGGRUPPATI per voce di `SORGENTI`.
@@ -133,5 +144,94 @@ def test_nessun_BOM_letterale_nel_sorgente(percorso):
         'Un U+FEFF e- invisibile in un editor: si scrive con l-escape.\n'
         "    sbagliato:  '<carattere invisibile>'.encode('utf-8')\n"
         "    giusto   :  '\\ufeff'.encode('utf-8')\n"
+        f'{dettaglio}'
+    )
+
+
+def _parole_miste(testo: str):
+    """Le parole che mescolano lettere latine e lettere di un altro alfabeto.
+
+    Il criterio e' la MESCOLANZA e non la presenza: `'токен'` in
+    `tests/relay/test_autenticazione.py` e' una parola russa intera, usata come token
+    esotico di prova, e va bene. Quello che non va bene e' una lettera cirillica **dentro**
+    una parola latina, perche' li' e' invisibile: si legge come la latina che imita.
+    """
+    import unicodedata
+
+    parole, corrente, prima_riga, riga = [], '', 1, 1
+    for carattere in testo + '\n':
+        if carattere == '\n':
+            riga += 1
+        if carattere.isalpha():
+            if not corrente:
+                prima_riga = riga
+            corrente += carattere
+            continue
+        if corrente:
+            parole.append((prima_riga, corrente))
+            corrente = ''
+    misti = []
+    for numero, parola in parole:
+        latine = any(unicodedata.name(c, '').startswith('LATIN') for c in parola)
+        altre = [c for c in parola
+                 if unicodedata.name(c, '').startswith(ALFABETI_OMOGRAFI)]
+        if latine and altre:
+            misti.append((numero, parola, altre))
+    return misti
+
+
+def _file_da_controllare_per_omografi() -> list[Path]:
+    return _sorgenti() + [RADICE / nome for nome in DOCUMENTI if (RADICE / nome).is_file()]
+
+
+@pytest.mark.parametrize('nome', DOCUMENTI)
+def test_ogni_voce_di_DOCUMENTI_esiste(nome):
+    """Il guardiano del guardiano, come per `SORGENTI`.
+
+    Un documento rinominato uscirebbe altrimenti dalla scansione in silenzio, ed e'
+    esattamente il difetto che CodeRabbit ha alzato come Major sulla PR #21 per l'altra
+    lista: un controllo che smette di controllare senza dirlo.
+    """
+    assert (RADICE / nome).is_file(), (
+        f'{nome} non esiste piu- (rinominato? spostato?): non viene piu- controllato per '
+        'gli omografi, e senza questo test la cosa non si vedrebbe'
+    )
+
+
+@pytest.mark.parametrize('percorso', _file_da_controllare_per_omografi(),
+                         ids=lambda p: str(p.relative_to(RADICE)))
+def test_nessun_OMOGRAFO_dentro_una_parola_latina(percorso):
+    """Una lettera cirillica in mezzo a una parola latina non si vede e non solleva.
+
+    Ho commesso esattamente questo errore nella PR #24, scrivendo in `README.txt` la parola
+    «scioglieva» con la quinta lettera sostituita da U+0435 (CYRILLIC SMALL LETTER IE) al
+    posto della `e` latina. Qui la parola sbagliata **non** e' riportata letterale, per la
+    stessa ragione per cui il BOM si scrive con l'escape: un test che contiene il difetto che
+    cerca diventa rosso su se stesso, e allora si finisce per escluderlo dalla scansione —
+    cioe' per spegnere il guardiano invece di correggere il codice.
+    In un editor e in un browser le due lettere sono indistinguibili, e nessuno strumento si
+    lamenta: `git diff` la mostra come una `e`, `python -m py_compile` non la vede perche' e'
+    dentro una stringa o un commento, e una ricerca testuale di «scioglieva» non la trova.
+
+    E' la stessa classe di difetto per cui esiste il test sul BOM qui sopra, e la stessa per
+    cui «REGOLA CODIFICA» pretende che i marcatori emoji si confrontino per **codepoint**:
+    un carattere che si legge come un altro rompe un confronto in silenzio. Se capitasse
+    dentro `web/engine.js`, in un marcatore o in un nome di campo, il segnale non arriverebbe
+    mai a XTrader e il servizio non segnalerebbe niente.
+
+    Il messaggio dice riga, parola e codepoint, perche' in un difetto invisibile la posizione
+    e' tutto il contenuto utile.
+    """
+    misti = _parole_miste(percorso.read_text(encoding='utf-8'))
+    if not misti:
+        return
+    dettaglio = '\n'.join(
+        f'    riga {numero}: {parola!r} contiene '
+        + ', '.join(f'{c!r} (U+{ord(c):04X})' for c in altre)
+        for numero, parola, altre in misti)
+    raise AssertionError(
+        f'{percorso.relative_to(RADICE)} contiene {len(misti)} parole che mescolano '
+        'lettere latine e lettere di un altro alfabeto.\n'
+        'Si leggono come parole normali e non lo sono: va riscritta la lettera latina.\n'
         f'{dettaglio}'
     )
