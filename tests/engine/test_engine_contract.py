@@ -158,3 +158,75 @@ def test_il_motore_js_e_il_relay_producono_lo_STESSO_formato(casi):
         f'  JS     : {dal_js["csvCompleto"]!r}\n'
         f'  Python : {main.make_csv(riga)!r}'
     )
+
+
+def test_i_due_motori_producono_lo_STESSO_runParser(casi):
+    """Regola 3, la forma piena: `esegui_parser` (Python) == `runParser` (JS).
+
+    I casi vivono in `engine_cases.mjs` — definiti UNA volta, con l'output JS come
+    ORACOLO — e qui ciascun `(messaggio, config)` gira nel motore Python. Si
+    confronta l'intero risultato: `matched`, `row` (le 14 colonne), `missing`,
+    `complete`. Un solo campo diverso su un solo caso nomina il caso e la colonna,
+    invece di un generico «i motori divergono».
+
+    E' il guardiano che la Issue #2 chiede per il PR 10: senza, le due
+    implementazioni dello stesso contratto si allontanano al primo `str.replace`
+    che in Python cambia tutte le occorrenze e in JS solo la prima.
+    """
+    import importlib
+    import sys
+    sys.path.insert(0, str(RADICE))
+    main = importlib.import_module('main')
+
+    esportato = next((c for c in casi if 'gemello Python' in c['nome']), None)
+    assert esportato and esportato['ok'], \
+        'il caso JS di confronto non e\' passato: ' + str(esportato and esportato.get('errore'))
+
+    divergenti = []
+    for caso_confronto in esportato['dettaglio']:
+        nome = caso_confronto['nome']
+        atteso = caso_confronto['atteso']
+        try:
+            ottenuto = main.esegui_parser(caso_confronto['message'], caso_confronto['config'])
+        except Exception as e:  # noqa: BLE001 - un'eccezione E' una divergenza
+            divergenti.append(f'{nome}: Python SOLLEVA {type(e).__name__}: {e}')
+            continue
+        for campo in ('matched', 'row', 'missing', 'complete'):
+            if ottenuto[campo] != atteso[campo]:
+                divergenti.append(
+                    f'{nome} · {campo}: JS={atteso[campo]!r} Python={ottenuto[campo]!r}')
+
+    assert not divergenti, (
+        'il motore Python diverge da web/engine.js:\n'
+        + '\n'.join(f'  - {r}' for r in divergenti)
+    )
+
+
+def test_ci_sono_abbastanza_casi_di_confronto(casi):
+    """Il guardiano non deve svuotarsi: se i casi di confronto sparissero, il test
+    sopra passerebbe a vuoto. Qui si pretende che ce ne siano abbastanza."""
+    esportato = next((c for c in casi if 'gemello Python' in c['nome']), None)
+    assert esportato and esportato['ok'], 'caso di confronto assente o fallito'
+    assert len(esportato['dettaglio']) >= 10, (
+        f'solo {len(esportato["dettaglio"])} casi di confronto: il guardiano copre troppo poco')
+
+
+def test_le_QUATTRO_obbligatorie_in_Python_sono_verbatim():
+    """La lista Python, verbatim, decisa dal proprietario (Issue #2/#25).
+
+    Il confronto JS/Python lega i RISULTATI (`missing`/`complete`): se le due liste
+    fossero sbagliate nello STESSO modo, quel confronto passerebbe comunque. Questo
+    caso invece pinna la lista Python parola per parola, e il caso gemello in
+    `engine_cases.mjs` pinna quella JS: insieme, una divergenza fra le due — o una
+    deriva di entrambe dalla decisione — diventa rossa. Chiesto da Claude Fable 5
+    sulla PR #28.
+    """
+    import importlib
+    import sys
+    sys.path.insert(0, str(RADICE))
+    main = importlib.import_module('main')
+    assert main.COLONNE_OBBLIGATORIE == ['EventName', 'MarketType', 'SelectionName', 'BetType'], (
+        f'COLONNE_OBBLIGATORIE e- {main.COLONNE_OBBLIGATORIE}, non le quattro decise su #2/#25')
+    # Provider e Price NON sono obbligatorie: pretenderle bloccherebbe segnali validi.
+    assert 'Provider' not in main.COLONNE_OBBLIGATORIE
+    assert 'Price' not in main.COLONNE_OBBLIGATORIE

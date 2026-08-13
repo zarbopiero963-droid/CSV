@@ -272,21 +272,34 @@ caso('parser: marcatore senza evento, confronto col motore Python', () => {
   return esiti;
 });
 
-caso('parser: Provider di soli spazi vale come mancante', () => {
+caso('parser: una obbligatoria di soli spazi vale come mancante', () => {
   const cfg = configProduzione();
   // Stessa classe di difetto su una colonna alimentata da una costante: una
-  // costante fatta di spazi e- una configurazione vuota, non un valore.
-  cfg.columns.Provider = { source: 'constant', value: '   ' };
+  // costante fatta di spazi e- una configurazione vuota, non un valore. Si prova
+  // su `MarketType`, una delle QUATTRO obbligatorie (prima era `Provider`, che
+  // obbligatoria non e- piu').
+  cfg.columns.MarketType = { source: 'constant', value: '   ' };
   const r = runParser(MSG_VALIDO, cfg);
-  eq(r.missing.includes('Provider'), true, 'Provider di soli spazi va elencato come mancante');
-  eq(r.complete, false, 'nessuna riga con Provider di soli spazi');
+  eq(r.missing.includes('MarketType'), true, 'MarketType di soli spazi va elencato come mancante');
+  eq(r.complete, false, 'nessuna riga con una obbligatoria di soli spazi');
   return r.missing;
 });
 
-caso('parser: Price NON e- obbligatoria (main.py la lascia vuota)', () => {
+caso('parser: Provider e Price NON sono obbligatorie', () => {
   if (!Array.isArray(REQUIRED_COLUMNS)) throw new Error('engine.js non esporta REQUIRED_COLUMNS');
-  eq(REQUIRED_COLUMNS.includes('Price'), false,
-     'il parser di produzione non produce Price: richiederla bloccherebbe i segnali reali');
+  // `Provider` e' sempre la costante "XTrader" e non protegge da nulla; `Price` la
+  // mette XTrader dal proprio book. Pretenderle bloccherebbe segnali validi.
+  eq(REQUIRED_COLUMNS.includes('Provider'), false, 'Provider non e- obbligatoria');
+  eq(REQUIRED_COLUMNS.includes('Price'), false, 'Price non e- obbligatoria');
+  return REQUIRED_COLUMNS;
+});
+
+caso('parser: le QUATTRO obbligatorie sono quelle decise dal proprietario', () => {
+  // La lista, verbatim: se qualcuno la cambia in un motore solo, questo caso lo
+  // vede — e il confronto JS/Python la tiene identica all'altro motore.
+  eq([...REQUIRED_COLUMNS].sort(),
+     ['BetType', 'EventName', 'MarketType', 'SelectionName'],
+     'le quattro colonne obbligatorie decise su #2/#25');
   return REQUIRED_COLUMNS;
 });
 
@@ -343,6 +356,125 @@ caso('descrizione regola: leggibile e non solleva', () => {
   eq(describeRule(null), '(vuoto)', 'null');
   return 'ok';
 });
+
+/* --------------------------- confronto col gemello Python (esegui_parser) */
+
+// I casi sono definiti QUI una volta sola e il loro output JS e' l'ORACOLO: il
+// test Python legge ciascun (messaggio, config), fa girare `esegui_parser` e
+// pretende lo stesso `runParser` — matched, row, missing, complete. Cosi' gli
+// ingressi non sono ricopiati in Python (regola 3) e la divergenza, se c'e',
+// diventa rossa nominando il caso.
+function casiConfronto() {
+  // Nome distinto dall'array `casi` a livello di modulo (in cui `caso` inserisce):
+  // ombreggiarlo funzionava, ma una modifica futura qui dentro rischierebbe l-array
+  // sbagliato. Segnalato da CodeRabbit sulla PR #28.
+  const confronti = [];
+  const aggiungi = (nome, message, config) =>
+    confronti.push({ nome, message, config, atteso: runParser(message, config) });
+
+  const prod = configProduzione();
+  aggiungi('prod: messaggio valido → completo', MSG_VALIDO, prod);
+  aggiungi('prod: " v " dentro un nome squadra → sostituita solo l-ultima',
+    `P.Bet. PREMACHT 0,5HT\n${VS} Man v City v Napoli\n@ 1.90`, prod);
+  aggiungi('prod: header presente ma nessuna riga col marcatore → non completo',
+    'P.Bet. PREMACHT 0,5HT\nnessun marcatore qui\n@ 1.85', prod);
+  aggiungi('prod: header assente → non riconosciuto',
+    `Altro canale\n${VS} A v B`, prod);
+  aggiungi('prod: evento vuoto dopo il marcatore → non completo',
+    `P.Bet. PREMACHT 0,5HT\n${VS}\n@ 1.85`, prod);
+
+  // Ogni sorgente e trasformazione, isolati.
+  const soloEmpty = {}; for (const c of COLUMNS) soloEmpty[c] = { source: 'empty' };
+
+  aggiungi('sorgente message', 'riga uno\nriga due', {
+    match: { type: 'contains', value: 'riga' },
+    columns: { ...soloEmpty, EventName: { source: 'message' } },
+  });
+  aggiungi('sorgente regex con gruppo e comma_to_dot', 'Quota 1,85 sul match', {
+    match: { type: 'contains', value: 'Quota' },
+    columns: { ...soloEmpty,
+      EventName: { source: 'constant', value: 'X' },
+      Price: { source: 'regex', pattern: '(?:@|quota)\\s*([0-9]+[.,][0-9]+)', group: 1,
+               transforms: [{ op: 'comma_to_dot' }] } },
+  });
+  aggiungi('sorgente line whole', 'testo\nEVENTO: Roma - Lazio\nfine', {
+    match: { type: 'contains', value: 'EVENTO' },
+    columns: { ...soloEmpty,
+      Provider: { source: 'constant', value: 'XTrader' },
+      EventName: { source: 'line', anchor: 'evento', part: 'whole',
+                   transforms: [{ op: 'trim' }] } },
+  });
+  aggiungi('sorgente line con marcatore assente nella riga → vuoto poi trasformato',
+    'testo\nEVENTO Roma - Lazio\nfine', {
+    match: { type: 'contains', value: 'EVENTO' },
+    columns: { ...soloEmpty,
+      Provider: { source: 'constant', value: 'XTrader' },
+      EventName: { source: 'line', anchor: 'evento', part: 'after', marker: 'XX',
+                   transforms: [{ op: 'upper' }] } },
+  });
+  aggiungi('trasformazioni: digits_only, upper, lower, replace_all',
+    'Provider: bet365\nvalore = ab-cd-ef\nnumero = tot 12.5x', {
+    match: { type: 'contains', value: 'Provider' },
+    columns: { ...soloEmpty,
+      Provider: { source: 'line', anchor: 'provider', part: 'after', marker: 'provider:',
+                  transforms: [{ op: 'trim' }, { op: 'upper' }] },
+      EventName: { source: 'line', anchor: 'valore', part: 'after', marker: '=',
+                   transforms: [{ op: 'trim' }, { op: 'replace_all', from: '-', to: ' ' }] },
+      Points: { source: 'line', anchor: 'numero', part: 'whole',
+                transforms: [{ op: 'digits_only' }] } },
+  });
+  // I separatori decimali si cambiano SOLO alla prima occorrenza in JS
+  // (`String.replace` con argomento stringa): un valore con due virgole stana la
+  // differenza con lo `str.replace` di Python, che di default le cambia tutte.
+  aggiungi('trasformazioni: comma_to_dot tocca solo la PRIMA virgola', 'x', {
+    match: { type: 'contains', value: 'x' },
+    columns: { ...soloEmpty,
+      Provider: { source: 'constant', value: 'XTrader' },
+      EventName: { source: 'constant', value: '1,2,3',
+                   transforms: [{ op: 'comma_to_dot' }] } },
+  });
+  aggiungi('trasformazioni: dot_to_comma tocca solo il PRIMO punto', 'x', {
+    match: { type: 'contains', value: 'x' },
+    columns: { ...soloEmpty,
+      Provider: { source: 'constant', value: 'XTrader' },
+      EventName: { source: 'constant', value: '1.2.3',
+                   transforms: [{ op: 'dot_to_comma' }] } },
+  });
+  aggiungi('condizione regex', `P.Bet LIVE\n${VS} A v B`, {
+    match: { type: 'regex', value: 'p\\.?bet' },
+    columns: { ...soloEmpty,
+      Provider: { source: 'constant', value: 'XTrader' },
+      EventName: { source: 'line', anchor: VS, part: 'after', marker: VS,
+                   transforms: [{ op: 'replace_last', from: ' v ', to: ' - ' }, { op: 'trim' }] } },
+  });
+  aggiungi('condizione assente → non riconosciuto', 'qualunque cosa', {
+    match: null, columns: soloEmpty,
+  });
+  aggiungi('regex che non compila → colonna vuota, nessun errore', 'testo', {
+    match: { type: 'contains', value: 'testo' },
+    columns: { ...soloEmpty,
+      Provider: { source: 'constant', value: 'XTrader' },
+      EventName: { source: 'constant', value: 'X' },
+      Points: { source: 'regex', pattern: '([', group: 1 } },
+  });
+  // Una obbligatoria valorizzata con la COSTANTE 0 (JSON valido). In JS
+  // `String(0 ?? '')` e' '0' → colonna PRESENTE; con lo `str(0 or '')` di Python
+  // sarebbe '' → colonna MANCANTE, e i due motori divergerebbero su `missing` e
+  // `complete`. E' la divergenza che il gemello Python deve replicare: la riga
+  // resta `0` in entrambi, e il valore obbligatorio non e' vuoto. Il motore Python
+  // usa quindi `?? ''` (solo None/undefined), non `or ''`. CodeRabbit, PR #28.
+  aggiungi('obbligatoria = costante 0 → PRESENTE, non mancante (0 e- valorizzato)', 'x', {
+    match: { type: 'contains', value: 'x' },
+    columns: { ...soloEmpty,
+      EventName: { source: 'constant', value: 0 },
+      MarketType: { source: 'constant', value: 'OVER_UNDER_15' },
+      SelectionName: { source: 'constant', value: 'Over 1,5' },
+      BetType: { source: 'constant', value: 'PUNTA' } },
+  });
+  return confronti;
+}
+
+caso('motore: casi di confronto per il gemello Python', () => casiConfronto());
 
 process.stdout.write(JSON.stringify(casi, null, 1));
 process.exit(casi.every(c => c.ok) ? 0 : 1);

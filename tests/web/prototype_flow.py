@@ -12,7 +12,7 @@ Lo avvia `test_prototype_flow.py`, che tira su il server. A mano:
     python tests/web/prototype_flow.py http://127.0.0.1:8099/app/ /tmp/shots
 """
 
-import sys, pathlib, tempfile
+import csv, io, sys, pathlib, tempfile
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 from playwright.sync_api import sync_playwright
 
@@ -127,10 +127,54 @@ with sync_playwright() as pw:
     assert ev2 == 'Inter - Milan', f'EventName trasformato={ev2!r}'
     shot(pg, '09-eventname-trasformato')
 
-    # salta fino al riepilogo
-    for _ in range(12):
+    # Verso il riepilogo, ma NON a vuoto: dal 13/08/2026 le colonne obbligatorie sono
+    # quattro (EventName, MarketType, SelectionName, BetType), quindi un parser che
+    # lascia MarketType/SelectionName/BetType vuote e' «incompleto» e non manda segnali.
+    # Si impostano come costanti, com'e' un parser vero.
+    #
+    # La navigazione NON si fida dell-ordine hardcodato: `_costante(colonna, ...)`
+    # asserisce che il wizard sia davvero su quella colonna (il titolo bolla mostra
+    # `Colonna <nome>`) PRIMA di scrivere. Un riordino silenzioso degli step
+    # metterebbe altrimenti la costante nella colonna sbagliata senza far fallire il
+    # test. Chiesto da Claude Fable 5 sulla PR #28. E le attese sono legate allo
+    # STATO (colonna cambiata, `#rule-const` comparso), non a un timer fisso che su un
+    # runner lento farebbe cliccare prima del render. Segnalato da CodeRabbit, PR #28.
+    def _colonna_corrente():
+        return pg.inner_text('.bubble.ai strong.mono')
+
+    def _avanti():
+        prima = _colonna_corrente()
         pg.click('[data-act="wiz-next"]')
-    pg.wait_for_selector('#test-msg')
+        pg.wait_for_function(
+            "p => { const e = document.querySelector('.bubble.ai strong.mono');"
+            " return e && e.textContent !== p; }", arg=prima)
+
+    def _costante(colonna, valore):
+        corrente = _colonna_corrente()
+        assert corrente == colonna, f'wizard atteso su {colonna!r}, invece su {corrente!r}'
+        pg.click('[data-act="wiz-mode"][data-mode="constant"]')
+        pg.wait_for_selector('#rule-const')
+        pg.fill('#rule-const', valore)
+
+    def _al_riepilogo():
+        pg.click('[data-act="wiz-next"]')
+        pg.wait_for_selector('#test-msg')
+
+    _avanti()                       # MarketId
+    _avanti()                       # MarketName
+    _avanti()                       # MarketType (obbligatoria)
+    _costante('MarketType', 'OVER_UNDER_15')
+    _avanti()                       # SelectionId
+    _avanti()                       # SelectionName (obbligatoria)
+    _costante('SelectionName', 'Over 1,5 goal')
+    _avanti()                       # Handicap
+    _avanti()                       # Price
+    _avanti()                       # MinPrice
+    _avanti()                       # MaxPrice
+    _avanti()                       # BetType (obbligatoria)
+    _costante('BetType', 'PUNTA')
+    _avanti()                       # Points
+    _al_riepilogo()
     shot(pg, '10-riepilogo')
 
     # prova messaggio: caso riconosciuto
@@ -141,6 +185,17 @@ with sync_playwright() as pw:
     assert 'Inter - Milan' in csv_txt, f'CSV senza evento: {csv_txt!r}'
     assert csv_txt.count('"') == 56, f'campi quotati attesi 56, trovati {csv_txt.count(chr(34))}'
     assert csv_txt.strip().count(chr(10)) == 1, 'attese 2 righe: intestazione + segnale'
+    # Asserzione POSIZIONALE: le costanti devono stare nella colonna giusta, non solo
+    # comparire da qualche parte. Se il wizard riordinasse gli step, `_costante` gia'
+    # fallirebbe sull-asserzione di colonna; questo e' il secondo pavimento, sul CSV
+    # prodotto. Indici da HEADERS: EventName=2, MarketType=5, SelectionName=7, BetType=12.
+    righe = list(csv.reader(io.StringIO(csv_txt)))
+    assert len(righe) >= 2, f'CSV senza riga segnale: {csv_txt!r}'
+    segnale = righe[1]
+    assert segnale[2] == 'Inter - Milan', f'EventName in colonna sbagliata: {segnale!r}'
+    assert segnale[5] == 'OVER_UNDER_15', f'MarketType in colonna sbagliata: {segnale!r}'
+    assert segnale[7] == 'Over 1,5 goal', f'SelectionName in colonna sbagliata: {segnale!r}'
+    assert segnale[12] == 'PUNTA', f'BetType in colonna sbagliata: {segnale!r}'
     shot(pg, '11-prova-ok')
     print('CSV riconosciuto:', repr(csv_txt))
 

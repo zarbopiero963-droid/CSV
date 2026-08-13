@@ -372,10 +372,18 @@ un'ancora così non combacerebbe più con nessuna riga, in silenzio.
 (le 14 colonne), `missing` (le colonne obbligatorie risultate vuote) e `complete`.
 **Chi scrive il feed deve guardare `complete`, non `matched`:** un messaggio
 riconosciuto ma privo dell'evento produrrebbe una riga formalmente valida e priva
-di senso per XTrader. Le colonne obbligatorie sono in `REQUIRED_COLUMNS` e oggi
-sono `Provider` ed `EventName`. **`Price` non è obbligatoria:** il parser in
-produzione (`main.py`) la lascia vuota perché la quota la mette XTrader dal
-proprio book, quindi pretenderla bloccherebbe i segnali reali.
+di senso per XTrader. Le colonne obbligatorie sono in `REQUIRED_COLUMNS` e dal
+13/08/2026 (Issue #2, riconfermate su #25) sono **quattro**: `EventName`,
+`MarketType`, `SelectionName`, `BetType` — l'evento, il tipo di mercato su cui
+XTrader decide, la selezione, e se puntare o bancare. **`Provider` non è
+obbligatoria:** è sempre la costante `"XTrader"` e pretenderla non protegge da
+nulla. **`Price` non è obbligatoria:** il parser in produzione (`main.py`) la
+lascia vuota perché la quota la mette XTrader dal proprio book, quindi pretenderla
+bloccherebbe i segnali reali. **`MarketName` non è obbligatoria:** è l'etichetta
+leggibile, mentre `MarketType` è il codice su cui XTrader agisce. La lista è
+identica nei due motori (`REQUIRED_COLUMNS` in `web/engine.js`,
+`COLONNE_OBBLIGATORIE` in `main.py`), tenuta allineata dal test di confronto: due
+liste divergenti darebbero «completo» nel browser e feed vuoto in produzione.
 
 Il valore di una colonna obbligatoria viene **normalizzato** prima del controllo:
 uno spazio è un carattere, quindi `" "` senza `trim` risulterebbe valorizzato e
