@@ -2500,3 +2500,79 @@ def test_la_WHERE_anti_corsa_serve_DAVVERO(tmp_path, monkeypatch):
     assert dopo == prima + 1, (
         f'session_version da {prima} a {dopo}: la richiesta lenta ha incrementato una seconda '
         'volta, quindi butta fuori anche una sessione nata DOPO la revoca')
+
+
+def test_il_FEED_non_fa_scattare_la_revoca(tmp_path, monkeypatch):
+    """La NON-relazione fra sessione e feed, ora che il percorso sessione SCRIVE.
+
+    Chiesto da GPT-5.5 sulla PR #24, e la richiesta e' giusta: mettere una scrittura sul
+    percorso di lettura della sessione ha senso solo se quel percorso resta separato dal feed.
+    `/xtrader.csv` non ha sessione — XTrader interroga con un token nell'URL — quindi una sua
+    richiesta non deve toccare `users`, nemmeno quando l'invariante dell'amministratore e'
+    violata: il feed lo interroga un programma, a raffica, e una revoca fatta da li' sarebbe
+    una scrittura per ogni interrogazione.
+
+    E' lo stesso principio per cui `_rispondi_con_sessione` e' chiamata per-rotta e non da un
+    middleware: un middleware girerebbe anche qui.
+    """
+    import sqlite3
+    percorso = _prepara(tmp_path, monkeypatch, 'feed_e_revoca.db')
+    VECCHIO, NUOVO = '111000111', '222000222'
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', VECCHIO)
+    main.login_telegram(main.LoginTelegramIn(**_dati_login(id=VECCHIO)))
+
+    # L'invariante e' violata: la variabile e' cambiata e la riga porta ancora la vecchia.
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', NUOVO)
+    monkeypatch.setattr(main, 'TOKEN', 'token-di-prova-non-un-segreto')
+
+    risposta = main.xtrader_csv(token='token-di-prova-non-un-segreto')
+    assert risposta.status_code == 200, f'il feed ha risposto {risposta.status_code}'
+
+    c = sqlite3.connect(percorso)
+    ancora = c.execute('SELECT telegram_id FROM users WHERE origin_profile=?',
+                       (main.PIERO_PROFILE,)).fetchone()[0]
+    revoche = c.execute("SELECT COUNT(*) FROM admin_audit"
+                        " WHERE action='identita_telegram_revocata'").fetchone()[0]
+    c.close()
+    assert ancora == VECCHIO, (
+        'una richiesta al FEED ha sciolto il collegamento: il percorso del feed ha toccato '
+        '`users`, e XTrader lo interroga a raffica')
+    assert revoche == 0, f'{revoche} revoche scritte da una richiesta al feed'
+
+
+@pytest.mark.parametrize('valore', ['', '"222000222"', '  ', '022200022'])
+def test_una_variabile_ASSENTE_o_MALFORMATA_non_revoca_dalla_sessione(valore, tmp_path,
+                                                                     monkeypatch):
+    """Il verso opposto sul percorso nuovo, chiesto da GPT-5.5 sulla PR #24.
+
+    `revoca_identita_stantia()` e' dietro lo stesso controllo di validita' del login, ma non
+    era misurato **da questo percorso** — e questo percorso e' quello di ogni richiesta del
+    sito, quindi un errore qui scioglierebbe un collegamento buono a ogni pagina aperta,
+    all'infinito, per un refuso nel pannello. E' il difetto peggiore fra tutti quelli di
+    questa PR, se ci arrivasse da qui.
+    """
+    import sqlite3
+    percorso = _prepara(tmp_path, monkeypatch, f'sessione_valore_{abs(hash(valore))}.db')
+    BUONO = '111000111'
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', BUONO)
+    risposta = main.login_telegram(main.LoginTelegramIn(**_dati_login(id=BUONO)))
+    cookie = None
+    for pezzo in (risposta.headers.get('set-cookie') or '').split(';'):
+        chiave, _, v = pezzo.strip().partition('=')
+        if chiave == main.NOME_COOKIE:
+            cookie = v
+
+    class Richiesta:
+        cookies = {main.NOME_COOKIE: cookie}
+
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', valore)
+    assert main.utente_dalla_sessione(Richiesta()) is not None, (
+        f'con TELEGRAM_ADMIN_ID={valore!r} la sessione buona e- stata invalidata')
+
+    c = sqlite3.connect(percorso)
+    ancora = c.execute('SELECT telegram_id FROM users WHERE origin_profile=?',
+                       (main.PIERO_PROFILE,)).fetchone()[0]
+    c.close()
+    assert ancora == BUONO, (
+        f'con TELEGRAM_ADMIN_ID={valore!r} il collegamento buono e- stato sciolto (ora '
+        f'{ancora!r}): un refuso nel pannello scioglierebbe a ogni pagina aperta')
