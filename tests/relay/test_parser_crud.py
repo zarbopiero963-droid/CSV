@@ -440,3 +440,93 @@ def test_prova_con_regex_CATASTROFICA_e_limitata(servizio):
     assert trascorso < 3.0, (
         f'/test ha impiegato {trascorso:.2f}s su una regex catastrofica: il budget di '
         f'parser non la limita, ed e- un DoS autenticato')
+
+
+def test_una_config_con_COLONNA_non_eseguibile_da_422(servizio):
+    """Anche una COLONNA storta va rifiutata, non solo la condizione.
+
+    `esegui_parser` costruisce sempre la `row` (esegue TUTTE le colonne), a
+    prescindere dal fatto che la condizione riconosca «probe»: quindi il dry-run di
+    `_valida_config_parser` esegue le regole delle colonne e una regola non eseguibile
+    (qui un `pattern` non-stringa) da' 422. GPT-5.6 Sol dubitava che le colonne fossero
+    validate quando `match` non combacia con «probe»: questo caso lo verifica, sia con
+    un match che combacia sia con uno che NON combacia.
+    """
+    cookie, _ = _login_a(servizio)
+    for match in ({'type': 'contains', 'value': 'x'},           # 'probe' non contiene 'x'
+                  {'type': 'contains', 'value': 'probe'}):        # 'probe' contiene 'probe'
+        cfg = {'match': match, 'columns': {'EventName': {'source': 'regex', 'pattern': 123}}}
+        stato, corpo, _ = _crea(servizio, cookie, 'Colonna storta', config=cfg)
+        assert stato == 422, (
+            f'colonna non eseguibile con match {match!r}: atteso 422, ricevuto {stato} '
+            f'({corpo[:120]!r})')
+
+
+def test_prova_senza_sessione_da_401_anche_con_corpo_INVALIDO(servizio):
+    """La rotta `/test` non deve rivelare la propria esistenza con un 422.
+
+    Prima leggeva `MessageIn` nella firma: FastAPI validava il corpo PRIMA della
+    sessione, quindi un corpo malformato senza cookie dava 422 (cioè «la rotta
+    esiste») invece di 401. Ora il corpo si legge dopo il controllo di sessione.
+    Segnalato da Claude Fable 5 e GPT-5.6 Sol sulla PR #30.
+    """
+    # Corpo che NON passerebbe MessageIn ('message' manca), senza cookie → 401, non 422.
+    stato, _, _ = _chiama(servizio, 'POST', '/api/me/parsers/qualunque/test', corpo={})
+    assert stato == 401, f'atteso 401, ricevuto {stato}: la rotta rivela di esistere'
+    # E con la sessione ma corpo invalido → 422 (ora, dopo il 401).
+    cookie, _ = _login_a(servizio)
+    slug = json.loads(_crea(servizio, cookie, 'X')[1])['slug']
+    stato, _, _ = _chiama(servizio, 'POST', f'/api/me/parsers/{slug}/test', cookie=cookie, corpo={})
+    assert stato == 422, f'corpo senza «message» con sessione: atteso 422, ricevuto {stato}'
+
+
+def test_creazione_disambigua_su_collisione_di_NAME_legacy(tmp_path, monkeypatch):
+    """Un parser gia' chiamato `u{id}-{slug}` (admin/legacy) non blocca la creazione.
+
+    Il `name` è PRIMARY KEY globale. Se un parser esiste gia' con quel `name` ma NON
+    è fra gli slug dell'utente, ricalcolare dagli soli slug dell'utente darebbe
+    all'infinito lo stesso `name` → 409 permanente. Segnando lo slug come «bruciato»,
+    il giro dopo `_slug_libero` ne prende un altro. Segnalato da Fable 5 e Sol, PR #30.
+    """
+    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'legacy.db'))
+    main._PERCORSI_MIGRATI.discard(main.DB_PATH)
+    c = main.db()
+    # Un parser gia' chiamato come quello che l'utente 7 genererebbe (name PK globale).
+    c.execute("INSERT INTO parsers(name, header) VALUES ('u7-test-1', '')")
+    c.commit()
+    config = {'match': {'type': 'contains', 'value': 'x'},
+              'columns': {'EventName': {'source': 'constant', 'value': 'X'}}}
+    parser = main._crea_parser_utente(c, 7, 'Test 1', config, True)
+    c.close()
+    assert parser['slug'] == 'test-1-2', (
+        f"la creazione non ha disambiguato sul name legacy: slug {parser['slug']!r}")
+
+
+def test_crea_CHIUDE_la_connessione_anche_su_409(tmp_path, monkeypatch):
+    """Il fail-first del leak: `_crea_parser_utente` che solleva 409 non deve lasciare
+    la connessione aperta con la transazione in corso. Segnalato da Claude Fable 5.
+    """
+    import asyncio
+    import sqlite3
+    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'leak.db'))
+    main._PERCORSI_MIGRATI.discard(main.DB_PATH)
+    connessioni = []
+    reale = main.db
+    monkeypatch.setattr(main, 'db', lambda: connessioni.append(reale()) or connessioni[-1])
+    monkeypatch.setattr(main, '_sessione_valida', lambda r: {'id': 1, 'versione': 1})
+
+    def solleva_409(*a, **k):
+        raise main.HTTPException(409, 'contesa')
+
+    monkeypatch.setattr(main, '_crea_parser_utente', solleva_409)
+
+    class Req:
+        async def json(self):
+            return {'titolo': 'X', 'config': {'match': {'type': 'contains', 'value': 'zzz'}}}
+
+    with pytest.raises(main.HTTPException) as e:
+        asyncio.run(main.crea_parser_mio(Req()))
+    assert e.value.status_code == 409
+    assert connessioni, 'db() non e- stato chiamato'
+    with pytest.raises(sqlite3.ProgrammingError):
+        connessioni[0].execute('SELECT 1')   # una execute su connessione chiusa solleva

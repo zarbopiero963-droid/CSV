@@ -3421,23 +3421,34 @@ def _crea_parser_utente(c, user_id, titolo, config, active):
     # PR #30; e' la stessa classe della corsa di login, qui risolta col retry perche'
     # il costo di un secondo tentativo e' trascurabile.
     nome = None
-    for _ in range(6):
-        presi = {r[0] for r in c.execute(
+    falliti = set()   # slug gia' bruciati: da NON ricalcolare
+    for _ in range(8):
+        presi = falliti | {r[0] for r in c.execute(
             'SELECT slug FROM parsers WHERE user_id=?', (user_id,)).fetchall()}
         slug = _slug_libero(_slugifica(titolo), presi)
         candidato = f'u{user_id}-{slug}'
-        massimo = c.execute('SELECT MAX(ordine) FROM parsers WHERE user_id=?',
-                            (user_id,)).fetchone()[0]
-        ordine = (massimo + 1) if massimo is not None else 0
         try:
+            # `ordine` calcolato NELLA INSERT, non con un SELECT separato: due POST
+            # concorrenti leggerebbero lo stesso `MAX(ordine)` e salverebbero ordini
+            # duplicati (precedenza ambigua fra i parser dello stesso utente). La
+            # sottoquery gira dentro il lock di scrittura dell'INSERT, quindi e'
+            # atomica. Segnalato da GPT-5.6 Sol sulla PR #30.
             c.execute(
                 'INSERT INTO parsers(name, header, user_id, slug, titolo, config_json, active, ordine)'
-                ' VALUES (?,?,?,?,?,?,?,?)',
+                ' VALUES (?,?,?,?,?,?,?,'
+                ' (SELECT COALESCE(MAX(ordine), -1) + 1 FROM parsers WHERE user_id=?))',
                 (candidato, '', user_id, slug, titolo, json.dumps(config),
-                 1 if active else 0, ordine))
+                 1 if active else 0, user_id))
             nome = candidato
             break
         except sqlite3.IntegrityError:
+            # Puo' essere la corsa su `UNIQUE(user_id, slug)` OPPURE una collisione sul
+            # `name` (PRIMARY KEY globale): un parser legacy o admin chiamato gia'
+            # `u{user_id}-{slug}` non comparirebbe fra gli slug dell'utente, quindi
+            # ricalcolare dagli SOLI suoi slug darebbe all'infinito lo stesso nome. Si
+            # segna lo slug come bruciato: il giro dopo `_slug_libero` ne prende un
+            # altro e il nome cambia. Segnalato da Claude Fable 5 sulla PR #30.
+            falliti.add(slug)
             continue
     if nome is None:
         raise HTTPException(409, 'creazione non riuscita per contesa, riprova')
@@ -3491,9 +3502,14 @@ async def crea_parser_mio(request: Request):
         raise HTTPException(422, 'titolo mancante')
     _valida_config_parser(dati.config)
     c = db()
-    parser = _crea_parser_utente(c, utente['id'], titolo, dati.config, dati.active)
-    c.commit()
-    c.close()
+    # `try/finally`: `_crea_parser_utente` puo' sollevare 409 (contesa esaurita), e
+    # senza il `finally` la connessione resterebbe aperta con la transazione in corso,
+    # rischiando un lock sulle richieste successive. Segnalato da Claude Fable 5, PR #30.
+    try:
+        parser = _crea_parser_utente(c, utente['id'], titolo, dati.config, dati.active)
+        c.commit()
+    finally:
+        c.close()
     return _rispondi_con_sessione(utente['id'], utente['versione'], parser)
 
 
@@ -3510,19 +3526,20 @@ async def modifica_parser_mio(slug: str, request: Request):
         raise HTTPException(422, 'titolo mancante')
     _valida_config_parser(dati.config)
     c = db()
-    riga = c.execute('SELECT id FROM parsers WHERE user_id=? AND slug=?',
-                     (utente['id'], slug)).fetchone()
-    if not riga:
+    try:
+        riga = c.execute('SELECT id FROM parsers WHERE user_id=? AND slug=?',
+                         (utente['id'], slug)).fetchone()
+        if not riga:
+            raise HTTPException(404, 'parser non trovato')
+        c.execute('UPDATE parsers SET titolo=?, config_json=?, active=?'
+                  ' WHERE user_id=? AND slug=?',
+                  (titolo, json.dumps(dati.config), 1 if dati.active else 0, utente['id'], slug))
+        nuova = c.execute('SELECT id, slug, titolo, active, config_json, ordine'
+                          ' FROM parsers WHERE user_id=? AND slug=?',
+                          (utente['id'], slug)).fetchone()
+        c.commit()
+    finally:
         c.close()
-        raise HTTPException(404, 'parser non trovato')
-    c.execute('UPDATE parsers SET titolo=?, config_json=?, active=?'
-              ' WHERE user_id=? AND slug=?',
-              (titolo, json.dumps(dati.config), 1 if dati.active else 0, utente['id'], slug))
-    nuova = c.execute('SELECT id, slug, titolo, active, config_json, ordine'
-                      ' FROM parsers WHERE user_id=? AND slug=?',
-                      (utente['id'], slug)).fetchone()
-    c.commit()
-    c.close()
     return _rispondi_con_sessione(utente['id'], utente['versione'], _vista_parser(nuova))
 
 
@@ -3531,25 +3548,26 @@ def elimina_parser_mio(slug: str, request: Request):
     """Elimina un proprio parser. **404** se non e' dell'utente."""
     utente = _sessione_valida(request)
     c = db()
-    riga = c.execute('SELECT id FROM parsers WHERE user_id=? AND slug=?',
-                     (utente['id'], slug)).fetchone()
-    if not riga:
+    try:
+        riga = c.execute('SELECT id FROM parsers WHERE user_id=? AND slug=?',
+                         (utente['id'], slug)).fetchone()
+        if not riga:
+            raise HTTPException(404, 'parser non trovato')
+        # Le associazioni chat→parser puntano a `parsers.id`: si rimuovono col parser,
+        # o resterebbero orfane e il dispatch per-utente (PR successivo) le seguirebbe.
+        # Oggi `parser_chats` e' vuota (nessun codice la scrive ancora), quindi qui non
+        # cancella niente; c'e' perche' sia corretta quando quel PR la popolera'.
+        # Segnalato da GPT-5.5 e Claude Fable 5 sulla PR #30.
+        c.execute('DELETE FROM parser_chats WHERE parser_id=?', (riga[0],))
+        c.execute('DELETE FROM parsers WHERE user_id=? AND slug=?', (utente['id'], slug))
+        c.commit()
+    finally:
         c.close()
-        raise HTTPException(404, 'parser non trovato')
-    # Le associazioni chat→parser puntano a `parsers.id`: si rimuovono con il parser,
-    # o resterebbero orfane e il dispatch per-utente (PR successivo) le seguirebbe.
-    # Oggi `parser_chats` e' vuota (nessun codice la scrive ancora), quindi qui non
-    # cancella niente; c'e' perche' sia corretta quando quel PR la popolera'.
-    # Segnalato da GPT-5.5 e Claude Fable 5 sulla PR #30.
-    c.execute('DELETE FROM parser_chats WHERE parser_id=?', (riga[0],))
-    c.execute('DELETE FROM parsers WHERE user_id=? AND slug=?', (utente['id'], slug))
-    c.commit()
-    c.close()
     return _rispondi_con_sessione(utente['id'], utente['versione'], {'ok': True})
 
 
 @app.post('/api/me/parsers/{slug}/test')
-def prova_parser_mio(slug: str, data: MessageIn, request: Request):
+async def prova_parser_mio(slug: str, request: Request):
     """Prova un messaggio contro un proprio parser, A SECCO: niente scrittura nel feed.
 
     Restituisce `matched`, `missing`, `complete` e — se completo — il `csv` e l'`event`.
@@ -3557,17 +3575,30 @@ def prova_parser_mio(slug: str, data: MessageIn, request: Request):
     se la condizione ha combaciato e quali colonne obbligatorie mancano, senza toccare
     il feed di nessuno. `esegui_parser` e' avvolto: una config che sollevasse da' un
     esito diagnostico, non un 500.
+
+    Il corpo si legge a mano DOPO il controllo di sessione — come POST/PUT — o
+    FastAPI validerebbe `MessageIn` prima e un estraneo con corpo malformato
+    riceverebbe 422 invece di 401, rivelando che la rotta esiste. Segnalato da
+    Claude Fable 5 e GPT-5.6 Sol sulla PR #30.
     """
     utente = _sessione_valida(request)
+    try:
+        dati = MessageIn(**(await request.json()))
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(422, 'corpo non valido: serve {"message": "..."}')
     c = db()
-    riga = c.execute('SELECT config_json FROM parsers WHERE user_id=? AND slug=?',
-                     (utente['id'], slug)).fetchone()
-    c.close()
+    try:
+        riga = c.execute('SELECT config_json FROM parsers WHERE user_id=? AND slug=?',
+                         (utente['id'], slug)).fetchone()
+    finally:
+        c.close()
     if not riga:
         raise HTTPException(404, 'parser non trovato')
     try:
         config = json.loads(riga[0]) if riga[0] else {}
-        risultato = esegui_parser(data.message, config)
+        risultato = esegui_parser(dati.message, config)
     except Exception:
         return _rispondi_con_sessione(utente['id'], utente['versione'],
                                       {'matched': False, 'missing': [], 'complete': False,
