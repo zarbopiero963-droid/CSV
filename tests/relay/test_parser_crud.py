@@ -380,6 +380,35 @@ def test_la_creazione_RITENTA_su_collisione_di_slug(tmp_path, monkeypatch):
         'atteso «test-1-2»')
 
 
+def test_DELETE_pulisce_parser_chats_e_solo_quelle(servizio, tmp_path):
+    """La cancellazione rimuove le associazioni chat DEL parser, e solo quelle.
+
+    `parser_chats` è vuota oggi (nessun codice la scrive ancora), quindi la si popola
+    a mano nel DB del sottoprocesso per esercitare la pulizia aggiunta come fix del
+    bloccante (GPT-5.5, Fable 5): un parser cancellato non deve lasciare associazioni
+    orfane che il dispatch futuro seguirebbe. E la pulizia è **scoped** all'`id` del
+    parser cancellato: le associazioni di un altro parser restano.
+    """
+    import sqlite3
+    cookie, _ = _login_a(servizio)
+    p1 = json.loads(_crea(servizio, cookie, 'Uno')[1])
+    p2 = json.loads(_crea(servizio, cookie, 'Due')[1])
+
+    db = sqlite3.connect(tmp_path / 'signals.db')
+    db.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (?,?)', (p1['id'], 111))
+    db.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (?,?)', (p2['id'], 222))
+    db.commit()
+    db.close()
+
+    assert _chiama(servizio, 'DELETE', f'/api/me/parsers/{p1["slug"]}', cookie=cookie)[0] == 200
+
+    db = sqlite3.connect(tmp_path / 'signals.db')
+    restano = sorted(r[0] for r in db.execute('SELECT parser_id FROM parser_chats').fetchall())
+    db.close()
+    assert restano == [p2['id']], (
+        f'DELETE ha lasciato orfani o rimosso le associazioni sbagliate: {restano}')
+
+
 def test_prova_con_regex_CATASTROFICA_e_limitata(servizio):
     """`/test` esegue la regex dell'utente sul messaggio dell'utente, ma col budget.
 
