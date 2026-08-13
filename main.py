@@ -750,6 +750,19 @@ RIFERIMENTI_UTENTE = (
     ('admin_audit', 'target_user_id'),
 )
 
+# Le colonne di `admin_audit` NON si travasano quando si RIPARA un account: le altre sono
+# **dati** dell'utente e vanno dove vanno i dati, quelle due sono **storia**. Riscritte, un
+# `collegamento_admin_rifiutato` registrato contro la riga X diventa un rifiuto del
+# proprietario contro se stesso — auto-referenziale, cioe' inutile proprio nel momento in cui
+# serve, perche' `admin_audit` e' l'unico posto dove il proprietario legge PERCHE' un login e'
+# stato rifiutato. La MIGRAZIONE invece deve riscriverle: la' la riga perdente perde
+# `origin_profile` e i suoi riferimenti resterebbero orfani. Segnalato da CodeRabbit sulla
+# PR #24. Derivato e non riscritto a mano: una colonna nuova entra da `RIFERIMENTI_UTENTE`,
+# che e' vincolato dal test dello schema, e arriva qui da se'.
+RIFERIMENTI_DATI_UTENTE = tuple((tabella, colonna)
+                                for tabella, colonna in RIFERIMENTI_UTENTE
+                                if tabella != 'admin_audit')
+
 # I nomi che per convenzione riferiscono un utente. Il test li usa per trovare le colonne
 # che DOVREBBERO essere in `RIFERIMENTI_UTENTE`.
 NOMI_DI_RIFERIMENTO_UTENTE = ('user_id', 'owner_user_id', 'admin_user_id',
@@ -928,10 +941,11 @@ def riconcilia_su_utente(c, da_utente, a_utente):
     giusta — `users.telegram_id` e' UNIQUE, quindi va prima liberato. E cio' che quella
     riga avesse accumulato non va perso, da cui il travaso invece di una `DELETE`.
 
-    Riusa `RIFERIMENTI_UTENTE` e `_trasferisci_parser` della migrazione (regola 3): sono le
-    stesse otto coppie tabella/colonna, e tenerne due elenchi sarebbe la duplicazione che
-    diverge al primo `ALTER TABLE`. Il test che verifica la completezza di
-    `RIFERIMENTI_UTENTE` copre quindi anche questa funzione.
+    Riusa `RIFERIMENTI_DATI_UTENTE` e `_trasferisci_parser` della migrazione (regola 3):
+    `RIFERIMENTI_DATI_UTENTE` e' *derivato* da `RIFERIMENTI_UTENTE` togliendo le due colonne
+    di `admin_audit`, che sono storia e non dati (vedi il commento sulla costante). Derivato e
+    non ricopiato: il test che verifica la completezza di `RIFERIMENTI_UTENTE` copre quindi
+    anche questa funzione, e una colonna nuova arriva qui da se'.
 
     La riga perdente **non** viene cancellata: le si azzera `telegram_id` e resta un
     account senza niente. Una `DELETE` sarebbe irreversibile e potrebbe orfanare una
@@ -941,7 +955,7 @@ def riconcilia_su_utente(c, da_utente, a_utente):
     Non fa `commit`: la libera chi chiama, perche' questa operazione deve stare nella
     stessa transazione della scrittura che segue.
     """
-    for tabella, colonna in RIFERIMENTI_UTENTE:
+    for tabella, colonna in RIFERIMENTI_DATI_UTENTE:
         c.execute(f'UPDATE {tabella} SET {colonna}=? WHERE {colonna}=?',
                   (a_utente, da_utente))
     _trasferisci_parser(c, da_utente, a_utente)
@@ -1877,8 +1891,12 @@ def login_telegram(data: LoginTelegramIn):
     # `session_version` due volte, e **un cookie su sei nasce morto** — il login «riesce», la
     # richiesta successiva risponde 401, e chi lo subisce non ha modo di capire perche'.
     # Alzato da Claude Fable 5 e da GPT-5.6 Sol indipendentemente sulla PR #24.
-    c.execute('BEGIN IMMEDIATE')
+    # `BEGIN IMMEDIATE` sta DENTRO il `try`: sotto contesa quel comando stesso solleva
+    # `database is locked`, e da fuori nessuno chiuderebbe la connessione — ogni login perso
+    # per lock perderebbe un descrittore, su un container che non riparte mai. Rilievo di
+    # Claude Fable 5 sulla PR #24.
     try:
+        c.execute('BEGIN IMMEDIATE')
         utente, versione = _decidi_identita(c, data)
         c.commit()
     except HTTPException:
@@ -1928,8 +1946,18 @@ def _decidi_identita(c, data):
     proprietario = c.execute('SELECT id, session_version, telegram_id FROM users'
                              ' WHERE origin_profile=?', (PIERO_PROFILE,)).fetchone()
 
+    # Un valore malformato non descrive NESSUNA identita': applicare l'invariante su di esso
+    # scioglie un collegamento buono senza poterne creare uno nuovo, perche' CASO 2 confronta
+    # `data.id` con lo stesso valore e non combacia mai — quindi il proprietario resta fuori
+    # dal proprio account e gliene nasce uno vuoto, per un refuso nel pannello Railway.
+    # `admin_id_malformato()` esisteva gia' e segnalava soltanto, all'avvio: un controllo che
+    # nomina il problema ma non lo previene. Trovato indipendentemente da GPT-5.6 Sol e da
+    # CodeRabbit sulla PR #24, e misurato in
+    # `test_un_ADMIN_ID_malformato_NON_scioglie_un_collegamento_BUONO`.
+    admin_configurato = bool(TELEGRAM_ADMIN_ID) and not admin_id_malformato()
+
     # CASO 1 — il collegamento stantio si scioglie.
-    if (TELEGRAM_ADMIN_ID and proprietario and proprietario[2]
+    if (admin_configurato and proprietario and proprietario[2]
             and proprietario[2] != TELEGRAM_ADMIN_ID):
         c.execute('UPDATE users SET telegram_id=NULL,'
                   ' session_version=session_version+1 WHERE id=?', (proprietario[0],))
@@ -1944,7 +1972,7 @@ def _decidi_identita(c, data):
         riga = c.execute('SELECT id, session_version FROM users WHERE telegram_id=?',
                          (data.id,)).fetchone()
 
-    e_amministratore = bool(TELEGRAM_ADMIN_ID) and data.id == TELEGRAM_ADMIN_ID
+    e_amministratore = admin_configurato and data.id == TELEGRAM_ADMIN_ID
 
     # CASO 2 — l'identita' configurata si collega alla riga del proprietario.
     if e_amministratore and proprietario and (riga is None or riga[0] != proprietario[0]):
@@ -1986,7 +2014,9 @@ def _decidi_identita(c, data):
         if riga is None:
             # Non deve accadere: l'inserimento e' andato o la riga c'era. Se accade, e'
             # meglio un 503 che un `TypeError` sull'indice di `None`. La connessione la
-            # chiude chi ha aperto la transazione, dopo il rollback.
+            # chiude chi ha aperto la transazione, e un `HTTPException` prende il ramo che
+            # CONFERMA: e' una decisione, non un guasto. Il commento diceva «dopo il
+            # rollback» ed era rimasto indietro di un commit — segnalato da CodeRabbit.
             raise HTTPException(503, 'account non creato: riprova')
     else:
         # Login successivi: il nome su Telegram puo' essere cambiato.

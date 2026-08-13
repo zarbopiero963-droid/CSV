@@ -498,13 +498,21 @@ Il proprietario entra in due modi, e il secondo non è un vezzo:
    Verificata a **ogni** login, chiunque lo faccia, l'invariante produce due comportamenti
    che i gate finali hanno preteso sulla PR #24:
 
-   - **cambiare la variabile toglie l'accesso alla vecchia identità**, subito, sciogliendo
-     il collegamento stantio — `telegram_id` azzerato, `session_version` incrementata, riga
-     in `admin_audit`. Prima la revoca scattava solo all'ingresso del nuovo ID, e se il
+   - **cambiare la variabile toglie l'accesso alla vecchia identità** sciogliendo il
+     collegamento stantio — `telegram_id` azzerato, `session_version` incrementata, riga in
+     `admin_audit`. Prima la revoca scattava solo all'ingresso del **nuovo** ID, e se il
      nuovo non entrava mai il vecchio restava amministratore per sempre: cambiare la
-     variabile era teatro. Bloccante di GPT-5.6 Sol;
+     variabile era teatro. Bloccante di GPT-5.6 Sol. Precisione richiesta da CodeRabbit sulla
+     PR #24, perché «subito» non era vero e la differenza è misurabile: cambiare la variabile
+     **non scrive nel database** — il servizio la legge all'avvio e la revoca viene applicata
+     **al primo login successivo al cambio**, chiunque lo faccia. Fino a quel login la riga
+     porta ancora il vecchio `telegram_id` e le sue sessioni sono valide;
    - **se la variabile punta a un account che possiede parser o chat, il login è rifiutato**
-     con `409` e nessuna riga viene toccata. Prima quell'account veniva assorbito: bastava
+     con `409`: l'account bersaglio resta **intatto**, nessun dato viene travasato e nessun
+     `telegram_id` viene spostato. Resta possibile che il collegamento stantio del
+     proprietario sia già stato sciolto nello stesso login, perché quello è il punto
+     precedente e riguarda un'altra riga (precisione richiesta da CodeRabbit sulla PR #24).
+     Prima quell'account veniva assorbito: bastava
      sbagliare una cifra e metterci l'ID di un cliente, e al suo login i suoi parser e le
      sue chat passavano al proprietario, il suo `telegram_id` veniva azzerato e lui otteneva
      `is_admin=1` — **perdeva tutto e entrava nell'account di un altro**, senza un errore da
@@ -518,8 +526,17 @@ Il proprietario entra in due modi, e il secondo non è un vezzo:
    «riesce» e la richiesta dopo risponde `401`. Alzato da Fable 5 e Sol indipendentemente. Quindi il collegamento è **idempotente** e l'ordine fra impostare la
    variabile e fare il login **non conta**: il login successivo ripara quello precedente.
    Se un'altra riga possiede già quell'ID, `riconcilia_su_utente()` le travasa tutto —
-   riusando `RIFERIMENTI_UTENTE` e `_trasferisci_parser` della migrazione, un elenco solo
-   (regola 3) — le azzera il `telegram_id`, che è UNIQUE, e scrive una riga in
+   riusando `_trasferisci_parser` e `RIFERIMENTI_DATI_UTENTE`, che è *derivato* da
+   `RIFERIMENTI_UTENTE` della migrazione e non ricopiato (regola 3): una colonna nuova entra
+   dall'elenco vincolato dal test dello schema e arriva qui da sé. La differenza fra i due
+   elenchi sono le due colonne di `admin_audit`, che la riparazione **non** riscrive: le altre
+   sono dati dell'utente e seguono i dati, quelle sono storia, e una riga
+   `collegamento_admin_rifiutato` riscritta diventerebbe un rifiuto del proprietario contro se
+   stesso — inutile proprio dove serve, perché `admin_audit` è l'unico posto in cui il
+   proprietario legge perché un login è stato rifiutato (segnalato da CodeRabbit sulla PR #24).
+   La migrazione invece deve riscriverle, perché là la riga perdente perde `origin_profile` e i
+   suoi riferimenti resterebbero orfani. Poi la riparazione le azzera il `telegram_id`, che è
+   UNIQUE, e scrive una riga in
    `admin_audit`: una riparazione silenziosa sarebbe indistinguibile da
    un'appropriazione di account. La riga perdente **non** viene cancellata, perché un
    `NULL` è reversibile e una `DELETE` no, e le sue sessioni muoiono con un incremento di
@@ -531,9 +548,26 @@ Il proprietario entra in due modi, e il secondo non è un vezzo:
    amministrativo** sulla riga che possiede i parser — e non scadrebbe, perché `GET /api/me`
    rinnova il cookie a ogni richiesta valida, quindi una sessione tenuta attiva è immortale.
    Il caso non è ipotetico: se in quella variabile fosse finito l'ID sbagliato — un estraneo,
-   o un account compromesso — correggerla non gli toglierebbe il pannello. La revoca scatta
-   al **cambio** e non a ogni login, altrimenti entrare dal computer chiuderebbe la sessione
-   sul telefono. Bloccante di GPT-5.6 Sol sulla PR #24.
+   o un account compromesso — correggerla non gli toglierebbe il pannello. La revoca la
+   provoca il **cambio di valore**, non un login qualunque: è applicata al primo login
+   successivo al cambio e non a ogni login, altrimenti entrare dal computer chiuderebbe la
+   sessione sul telefono. Bloccante di GPT-5.6 Sol sulla PR #24.
+
+   **Due cose che invece NON revocano, e sono deliberate.** *Svuotare* la variabile non
+   scioglie niente: vuota significa «nessuna invariante dichiarata», non «revoca», e
+   scioglierla lascerebbe la riga `PIERO` senza `telegram_id` senza poterla ricollegare — al
+   login successivo nascerebbe un secondo account, cioè lo stesso lockout del punto qui
+   sotto. Il gesto per togliere l'accesso a un'identità è **cambiare** il valore, non
+   cancellarlo (chiesto da GPT-5.6 Sol sulla PR #24, e la risposta è misurata in
+   `test_SVUOTARE_la_variabile_non_scioglie_il_collegamento`). Un valore **malformato** —
+   virgolette prese incollando nel pannello, spazi interni, cifre non ASCII, zero iniziale —
+   viene trattato come *non configurato*: `admin_id_malformato()` lo riconosce e il login
+   **non applica l'invariante**. Prima la applicava sul valore grezzo, e il risultato era il
+   peggiore possibile: il collegamento buono veniva sciolto, `CASO 2` non poteva ricrearlo
+   perché confronta `data.id` con lo stesso valore malformato, e al proprietario nasceva un
+   account vuoto — **un refuso nel pannello Railway lo chiudeva fuori dal proprio account**,
+   col solo avviso di una riga di log all'avvio. Trovato indipendentemente da GPT-5.6 Sol e da
+   CodeRabbit sulla PR #24.
 
    *Fino al 12/08/2026 il collegamento viveva dentro `if riga is None`, quindi valeva solo
    al primo login.* Un login fatto prima che la variabile fosse **arrivata nel processo** —

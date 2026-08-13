@@ -328,14 +328,29 @@ TELEGRAM_ADMIN_ID: l'ID Telegram numerico del proprietario. Collega il suo login
   proprietario porta QUEL telegram_id, o nessuno. Da lei discendono due comportamenti che
   non sono dettagli:
 
-  1. CAMBIARE la variabile TOGLIE l'accesso alla vecchia identita', e lo fa al primo
-     login di CHIUNQUE — non solo quando il nuovo ID entra. Il collegamento stantio
-     viene sciolto (telegram_id azzerato, session_version incrementata, riga in
-     admin_audit) e la vecchia identita' torna un cliente qualunque. Prima la revoca
-     scattava solo all'ingresso del nuovo ID: se il nuovo non entrava mai, il vecchio
-     restava amministratore per sempre, e cambiare la variabile era teatro.
+  1. CAMBIARE la variabile TOGLIE l'accesso alla vecchia identita', e la revoca viene
+     APPLICATA al primo login successivo al cambio, di CHIUNQUE — non solo quando il
+     nuovo ID entra. Cambiare la variabile non scrive nel database: il servizio la legge
+     all'avvio, e fino a quel primo login la riga porta ancora il vecchio telegram_id e
+     le sue sessioni sono valide. Poi il collegamento stantio viene sciolto (telegram_id
+     azzerato, session_version incrementata, riga in admin_audit) e la vecchia identita'
+     torna un cliente qualunque. Prima la revoca scattava solo all'ingresso del nuovo ID:
+     se il nuovo non entrava mai, il vecchio restava amministratore per sempre, e
+     cambiare la variabile era teatro.
+     SVUOTARE la variabile invece NON scioglie niente, ed e' deliberato: vuota significa
+     «nessuna invariante dichiarata», non «revoca». Sciogliendo, la riga del proprietario
+     resterebbe senza telegram_id e nessun ramo potrebbe ricollegarla — al login dopo
+     nascerebbe un secondo account. Un valore MALFORMATO (virgolette prese incollando
+     nel pannello, spazi interni, cifre non ASCII, zero iniziale) e' trattato come NON
+     configurato per la stessa ragione: applicare l'invariante su un valore con cui
+     nessun collegamento nuovo puo' nascere scioglieva quello buono e faceva nascere un
+     account vuoto, cioe' un refuso nel pannello chiudeva il proprietario fuori dal
+     proprio account.
   2. Se la variabile punta a un account che POSSIEDE parser o chat, il login viene
-     RIFIUTATO con 409 e nessuna delle due righe viene toccata. Prima quell'account
+     RIFIUTATO con 409: l'account bersaglio resta INTATTO, nessun dato viene travasato e
+     nessun telegram_id viene spostato (il collegamento stantio del proprietario, se
+     c'era, puo' essere stato sciolto al punto 1, che riguarda un'altra riga).
+     Prima quell'account
      veniva assorbito: bastava sbagliare una cifra e mettere l'ID di un cliente, e al suo
      login i suoi parser e le sue chat passavano al proprietario, il suo telegram_id
      veniva azzerato e lui otteneva is_admin=1 — perdeva tutto E entrava nell'account di

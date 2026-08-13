@@ -703,6 +703,26 @@ def test_un_cookie_GIA_scaduto_non_viene_resuscitato_dal_rinnovo(servizio):
         'esiste piu-, perche- basta usarla per annullarla')
 
 
+def _attendi_tutti(fili, esiti):
+    """Aspetta ogni thread e **pretende** che abbia finito, con un esito per ciascuno.
+
+    `Thread.join(timeout=...)` ritorna in silenzio anche quando il thread e' ancora vivo:
+    senza questo controllo un test di concorrenza valuta le proprie assert su MENO esiti di
+    quanti login ha lanciato, e passa verde senza aver misurato la corsa che descrive — la
+    forma esatta del test finto che `CLAUDE.md` vieta. Segnalato da CodeRabbit sulla PR #24,
+    su due siti: i due test di concorrenza lo usano entrambi invece di ricopiarlo.
+    """
+    for filo in fili:
+        filo.join(timeout=30)
+    vivi = [filo for filo in fili if filo.is_alive()]
+    assert not vivi, (
+        f'{len(vivi)} thread su {len(fili)} non hanno finito entro 30 s: le assert che '
+        'seguono girerebbero su una corsa incompleta')
+    assert len(esiti) == len(fili), (
+        f'{len(esiti)} esiti per {len(fili)} thread: il test valuterebbe la corsa su meno '
+        'login di quanti ne ha lanciati')
+
+
 def test_due_PRIMI_login_dello_stesso_utente_nuovo_danno_UNA_riga(tmp_path, monkeypatch):
     """La corsa `SELECT`-poi-`INSERT` su `telegram_id` UNIQUE, chiusa strutturalmente.
 
@@ -744,8 +764,7 @@ def test_due_PRIMI_login_dello_stesso_utente_nuovo_danno_UNA_riga(tmp_path, monk
     fili = [threading.Thread(target=prova) for _ in range(6)]
     for f in fili:
         f.start()
-    for f in fili:
-        f.join(timeout=30)
+    _attendi_tutti(fili, esiti)
 
     assert set(esiti) == {200}, f'login concorrenti di un utente nuovo: {esiti}'
     c = sqlite3.connect(percorso)
@@ -1321,14 +1340,15 @@ def test_la_riparazione_NON_perde_i_dati_dell_account_sbagliato(tmp_path, monkey
     main.login_telegram(main.LoginTelegramIn(**_dati_login()))
 
     c = sqlite3.connect(percorso)
-    chat = c.execute("SELECT user_id FROM signals WHERE csv='riga'").fetchone()[0]
+    segnale = c.execute("SELECT user_id FROM signals WHERE csv='riga'").fetchone()[0]
     log = c.execute('SELECT user_id FROM message_logs WHERE text=?', ('un messaggio',)).fetchone()[0]
     audit = c.execute("SELECT admin_user_id, target_user_id FROM admin_audit"
                       " WHERE action='riconciliato_account_duplicato'").fetchone()
     rimasto = c.execute('SELECT telegram_id FROM users WHERE id=?', (vuoto,)).fetchone()[0]
     c.close()
 
-    assert chat == piero, f'il segnale e- rimasto all-account sbagliato (user {chat}, atteso {piero})'
+    assert segnale == piero, (
+        f'il segnale e- rimasto all-account sbagliato (user {segnale}, atteso {piero})')
     assert log == piero, f'il log e- rimasto all-account sbagliato (user {log}, atteso {piero})'
     assert audit == (piero, vuoto), (
         f'la riparazione non e- tracciata in admin_audit: {audit}. Una riparazione '
@@ -1375,17 +1395,22 @@ def test_un_CLIENTE_non_fa_scattare_la_riparazione(tmp_path, monkeypatch):
     '0',                 # non e' l'id di nessuno
 ])
 def test_un_TELEGRAM_ADMIN_ID_malformato_viene_RICONOSCIUTO(valore, monkeypatch):
-    """Le quattro forme sbagliate sono tutte silenziose, e la quinta inganna `.isdigit()`.
+    """Le sette forme sbagliate sono tutte silenziose, e due ingannano i controlli ovvi.
 
     Un valore malformato non solleva e non collega: il confronto con l'`id` che Telegram
-    manda non combacia mai, quindi il proprietario ottiene un account vuoto **e la
-    riparazione idempotente non scatta nemmeno**, perche' il ramo che ripara sta dietro
-    quel confronto. E' l'unico modo residuo di restare fuori dal proprio account.
+    manda non combacia mai, quindi nessun collegamento nuovo puo' nascere e il proprietario
+    resta un utente come gli altri. Da qui il valore di questo riconoscimento: il login lo
+    consulta per NON applicare l'invariante su un valore che non descrive nessuno — senza,
+    scioglieva il collegamento buono e faceva nascere un account vuoto (vedi
+    `test_un_ADMIN_ID_malformato_NON_scioglie_un_collegamento_BUONO`), e l'avviso all'avvio
+    era il solo segnale.
 
-    L'ultimo caso e' il motivo per cui il controllo usa `re.fullmatch(r'[0-9]+')` e non
-    `.isdigit()`: `'٩٨٧'.isdigit()` e' `True`, e quelle cifre non combaciano con nessun id
-    Telegram. Un controllo che accetta il valore sbagliato e' un controllo che non c'e'.
-    Segnalato da GPT-5.5 sulla PR #24.
+    I due che ingannano: le cifre arabo-indiane sono il motivo per cui il controllo usa una
+    regex e non `.isdigit()`, perche' `'٩٨٧'.isdigit()` e' `True` e quelle cifre non
+    combaciano con nessun id Telegram; lo zero iniziale e `0` sono il motivo per cui la regex
+    e' `[1-9][0-9]*` e non `[0-9]+`, che li accetterebbe entrambi. Un controllo che accetta il
+    valore sbagliato e' un controllo che non c'e'. Segnalato da GPT-5.5 sulla PR #24; il
+    disallineamento fra questo docstring e la regex davvero implementata, da CodeRabbit.
     """
     monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', valore)
     assert main.admin_id_malformato() is True, (
@@ -1834,8 +1859,7 @@ def test_due_primi_login_CONCORRENTI_dell_admin_non_uccidono_il_cookie(tmp_path,
     fili = [threading.Thread(target=prova) for _ in range(6)]
     for f in fili:
         f.start()
-    for f in fili:
-        f.join(timeout=30)
+    _attendi_tutti(fili, esiti)
 
     guasti = [e for e in esiti if e[0] != 'ok']
     assert not guasti, f'login concorrenti hanno sollevato: {guasti}'
@@ -1852,3 +1876,183 @@ def test_due_primi_login_CONCORRENTI_dell_admin_non_uccidono_il_cookie(tmp_path,
         f'{len(morti)} cookie su {len(esiti)} sono nati morti: session_version e- stata '
         'incrementata da un login concorrente dopo la firma, quindi il login «riesce» e la '
         'richiesta successiva risponde 401')
+
+
+def test_un_ADMIN_ID_malformato_NON_scioglie_un_collegamento_BUONO(tmp_path, monkeypatch):
+    """Bloccante di GPT-5.6 Sol e di CodeRabbit sulla PR #24, trovato indipendentemente.
+
+    `admin_id_malformato()` esisteva gia' e **segnalava soltanto**, all'avvio. Il percorso
+    di login non lo guardava: confrontava il `telegram_id` della riga del proprietario con
+    il valore grezzo della variabile. Misurato prima di correggerlo, con
+    `TELEGRAM_ADMIN_ID='"987654321"'` — le virgolette che si prendono incollando un valore
+    nel pannello Railway — e la riga del proprietario collegata a `987654321`:
+
+        CASO 1 combacia (`'987654321' != '"987654321"'`) -> telegram_id azzerato,
+        session_version incrementata;
+        `e_amministratore` e' falsa, perche' `data.id` non sara' mai `'"987654321"'`,
+        quindi CASO 2 non puo' ricollegare;
+        `riga` e' None -> nasce un secondo account `registrato`.
+
+    Cioe': **un refuso nel pannello chiude il proprietario fuori dal proprio account**, e il
+    solo segnale e' una riga di log all'avvio. Un valore malformato non descrive nessuna
+    identita', quindi l'invariante non va applicata affatto: non si scioglie un collegamento
+    buono in nome di un valore con cui nessun collegamento nuovo puo' nascere.
+    """
+    import sqlite3
+    percorso = _prepara(tmp_path, monkeypatch, 'admin_malformato.db')
+    BUONO = '987654321'
+
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', BUONO)
+    main.login_telegram(main.LoginTelegramIn(**_dati_login(id=BUONO)))
+    c = sqlite3.connect(percorso)
+    piero = c.execute('SELECT id, telegram_id FROM users WHERE origin_profile=?',
+                      (main.PIERO_PROFILE,)).fetchone()
+    c.close()
+    assert piero[1] == BUONO, 'il primo login non ha collegato: il test non misura niente'
+
+    # Il refuso: lo stesso id, con le virgolette che il pannello si porta dietro.
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', f'"{BUONO}"')
+    assert main.admin_id_malformato() is True, 'il valore di prova non e- malformato'
+
+    from fastapi import HTTPException
+    try:
+        risposta = main.login_telegram(main.LoginTelegramIn(**_dati_login(id=BUONO)))
+        utente = json.loads(bytes(risposta.body).decode()).get('utente')
+    except HTTPException:
+        utente = None
+
+    c = sqlite3.connect(percorso)
+    dopo = c.execute('SELECT telegram_id FROM users WHERE id=?', (piero[0],)).fetchone()[0]
+    quanti = c.execute('SELECT COUNT(*) FROM users').fetchone()[0]
+    c.close()
+
+    assert dopo == BUONO, (
+        f'il collegamento buono e- stato sciolto (telegram_id ora {dopo!r}) da una variabile '
+        'malformata, con cui nessun collegamento nuovo puo- nascere')
+    assert utente == piero[0], (
+        f'il proprietario e- entrato in un account diverso dal suo (utente {utente}, atteso '
+        f'{piero[0]}): un refuso nel pannello lo chiude fuori')
+    assert quanti == 1, (
+        f'{quanti} righe in users invece di una: la variabile malformata ha fatto nascere un '
+        'secondo account per il proprietario')
+
+
+def test_SVUOTARE_la_variabile_non_scioglie_il_collegamento(tmp_path, monkeypatch):
+    """Secondo bloccante di GPT-5.6 Sol sulla PR #24, e qui la risposta e' NO, deliberata.
+
+    Sol chiede che togliere `TELEGRAM_ADMIN_ID` revochi il collegamento. Misurato cosa
+    produrrebbe: la riga del proprietario resterebbe senza `telegram_id`, e siccome con la
+    variabile vuota `e_amministratore` e' falsa, il suo login successivo non la
+    ricollegherebbe — **nascerebbe un secondo account**. E' esattamente il lockout del test
+    qui sopra, con un'altra causa.
+
+    La variabile vuota significa «nessuna invariante dichiarata», non «revoca». Il gesto per
+    togliere l'accesso a un'identita' e' CAMBIARE il valore con quello nuovo, ed e' misurato
+    da `test_cambiare_la_variabile_TOGLIE_l_accesso_alla_vecchia_identita`. Questo test
+    esiste per impedire che la richiesta di Sol venga implementata per errore: il
+    proprietario ha svuotato la variabile davvero, il 13/08/2026, per un motivo che non
+    c'entrava niente con l'accesso (un fallimento di build su Railway).
+    """
+    import sqlite3
+    percorso = _prepara(tmp_path, monkeypatch, 'variabile_svuotata.db')
+    ID = '987654321'
+
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', ID)
+    main.login_telegram(main.LoginTelegramIn(**_dati_login(id=ID)))
+    c = sqlite3.connect(percorso)
+    piero = c.execute('SELECT id FROM users WHERE origin_profile=?',
+                      (main.PIERO_PROFILE,)).fetchone()[0]
+    c.close()
+
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', '')
+    risposta = main.login_telegram(main.LoginTelegramIn(**_dati_login(id=ID)))
+    utente = json.loads(bytes(risposta.body).decode()).get('utente')
+
+    c = sqlite3.connect(percorso)
+    dopo = c.execute('SELECT telegram_id FROM users WHERE id=?', (piero,)).fetchone()[0]
+    quanti = c.execute('SELECT COUNT(*) FROM users').fetchone()[0]
+    c.close()
+
+    assert dopo == ID, f'svuotare la variabile ha sciolto il collegamento (ora {dopo!r})'
+    assert utente == piero, f'il proprietario e- finito in un altro account (utente {utente})'
+    assert quanti == 1, f'{quanti} righe in users invece di una'
+
+
+def test_la_riparazione_non_RISCRIVE_la_storia_di_admin_audit(tmp_path, monkeypatch):
+    """Segnalato da CodeRabbit sulla PR #24, e la conseguenza e' un audit che si smentisce.
+
+    Scenario reale, in due tempi: `TELEGRAM_ADMIN_ID` punta all'account di un cliente che
+    possiede parser, il login viene RIFIUTATO e la riga `collegamento_admin_rifiutato` dice
+    «la decisione riguardava l'account X». Poi quell'account resta senza parser e senza chat,
+    e la riparazione lo travasa nel proprietario. Se il travaso riscrive anche
+    `admin_audit.target_user_id`, quella riga diventa «il proprietario ha rifiutato di
+    collegarsi al proprietario»: auto-referenziale, cioe' inutile proprio nel momento in cui
+    serve, perche' `admin_audit` e' l'unico posto dove il proprietario legge PERCHE' un login
+    e' stato rifiutato.
+
+    La distinzione e': le altre colonne sono **dati** dell'utente e vanno dove vanno i dati;
+    quelle due sono **storia**, e la storia di una riga che non viene cancellata resta sua.
+    """
+    import sqlite3
+    percorso = _prepara(tmp_path, monkeypatch, 'audit_storia.db')
+    c = main.db()
+    c.execute("INSERT INTO users(telegram_id, status) VALUES ('555000555','registrato')")
+    perdente = c.execute("SELECT id FROM users WHERE telegram_id='555000555'").fetchone()[0]
+    piero = c.execute('SELECT id FROM users WHERE origin_profile=?',
+                      (main.PIERO_PROFILE,)).fetchone()[0]
+    main._annota_admin(c, piero, 'collegamento_admin_rifiutato', bersaglio=perdente)
+    c.commit()
+
+    main.riconcilia_su_utente(c, da_utente=perdente, a_utente=piero)
+    c.commit()
+    c.close()
+
+    c = sqlite3.connect(percorso)
+    bersaglio = c.execute("SELECT target_user_id FROM admin_audit"
+                          " WHERE action='collegamento_admin_rifiutato'").fetchone()[0]
+    c.close()
+    assert bersaglio == perdente, (
+        f'la traccia del rifiuto punta ora a {bersaglio} invece di {perdente}: la riparazione '
+        'ha riscritto la storia, e il proprietario legge un rifiuto contro se- stesso')
+
+
+def test_un_LOCK_sul_database_non_LASCIA_APERTA_la_connessione(tmp_path, monkeypatch):
+    """Rilievo minore di Claude Fable 5 sulla PR #24, e aveva ragione.
+
+    `BEGIN IMMEDIATE` stava FUORI dal `try`: sotto contesa quel comando solleva
+    `OperationalError: database is locked`, e da fuori dal `try` nessuno chiude la
+    connessione. Ogni login perso sotto lock lasciava un descrittore aperto — su un container
+    Railway che non riparte, la perdita si accumula.
+
+    Si misura con una connessione finta che solleva su `BEGIN IMMEDIATE`, perche' e' l'unico
+    modo di OSSERVARE la chiusura: un test che tiene un lock vero vede l'eccezione ma non
+    puo' vedere se la connessione e' stata chiusa.
+    """
+    import sqlite3
+    _prepara(tmp_path, monkeypatch, 'lock.db')
+    vera = main.db()
+    chiuse = []
+
+    class ConnessioneCheSiRifiuta:
+        def execute(self, sql, *args):
+            if sql.startswith('BEGIN'):
+                raise sqlite3.OperationalError('database is locked')
+            return vera.execute(sql, *args)
+
+        def commit(self):
+            return vera.commit()
+
+        def rollback(self):
+            return vera.rollback()
+
+        def close(self):
+            chiuse.append(True)
+
+    monkeypatch.setattr(main, 'db', lambda: ConnessioneCheSiRifiuta())
+    with pytest.raises(sqlite3.OperationalError):
+        main.login_telegram(main.LoginTelegramIn(**_dati_login()))
+    vera.close()
+
+    assert chiuse, (
+        'la connessione non e- stata chiusa: un login perso per lock perde un descrittore, e '
+        'sotto contesa la perdita si accumula fino a esaurire i descrittori del processo')
