@@ -530,3 +530,88 @@ def test_crea_CHIUDE_la_connessione_anche_su_409(tmp_path, monkeypatch):
     assert connessioni, 'db() non e- stato chiamato'
     with pytest.raises(sqlite3.ProgrammingError):
         connessioni[0].execute('SELECT 1')   # una execute su connessione chiusa solleva
+
+
+def test_PUT_che_perde_la_corsa_con_una_DELETE_da_404_non_500(tmp_path, monkeypatch):
+    """PUT su un parser svuotato da una DELETE concorrente → **404**, non 500.
+
+    `elimina_parser_mio` e' sync (FastAPI la esegue nel threadpool anyio),
+    `modifica_parser_mio` e' async (event loop): una DELETE puo' vincere la corsa e
+    svuotare la riga fra il SELECT iniziale e l'UPDATE del PUT. Senza guardia il SELECT
+    finale torna `None` e `_vista_parser(None)` solleva `TypeError` → 500. Con la
+    guardia: 404, come se la cancellazione avesse vinto. E' una self-race dello STESSO
+    utente (stesso `user_id`+`slug`), non un leak fra utenti. Bloccante di GPT-5.6 Sol,
+    PR #30.
+
+    Fail-first: sul codice VECCHIO qui vola un `TypeError`, che `pytest.raises(
+    HTTPException)` non cattura → il test e' rosso. Con la guardia diventa 404.
+    """
+    import asyncio
+    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'corsa_put.db'))
+    main._PERCORSI_MIGRATI.discard(main.DB_PATH)
+    reale = main.db()
+    config = {'match': {'type': 'contains', 'value': 'x'},
+              'columns': {'EventName': {'source': 'constant', 'value': 'X'}}}
+    parser = main._crea_parser_utente(reale, 1, 'Test 1', config, True)
+    reale.commit()
+    slug = parser['slug']
+
+    class ConnCorsaDelete:
+        """Alla prima UPDATE del PUT, svuota la riga PRIMA: la DELETE vince la corsa."""
+
+        def __init__(self, sotto):
+            self._sotto = sotto
+            self._fatta = False
+
+        def execute(self, sql, params=()):
+            if not self._fatta and sql.lstrip().startswith('UPDATE parsers SET titolo'):
+                self._fatta = True
+                self._sotto.execute('DELETE FROM parsers WHERE user_id=? AND slug=?',
+                                    (1, slug))
+            return self._sotto.execute(sql, params)
+
+        def __getattr__(self, nome):
+            return getattr(self._sotto, nome)
+
+    monkeypatch.setattr(main, 'db', lambda: ConnCorsaDelete(reale))
+    monkeypatch.setattr(main, '_sessione_valida', lambda r: {'id': 1, 'versione': 1})
+
+    class Req:
+        async def json(self):
+            return {'titolo': 'Rinominato', 'config': config}
+
+    with pytest.raises(main.HTTPException) as e:
+        asyncio.run(main.modifica_parser_mio(slug, Req()))
+    assert e.value.status_code == 404, (
+        f'PUT che perde la corsa con una DELETE: atteso 404, ricevuto '
+        f'{e.value.status_code}')
+
+
+def test_la_migrazione_retrocompila_il_titolo_dei_parser_legacy(tmp_path, monkeypatch):
+    """Un parser preesistente (schema pre-`titolo`) non deve restare con `titolo` NULL.
+
+    La colonna `titolo` e' additiva e nullable, ma il contratto API dichiara
+    `titolo: str`: il proprietario loggato che chiama `GET /api/me/parsers` vedrebbe
+    `titolo: null` sul parser PIERO di default. La migrazione lo retrocompila dal
+    `name` — un'etichetta onesta, non un dato inventato. Bloccante di GPT-5.6 Sol, PR #30.
+
+    Fail-first: senza il backfill in `_completa_colonne_nuove`, `titolo` resta NULL e
+    l'asserzione fallisce; con esso vale `name`.
+    """
+    import sqlite3
+    percorso = str(tmp_path / 'legacy_titolo.db')
+    # Un DB nello schema ORIGINALE (nessuna colonna `titolo`), con una riga legacy.
+    c = sqlite3.connect(percorso)
+    for istruzione in main.SCHEMA_ORIGINALE:
+        c.execute(istruzione)
+    c.execute("INSERT INTO parsers(name, header) VALUES ('vecchio_parser', 'H')")
+    c.commit()
+    c.close()
+
+    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    main._PERCORSI_MIGRATI.discard(percorso)
+    conn = main.db()   # esegue migra()
+    riga = conn.execute("SELECT titolo FROM parsers WHERE name='vecchio_parser'").fetchone()
+    conn.close()
+    assert riga is not None and riga[0], (
+        f'la migrazione non ha retrocompilato il titolo del parser legacy: {riga!r}')

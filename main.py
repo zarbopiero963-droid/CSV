@@ -1332,6 +1332,12 @@ def _completa_colonne_nuove(c, profilo_proprietario):
     # `id` dal `rowid`, in una colonna vera: il `rowid` puo' cambiare con un VACUUM,
     # quindi memorizzarlo e' l'unico modo perche' un riferimento resti valido.
     c.execute('UPDATE parsers SET id=rowid WHERE id IS NULL')
+    # `titolo` retrocompilato dal `name` per le righe legacy (schema pre-`titolo`): la
+    # colonna e' additiva e nullable, ma il contratto API dichiara `titolo: str` e il
+    # proprietario loggato vedrebbe `titolo: null` sul parser PIERO di default. Il `name`
+    # e' un'etichetta onesta e non inventa dati; solo le righe a NULL, quindi idempotente
+    # e mai sovrascrive un titolo scelto. Bloccante di GPT-5.6 Sol sulla PR #30.
+    c.execute('UPDATE parsers SET titolo = name WHERE titolo IS NULL')
     _assegna_slug_e_ordine(c)
 
 
@@ -3537,6 +3543,12 @@ async def modifica_parser_mio(slug: str, request: Request):
         nuova = c.execute('SELECT id, slug, titolo, active, config_json, ordine'
                           ' FROM parsers WHERE user_id=? AND slug=?',
                           (utente['id'], slug)).fetchone()
+        if nuova is None:
+            # Una DELETE concorrente (rotta sync, threadpool anyio) ha svuotato la riga
+            # fra il SELECT iniziale e l'UPDATE: la corsa l'ha vinta la cancellazione.
+            # **404**, come se lo slug non ci fosse — non un 500 da `_vista_parser(None)`.
+            # Bloccante di GPT-5.6 Sol sulla PR #30.
+            raise HTTPException(404, 'parser non trovato')
         c.commit()
     finally:
         c.close()

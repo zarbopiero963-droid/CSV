@@ -599,7 +599,10 @@ Regole, tutte vincolate da `tests/relay/test_parser_crud.py`:
   (`UNIQUE (user_id, slug)`), e **non cambia** con una rinomina, così un riferimento
   allo slug non si rompe. Il `name` (PRIMARY KEY globale, eredità legacy) è generato
   `u{user_id}-{slug}`, univoco fra tutti gli utenti: due clienti possono intitolare
-  «Test 1» il proprio parser senza collidere.
+  «Test 1» il proprio parser senza collidere. La colonna è additiva e nullable, ma la
+  migrazione **retrocompila** `titolo` dal `name` per le righe legacy (schema
+  pre-`titolo`, es. il parser PIERO di default): nessun parser esistente resta con
+  `titolo: null`, così il contratto `titolo: str` vale anche per chi era già a database.
 - La **`config`** viene validata alla scrittura: struttura (oggetto, `match`/`columns`
   oggetti, ogni regola un oggetto) **e** un dry-run di `esegui_parser`, così i valori
   storti danno un **422** con il motivo invece di un parser che scarta in silenzio. È
