@@ -1039,3 +1039,183 @@ def _colonne(percorso, tabella):
     nomi = {r[1] for r in c.execute(f'PRAGMA table_info({tabella})')}
     c.close()
     return nomi
+
+
+def test_due_giri_di_promemoria_CONCORRENTI_mandano_UN_solo_avviso(tmp_path, monkeypatch):
+    """Alzata da Claude Fable 5 e GPT-5.5 sulla PR #26: SELECT, invio, UPDATE non atomici.
+
+    Due chiamate parallele leggevano gli stessi candidati e mandavano **due** avvisi per la
+    stessa scadenza. Ora la prenotazione precede l'invio e porta nella `WHERE` il valore che si
+    aspetta di trovare, quindi solo una delle due tocca la riga: chi trova `rowcount == 0` ha
+    perso la corsa e passa oltre.
+
+    L'invio e' rallentato di proposito: senza attesa, i due giri si serializzerebbero da soli e
+    il test misurerebbe la fortuna invece del meccanismo — lo stesso errore che avevo fatto col
+    test a sei thread sulla revoca nella PR #24.
+    """
+    import threading
+    inviati = []
+    percorso, admin_s, _cliente_s, cliente = _admin(tmp_path, monkeypatch, 'promemoria_corsa.db')
+
+    def invio_lento(chat_id, testo, *a, **k):
+        time.sleep(0.2)
+        inviati.append(testo)
+        return True, None
+
+    monkeypatch.setattr(main, 'invia_messaggio_telegram', invio_lento)
+    c = sqlite3.connect(percorso)
+    c.execute("UPDATE users SET status='attivo', access_expires_at=? WHERE id=?",
+              (int(time.time()) + 2 * GIORNO, cliente))
+    c.commit()
+    c.close()
+
+    porta = threading.Barrier(2)
+    esiti = []
+
+    def giro():
+        porta.wait()
+        esiti.append(_corpo(main.manda_promemoria(admin_s))['avvisati'])
+
+    fili = [threading.Thread(target=giro) for _ in range(2)]
+    for f in fili:
+        f.start()
+    for f in fili:
+        f.join(timeout=30)
+    assert not [f for f in fili if f.is_alive()], 'un giro non ha finito'
+    assert len(esiti) == 2, f'{len(esiti)} esiti per 2 giri'
+
+    assert len(inviati) == 1, (
+        f'{len(inviati)} avvisi per la stessa scadenza: due giri concorrenti hanno letto gli '
+        'stessi candidati e mandato ognuno il proprio')
+    assert sorted(len(e) for e in esiti) == [0, 1], f'esiti: {esiti}'
+
+
+def test_il_promemoria_non_TIENE_il_lock_durante_la_rete(tmp_path, monkeypatch):
+    """Bloccante di Claude Fable 5 sulla PR #26, e il sintomo sarebbe il feed fermo.
+
+    La prima versione scriveva dentro il ciclo e faceva un `commit` solo alla fine: con dieci
+    secondi di timeout per utente, SQLite teneva il lock di **scrittura** per tutto il giro, e
+    in quel tempo webhook e feed rispondevano «database is locked». Un promemoria che congela il
+    feed e' molto peggio di un promemoria mancato.
+
+    Il test misura la proprieta' che lo esclude: **mentre** un invio e' in corso, un'altra
+    connessione riesce a scrivere. Con la transazione aperta, questa `INSERT` fallirebbe.
+    """
+    import threading
+    percorso, admin_s, _cliente_s, cliente = _admin(tmp_path, monkeypatch, 'promemoria_lock.db')
+    scritture = []
+
+    def invio_che_controlla(chat_id, testo, *a, **k):
+        altra = sqlite3.connect(percorso, timeout=1)
+        try:
+            altra.execute('INSERT INTO message_logs(user_id, text, esito)'
+                          " VALUES (?, 'durante l-invio', 'ok')", (cliente,))
+            altra.commit()
+            scritture.append(True)
+        except sqlite3.OperationalError as e:
+            scritture.append(str(e))
+        finally:
+            altra.close()
+        return True, None
+
+    monkeypatch.setattr(main, 'invia_messaggio_telegram', invio_che_controlla)
+    c = sqlite3.connect(percorso)
+    c.execute("UPDATE users SET status='attivo', access_expires_at=? WHERE id=?",
+              (int(time.time()) + 2 * GIORNO, cliente))
+    c.commit()
+    c.close()
+
+    main.manda_promemoria(admin_s)
+    assert scritture == [True], (
+        f'un-altra connessione non ha potuto scrivere durante l-invio: {scritture}. Il giro dei '
+        'promemoria tiene aperta una transazione di scrittura, quindi congela feed e webhook')
+
+
+def test_una_richiesta_persa_per_l_INDICE_da_409_non_500(tmp_path, monkeypatch):
+    """Bloccante di Claude Fable 5 sulla PR #26: con due worker l'indice e' l'unico arbitro.
+
+    La rilettura dentro `BEGIN IMMEDIATE` copre un processo solo. Con due — due worker uvicorn,
+    o un domani due istanze — la seconda `INSERT` viola `richiesta_aperta_unica` e sollevava
+    `IntegrityError`, cioe' **500** su un doppio clic. Non e' un guasto: e' la corsa persa, e la
+    risposta e' la stessa che daremmo avendola vista noi.
+
+    Lo stato di partenza e' quello che l'interleaving produce, costruito direttamente invece di
+    simulato con una patch: una richiesta **aperta** in tabella mentre `users.status` e' ancora
+    `registrato`. E' lo stato che si ottiene quando l'altro worker ha fatto l'`INSERT` e non
+    ancora la `UPDATE`, ed e' anche lo stato in cui si trova un database su cui qualcuno ha
+    scritto a mano — quindi il test copre due cose con un caso solo.
+    """
+    from fastapi import HTTPException
+    percorso, _admin_s, cliente_s, cliente = _admin(tmp_path, monkeypatch, 'indice_409.db')
+    c = sqlite3.connect(percorso)
+    c.execute('INSERT INTO access_requests(user_id) VALUES (?)', (cliente,))
+    c.commit()
+    stato = c.execute('SELECT status FROM users WHERE id=?', (cliente,)).fetchone()[0]
+    c.close()
+    assert stato == 'registrato', (
+        f'lo stato e- giu- {stato!r}: il test non riproduce l-incoerenza che vuole misurare')
+
+    with pytest.raises(HTTPException) as errore:
+        main.chiedi_accesso(cliente_s)
+    assert errore.value.status_code == 409, (
+        f'{errore.value.status_code} invece di 409: la corsa persa contro un altro worker '
+        'diventa un errore del server su un doppio clic')
+
+    c = sqlite3.connect(percorso)
+    aperte = c.execute('SELECT COUNT(*) FROM access_requests WHERE user_id=?',
+                       (cliente,)).fetchone()[0]
+    c.close()
+    assert aperte == 1, f'{aperte} richieste per lo stesso cliente'
+
+
+def test_la_MIGRAZIONE_non_muore_sui_duplicati_che_deve_correggere(tmp_path, monkeypatch):
+    """Bloccante di Claude Fable 5 sulla PR #26, e la conseguenza era il servizio giu'.
+
+    `CREATE UNIQUE INDEX` su dati che lo violano **solleva**. Quell'istruzione sta dentro
+    `migra()`, che gira dentro `db()`: sollevare li' significa che `db()` non torna piu' e il
+    servizio non risponde a **nessuna** richiesta, feed compreso. Cioe' il vincolo aggiunto per
+    correggere un difetto avrebbe ucciso il servizio proprio sui database che quel difetto ha
+    prodotto.
+
+    Il test parte da quello stato — due richieste aperte per lo stesso utente — e pretende che
+    la migrazione lo sistemi invece di morirci sopra: la piu' vecchia resta aperta (e' quella che
+    l'utente ha fatto davvero), le altre vengono chiuse come `duplicata` e **non** cancellate,
+    cosi' il proprietario vede cosa e' successo.
+    """
+    percorso = str(tmp_path / 'duplicati.db')
+    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    main.db().close()
+
+    c = sqlite3.connect(percorso)
+    c.execute("INSERT INTO users(telegram_id, status) VALUES ('555000555','in_attesa')")
+    utente = c.execute("SELECT id FROM users WHERE telegram_id='555000555'").fetchone()[0]
+    c.execute('DROP INDEX richiesta_aperta_unica')
+    for _ in range(3):
+        c.execute('INSERT INTO access_requests(user_id) VALUES (?)', (utente,))
+    c.commit()
+    aperte = c.execute('SELECT COUNT(*) FROM access_requests WHERE decided_at IS NULL'
+                       ).fetchone()[0]
+    c.close()
+    assert aperte == 3, 'il test non parte dallo stato che vuole misurare'
+
+    # La migrazione rigira, come farebbe al riavvio del container.
+    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    main.db().close()   # non deve sollevare
+
+    c = sqlite3.connect(percorso)
+    restano = c.execute('SELECT COUNT(*) FROM access_requests WHERE decided_at IS NULL'
+                        ).fetchone()[0]
+    chiuse = c.execute("SELECT COUNT(*) FROM access_requests WHERE outcome='duplicata'"
+                       ).fetchone()[0]
+    tenuta = c.execute('SELECT MIN(id) FROM access_requests WHERE decided_at IS NULL'
+                       ).fetchone()[0]
+    tutte = c.execute('SELECT COUNT(*) FROM access_requests').fetchone()[0]
+    indice = c.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='index'"
+                       " AND name='richiesta_aperta_unica'").fetchone()[0]
+    c.close()
+    assert restano == 1, f'{restano} richieste aperte dopo la migrazione'
+    assert chiuse == 2, f'{chiuse} chiuse come duplicata invece di 2'
+    assert tenuta == 1, f'la richiesta tenuta e- la {tenuta}, non la piu- vecchia'
+    assert tutte == 3, f'{tutte} righe: la migrazione ha CANCELLATO invece di chiudere'
+    assert indice == 1, 'l-indice non e- stato creato dopo la deduplica'

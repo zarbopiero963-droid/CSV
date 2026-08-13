@@ -722,14 +722,6 @@ SCHEMA_MULTIUTENTE = (
     'CREATE TABLE IF NOT EXISTS access_requests (id INTEGER PRIMARY KEY AUTOINCREMENT,'
     ' user_id INTEGER, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,'
     ' decided_at INTEGER, decided_by INTEGER, granted_days INTEGER, outcome TEXT)',
-    # Una sola richiesta APERTA per utente, imposta dal database e non dal codice. La logica
-    # applicativa che rilegge lo stato dentro `BEGIN IMMEDIATE` basta per le richieste che
-    # passano da questo processo; questo indice basta anche per quelle che non ci passano — un
-    # secondo worker, un domani un secondo processo, o una scrittura fatta a mano. Chiesto da
-    # GPT-5.5 sulla PR #26, e la forma e' un indice UNIQUE **parziale**: le richieste giu'
-    # decise possono essere quante si vuole, perche' sono storia.
-    'CREATE UNIQUE INDEX IF NOT EXISTS richiesta_aperta_unica'
-    ' ON access_requests(user_id) WHERE decided_at IS NULL',
     'CREATE TABLE IF NOT EXISTS admin_audit (id INTEGER PRIMARY KEY AUTOINCREMENT,'
     ' admin_user_id INTEGER, target_user_id INTEGER, action TEXT,'
     ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP)',
@@ -855,6 +847,20 @@ def migra(c):
     """
     for istruzione in SCHEMA_ORIGINALE + SCHEMA_MULTIUTENTE:
         c.execute(istruzione)
+    _chiudi_richieste_duplicate(c)
+    # L'indice si crea DOPO la deduplica, e l'ordine e' la sostanza: `CREATE UNIQUE INDEX` su
+    # dati che lo violano **solleva**, e sollevare qui significa che `db()` non torna piu' —
+    # cioe' il servizio non risponde a nessuna richiesta, feed compreso. Un vincolo aggiunto
+    # per correggere un difetto non deve poter uccidere il servizio proprio sui database che
+    # quel difetto ha prodotto. Bloccante di Claude Fable 5 sulla PR #26.
+    #
+    # Una sola richiesta APERTA per utente, imposta dal database e non dal codice: la rilettura
+    # dentro `BEGIN IMMEDIATE` copre le richieste che passano da questo processo, l'indice copre
+    # anche quelle che non ci passano — un secondo worker, o una scrittura fatta a mano. Le
+    # richieste giu' decise possono essere quante si vuole, perche' sono storia: da qui l'indice
+    # **parziale**. Chiesto da GPT-5.5.
+    c.execute('CREATE UNIQUE INDEX IF NOT EXISTS richiesta_aperta_unica'
+              ' ON access_requests(user_id) WHERE decided_at IS NULL')
     for tabella, colonna, tipo in COLONNE_MULTIUTENTE:
         try:
             c.execute(f'ALTER TABLE {tabella} ADD COLUMN {colonna} {tipo}')
@@ -873,6 +879,34 @@ def migra(c):
     c.execute('UPDATE signals SET profile=? WHERE profile IS NULL', (PIERO_PROFILE,))
     _travasa_nel_multiutente(c)
     c.commit()
+
+
+def _chiudi_richieste_duplicate(c):
+    """Lascia UNA richiesta aperta per utente, chiudendo le altre come `duplicata`.
+
+    Serve prima di creare l'indice UNIQUE parziale: su un database che contiene giu' i
+    duplicati — cioe' proprio quello prodotto dal difetto che l'indice previene — un
+    `CREATE UNIQUE INDEX` solleva, e sollevare dentro `migra()` significa che `db()` non torna
+    piu' e il servizio non risponde a nessuna richiesta.
+
+    **Chiude e non cancella**, e tiene la piu' VECCHIA: quella e' la richiesta che l'utente ha
+    fatto davvero, le altre sono i clic ripetuti. Le chiuse restano in tabella con
+    `outcome='duplicata'`, cosi' il proprietario vede cosa e' successo invece di trovare righe
+    scomparse.
+    """
+    duplicati = c.execute(
+        'SELECT user_id FROM access_requests WHERE decided_at IS NULL'
+        ' GROUP BY user_id HAVING COUNT(*) > 1').fetchall()
+    for (utente,) in duplicati:
+        tenuta = c.execute('SELECT MIN(id) FROM access_requests'
+                           ' WHERE user_id=? AND decided_at IS NULL', (utente,)).fetchone()[0]
+        c.execute("UPDATE access_requests SET decided_at=strftime('%s','now'),"
+                  " outcome='duplicata'"
+                  ' WHERE user_id=? AND decided_at IS NULL AND id != ?', (utente, tenuta))
+    if duplicati:
+        logging.getLogger('xtrader.relay').warning(
+            'migrazione: chiuse le richieste di accesso duplicate di %d utenti',
+            len(duplicati))
 
 
 def _slug_libero(base, presi):
@@ -2551,7 +2585,16 @@ def chiedi_accesso(request: Request):
             # Un sospeso non rientra da se' chiedendo di nuovo: la sospensione e' una decisione
             # del proprietario, e una richiesta che la aggirasse la renderebbe inutile.
             raise HTTPException(403, 'accesso sospeso')
-        c.execute('INSERT INTO access_requests(user_id) VALUES (?)', (utente['id'],))
+        try:
+            c.execute('INSERT INTO access_requests(user_id) VALUES (?)', (utente['id'],))
+        except sqlite3.IntegrityError:
+            # L'indice `richiesta_aperta_unica` ha detto no: un ALTRO processo ha inserito la
+            # richiesta fra la nostra rilettura e questo `INSERT`. Non e' un guasto, e' la
+            # corsa persa — e la risposta giusta e' la stessa che daremmo avendola vista noi.
+            # Senza questo ramo il perdente riceveva un **500** su un doppio clic. Bloccante di
+            # Claude Fable 5 sulla PR #26: la rilettura dentro la transazione copre un processo
+            # solo, e con due worker l'indice diventa l'unico arbitro.
+            raise HTTPException(409, 'richiesta giu\' in corso')
         c.execute("UPDATE users SET status='in_attesa' WHERE id=?", (utente['id'],))
         raggiungibile = bool(riga[2])
         c.commit()
@@ -2745,16 +2788,40 @@ def manda_promemoria(request: Request):
         giorni = giorni_rimasti(scadenza, adesso=adesso)
         if giorni is None or not 0 < giorni <= GIORNI_PROMEMORIA:
             continue
+        # **Si PRENOTA prima di inviare**, con una scrittura atomica e un `commit` immediato.
+        # Due ragioni, entrambe alzate sulla PR #26:
+        #
+        # 1. due chiamate concorrenti leggevano gli stessi candidati e mandavano due avvisi per
+        #    la stessa scadenza (Fable 5 e GPT-5.5). La `WHERE` porta il valore che ci si
+        #    aspetta di trovare, quindi solo una delle due tocca una riga: chi trova
+        #    `rowcount == 0` ha perso la corsa e passa oltre. E' la stessa forma della `WHERE`
+        #    anti-corsa di `revoca_identita_stantia`;
+        # 2. la transazione di scrittura **non deve restare aperta durante la rete**. La prima
+        #    versione scriveva dentro il ciclo e faceva un `commit` solo alla fine: con dieci
+        #    secondi di timeout per utente, SQLite teneva il lock di scrittura per tutta la
+        #    durata del giro, e in quel tempo webhook e feed rispondevano «database is locked».
+        #    Un promemoria che congela il feed e' molto peggio di un promemoria mancato.
+        #    Bloccante di Fable 5.
+        prenotata = c.execute(
+            'UPDATE users SET promemoria_per=? WHERE id=?'
+            ' AND (promemoria_per IS NULL OR promemoria_per != ?)',
+            (scadenza, utente, scadenza))
+        c.commit()
+        if not prenotata.rowcount:
+            continue
         riuscito, motivo = invia_messaggio_telegram(
             telegram_id,
             f'Il tuo accesso scade fra {giorni} giorni. Scrivi per rinnovare.')
         if riuscito:
-            c.execute('UPDATE users SET promemoria_per=? WHERE id=?', (scadenza, utente))
             avvisati.append(utente)
         else:
-            # Non si consuma: al prossimo giro si riprova. E si registra che quel cliente non
-            # e' raggiungibile, perche' il proprietario deve poterlo contattare a mano.
-            c.execute('UPDATE users SET telegram_reachable=0 WHERE id=?', (utente,))
+            # La prenotazione si RILASCIA: un invio fallito non deve consumare il promemoria,
+            # o il cliente non saprebbe mai di stare scadendo proprio nel caso in cui il canale
+            # e' rotto. E si registra che non e' raggiungibile, perche' il proprietario deve
+            # poterlo contattare a mano.
+            c.execute('UPDATE users SET promemoria_per=NULL, telegram_reachable=0'
+                      ' WHERE id=?', (utente,))
+            c.commit()
             falliti.append({'utente': utente, 'motivo': motivo})
     _annota_admin(c, amministratore['id'], 'promemoria_inviati')
     c.commit()
