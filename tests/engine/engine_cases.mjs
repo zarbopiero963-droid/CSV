@@ -344,5 +344,107 @@ caso('descrizione regola: leggibile e non solleva', () => {
   return 'ok';
 });
 
+/* --------------------------- confronto col gemello Python (esegui_parser) */
+
+// I casi sono definiti QUI una volta sola e il loro output JS e' l'ORACOLO: il
+// test Python legge ciascun (messaggio, config), fa girare `esegui_parser` e
+// pretende lo stesso `runParser` — matched, row, missing, complete. Cosi' gli
+// ingressi non sono ricopiati in Python (regola 3) e la divergenza, se c'e',
+// diventa rossa nominando il caso.
+function casiConfronto() {
+  const casi = [];
+  const aggiungi = (nome, message, config) =>
+    casi.push({ nome, message, config, atteso: runParser(message, config) });
+
+  const prod = configProduzione();
+  aggiungi('prod: messaggio valido → completo', MSG_VALIDO, prod);
+  aggiungi('prod: " v " dentro un nome squadra → sostituita solo l-ultima',
+    `P.Bet. PREMACHT 0,5HT\n${VS} Man v City v Napoli\n@ 1.90`, prod);
+  aggiungi('prod: header presente ma nessuna riga col marcatore → non completo',
+    'P.Bet. PREMACHT 0,5HT\nnessun marcatore qui\n@ 1.85', prod);
+  aggiungi('prod: header assente → non riconosciuto',
+    `Altro canale\n${VS} A v B`, prod);
+  aggiungi('prod: evento vuoto dopo il marcatore → non completo',
+    `P.Bet. PREMACHT 0,5HT\n${VS}\n@ 1.85`, prod);
+
+  // Ogni sorgente e trasformazione, isolati.
+  const soloEmpty = {}; for (const c of COLUMNS) soloEmpty[c] = { source: 'empty' };
+
+  aggiungi('sorgente message', 'riga uno\nriga due', {
+    match: { type: 'contains', value: 'riga' },
+    columns: { ...soloEmpty, EventName: { source: 'message' } },
+  });
+  aggiungi('sorgente regex con gruppo e comma_to_dot', 'Quota 1,85 sul match', {
+    match: { type: 'contains', value: 'Quota' },
+    columns: { ...soloEmpty,
+      EventName: { source: 'constant', value: 'X' },
+      Price: { source: 'regex', pattern: '(?:@|quota)\\s*([0-9]+[.,][0-9]+)', group: 1,
+               transforms: [{ op: 'comma_to_dot' }] } },
+  });
+  aggiungi('sorgente line whole', 'testo\nEVENTO: Roma - Lazio\nfine', {
+    match: { type: 'contains', value: 'EVENTO' },
+    columns: { ...soloEmpty,
+      Provider: { source: 'constant', value: 'XTrader' },
+      EventName: { source: 'line', anchor: 'evento', part: 'whole',
+                   transforms: [{ op: 'trim' }] } },
+  });
+  aggiungi('sorgente line con marcatore assente nella riga → vuoto poi trasformato',
+    'testo\nEVENTO Roma - Lazio\nfine', {
+    match: { type: 'contains', value: 'EVENTO' },
+    columns: { ...soloEmpty,
+      Provider: { source: 'constant', value: 'XTrader' },
+      EventName: { source: 'line', anchor: 'evento', part: 'after', marker: 'XX',
+                   transforms: [{ op: 'upper' }] } },
+  });
+  aggiungi('trasformazioni: digits_only, upper, lower, replace_all',
+    'Provider: bet365\nvalore = ab-cd-ef\nnumero = tot 12.5x', {
+    match: { type: 'contains', value: 'Provider' },
+    columns: { ...soloEmpty,
+      Provider: { source: 'line', anchor: 'provider', part: 'after', marker: 'provider:',
+                  transforms: [{ op: 'trim' }, { op: 'upper' }] },
+      EventName: { source: 'line', anchor: 'valore', part: 'after', marker: '=',
+                   transforms: [{ op: 'trim' }, { op: 'replace_all', from: '-', to: ' ' }] },
+      Points: { source: 'line', anchor: 'numero', part: 'whole',
+                transforms: [{ op: 'digits_only' }] } },
+  });
+  // I separatori decimali si cambiano SOLO alla prima occorrenza in JS
+  // (`String.replace` con argomento stringa): un valore con due virgole stana la
+  // differenza con lo `str.replace` di Python, che di default le cambia tutte.
+  aggiungi('trasformazioni: comma_to_dot tocca solo la PRIMA virgola', 'x', {
+    match: { type: 'contains', value: 'x' },
+    columns: { ...soloEmpty,
+      Provider: { source: 'constant', value: 'XTrader' },
+      EventName: { source: 'constant', value: '1,2,3',
+                   transforms: [{ op: 'comma_to_dot' }] } },
+  });
+  aggiungi('trasformazioni: dot_to_comma tocca solo il PRIMO punto', 'x', {
+    match: { type: 'contains', value: 'x' },
+    columns: { ...soloEmpty,
+      Provider: { source: 'constant', value: 'XTrader' },
+      EventName: { source: 'constant', value: '1.2.3',
+                   transforms: [{ op: 'dot_to_comma' }] } },
+  });
+  aggiungi('condizione regex', `P.Bet LIVE\n${VS} A v B`, {
+    match: { type: 'regex', value: 'p\\.?bet' },
+    columns: { ...soloEmpty,
+      Provider: { source: 'constant', value: 'XTrader' },
+      EventName: { source: 'line', anchor: VS, part: 'after', marker: VS,
+                   transforms: [{ op: 'replace_last', from: ' v ', to: ' - ' }, { op: 'trim' }] } },
+  });
+  aggiungi('condizione assente → non riconosciuto', 'qualunque cosa', {
+    match: null, columns: soloEmpty,
+  });
+  aggiungi('regex che non compila → colonna vuota, nessun errore', 'testo', {
+    match: { type: 'contains', value: 'testo' },
+    columns: { ...soloEmpty,
+      Provider: { source: 'constant', value: 'XTrader' },
+      EventName: { source: 'constant', value: 'X' },
+      Points: { source: 'regex', pattern: '([', group: 1 } },
+  });
+  return casi;
+}
+
+caso('motore: casi di confronto per il gemello Python', () => casiConfronto());
+
 process.stdout.write(JSON.stringify(casi, null, 1));
 process.exit(casi.every(c => c.ok) ? 0 : 1);

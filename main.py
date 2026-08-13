@@ -1662,6 +1662,204 @@ def parse_message(message, cfg):
     return {'event': event, 'csv': make_csv(row)}
 
 
+# ============================================================================
+# MOTORE DI PARSING CONFIGURABILE — gemello Python di web/engine.js
+# ============================================================================
+#
+# Un parser e' descritto da una config JSON: una condizione di riconoscimento
+# (`match`) e una regola per ciascuna delle 14 colonne (`columns`). Questo e' il
+# motore che ESEGUE quella config, e deve produrre gli STESSI output di
+# `web/engine.js` — sono due implementazioni dello stesso contratto (regola 3 di
+# `CLAUDE.md`), e `tests/engine/test_engine_contract.py` fa girare entrambi sugli
+# stessi casi e pretende che coincidano.
+#
+# Perche' esiste: oggi il parser vive nel CODICE (`parse_message` qui sopra, con
+# header e mappatura cablati). Questo motore lo sostituira' con una config che
+# l'utente compone dalla web app, senza toccare il codice. Per ora e' solo
+# aggiunto — nessuna rotta lo usa ancora; il collegamento e' il PR successivo, e
+# PIERO verra' seminato con una config byte-identica al comportamento cablato.
+#
+# Le colonne sono `HEADERS`, non una lista nuova: una seconda copia si
+# allineerebbe da sola a un ordine sbagliato.
+#
+# **Limite dichiarato, perche' non sia una sorpresa:** il motore JS e quello
+# Python NON possono essere identici su ogni input immaginabile — i due motori di
+# espressioni regolari differiscono (gruppi unicode, classi, flag) e gli insiemi
+# di spazio-bianco di `trim`/`strip` differiscono ai bordi. Il confronto non e'
+# una dimostrazione universale: e' un guardiano su un insieme di casi, ed e' li'
+# che va aggiunto ogni formato reale nuovo. Per i sorgenti costante/riga, che sono
+# quelli del parser di produzione, la corrispondenza e' esatta.
+
+# Colonne senza le quali la riga sarebbe pericolosamente incompleta per XTrader.
+# **Sono due, non quattro**, e la scelta viene da `web/engine.js`, che e' la fonte
+# del contratto (regola 3): `Price` non e' obbligatoria perche' il parser oggi in
+# produzione la lascia vuota — la quota la mette XTrader dal proprio book, quindi
+# pretenderla bloccherebbe i segnali reali. La Issue #2 elencava quattro
+# obbligatorie: quella lista e' la specifica su carta, questa e' il codice
+# eseguibile, e dove divergono comanda il codice finche' il proprietario non
+# decide di cambiarle in ENTRAMBI i motori nello stesso PR.
+COLONNE_OBBLIGATORIE = ['Provider', 'EventName']
+
+
+def _taglia_codepoint(testo, n):
+    """Primi `n` CODEPOINT, non le prime `n` unita' UTF-16 (`cutByCodePoint`).
+
+    In Python 3 una stringa e' gia' una sequenza di codepoint, quindi `str[:n]`
+    fa esattamente cio' che in JS richiede lo spread `[...s].slice(0, n)`: senza
+    quello spread, `slice` conterebbe le unita' UTF-16 e un emoji astrale a
+    cavallo del taglio lascerebbe un surrogato spaiato.
+    """
+    return str('' if testo is None else testo)[:n]
+
+
+def _sostituisci_ultima(testo, da, a):
+    """`replaceLast`: sostituisce l'ULTIMA occorrenza di `da` con `a`."""
+    if not da:
+        return testo
+    i = testo.rfind(da)
+    return testo if i < 0 else testo[:i] + a + testo[i + len(da):]
+
+
+# Le trasformazioni, gemelle di `TRANSFORMS` in engine.js. Ogni voce prende il
+# valore grezzo e la regola di trasformazione e restituisce il valore trasformato.
+# Le due che sostituiscono un separatore decimale toccano SOLO la prima
+# occorrenza (`count=1`): e' cio' che fa `String.replace` con un argomento
+# stringa in JavaScript, e replicarlo con lo `str.replace` di Python — che di
+# default le cambia TUTTE — sarebbe una divergenza silenziosa fra i due motori.
+TRASFORMAZIONI_MOTORE = {
+    'trim': lambda v, t: v.strip(),
+    'replace_last': lambda v, t: _sostituisci_ultima(v, t.get('from', ''), t.get('to', '')),
+    'replace_all': lambda v, t: (t.get('to', '').join(v.split(t.get('from')))
+                                 if t.get('from') else v),
+    'upper': lambda v, t: v.upper(),
+    'lower': lambda v, t: v.lower(),
+    'comma_to_dot': lambda v, t: v.replace(',', '.', 1),
+    'dot_to_comma': lambda v, t: v.replace('.', ',', 1),
+    'digits_only': lambda v, t: (re.search(r'[0-9.,]+', v).group(0)
+                                 if re.search(r'[0-9.,]+', v) else ''),
+}
+
+
+def _riga_con_ancora(message, ancora):
+    """La prima riga che CONTIENE l'ancora, ignorando il caso (`findLine`).
+
+    Ancora vuota → ogni riga la contiene → la PRIMA riga, come in JS
+    (`''.includes` e' sempre vero). Restituisce `None` se nessuna riga combacia:
+    e' l'`undefined` di JS, e chi chiama lo distingue dal valore vuoto.
+    """
+    needle = (ancora or '').lower()
+    for l in re.split(r'\r?\n', message):
+        if needle in l.lower():
+            return l
+    return None
+
+
+def _flag_regex(flags):
+    """I flag JS (`'i'`, `'im'`, …) tradotti nei flag di Python.
+
+    `'i'` e' il default in engine.js (`rule.flags || 'i'`). `'g'` e `'u'` non
+    hanno un equivalente utile qui — la ricerca di Python non e' globale, e le
+    stringhe sono gia' unicode — e vengono ignorati, non tradotti in un errore.
+    """
+    mappa = {'i': re.I, 'm': re.M, 's': re.S, 'x': re.X}
+    risultato = 0
+    for f in (flags or 'i'):
+        risultato |= mappa.get(f, 0)
+    return risultato
+
+
+def _estrai_valore(message, regola):
+    """Il valore grezzo di una colonna dal messaggio, poi le trasformazioni
+    (`extractValue`).
+
+    I casi che restituiscono PRIMA delle trasformazioni sono deliberati e copiati
+    da JS: riga non trovata e regex che non combacia (o non compila) danno `''`
+    senza passare dalle trasformazioni. Una riga TROVATA ma senza il marcatore
+    da' `''` e POI applica le trasformazioni, perche' in JS non c'e' un ritorno
+    anticipato in quel ramo.
+    """
+    if not regola:
+        return ''
+    sorgente = regola.get('source')
+    if sorgente == 'empty':
+        return ''
+    if sorgente == 'constant':
+        v = regola.get('value')
+        v = '' if v is None else v
+    elif sorgente == 'message':
+        v = message
+    elif sorgente == 'line':
+        riga = _riga_con_ancora(message, regola.get('anchor'))
+        if riga is None:
+            return ''
+        marcatore = regola.get('marker')
+        if regola.get('part') == 'after' and marcatore:
+            i = riga.lower().find(marcatore.lower())
+            v = '' if i < 0 else riga[i + len(marcatore):]
+        else:
+            v = riga
+    elif sorgente == 'regex':
+        try:
+            m = re.search(regola.get('pattern', ''), message, _flag_regex(regola.get('flags')))
+        except re.error:
+            return ''
+        if not m:
+            return ''
+        gruppo = regola.get('group', 1)
+        try:
+            catturato = m.group(gruppo)
+        except IndexError:
+            # Gruppo fuori portata: in JS `m[n]` sarebbe `undefined`, e `?? m[0]`
+            # ricade sulla corrispondenza intera. Qui ci si ricade allo stesso modo.
+            catturato = None
+        v = catturato if catturato is not None else m.group(0)
+    else:
+        return ''
+    for t in regola.get('transforms') or []:
+        fn = TRASFORMAZIONI_MOTORE.get(t.get('op'))
+        if fn:
+            v = fn(v, t)
+    return v
+
+
+def condizione_soddisfatta(message, cond):
+    """Il messaggio appartiene a questo parser? (`matches`).
+
+    Senza condizione o senza valore → `False`: un parser senza condizione non
+    rivendica ogni messaggio, non rivendica nessuno.
+    """
+    if not cond or not cond.get('value'):
+        return False
+    if cond.get('type') == 'regex':
+        try:
+            return re.search(cond['value'], message, re.I) is not None
+        except re.error:
+            return False
+    return cond['value'].lower() in message.lower()
+
+
+def esegui_parser(message, config):
+    """Esegue la config sul messaggio (`runParser`).
+
+    Restituisce `matched` (soddisfa la condizione), `row` (le 14 colonne, sempre
+    presenti, vuote dove non mappate), `missing` (le obbligatorie risultate vuote)
+    e `complete` (matched e nessuna obbligatoria mancante).
+
+    Chi scrive il feed guarda `complete`, non `matched`: un messaggio riconosciuto
+    ma senza evento produrrebbe una riga quotata e priva di senso. Il `.strip()`
+    su `missing` e' un pavimento che non dipende dalla configurazione — una colonna
+    obbligatoria fatta di soli spazi e' vuota, anche se l'utente non ha messo un
+    `trim` fra le trasformazioni.
+    """
+    colonne = config.get('columns') or {}
+    matched = condizione_soddisfatta(message, config.get('match'))
+    row = [_estrai_valore(message, colonne.get(c)) for c in HEADERS]
+    mancanti = [c for c in COLONNE_OBBLIGATORIE
+                if not str(row[HEADERS.index(c)] or '').strip()]
+    return {'matched': matched, 'row': row, 'missing': mancanti,
+            'complete': matched and not mancanti}
+
+
 def auth(token):
     """Rifiuta un token sbagliato — e rifiuta anche quando non ce n'e' uno da confrontare.
 
