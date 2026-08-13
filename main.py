@@ -661,6 +661,15 @@ class ProfileIn(BaseModel):
     chat_ids: str
     parser: str = DEFAULT_PARSER
 
+class ParserMioIn(BaseModel):
+    # L'input di un parser creato/modificato dall'utente della sessione. NON contiene
+    # `user_id`: il proprietario viene SEMPRE dalla sessione, mai dal corpo della
+    # richiesta (isolamento fra utenti). `config` e' la config del motore
+    # (`esegui_parser`); `titolo` e' l'etichetta che il cliente vede.
+    titolo: str
+    config: dict = {}
+    active: bool = True
+
 
 # Le tre tabelle con cui il servizio e' nato. Restano con QUESTI nomi e questa
 # forma: gli endpoint le leggono, e questa migrazione non cambia il comportamento
@@ -790,6 +799,11 @@ COLONNE_MULTIUTENTE = (
     ('parsers', 'user_id', 'INTEGER'),
     ('parsers', 'slug', 'TEXT'),
     ('parsers', 'config_json', 'TEXT'),
+    # Il titolo che il cliente vede e sceglie. `name` (PRIMARY KEY globale, eredita'
+    # dello schema legacy) deve restare univoco fra TUTTI gli utenti, quindi non puo'
+    # essere il titolo: due clienti possono chiamare «Test 1» il proprio parser. Il
+    # titolo sta qui; l'identita' interna e' `(user_id, slug)`.
+    ('parsers', 'titolo', 'TEXT'),
     ('parsers', 'active', 'INTEGER DEFAULT 1'),
     # `ordine` decide chi vince quando due parser dello stesso utente riconoscono
     # lo stesso messaggio. Serve un ORDER BY esplicito, e va mostrato in UI.
@@ -3323,6 +3337,222 @@ def test_parser(name: str, data: MessageIn, x_admin_token: str | None = Header(N
 @app.post('/api/test-message')
 def test_message(data: MessageIn, x_admin_token: str | None = Header(None), parser: str = Query(DEFAULT_PARSER)):
     return test_parser(parser, data, x_admin_token)
+
+
+# --------------------------------------------------------------------------- #
+#  Parser dell'utente: CRUD legato alla SESSIONE, non al token admin.
+#
+#  Le rotte `/api/parsers*` qui sopra sono admin-token e globali (le usa il
+#  proprietario). Queste `/api/me/parsers*` sono la faccia per-utente: ogni cliente
+#  vede e tocca SOLO i propri parser (`user_id` dalla sessione, 404 sui parser di un
+#  altro). Sono la base che la web app chiamera' al posto dei dati finti.
+# --------------------------------------------------------------------------- #
+
+def _slugifica(testo):
+    """Un titolo → uno slug base: minuscolo, solo `a-z0-9-`, senza `-` ai bordi.
+
+    Vuoto o fatto di soli simboli → `'parser'`, cosi' `_slug_libero` ha sempre una
+    base da disambiguare invece di uno slug vuoto che collide con se stesso.
+    """
+    base = re.sub(r'[^a-z0-9]+', '-', (testo or '').lower()).strip('-')
+    return base or 'parser'
+
+
+def _vista_parser(riga):
+    """La vista pubblica di un parser: mai il `name` interno, mai `user_id`.
+
+    `riga` = (id, slug, titolo, active, config_json, ordine).
+    """
+    return {'id': riga[0], 'slug': riga[1], 'titolo': riga[2], 'active': bool(riga[3]),
+            'config': json.loads(riga[4]) if riga[4] else None, 'ordine': riga[5]}
+
+
+def _valida_config_parser(config):
+    """Controlla una config al confine di SCRITTURA, con un errore chiaro all'utente.
+
+    Due livelli. **Struttura:** deve essere un oggetto, con `match`/`columns` oggetti e
+    ogni regola di colonna un oggetto — cosi' `null`, `[]`, `columns: []` danno un 422
+    esplicito invece di un `AttributeError`. **Esecuzione:** un dry-run su un messaggio
+    di prova, che scova i valori storti che la struttura non vede (un `pattern` o un
+    valore non-stringa che farebbe sollevare `esegui_parser`).
+
+    E' la validazione che CodeRabbit ha chiesto sulla PR #29, messa nel posto giusto:
+    la creazione, dove l'utente riceve il motivo. Il fail-safe largo di
+    `elabora_messaggio` resta come seconda rete sul percorso del webhook.
+    """
+    if not isinstance(config, dict):
+        raise HTTPException(422, 'config deve essere un oggetto')
+    match = config.get('match')
+    if match is not None and not isinstance(match, dict):
+        raise HTTPException(422, 'config.match deve essere un oggetto')
+    colonne = config.get('columns')
+    if colonne is not None and not isinstance(colonne, dict):
+        raise HTTPException(422, 'config.columns deve essere un oggetto')
+    for nome, regola in (colonne or {}).items():
+        if not isinstance(regola, dict):
+            raise HTTPException(422, f'la regola della colonna {nome!r} deve essere un oggetto')
+    # Dry-run: la config deve ESEGUIRE senza sollevare. Il tempo-regex e' limitato dal
+    # budget di `esegui_parser`, quindi anche un pattern cattivo qui e' innocuo.
+    try:
+        esegui_parser('probe', config)
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(422, 'config non eseguibile: controlla la condizione e le regole delle colonne')
+
+
+def _crea_parser_utente(c, user_id, titolo, config, active):
+    """Crea un parser di proprieta' di `user_id` e ne restituisce la vista pubblica.
+
+    Il `name` (PRIMARY KEY globale, eredita' dello schema legacy) va reso univoco fra
+    TUTTI gli utenti. Si deriva da `(user_id, slug)`, che l'indice UNIQUE garantisce
+    univoco per utente, quindi `u{user_id}-{slug}` e' univoco globale. Lo `slug` e'
+    l'identita' STABILE: non cambia se il titolo viene modificato, cosi' un riferimento
+    allo slug non si rompe con una rinomina. `header` e' '' (NOT NULL dello schema
+    legacy), inutile per un parser `config_json`.
+    """
+    presi = {r[0] for r in c.execute(
+        'SELECT slug FROM parsers WHERE user_id=?', (user_id,)).fetchall()}
+    slug = _slug_libero(_slugifica(titolo), presi)
+    nome = f'u{user_id}-{slug}'
+    massimo = c.execute('SELECT MAX(ordine) FROM parsers WHERE user_id=?',
+                        (user_id,)).fetchone()[0]
+    ordine = (massimo + 1) if massimo is not None else 0
+    c.execute(
+        'INSERT INTO parsers(name, header, user_id, slug, titolo, config_json, active, ordine)'
+        ' VALUES (?,?,?,?,?,?,?,?)',
+        (nome, '', user_id, slug, titolo, json.dumps(config), 1 if active else 0, ordine))
+    # `id` = `rowid`, come fa la migrazione: e' il surrogato stabile a cui punta
+    # `parser_chats.parser_id` (dispatch per-utente, PR successivo).
+    c.execute('UPDATE parsers SET id=rowid WHERE name=? AND id IS NULL', (nome,))
+    riga = c.execute('SELECT id, slug, titolo, active, config_json, ordine'
+                     ' FROM parsers WHERE name=?', (nome,)).fetchone()
+    return _vista_parser(riga)
+
+
+@app.get('/api/me/parsers')
+def lista_parser_miei(request: Request):
+    """I parser dell'utente della sessione — MAI quelli di un altro."""
+    utente = _sessione_valida(request)
+    c = db()
+    righe = c.execute(
+        'SELECT id, slug, titolo, active, config_json, ordine FROM parsers'
+        ' WHERE user_id=? ORDER BY ordine, slug', (utente['id'],)).fetchall()
+    c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'],
+                                  [_vista_parser(r) for r in righe])
+
+
+async def _parser_in_dal_corpo(request):
+    """`ParserMioIn` dal corpo JSON, o `422` — senza mai riportare il corpo ricevuto.
+
+    Letto qui e non nella firma della rotta: con `data: ParserMioIn` FastAPI
+    validerebbe il corpo PRIMA del controllo di sessione, e un estraneo riceverebbe
+    422 invece di 401 — la stessa conferma «questa rotta esiste» che il 401 serve a non
+    dare. Stesso motivo, e stessa guardia (`test_autenticazione.py`), delle rotte
+    `/api/admin/*`. `user_id`/`id` nel corpo vengono ignorati: il proprietario viene
+    dalla sessione (Pydantic scarta i campi non dichiarati). Un corpo assente o non
+    JSON → 422, come farebbe FastAPI.
+    """
+    try:
+        return ParserMioIn(**(await request.json()))
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(422, 'corpo non valido: serve {"titolo": ..., "config": {...}}')
+
+
+@app.post('/api/me/parsers')
+async def crea_parser_mio(request: Request):
+    """Crea un parser per l'utente della sessione. `user_id` viene DALLA SESSIONE."""
+    utente = _sessione_valida(request)
+    dati = await _parser_in_dal_corpo(request)
+    titolo = dati.titolo.strip()
+    if not titolo:
+        raise HTTPException(422, 'titolo mancante')
+    _valida_config_parser(dati.config)
+    c = db()
+    parser = _crea_parser_utente(c, utente['id'], titolo, dati.config, dati.active)
+    c.commit()
+    c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'], parser)
+
+
+@app.put('/api/me/parsers/{slug}')
+async def modifica_parser_mio(slug: str, request: Request):
+    """Modifica un proprio parser. **404** (non 403) se lo slug non e' dell'utente.
+
+    Lo `slug` non cambia con una rinomina del titolo: e' l'identita' stabile.
+    """
+    utente = _sessione_valida(request)
+    dati = await _parser_in_dal_corpo(request)
+    titolo = dati.titolo.strip()
+    if not titolo:
+        raise HTTPException(422, 'titolo mancante')
+    _valida_config_parser(dati.config)
+    c = db()
+    riga = c.execute('SELECT id FROM parsers WHERE user_id=? AND slug=?',
+                     (utente['id'], slug)).fetchone()
+    if not riga:
+        c.close()
+        raise HTTPException(404, 'parser non trovato')
+    c.execute('UPDATE parsers SET titolo=?, config_json=?, active=?'
+              ' WHERE user_id=? AND slug=?',
+              (titolo, json.dumps(dati.config), 1 if dati.active else 0, utente['id'], slug))
+    nuova = c.execute('SELECT id, slug, titolo, active, config_json, ordine'
+                      ' FROM parsers WHERE user_id=? AND slug=?',
+                      (utente['id'], slug)).fetchone()
+    c.commit()
+    c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'], _vista_parser(nuova))
+
+
+@app.delete('/api/me/parsers/{slug}')
+def elimina_parser_mio(slug: str, request: Request):
+    """Elimina un proprio parser. **404** se non e' dell'utente."""
+    utente = _sessione_valida(request)
+    c = db()
+    cur = c.execute('DELETE FROM parsers WHERE user_id=? AND slug=?', (utente['id'], slug))
+    trovato = cur.rowcount > 0
+    c.commit()
+    c.close()
+    if not trovato:
+        raise HTTPException(404, 'parser non trovato')
+    return _rispondi_con_sessione(utente['id'], utente['versione'], {'ok': True})
+
+
+@app.post('/api/me/parsers/{slug}/test')
+def prova_parser_mio(slug: str, data: MessageIn, request: Request):
+    """Prova un messaggio contro un proprio parser, A SECCO: niente scrittura nel feed.
+
+    Restituisce `matched`, `missing`, `complete` e — se completo — il `csv` e l'`event`.
+    E' la base del motore diagnostico «perche' non ha fatto il parser»: il cliente vede
+    se la condizione ha combaciato e quali colonne obbligatorie mancano, senza toccare
+    il feed di nessuno. `esegui_parser` e' avvolto: una config che sollevasse da' un
+    esito diagnostico, non un 500.
+    """
+    utente = _sessione_valida(request)
+    c = db()
+    riga = c.execute('SELECT config_json FROM parsers WHERE user_id=? AND slug=?',
+                     (utente['id'], slug)).fetchone()
+    c.close()
+    if not riga:
+        raise HTTPException(404, 'parser non trovato')
+    try:
+        config = json.loads(riga[0]) if riga[0] else {}
+        risultato = esegui_parser(data.message, config)
+    except Exception:
+        return _rispondi_con_sessione(utente['id'], utente['versione'],
+                                      {'matched': False, 'missing': [], 'complete': False,
+                                       'errore': 'config non eseguibile'})
+    corpo = {'matched': risultato['matched'], 'missing': risultato['missing'],
+             'complete': risultato['complete']}
+    if risultato['complete']:
+        row = ['' if v is None else v for v in risultato['row']]
+        corpo['event'] = str(row[HEADERS.index('EventName')])
+        corpo['csv'] = make_csv(row)
+    return _rispondi_con_sessione(utente['id'], utente['versione'], corpo)
+
 
 @app.post('/telegram/webhook')
 async def telegram_webhook(request: Request):

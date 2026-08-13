@@ -6,12 +6,25 @@ ENDPOINT PUBBLICO CSV
 GET /xtrader.csv?token=TOKEN
 Restituisce l'ultimo segnale ricevuto. Se non ci sono segnali restituisce la sola intestazione.
 
-GESTIONE MULTI-PARSER
+GESTIONE MULTI-PARSER (ADMIN)
 I parser vengono salvati nel database SQLite e possono essere creati/modificati senza cambiare il codice.
 GET /api/parsers
 POST /api/parsers con Header X-Admin-Token: TOKEN e body JSON:
 {"name":"Parser_LIVE_1","header":"P.Bet. LIVE","market_name":"Over/Under 2,5 gol","market_type":"OVER_UNDER_25","selection_name":"Over 2,5 goal","handicap":"0","bet_type":"PUNTA"}
 DELETE /api/parsers/NOME con Header X-Admin-Token.
+
+PARSER DELL'UTENTE (SESSIONE)
+Ogni cliente crea/modifica/elimina SOLO i propri parser, autenticandosi con la
+sessione (il cookie di login), non col token del feed. user_id viene dalla sessione,
+mai dal corpo; su un parser di un altro la risposta e' 404 (non 403).
+GET    /api/me/parsers                  i parser dell'utente
+POST   /api/me/parsers                  body {"titolo":"Test 1","config":{...},"active":true}
+PUT    /api/me/parsers/SLUG             aggiorna il proprio (lo slug non cambia con la rinomina)
+DELETE /api/me/parsers/SLUG             elimina il proprio
+POST   /api/me/parsers/SLUG/test        body {"message":"..."} -> {matched,missing,complete,event?,csv?}
+La config viene validata alla creazione (struttura + dry-run): una config storta da'
+422 col motivo. La prova (/test) e' a secco: non scrive nel feed di nessuno, e dice
+se la condizione ha combaciato e quali colonne obbligatorie mancano.
 
 PROFILI E FEED SEPARATI
 Ogni profilo ha i suoi chat_id, il suo parser e il suo CSV indipendente.

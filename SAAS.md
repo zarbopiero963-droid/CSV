@@ -574,6 +574,43 @@ GET    /xtrader.csv?token=...                             alias legacy di PIERO
 POST   /telegram/webhook                                  unico bot, dispatch per chat_id
 ```
 
+### Cosa esiste DAVVERO: il CRUD dei parser per-utente
+
+Il primo pezzo del disegno sopra realizzato sul server, con i nomi veri (che
+riconcilieremo col disegno nel PR che collega la web app). Autenticazione a
+**sessione** (il cookie firmato), non col token del feed:
+
+```text
+GET    /api/me/parsers                 i parser dell'utente della sessione
+POST   /api/me/parsers                 { titolo, config, active? } → parser creato
+PUT    /api/me/parsers/{slug}          { titolo, config, active? } aggiorna il proprio
+DELETE /api/me/parsers/{slug}          elimina il proprio
+POST   /api/me/parsers/{slug}/test     { message } → { matched, missing, complete, event?, csv? }
+```
+
+Regole, tutte vincolate da `tests/relay/test_parser_crud.py`:
+
+- **`user_id` viene SEMPRE dalla sessione**, mai dal corpo: un `user_id` messo nel
+  JSON viene ignorato (Pydantic scarta i campi non dichiarati). Un utente vede,
+  modifica ed elimina **solo** i propri parser; su un parser di un altro la risposta
+  è **404**, non 403 — un 403 confermerebbe che quel parser esiste.
+- Il **`titolo`** è l'etichetta che il cliente sceglie (colonna nuova `parsers.titolo`);
+  lo **`slug`** è l'identità **stabile**, derivata dal titolo e univoca per utente
+  (`UNIQUE (user_id, slug)`), e **non cambia** con una rinomina, così un riferimento
+  allo slug non si rompe. Il `name` (PRIMARY KEY globale, eredità legacy) è generato
+  `u{user_id}-{slug}`, univoco fra tutti gli utenti: due clienti possono intitolare
+  «Test 1» il proprio parser senza collidere.
+- La **`config`** viene validata alla scrittura: struttura (oggetto, `match`/`columns`
+  oggetti, ogni regola un oggetto) **e** un dry-run di `esegui_parser`, così i valori
+  storti danno un **422** con il motivo invece di un parser che scarta in silenzio. È
+  la validazione che CodeRabbit ha chiesto, al confine giusto; il fail-safe di
+  `elabora_messaggio` resta come seconda rete sul webhook.
+- `POST …/test` è **a secco**: non scrive nel feed di nessuno. Restituisce
+  `matched`/`missing`/`complete` — la base del motore diagnostico «perché non ha fatto
+  il parser» — e, se completo, l'`event` e il `csv`.
+- Le rotte `/api/parsers*` (admin, token del feed) **restano** invariate: le usa il
+  proprietario. `/api/me/parsers*` è la faccia per-utente, additiva.
+
 ## Autenticazione
 
 Telegram Login Widget come percorso principale: la firma HMAC-SHA256 del
