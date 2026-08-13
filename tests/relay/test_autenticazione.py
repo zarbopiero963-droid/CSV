@@ -85,6 +85,18 @@ ROTTE_CON_AUTENTICAZIONE_PROPRIA = {
     ('POST', '/api/login/password'): 503,
     # Cookie di sessione assente, non firmato o scaduto → 401.
     ('GET', '/api/me'): 401,
+    # Il cliente chiede l'accesso: e' la sua sessione a dire chi e', quindi senza sessione
+    # 401 come `/api/me`.
+    ('POST', '/api/access/request'): 401,
+    # Le rotte del pannello rispondono **404** a chi non e' l'amministratore, non 403: un 403
+    # confermerebbe a un estraneo che il pannello sta li'. Le due POST leggono il corpo a mano
+    # DOPO il controllo della sessione, altrimenti FastAPI validerebbe il corpo per primo e
+    # risponderebbe 422 — cioe' la stessa conferma, per un'altra via. L'ha trovato questa
+    # guardia sulla PR #26.
+    ('GET', '/api/admin/requests'): 404,
+    ('POST', '/api/admin/requests/{richiesta}/approva'): 404,
+    ('POST', '/api/admin/requests/{richiesta}/rifiuta'): 404,
+    ('POST', '/api/admin/promemoria'): 404,
 }
 
 # I MOUNT sono un'altra cosa dalle rotte, e vanno dichiarati a parte: non hanno

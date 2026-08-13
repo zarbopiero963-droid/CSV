@@ -118,12 +118,68 @@ un canale non serve nell'altro.
 session_version nel database invalida SUBITO tutti i cookie di un utente: e' il modo
 di chiudere un accesso sospetto senza aspettare i 20 minuti.
 
+ACCESSO SU APPROVAZIONE (dal PR 7)
+Un cliente nuovo nasce 'registrato' e non ha accesso. Chiede, il proprietario concede
+giorni, il cliente riceve un messaggio su Telegram. Alla scadenza il feed torna a sola
+intestazione senza revocare il token.
+
+POST /api/access/request
+  Sessione del cliente. Crea la richiesta e mette lo stato 'in_attesa'.
+  409 se ha gia' una richiesta aperta o l'accesso attivo, 403 se e' sospeso.
+  Risponde con {"raggiungibile", "bot"}: "bot" e' il deep link t.me/<bot>?start=accesso.
+  IL DEEP LINK NON E' UN ABBELLIMENTO: il bot Telegram non puo' scrivere per primo, quindi
+  sendMessage verso chi non ha mai aperto la conversazione FALLISCE. Un cliente che entra
+  col Login Widget e non apre mai il bot non riceverebbe mai l'approvazione, in silenzio.
+  Quando preme Start, la consegna arriva al webhook e telegram_reachable diventa 1.
+
+GET  /api/admin/requests
+POST /api/admin/requests/<id>/approva   body {"giorni": <numero>}
+POST /api/admin/requests/<id>/rifiuta
+POST /api/admin/promemoria
+  Tutte e quattro rispondono 404 a chi non e' l'amministratore — non 403, che
+  confermerebbe a un estraneo che il pannello sta li'. Per la stessa ragione le rotte con
+  un corpo o un id nel percorso li leggono A MANO dopo il controllo della sessione:
+  lasciandoli a FastAPI, un estraneo riceveva 422 invece di 404, cioe' la stessa conferma
+  per un'altra via.
+  I giorni sono un campo libero (1..3650: il limite ferma un refuso, non fa da listino).
+  I rinnovi SI SOMMANO se la scadenza e' nel futuro, altrimenti ripartono da oggi —
+  senza il secondo ramo, prorogare un cliente scaduto da due mesi gli darebbe una
+  scadenza nel passato, cioe' «attivo» nel pannello e feed vuoto.
+  L'approvazione risponde con {"notificato", "motivo"}: se il messaggio non e' partito,
+  notificato e' false col motivo, e telegram_reachable va a 0. L'ERRORE DI INVIO NON VIENE
+  INGOIATO, perche' un invio fallito in silenzio produce lo stato peggiore — il
+  proprietario crede di aver avvisato, il cliente non sa di essere attivo. L'accesso resta
+  concesso: e' stato deciso, e non si annulla una decisione perche' l'avviso non e'
+  arrivato.
+  Il promemoria parte a 5 giorni dalla scadenza, UNA VOLTA PER SCADENZA (users.promemoria_per
+  conserva QUALE scadenza e' stata annunciata: con un booleano il secondo rinnovo non
+  avviserebbe mai piu'). Un invio fallito NON consuma il promemoria: il giro dopo riprova.
+  LIMITE DICHIARATO: non c'e' uno scheduler. /api/admin/promemoria va CHIAMATA, dal
+  proprietario o da un job programmato su Railway. Finche' non viene chiamata nessun
+  promemoria parte — e' un compito che aspetta, non un compito perso.
+
+EFFETTI DELLA SCADENZA
+  Feed: 200 con SOLA INTESTAZIONE e BOM, non 401. Per XTrader un errore HTTP e' un guasto
+  da segnalare, mentre «nessun segnale» e' uno stato normale che gestisce da se'.
+  Token: NON revocato. «Scaduto» e «revocato» sono stati diversi — revocare costringerebbe
+  il cliente a riconfigurare XTrader a ogni rinnovo. Cosi' il rinnovo e' istantaneo.
+  Webhook: i messaggi delle sue chat non vengono elaborati e non finiscono nei log. Il feed
+  non viene toccato: allo svuotamento ci pensa il TTL di 90 secondi.
+  Bloccano 'scaduto' e 'sospeso'. NON 'registrato': i feed per profilo esistono da prima di
+  questo flusso e i loro utenti sono nati 'registrato' dalla migrazione, quindi bloccarli
+  spegnerebbe in silenzio un feed che oggi funziona. Un cliente che si registra col Login
+  Widget non ha nessun profilo, quindi non ha nessun feed da bloccare.
+  Il PROPRIETARIO (is_admin) non ha un abbonamento: il suo feed non dipende da nessuna
+  scadenza, altrimenti una riga sbagliata nel database spegnerebbe quello che XTrader
+  interroga in produzione.
+
 COSA IL PR 6 NON FA
 La web app in web/ resta con dati finti: collegarla al backend e' un PR successivo.
 Questi endpoint si esercitano via HTTP, e i test lo fanno.
-L'accesso su approvazione (stati registrato/attivo/scaduto, giorni rimasti, pannello
-richieste) e' la Issue #7 e non e' qui: un utente nuovo nasce con status "registrato"
-e non puo' ancora fare nulla.
+L'accesso su approvazione NON e' del PR 6: e' arrivato col PR 7, ed e' descritto qui
+sopra in ACCESSO SU APPROVAZIONE. Questa riga diceva il contrario e contraddiceva la
+sezione nuova nello stesso file — segnalato da CodeRabbit sulla PR #26. Cio' che manca
+ancora sono le SCHERMATE di quel flusso: la web app e' sui dati finti fino al PR 12.
 
 AUTENTICAZIONE
 CSV_ACCESS_TOKEN protegge dieci rotte: i due feed CSV (/xtrader.csv e
@@ -324,6 +380,13 @@ TELEGRAM_ADMIN_ID: l'ID Telegram numerico del proprietario. Collega il suo login
   aveva accumulato, gli toglie il telegram_id e lo scrive sulla riga PIERO, con una riga
   in admin_audit. Quindi l'ordine fra variabile e login non conta — ma la riparazione
   va AUTORIZZATA, vedi TELEGRAM_ADMIN_RECONCILE qui sotto.
+TELEGRAM_BOT_USERNAME: lo username del bot, senza @. Serve SOLO per costruire il deep
+  link che il cliente segue per aprire la conversazione col bot — passaggio obbligato,
+  perche' il bot non puo' scrivere per primo. Assente, il link non viene inventato: la
+  risposta porta "bot": null e la web app deve mostrare l'istruzione manuale («cerca
+  @<nome> su Telegram e premi Start»). Un link costruito con uno username vuoto porta alla
+  home di Telegram, e il cliente crede di aver fatto la sua parte mentre il bot continua a
+  non poterlo raggiungere.
 TELEGRAM_ADMIN_RECONCILE: facoltativa, serve una volta sola. E' il CONSENSO ad
   assorbire la riga vuota che possiede TELEGRAM_ADMIN_ID, e il suo valore e'
   l'IDENTIFICATIVO DI QUELLA RIGA — non un 1. Il numero lo trovi nel messaggio di log

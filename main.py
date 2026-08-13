@@ -702,6 +702,9 @@ SCHEMA_MULTIUTENTE = (
     ' token_hash TEXT, token_prefix TEXT,'
     " status TEXT NOT NULL DEFAULT 'registrato', access_expires_at INTEGER,"
     ' telegram_reachable INTEGER NOT NULL DEFAULT 0,'
+    # Per quale scadenza e' gia' stato mandato il promemoria. Non un booleano: con un
+    # booleano il secondo rinnovo non avvertirebbe piu', perche' resterebbe «gia' avvisato».
+    ' promemoria_per INTEGER,'
     ' session_version INTEGER NOT NULL DEFAULT 1,'
     ' is_admin INTEGER NOT NULL DEFAULT 0,'
     ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP)',
@@ -780,6 +783,9 @@ CHIAVE_CHAT = f'telegram_chat_id, {TOPIC_CHAT}'
 # colonna in piu' non cambia nessuna `SELECT` esistente, perche' tutte nominano le
 # colonne che leggono invece di usare `SELECT *`. Verificato prima di scriverle.
 COLONNE_MULTIUTENTE = (
+    # `users` esiste gia' nei database creati dalla PR #22: le colonne che nascono dopo vanno
+    # aggiunte con ALTER, o il servizio le cerca e non le trova.
+    ('users', 'promemoria_per', 'INTEGER'),
     ('parsers', 'user_id', 'INTEGER'),
     ('parsers', 'slug', 'TEXT'),
     ('parsers', 'config_json', 'TEXT'),
@@ -841,6 +847,20 @@ def migra(c):
     """
     for istruzione in SCHEMA_ORIGINALE + SCHEMA_MULTIUTENTE:
         c.execute(istruzione)
+    _chiudi_richieste_duplicate(c)
+    # L'indice si crea DOPO la deduplica, e l'ordine e' la sostanza: `CREATE UNIQUE INDEX` su
+    # dati che lo violano **solleva**, e sollevare qui significa che `db()` non torna piu' —
+    # cioe' il servizio non risponde a nessuna richiesta, feed compreso. Un vincolo aggiunto
+    # per correggere un difetto non deve poter uccidere il servizio proprio sui database che
+    # quel difetto ha prodotto. Bloccante di Claude Fable 5 sulla PR #26.
+    #
+    # Una sola richiesta APERTA per utente, imposta dal database e non dal codice: la rilettura
+    # dentro `BEGIN IMMEDIATE` copre le richieste che passano da questo processo, l'indice copre
+    # anche quelle che non ci passano — un secondo worker, o una scrittura fatta a mano. Le
+    # richieste gia' decise possono essere quante si vuole, perche' sono storia: da qui l'indice
+    # **parziale**. Chiesto da GPT-5.5.
+    c.execute('CREATE UNIQUE INDEX IF NOT EXISTS richiesta_aperta_unica'
+              ' ON access_requests(user_id) WHERE decided_at IS NULL')
     for tabella, colonna, tipo in COLONNE_MULTIUTENTE:
         try:
             c.execute(f'ALTER TABLE {tabella} ADD COLUMN {colonna} {tipo}')
@@ -859,6 +879,34 @@ def migra(c):
     c.execute('UPDATE signals SET profile=? WHERE profile IS NULL', (PIERO_PROFILE,))
     _travasa_nel_multiutente(c)
     c.commit()
+
+
+def _chiudi_richieste_duplicate(c):
+    """Lascia UNA richiesta aperta per utente, chiudendo le altre come `duplicata`.
+
+    Serve prima di creare l'indice UNIQUE parziale: su un database che contiene gia' i
+    duplicati — cioe' proprio quello prodotto dal difetto che l'indice previene — un
+    `CREATE UNIQUE INDEX` solleva, e sollevare dentro `migra()` significa che `db()` non torna
+    piu' e il servizio non risponde a nessuna richiesta.
+
+    **Chiude e non cancella**, e tiene la piu' VECCHIA: quella e' la richiesta che l'utente ha
+    fatto davvero, le altre sono i clic ripetuti. Le chiuse restano in tabella con
+    `outcome='duplicata'`, cosi' il proprietario vede cosa e' successo invece di trovare righe
+    scomparse.
+    """
+    duplicati = c.execute(
+        'SELECT user_id FROM access_requests WHERE decided_at IS NULL'
+        ' GROUP BY user_id HAVING COUNT(*) > 1').fetchall()
+    for (utente,) in duplicati:
+        tenuta = c.execute('SELECT MIN(id) FROM access_requests'
+                           ' WHERE user_id=? AND decided_at IS NULL', (utente,)).fetchone()[0]
+        c.execute("UPDATE access_requests SET decided_at=strftime('%s','now'),"
+                  " outcome='duplicata'"
+                  ' WHERE user_id=? AND decided_at IS NULL AND id != ?', (utente, tenuta))
+    if duplicati:
+        logging.getLogger('xtrader.relay').warning(
+            'migrazione: chiuse le richieste di accesso duplicate di %d utenti',
+            len(duplicati))
 
 
 def _slug_libero(base, presi):
@@ -946,6 +994,212 @@ def riconciliazione_autorizzata(utente):
     nuovo, e il consenso vecchio non puo' combaciare con un caso nuovo.
     """
     return TELEGRAM_ADMIN_RECONCILE != '' and TELEGRAM_ADMIN_RECONCILE == str(utente)
+
+
+# Quanti giorni prima della scadenza si avvisa il cliente. Dalla Issue #2.
+GIORNI_PROMEMORIA = 5
+
+# Lo username del bot, senza `@`. Serve **solo** per costruire il deep link: il bot Telegram
+# non puo' scrivere per primo, quindi il cliente deve aprire una conversazione, e per aprirla
+# gli si da' un link. Assente → il link non c'e' e la risposta lo dice, invece di inventare un
+# indirizzo che porta a un bot di qualcun altro.
+TELEGRAM_BOT_USERNAME = os.getenv('TELEGRAM_BOT_USERNAME', '').strip().lstrip('@')
+
+
+def link_del_bot(payload=None):
+    """Il deep link che apre il bot, o `None` se lo username non e' configurato.
+
+    `None` e non una stringa a caso: un link costruito con uno username vuoto
+    (`https://t.me/?start=...`) porta alla home di Telegram, e il cliente che lo segue crede
+    di aver fatto la sua parte mentre il bot continua a non poterlo raggiungere. Meglio dire
+    «non ce l'ho» e far comparire l'istruzione manuale.
+    """
+    if not TELEGRAM_BOT_USERNAME:
+        return None
+    base = f'https://t.me/{TELEGRAM_BOT_USERNAME}'
+    return f'{base}?start={payload}' if payload else base
+
+
+def invia_messaggio_telegram(chat_id, testo, bot_token=None):
+    """Manda un messaggio. Restituisce `(riuscito, motivo)` e **non solleva**.
+
+    Non solleva perche' i suoi chiamanti stanno su percorsi che devono concludere comunque:
+    approvare un accesso e' una decisione, e non si annulla una decisione perche' l'avviso non
+    e' partito. Ma il motivo torna a chi chiama, e li' **non va ingoiato**: la Issue #2 lo
+    chiede esplicitamente, perche' un invio fallito in silenzio produce lo stato peggiore — il
+    proprietario crede di aver avvisato, il cliente non sa di essere attivo, e nessuno dei due
+    ha modo di accorgersene.
+
+    Il caso che rende tutto questo necessario e' la trappola 1: `sendMessage` **falisce** se la
+    persona non ha mai scritto al bot. Non e' un errore di rete, e' lo stato normale di chi
+    entra col Login Widget e non apre mai la conversazione.
+
+    Il `motivo` non viene loggato da qui e non contiene il token: la `description` di Telegram
+    fa eco all'URL inviato, che porta il token del bot nel percorso.
+    """
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    token = bot_token or BOT_TOKEN
+    if not token:
+        return False, 'bot non configurato'
+    if not chat_id:
+        return False, 'destinatario sconosciuto'
+    parametri = urllib.parse.urlencode({'chat_id': chat_id, 'text': testo}).encode('utf-8')
+    richiesta = urllib.request.Request(
+        f'https://api.telegram.org/bot{token}/sendMessage', data=parametri, method='POST',
+        headers={'Content-Type': 'application/x-www-form-urlencoded'})
+    try:
+        with urllib.request.urlopen(richiesta, timeout=10) as risposta:  # noqa: S310
+            corpo = json.loads(risposta.read().decode('utf-8'))
+    except Exception as e:
+        # Il TIPO dell'eccezione, non il suo testo: un `HTTPError` di Telegram porta l'URL, e
+        # l'URL porta il token del bot. Il tipo dice al proprietario se e' rete o rifiuto.
+        return False, f'invio fallito ({type(e).__name__})'
+    # Come per `setWebhook`: il codice HTTP non basta, Telegram segnala parte dei rifiuti con
+    # `200` e `ok: false` — ed e' proprio il caso di «non puo' scrivere per primo».
+    if not corpo.get('ok'):
+        return False, 'Telegram ha rifiutato la consegna'
+    return True, None
+
+# Gli stati dell'accesso, in un posto solo. `in_attesa` e' fra `registrato` e `attivo`:
+# ha chiesto, il proprietario non ha ancora deciso.
+STATI_ACCESSO = ('registrato', 'in_attesa', 'attivo', 'scaduto', 'sospeso')
+
+
+# Gli stati in cui il feed NON consegna segnali e il webhook non elabora. Sono i due in cui
+# l'accesso c'era e non c'e' piu': `scaduto` per il tempo, `sospeso` per decisione.
+#
+# `registrato` e `in_attesa` **non** sono qui, ed e' una scelta di scopo dichiarata: i feed
+# per profilo esistono da prima del flusso di approvazione, e i loro utenti sono nati
+# `registrato` dalla migrazione (`_travasa_nel_multiutente`). Bloccarli adesso spegnerebbe in
+# silenzio un feed che oggi funziona — cioe' romperei la produzione per applicare una regola
+# che riguarda clienti che ancora non esistono. La Issue #2 per la PR 7 parla di **scaduto**;
+# «un utente nuovo non puo' fare nulla» diventa vincolante nella PR 8, quando il feed passa
+# all'utente e nessun feed legacy dipende piu' da questo.
+ACCESSI_BLOCCATI = ('scaduto', 'sospeso')
+
+
+def _istante(valore):
+    """Un istante letto dal database, o `None` se quel valore non e' un istante.
+
+    SQLite ha tipi dinamici: la colonna e' `INTEGER` ma niente vieta che una versione futura
+    ci scriva `''`. `int('')` solleva, e su `/api/me` diventerebbe un **500** su una rotta che
+    dovrebbe solo dire chi sei. Rischio alzato da GPT-5.5 sulla PR #26.
+
+    Chi legge decide cosa fare del `None`, e le due decisioni sono opposte per costruzione:
+    `stato_effettivo()` tratta un valore illeggibile come **scaduto** (fail-closed: un accesso
+    che non si sa quando finisce non e' un accesso infinito), `giorni_rimasti()` restituisce
+    `None` perche' non ha un numero da dare.
+    """
+    if valore is None:
+        return None
+    try:
+        return int(valore)
+    except (TypeError, ValueError):
+        return None
+
+
+def stato_effettivo(status, access_expires_at, adesso=None):
+    """Lo stato che CONTA adesso, che non e' sempre quello scritto nella colonna.
+
+    **La scadenza e' un istante, non un evento.** Nessun processo passa a mezzanotte a
+    riscrivere `status` delle righe scadute: la colonna resta `'attivo'` per sempre, e chi
+    la legge direttamente racconta una bugia. Misurato prima di questa funzione, su
+    `GET /api/me` di un cliente scaduto il giorno prima:
+
+        {'stato': 'attivo', 'accesso_scade': <ieri>}
+
+    E' il sintomo che la Issue #2 nomina esplicitamente — «pannello che dice attivo e feed
+    vuoto» — e la sua forma peggiore non e' l'etichetta sbagliata nella dashboard: e' che
+    ogni pezzo del servizio decida per conto proprio se una scadenza conta. Il feed direbbe
+    una cosa, il webhook un'altra, il pannello una terza. Per questo la conversione vive qui
+    e in un posto solo (regola 3), e la usano `/api/me`, il feed e il webhook.
+
+    Non tocca il database: `status` resta cio' che il proprietario ha DECISO (`attivo`,
+    `sospeso`), `access_expires_at` resta quando quella decisione finisce. Riscrivere la
+    colonna a ogni lettura sarebbe una scrittura su ogni richiesta, e renderebbe impossibile
+    distinguere «scaduto» da «sospeso a mano».
+    """
+    if status != 'attivo' or access_expires_at is None:
+        return status
+    scadenza = _istante(access_expires_at)
+    if scadenza is None:
+        # Illeggibile: `scaduto`, non `attivo`. Un accesso di cui non si sa quando finisce non
+        # e' un accesso senza fine — quello e' `NULL`, e **solo** `NULL`.
+        #
+        # La prima versione trattava anche la stringa vuota come «nessuna scadenza», cioe'
+        # come `NULL`: un `attivo` con `''` restava attivo **per sempre**. Fail-open, e nella
+        # stessa funzione il cui commento diceva il contrario — la forma di difetto che
+        # `CLAUDE.md` racconta come «l'affermazione e la sua smentita nello stesso posto».
+        # Peggio: l'avevo cementata in un test che pretendeva quel comportamento. Bloccante
+        # di Claude Fable 5 sulla PR #26.
+        return 'scaduto'
+    adesso = int(time.time()) if adesso is None else adesso
+    return 'attivo' if scadenza > adesso else 'scaduto'
+
+
+def giorni_rimasti(access_expires_at, adesso=None):
+    """I giorni interi che restano, o `None` se non c'e' una scadenza.
+
+    Arrotonda per ECCESSO: a 30 ore dalla scadenza restano «2 giorni» e non «1», perche'
+    troncando, l'ultimo giorno di accesso il cliente leggerebbe «0 giorni rimasti» mentre il
+    feed funziona ancora. Un numero che dice zero su un accesso vivo insegna a non fidarsi
+    del numero. Scaduto → `0`, mai un negativo.
+    """
+    scadenza = _istante(access_expires_at)
+    if scadenza is None:
+        return None
+    adesso = int(time.time()) if adesso is None else adesso
+    mancano = scadenza - adesso
+    if mancano <= 0:
+        return 0
+    return -(-mancano // 86400)
+
+
+def nuova_scadenza(access_expires_at, giorni, adesso=None):
+    """La scadenza dopo aver concesso `giorni`, con il caso limite che conta.
+
+    Due rami, e il secondo e' la ragione per cui questa e' una funzione:
+
+        se la scadenza attuale e' nel FUTURO:  si somma a quella (i rinnovi si sommano)
+        altrimenti:                            si riparte da ADESSO
+
+    Senza il secondo ramo, prorogare di 30 giorni un cliente scaduto da due mesi gli
+    darebbe una scadenza **nel passato**: il pannello direbbe «attivo» e il feed sarebbe
+    vuoto, cioe' esattamente lo stato che `stato_effettivo()` esiste per non produrre. E'
+    scritto nella Issue #2 come caso limite da non riscoprire.
+    """
+    adesso = int(time.time()) if adesso is None else adesso
+    attuale = _istante(access_expires_at)
+    base = attuale if attuale is not None and attuale > adesso else adesso
+    return base + int(giorni) * 86400
+
+
+def accesso_bloccato_del_profilo(c, profilo):
+    """Lo stato che BLOCCA il feed di questo profilo, o `None` se non c'e' niente da bloccare.
+
+    Il profilo e' l'unita' del feed di oggi; l'utente e' l'unita' dell'abbonamento. Il ponte
+    fra i due e' `users.origin_profile`, scritto dalla migrazione. Passa all'utente nella
+    PR 8 della Issue #2, e allora questa funzione cambia sorgente ma non significato — per
+    questo la decisione sta qui e non dentro il feed.
+
+    Due casi restituiscono `None` di proposito:
+
+    - **nessun utente collegato al profilo.** Un profilo senza riga in `users` non ha un
+      abbonamento da far scadere, e sospendergli il feed per assenza di dati sarebbe una
+      regressione provocata dalla mancanza di un'informazione;
+    - **il proprietario** (`is_admin`). Il suo accesso non e' un abbonamento: se dipendesse da
+      una scadenza, una riga sbagliata nel database spegnerebbe il feed che XTrader interroga
+      in produzione. E' la stessa ragione per cui `is_admin` non viene toccato dalla revoca
+      dell'identita' Telegram.
+    """
+    riga = c.execute('SELECT status, access_expires_at, is_admin FROM users'
+                     ' WHERE origin_profile=?', (profilo,)).fetchone()
+    if riga is None or riga[2]:
+        return None
+    stato = stato_effettivo(riga[0], riga[1])
+    return stato if stato in ACCESSI_BLOCCATI else None
 
 
 def possiede_qualcosa(c, utente):
@@ -1564,6 +1818,16 @@ def profile_csv(profile, token):
     auth(token)
     c = db()
     get_profile(c, profile)
+    # Accesso scaduto o sospeso: **sola intestazione**, e `200`. Non `401`, che per XTrader
+    # e' un guasto da segnalare invece di «nessun segnale»; non un feed vuoto senza BOM, che
+    # e' un CSV rotto. Il token **non** viene revocato: «scaduto» e «revocato» sono stati
+    # diversi, e revocare costringerebbe il cliente a riconfigurare XTrader a ogni rinnovo
+    # (Issue #2). Cosi' il rinnovo e' istantaneo: cambia una data e il feed riprende.
+    bloccato = accesso_bloccato_del_profilo(c, profile)
+    if bloccato:
+        c.close()
+        return Response(empty_csv(), media_type='text/csv',
+                        headers={'Cache-Control': 'no-store'})
     c.execute("DELETE FROM signals WHERE profile=? AND expires_at IS NOT NULL AND expires_at <= strftime('%s','now')", (profile,))
     c.commit()
     r = c.execute('SELECT csv FROM signals WHERE profile=? ORDER BY id DESC LIMIT 1', (profile,)).fetchone()
@@ -2223,13 +2487,410 @@ def chi_sono(request: Request):
     autenticata futura deve fare lo stesso — vedi `_rispondi_con_sessione` per il perche'
     non e' un middleware.
     """
+    # `_sessione_valida` e non due righe ricopiate: e' lo stesso controllo delle rotte nuove, e
+    # due copie divergono al primo cambio del messaggio o del codice (regola 3). Segnalato da
+    # CodeRabbit sulla PR #26.
+    utente = _sessione_valida(request)
+    # `stato_effettivo` e non `utente['status']`: la colonna dice cio' che il proprietario ha
+    # deciso, non se quella decisione e' ancora valida adesso. Misurato prima: un cliente
+    # scaduto ieri leggeva `stato: attivo` con una scadenza nel passato accanto.
+    return _rispondi_con_sessione(utente['id'], utente['versione'], {
+        'utente': utente['id'], 'nome': utente['first_name'],
+        'stato': stato_effettivo(utente['status'], utente['access_expires_at']),
+        'admin': utente['is_admin'],
+        'accesso_scade': utente['access_expires_at'],
+        'giorni_rimasti': giorni_rimasti(utente['access_expires_at'])})
+
+
+def _sessione_valida(request):
+    """L'utente della sessione, o `401`. Rinnova il cookie chi risponde, non questa."""
     utente = utente_dalla_sessione(request)
     if not utente:
         raise HTTPException(401, 'sessione assente o scaduta')
+    return utente
+
+
+def _solo_amministratore(request):
+    """L'utente della sessione se e' l'amministratore, altrimenti **404**.
+
+    `404` e non `403`, e la differenza non e' stilistica: un `403` conferma che quella rotta
+    esiste, cioe' dice a un estraneo dove sta il pannello. La Issue #2 lo scrive esplicitamente
+    per `/admin/*`, ed e' la stessa regola con cui un utente non vede i parser di un altro.
+    """
+    utente = utente_dalla_sessione(request)
+    if not utente or not utente['is_admin']:
+        raise HTTPException(404, 'not found')
+    return utente
+
+
+def _identificativo_o_404(valore):
+    """L'identificativo numerico di una richiesta, o `404`.
+
+    `richiesta: str` nella firma e la conversione qui, e non `richiesta: int`, per la stessa
+    ragione per cui il corpo si legge a mano: FastAPI valida i parametri di percorso **prima**
+    di entrare nell'handler, quindi `/api/admin/requests/NON-ESISTE/approva` rispondeva `422` a
+    un estraneo senza sessione — cioe' confermava che la rotta esiste, che e' cio' che il `404`
+    invece del `403` serve a non dare. Trovato dalla guardia sulle rotte in
+    `tests/relay/test_autenticazione.py`, che prova ogni rotta con un percorso finto.
+
+    E `404` e' anche la risposta giusta nel merito: una richiesta il cui identificativo non e'
+    un numero non esiste.
+    """
+    try:
+        return int(valore)
+    except (TypeError, ValueError):
+        raise HTTPException(404, 'richiesta non trovata')
+
+
+class GiorniIn(BaseModel):
+    """I giorni concessi da un'approvazione. Campo libero, come chiesto nella Issue #2."""
+
+    giorni: int
+
+
+@app.post('/api/access/request')
+def chiedi_accesso(request: Request):
+    """Il cliente chiede l'accesso. Idempotente per stato, non per chiamata.
+
+    Chi ha gia' una richiesta aperta o l'accesso attivo riceve `409`: senza, un doppio clic
+    riempirebbe il pannello del proprietario di richieste identiche, e con esse la decisione
+    diventerebbe «quale di queste tre approvo?».
+
+    **Restituisce il deep link del bot**, e non e' un abbellimento: il bot Telegram **non puo'
+    scrivere per primo**. `sendMessage` verso chi non ha mai aperto una conversazione col bot
+    falisce, quindi un cliente che entra col Login Widget e non apre mai il bot non ricevera'
+    mai l'approvazione — **in silenzio**. E' la trappola 1 della Issue #2. Il link porta a
+    `t.me/<bot>?start=...`: quando il cliente preme Start, la consegna arriva al webhook e
+    `users.telegram_reachable` diventa 1.
+    """
+    utente = _sessione_valida(request)
+    c = db()
+    # Lo stato si rilegge **dentro** `BEGIN IMMEDIATE`, e non basta quello che la sessione ha
+    # letto un istante prima: fra la lettura e l'inserimento c'e' spazio per un altro clic, e
+    # due richieste concorrenti passavano entrambe il controllo e inserivano due righe aperte —
+    # cioe' esattamente il caso che il 409 esiste per impedire. E' la stessa corsa
+    # SELECT-poi-INSERT del login, che la PR #24 ha chiuso con lo stesso strumento, e l'ho
+    # ripetuta qui. Alzata indipendentemente da Claude Fable 5 e GPT-5.5 sulla PR #26.
+    try:
+        # `BEGIN IMMEDIATE` sta DENTRO il `try`: sotto contesa quel comando stesso solleva
+        # `database is locked`, e da fuori nessun `except` gira e la connessione non viene
+        # chiusa. E' la stessa correzione che `login_telegram` ha ricevuto sulla PR #24 — dove
+        # la regola e' anche scritta — e l'ho riprodotta in tre rotte nuove: la classe non era
+        # stata cercata. Segnalato da CodeRabbit come Major sulla PR #26.
+        c.execute('BEGIN IMMEDIATE')
+        riga = c.execute('SELECT status, access_expires_at, telegram_reachable FROM users'
+                         ' WHERE id=?', (utente['id'],)).fetchone()
+        if riga is None:
+            raise HTTPException(401, 'sessione assente o scaduta')
+        stato = stato_effettivo(riga[0], riga[1])
+        if stato == 'attivo':
+            raise HTTPException(409, 'accesso giu\' attivo')
+        if stato == 'in_attesa':
+            raise HTTPException(409, 'richiesta giu\' in corso')
+        if stato == 'sospeso':
+            # Un sospeso non rientra da se' chiedendo di nuovo: la sospensione e' una decisione
+            # del proprietario, e una richiesta che la aggirasse la renderebbe inutile.
+            raise HTTPException(403, 'accesso sospeso')
+        try:
+            c.execute('INSERT INTO access_requests(user_id) VALUES (?)', (utente['id'],))
+        except sqlite3.IntegrityError:
+            # L'indice `richiesta_aperta_unica` ha detto no: un ALTRO processo ha inserito la
+            # richiesta fra la nostra rilettura e questo `INSERT`. Non e' un guasto, e' la
+            # corsa persa — e la risposta giusta e' la stessa che daremmo avendola vista noi.
+            # Senza questo ramo il perdente riceveva un **500** su un doppio clic. Bloccante di
+            # Claude Fable 5 sulla PR #26: la rilettura dentro la transazione copre un processo
+            # solo, e con due worker l'indice diventa l'unico arbitro.
+            raise HTTPException(409, 'richiesta giu\' in corso')
+        c.execute("UPDATE users SET status='in_attesa' WHERE id=?", (utente['id'],))
+        raggiungibile = bool(riga[2])
+        c.commit()
+    except Exception:
+        # Anche sugli `HTTPException`: qui, a differenza di `_decidi_identita`, nessuna
+        # scrittura precede il rifiuto, quindi non c'e' nessuna traccia da salvare — e
+        # confermare una transazione vuota su un percorso d'errore e' l'abitudine che il giorno
+        # in cui una scrittura ci finisce davanti la rende persistente. Rilievo di Fable 5.
+        c.rollback()
+        c.close()
+        raise
+    c.close()
     return _rispondi_con_sessione(utente['id'], utente['versione'], {
-        'utente': utente['id'], 'nome': utente['first_name'],
-        'stato': utente['status'], 'admin': utente['is_admin'],
-        'accesso_scade': utente['access_expires_at']})
+        'ok': True, 'stato': 'in_attesa',
+        'raggiungibile': raggiungibile, 'bot': link_del_bot('accesso')})
+
+
+@app.get('/api/admin/requests')
+def elenco_richieste(request: Request):
+    """Le richieste da decidere. Nessun token e nessun `telegram_id` nella risposta.
+
+    Il pannello mostra chi chiede e da quando; il `telegram_id` non serve a decidere e
+    finirebbe nei log di ogni proxy davanti al servizio, e i token dei clienti non compaiono
+    in nessuna risposta admin (Issue #2, test della PR 11).
+    """
+    utente = _solo_amministratore(request)
+    c = db()
+    # `try/finally`: un guasto inatteso qui lascerebbe la connessione aperta, e su un processo
+    # che non riparte le connessioni perse si accumulano. Segnalato da CodeRabbit sulla PR #26.
+    try:
+        righe = c.execute(
+            'SELECT r.id, r.user_id, r.created_at, u.first_name, u.username, u.status,'
+            ' u.access_expires_at, u.telegram_reachable'
+            ' FROM access_requests r JOIN users u ON u.id = r.user_id'
+            ' WHERE r.decided_at IS NULL ORDER BY r.id').fetchall()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'], {'richieste': [
+        {'richiesta': r[0], 'utente': r[1], 'chiesto_il': r[2], 'nome': r[3],
+         'username': r[4], 'stato': stato_effettivo(r[5], r[6]),
+         'giorni_rimasti': giorni_rimasti(r[6]), 'raggiungibile': bool(r[7])}
+        for r in righe]})
+
+
+@app.post('/api/admin/requests/{richiesta}/approva')
+async def approva_richiesta(richiesta: str, request: Request):
+    """Concede `giorni` di accesso, registra la decisione, avvisa il cliente.
+
+    **Il corpo si legge a mano, dopo il controllo della sessione**, e non come parametro
+    tipizzato. Con `dati: GiorniIn` nella firma, FastAPI valida il corpo **prima** di entrare
+    qui: un estraneo senza sessione riceveva `422` invece di `404`, cioe' la conferma che
+    questa rotta esiste — che e' esattamente cio' che il `404` invece del `403` serve a non
+    dare. L'ha trovato la guardia sulle rotte in `tests/relay/test_autenticazione.py`, che
+    enumera le rotte del servizio e pretende che ognuna rifiuti chi non e' autenticato: la
+    stessa guardia che a suo tempo ha scoperto il webhook non autenticato.
+
+    I giorni sono un campo libero, com'e' chiesto: nessun listino nel codice. Il limite
+    superiore esiste solo per fermare un refuso — `3650` sono dieci anni, e uno zero di troppo
+    su una tastiera e' piu' probabile di un abbonamento decennale.
+
+    **L'errore di invio non viene ingoiato.** La risposta porta `notificato: false` con il
+    motivo, e `telegram_reachable` va a 0: la Issue #2 lo chiede esplicitamente, perche' un
+    invio fallito in silenzio produce lo stato peggiore — il proprietario crede di aver
+    avvisato il cliente, il cliente non sa di essere stato attivato, e nessuno dei due ha modo
+    di accorgersene. L'accesso invece **resta concesso**: e' stato deciso, e non si annulla una
+    decisione perche' l'avviso non e' arrivato.
+    """
+    amministratore = _solo_amministratore(request)
+    numero = _identificativo_o_404(richiesta)
+    try:
+        dati = GiorniIn(**(await request.json()))
+    except HTTPException:
+        raise
+    except Exception:
+        # Corpo assente, non JSON, o senza `giorni`: `422`, come farebbe FastAPI. Il
+        # messaggio non riporta il corpo ricevuto.
+        raise HTTPException(422, 'corpo non valido: serve {"giorni": <numero>}')
+    if not 1 <= dati.giorni <= 3650:
+        raise HTTPException(422, 'giorni fuori intervallo')
+    c = db()
+    try:
+        # `BEGIN IMMEDIATE` sta DENTRO il `try`: sotto contesa quel comando stesso solleva
+        # `database is locked`, e da fuori nessun `except` gira e la connessione non viene
+        # chiusa. E' la stessa correzione che `login_telegram` ha ricevuto sulla PR #24 — dove
+        # la regola e' anche scritta — e l'ho riprodotta in tre rotte nuove: la classe non era
+        # stata cercata. Segnalato da CodeRabbit come Major sulla PR #26.
+        c.execute('BEGIN IMMEDIATE')
+        riga = c.execute('SELECT r.user_id, u.access_expires_at, u.telegram_id'
+                         ' FROM access_requests r JOIN users u ON u.id = r.user_id'
+                         ' WHERE r.id=? AND r.decided_at IS NULL', (numero,)).fetchone()
+        if riga is None:
+            # 404 anche per una richiesta gia' decisa: dall'esterno «non esiste» e «l'hai gia'
+            # decisa» sono lo stesso stato — non c'e' niente da decidere.
+            raise HTTPException(404, 'richiesta non trovata')
+        scadenza = nuova_scadenza(riga[1], dati.giorni)
+        c.execute("UPDATE users SET status='attivo', access_expires_at=?,"
+                  ' promemoria_per=NULL WHERE id=?', (scadenza, riga[0]))
+        c.execute("UPDATE access_requests SET decided_at=strftime('%s','now'), decided_by=?,"
+                  " granted_days=?, outcome='approvata' WHERE id=?",
+                  (amministratore['id'], dati.giorni, numero))
+        _annota_admin(c, amministratore['id'], 'accesso_approvato', bersaglio=riga[0])
+        c.commit()
+    except HTTPException:
+        # `rollback` e non `commit`: il solo `HTTPException` che nasce qui dentro e' il 404, e
+        # arriva **prima** di qualunque scrittura. Confermare una transazione vuota non fa
+        # danno oggi e lo farebbe il giorno in cui una scrittura finisse prima del controllo:
+        # e' la differenza con `_decidi_identita`, dove il `commit` serve perche' li' il
+        # rifiuto ha gia' scritto la propria riga di audit. Rilievo di Claude Fable 5.
+        c.rollback()
+        c.close()
+        raise
+    except Exception:
+        c.rollback()
+        c.close()
+        raise
+
+    # In un thread: questa rotta e' `async`, quindi gira sul loop, e `invia_messaggio_telegram`
+    # aspetta la rete fino a dieci secondi. Sul loop quei dieci secondi fermerebbero **tutte**
+    # le richieste del processo, feed compreso. Segnalato da GPT-5.5 sulla PR #26; e' lo stesso
+    # motivo per cui il webhook chiama `assicura_registrazione` con `to_thread`.
+    notificato, motivo = await asyncio.to_thread(
+        invia_messaggio_telegram, riga[2],
+        f'Accesso attivato: {dati.giorni} giorni. Buon lavoro.')
+    if not notificato:
+        c.execute('UPDATE users SET telegram_reachable=0 WHERE id=?', (riga[0],))
+        c.commit()
+    c.close()
+    return _rispondi_con_sessione(amministratore['id'], amministratore['versione'], {
+        'ok': True, 'utente': riga[0], 'scade': scadenza,
+        'giorni_rimasti': giorni_rimasti(scadenza),
+        'notificato': notificato, 'motivo': None if notificato else motivo})
+
+
+@app.post('/api/admin/requests/{richiesta}/rifiuta')
+def rifiuta_richiesta(richiesta: str, request: Request):
+    """Rifiuta una richiesta: torna `registrato`, cosi' puo' richiedere.
+
+    Non `sospeso`: un rifiuto non e' una punizione, e chi viene rifiutato deve poter chiedere
+    di nuovo — magari dopo aver pagato. La sospensione resta un gesto separato.
+    """
+    amministratore = _solo_amministratore(request)
+    numero = _identificativo_o_404(richiesta)
+    c = db()
+    try:
+        # `BEGIN IMMEDIATE` sta DENTRO il `try`: sotto contesa quel comando stesso solleva
+        # `database is locked`, e da fuori nessun `except` gira e la connessione non viene
+        # chiusa. E' la stessa correzione che `login_telegram` ha ricevuto sulla PR #24 — dove
+        # la regola e' anche scritta — e l'ho riprodotta in tre rotte nuove: la classe non era
+        # stata cercata. Segnalato da CodeRabbit come Major sulla PR #26.
+        c.execute('BEGIN IMMEDIATE')
+        riga = c.execute('SELECT user_id FROM access_requests'
+                         ' WHERE id=? AND decided_at IS NULL', (numero,)).fetchone()
+        if riga is None:
+            raise HTTPException(404, 'richiesta non trovata')
+        c.execute("UPDATE users SET status='registrato' WHERE id=? AND status='in_attesa'",
+                  (riga[0],))
+        c.execute("UPDATE access_requests SET decided_at=strftime('%s','now'), decided_by=?,"
+                  " outcome='rifiutata' WHERE id=?", (amministratore['id'], numero))
+        _annota_admin(c, amministratore['id'], 'accesso_rifiutato', bersaglio=riga[0])
+        c.commit()
+    except HTTPException:
+        # `rollback` come nella gemella `approva_richiesta`: il solo `HTTPException` che nasce
+        # qui e' il 404, e arriva prima di ogni scrittura. Avevo corretto una delle due rotte e
+        # lasciato l'altra col `commit` — due percorsi identici con due comportamenti diversi
+        # sono il posto in cui uno dei due diventera' sbagliato. Segnalato da CodeRabbit.
+        c.rollback()
+        c.close()
+        raise
+    except Exception:
+        c.rollback()
+        c.close()
+        raise
+    c.close()
+    return _rispondi_con_sessione(amministratore['id'], amministratore['versione'],
+                                  {'ok': True, 'utente': riga[0], 'stato': 'registrato'})
+
+
+@app.post('/api/admin/promemoria')
+def manda_promemoria(request: Request):
+    """Avvisa chi sta per scadere. **Una volta per scadenza**, non una volta per sempre.
+
+    `users.promemoria_per` conserva **quale** scadenza e' stata annunciata, e non un booleano:
+    con un booleano il secondo rinnovo non avviserebbe mai piu', perche' quella riga
+    resterebbe «gia' avvisata» per il resto della vita del cliente. Cosi' invece
+    l'approvazione azzera il campo e il promemoria del ciclo successivo parte da se'.
+
+    **Limite dichiarato, e non e' un dettaglio da scoprire in produzione: non c'e' uno
+    scheduler.** Questo servizio non ha un processo che si sveglia a ogni ora, e i due percorsi
+    che girano da soli sono il feed (che XTrader interroga a raffica: metterci un invio
+    Telegram lo renderebbe lento e fragile) e il webhook (che dipende dai messaggi dei canali).
+    Quindi questa rotta va **chiamata**, dal proprietario o da un job programmato su Railway.
+    Finche' non viene chiamata, nessun promemoria parte: e' un compito che aspetta, non un
+    compito perso. La riga in `admin_audit` dice quando e' stato fatto l'ultimo giro.
+
+    Un invio fallito **non** consuma il promemoria: la prenotazione viene rilasciata, cosi' il
+    giro successivo riprova. E' il contrario di quello che si fa con il freno del login, dove il
+    tentativo si consuma prima: la' il rischio e' che qualcuno provi troppe volte, qui il rischio
+    e' che il cliente non sappia che scade.
+
+    **Baratto dichiarato: at-most-once.** La prenotazione si conferma **prima** dell'invio, e
+    questo lascia una finestra — un crash del processo fra il `commit` e la chiamata a Telegram
+    consuma il promemoria senza averlo mandato, e nessuno riprova per quel ciclo. La scelta
+    opposta (inviare e poi scrivere) sposterebbe la finestra sull'altro lato e produrrebbe
+    avvisi **doppi** allo stesso cliente. Fra i due, un promemoria di cortesia perso vale meno di
+    un cliente che riceve due volte lo stesso messaggio, e il costo e' limitato: la scadenza la
+    vede comunque in dashboard, e il feed gli si spegne solo alla data. Chiesto da Claude Fable 5
+    sulla PR #26, e la richiesta era giusta — «accettabile solo se documentato».
+    """
+    amministratore = _solo_amministratore(request)
+    adesso = int(time.time())
+    c = db()
+    try:
+        avvisati, falliti = _giro_di_promemoria(c, adesso)
+        _annota_admin(c, amministratore['id'], 'promemoria_inviati')
+        c.commit()
+    finally:
+        # Il giro fa rete e scritture: un guasto a meta' non deve lasciare la connessione
+        # aperta. Segnalato da CodeRabbit sulla PR #26.
+        c.close()
+    return _rispondi_con_sessione(amministratore['id'], amministratore['versione'],
+                                  {'avvisati': avvisati, 'falliti': falliti})
+
+
+def _giro_di_promemoria(c, adesso):
+    """Il giro vero e proprio: candidati, prenotazione, invio. Restituisce `(avvisati, falliti)`.
+
+    Separato dalla rotta perche' la rotta deve solo garantire che la connessione si chiuda: un
+    corpo lungo dentro un `try/finally` nasconde quale riga puo' sollevare.
+    """
+    avvisati, falliti = [], []
+    candidati = c.execute(
+        "SELECT id, telegram_id, access_expires_at FROM users WHERE status='attivo'"
+        ' AND access_expires_at IS NOT NULL AND is_admin=0'
+        ' AND (promemoria_per IS NULL OR promemoria_per != access_expires_at)').fetchall()
+    for utente, telegram_id, scadenza in candidati:
+        giorni = giorni_rimasti(scadenza, adesso=adesso)
+        if giorni is None or not 0 < giorni <= GIORNI_PROMEMORIA:
+            continue
+        # **Si PRENOTA prima di inviare**, con una scrittura atomica e un `commit` immediato.
+        # Due ragioni, entrambe alzate sulla PR #26:
+        #
+        # 1. due chiamate concorrenti leggevano gli stessi candidati e mandavano due avvisi per
+        #    la stessa scadenza (Fable 5 e GPT-5.5). La `WHERE` porta il valore che ci si
+        #    aspetta di trovare, quindi solo una delle due tocca una riga: chi trova
+        #    `rowcount == 0` ha perso la corsa e passa oltre. E' la stessa forma della `WHERE`
+        #    anti-corsa di `revoca_identita_stantia`;
+        # 2. la transazione di scrittura **non deve restare aperta durante la rete**. La prima
+        #    versione scriveva dentro il ciclo e faceva un `commit` solo alla fine: con dieci
+        #    secondi di timeout per utente, SQLite teneva il lock di scrittura per tutta la
+        #    durata del giro, e in quel tempo webhook e feed rispondevano «database is locked».
+        #    Un promemoria che congela il feed e' molto peggio di un promemoria mancato.
+        #    Bloccante di Fable 5.
+        prenotata = c.execute(
+            'UPDATE users SET promemoria_per=? WHERE id=?'
+            ' AND (promemoria_per IS NULL OR promemoria_per != ?)',
+            (scadenza, utente, scadenza))
+        c.commit()
+        if not prenotata.rowcount:
+            continue
+        riuscito, motivo = invia_messaggio_telegram(
+            telegram_id,
+            f'Il tuo accesso scade fra {giorni} giorni. Scrivi per rinnovare.')
+        if riuscito:
+            avvisati.append(utente)
+        else:
+            # La prenotazione si RILASCIA: un invio fallito non deve consumare il promemoria,
+            # o il cliente non saprebbe mai di stare scadendo proprio nel caso in cui il canale
+            # e' rotto. E si registra che non e' raggiungibile, perche' il proprietario deve
+            # poterlo contattare a mano.
+            # **Due scritture, e separarle e' la sostanza.** Sono due fatti diversi con due
+            # condizioni diverse, e unirli in una sola istruzione ne perde uno:
+            #
+            # - «questo canale non funziona» e' vero SEMPRE: l'invio e' appena fallito. Va
+            #   scritto senza condizioni, perche' e' l'unico modo in cui il proprietario scopre
+            #   che quel cliente va contattato a mano;
+            # - «rilascia la prenotazione» vale solo se la prenotazione e' ancora **la nostra**:
+            #   se nel frattempo il proprietario ha rinnovato, `promemoria_per` porta ormai il
+            #   ciclo nuovo, e cancellarla farebbe rimandare un avviso gia' mandato.
+            #
+            # La prima versione le aveva unite, quindi la condizione governava anche il flag: un
+            # rinnovo durante l'invio fallito lasciava `telegram_reachable` a 1 e il proprietario
+            # non sapeva del canale rotto — e il commento accanto affermava il contrario.
+            # Rilievo di GPT-5.5 (la condizione) e poi di Claude Fable 5 (la regressione che la
+            # mia correzione aveva introdotto), PR #26.
+            c.execute('UPDATE users SET telegram_reachable=0 WHERE id=?', (utente,))
+            c.execute('UPDATE users SET promemoria_per=NULL'
+                      ' WHERE id=? AND promemoria_per=?', (utente, scadenza))
+            c.commit()
+            falliti.append({'utente': utente, 'motivo': motivo})
+    return avvisati, falliti
 
 
 @app.get('/api/parsers')
@@ -2406,6 +3067,34 @@ async def telegram_webhook(request: Request):
     text = msg.get('text') or msg.get('caption') or ''
     if not text:
         return {'ok': True, 'ignored': 'no_text'}
+    # `/start` da una chat PRIVATA: l'unico modo di sapere che il bot puo' scrivere a qualcuno.
+    #
+    # `sendMessage` falisce verso chi non ha mai aperto una conversazione col bot (trappola 1
+    # della Issue #2), e Telegram non offre nessun modo di CHIEDERE se puo': lo si scopre
+    # provando, o lo si registra quando la persona scrive. Questo ramo registra.
+    #
+    # **Perche' non indebolisce il filtro delle chat**, che e' una regola non negoziabile di
+    # `CLAUDE.md`: non e' un percorso di scrittura verso i segnali. Non tocca `signals`, non
+    # cerca parser, non guarda `profiles`. Scrive **un booleano** su una riga di `users`
+    # trovata per `telegram_id`, che e' l'identita' che Telegram stessa attesta nella
+    # consegna — la stessa che il Login Widget firma. Un estraneo che forgiasse questa
+    # consegna (e non puo': serve il segreto del webhook) otterrebbe di marcare raggiungibile
+    # un utente che lo e' davvero.
+    #
+    # Il messaggio NON finisce in `message_logs`: quel log e' dei messaggi dei canali, cioe'
+    # dei segnali. Una conversazione privata col bot non c'entra, e mettercela dentro
+    # significherebbe conservare testo privato in un archivio che serve a un'altra cosa.
+    if text.startswith('/start') and (chat.get('type') or '') == 'private':
+        mittente = str((msg.get('from') or {}).get('id') or '')
+        c = db()
+        try:
+            if mittente:
+                c.execute('UPDATE users SET telegram_reachable=1 WHERE telegram_id=?',
+                          (mittente,))
+                c.commit()
+        finally:
+            c.close()
+        return {'ok': True, 'start': True}
     c = db()
     profiles = c.execute('SELECT name,chat_ids,parser FROM profiles ORDER BY name').fetchall()
     profile = next((dict(zip(['name', 'chat_ids', 'parser'], row)) for row in profiles
@@ -2413,6 +3102,15 @@ async def telegram_webhook(request: Request):
     if not profile:
         c.close()
         return {'ok': True, 'ignored': 'chat_not_allowed'}
+    # Accesso scaduto o sospeso: non si elabora e **non si registra nel log**. Il log dei
+    # messaggi e' una funzione del servizio, non un archivio: continuare a riempirlo per chi
+    # non ha accesso significherebbe conservare i messaggi dei suoi canali senza dargli
+    # niente in cambio. E il feed resta com'era — non si svuota e non si aggiorna: allo
+    # scadere ci pensa il TTL di 90 secondi, che e' l'unico che deve toccarlo.
+    bloccato = accesso_bloccato_del_profilo(c, profile['name'])
+    if bloccato:
+        c.close()
+        return {'ok': True, 'ignored': f'access_{bloccato}'}
     cfg = get_parser(c, profile['parser'])
     parsed = parse_message(text, cfg)
     if not parsed:
