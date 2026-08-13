@@ -46,7 +46,7 @@ from tests.relay.test_csv_contract import RIGA_VALIDA  # noqa: E402
 # segreto atteso sono la stessa cosa in tutti i test che hanno bisogno di una sessione, e due
 # copie divergono al primo cambio del formato (regola 3).
 from tests.relay.test_login import (  # noqa: E402
-    BOT_FINTO, SEGRETO_ATTESO, _dati_login)
+    ADMIN_FINTO, BOT_FINTO, SEGRETO_ATTESO, _dati_login)
 
 GIORNO = 86400
 
@@ -576,3 +576,208 @@ def test_un_segnale_STANTIO_non_riemerge_quando_l_accesso_torna(tmp_path, monkey
     restano = c.execute("SELECT COUNT(*) FROM signals WHERE profile='MARCO'").fetchone()[0]
     c.close()
     assert restano == 0, f'{restano} segnali stantii sopravvivono alla prima lettura'
+
+
+# ------------------------------------------------- richiesta, decisione, notifica
+
+def _admin(tmp_path, monkeypatch, nome='admin.db'):
+    """Il proprietario con una sessione, piu' un cliente registrato. Restituisce i due."""
+    percorso = str(tmp_path / nome)
+    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    monkeypatch.setattr(main, 'BOT_TOKEN', BOT_FINTO)
+    monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', ADMIN_FINTO)
+    sessione_admin = _cookie(main.login_telegram(main.LoginTelegramIn(**_dati_login())))
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', '')
+    sessione_cliente = _cookie(
+        main.login_telegram(main.LoginTelegramIn(**_dati_login(id='555000555'))))
+    c = sqlite3.connect(percorso)
+    cliente = c.execute("SELECT id FROM users WHERE telegram_id='555000555'").fetchone()[0]
+    c.close()
+    return percorso, sessione_admin, sessione_cliente, cliente
+
+
+def _cookie(risposta):
+    """Una richiesta finta che porta il cookie di quella risposta."""
+    valore = None
+    for pezzo in (risposta.headers.get('set-cookie') or '').split(';'):
+        chiave, _, v = pezzo.strip().partition('=')
+        if chiave == main.NOME_COOKIE:
+            valore = v
+
+    class Richiesta:
+        cookies = {main.NOME_COOKIE: valore}
+
+    return Richiesta()
+
+
+def _corpo(risposta):
+    import json
+    return json.loads(bytes(risposta.body).decode())
+
+
+class _CorpoFinto:
+    """Una richiesta con cookie **e** corpo JSON, per le rotte che lo leggono a mano."""
+
+    def __init__(self, richiesta, dati):
+        self.cookies = richiesta.cookies
+        self._dati = dati
+
+    async def json(self):
+        return self._dati
+
+
+def test_una_richiesta_DOPPIA_viene_rifiutata(tmp_path, monkeypatch):
+    """Senza, un doppio clic riempie il pannello di richieste identiche.
+
+    E con tre richieste identiche la decisione diventa «quale approvo?»: il proprietario
+    concede giorni a una, le altre restano aperte, e il pannello mostra per sempre un lavoro
+    da fare che non esiste.
+    """
+    from fastapi import HTTPException
+    percorso, _admin_s, cliente_s, cliente = _admin(tmp_path, monkeypatch, 'doppia.db')
+    assert _corpo(main.chiedi_accesso(cliente_s))['stato'] == 'in_attesa'
+    with pytest.raises(HTTPException) as errore:
+        main.chiedi_accesso(cliente_s)
+    assert errore.value.status_code == 409, f'{errore.value.status_code} invece di 409'
+    c = sqlite3.connect(percorso)
+    quante = c.execute('SELECT COUNT(*) FROM access_requests WHERE user_id=?',
+                       (cliente,)).fetchone()[0]
+    c.close()
+    assert quante == 1, f'{quante} richieste per lo stesso cliente'
+
+
+def test_un_cliente_GIA_ATTIVO_non_puo_richiedere(tmp_path, monkeypatch):
+    """Chi ha accesso non ha niente da chiedere, e il pannello non deve mostrarlo."""
+    from fastapi import HTTPException
+    percorso, _a, cliente_s, cliente = _admin(tmp_path, monkeypatch, 'gia_attivo.db')
+    c = sqlite3.connect(percorso)
+    c.execute("UPDATE users SET status='attivo', access_expires_at=? WHERE id=?",
+              (int(time.time()) + 10 * GIORNO, cliente))
+    c.commit()
+    c.close()
+    with pytest.raises(HTTPException) as errore:
+        main.chiedi_accesso(cliente_s)
+    assert errore.value.status_code == 409
+
+
+def test_l_approvazione_CONCEDE_i_giorni_e_lo_traccia(tmp_path, monkeypatch):
+    """Il giro completo: richiesta, approvazione con giorni liberi, giorni rimasti, audit."""
+    import asyncio
+    percorso, admin_s, cliente_s, cliente = _admin(tmp_path, monkeypatch, 'approva.db')
+    monkeypatch.setattr(main, 'invia_messaggio_telegram', lambda *a, **k: (True, None))
+    main.chiedi_accesso(cliente_s)
+
+    aperte = _corpo(main.elenco_richieste(admin_s))['richieste']
+    assert len(aperte) == 1 and aperte[0]['utente'] == cliente, aperte
+    numero = aperte[0]['richiesta']
+
+    esito = _corpo(asyncio.run(main.approva_richiesta(
+        str(numero), _CorpoFinto(admin_s, {'giorni': 30}))))
+    assert esito['notificato'] is True
+    assert esito['giorni_rimasti'] == 30, f"giorni_rimasti={esito['giorni_rimasti']}"
+
+    c = sqlite3.connect(percorso)
+    riga = c.execute('SELECT status, access_expires_at FROM users WHERE id=?',
+                     (cliente,)).fetchone()
+    decisa = c.execute('SELECT granted_days, outcome, decided_by FROM access_requests'
+                       ' WHERE id=?', (numero,)).fetchone()
+    tracciato = c.execute("SELECT COUNT(*) FROM admin_audit"
+                          " WHERE action='accesso_approvato' AND target_user_id=?",
+                          (cliente,)).fetchone()[0]
+    c.close()
+    assert main.stato_effettivo(riga[0], riga[1]) == 'attivo'
+    assert decisa[0] == 30 and decisa[1] == 'approvata' and decisa[2] is not None
+    assert tracciato == 1, 'l-approvazione non e- tracciata in admin_audit'
+    # E la richiesta non e' piu' fra quelle da decidere.
+    assert _corpo(main.elenco_richieste(admin_s))['richieste'] == []
+
+
+def test_l_errore_di_INVIO_non_viene_ingoiato(tmp_path, monkeypatch):
+    """Trappola 1 della Issue #2, ed e' il caso normale, non l'eccezione.
+
+    Il bot **non puo' scrivere per primo**: verso un cliente che non ha mai aperto la
+    conversazione, `sendMessage` falisce. Se quell'errore venisse ingoiato si otterrebbe lo
+    stato peggiore possibile — il proprietario crede di aver avvisato, il cliente non sa di
+    essere attivo, e nessuno dei due ha modo di accorgersene.
+
+    L'accesso invece **resta concesso**: e' stato deciso, e una decisione non si annulla
+    perche' l'avviso non e' partito. E `telegram_reachable` va a 0, cosi' il pannello puo'
+    mostrare chi va contattato a mano.
+    """
+    import asyncio
+    percorso, admin_s, cliente_s, cliente = _admin(tmp_path, monkeypatch, 'invio_fallito.db')
+    monkeypatch.setattr(main, 'invia_messaggio_telegram',
+                        lambda *a, **k: (False, 'Telegram ha rifiutato la consegna'))
+    main.chiedi_accesso(cliente_s)
+    numero = _corpo(main.elenco_richieste(admin_s))['richieste'][0]['richiesta']
+
+    esito = _corpo(asyncio.run(main.approva_richiesta(
+        str(numero), _CorpoFinto(admin_s, {'giorni': 7}))))
+    assert esito['notificato'] is False, 'un invio fallito e- stato riportato come riuscito'
+    assert esito['motivo'], 'nessun motivo: il proprietario non sa perche- non e- arrivato'
+
+    c = sqlite3.connect(percorso)
+    riga = c.execute('SELECT status, access_expires_at, telegram_reachable FROM users'
+                     ' WHERE id=?', (cliente,)).fetchone()
+    c.close()
+    assert main.stato_effettivo(riga[0], riga[1]) == 'attivo', (
+        'l-accesso e- stato annullato perche- l-avviso non e- partito: sono due cose diverse')
+    assert riga[2] == 0, 'telegram_reachable non e- stato azzerato'
+
+
+def test_il_RIFIUTO_riporta_a_registrato_e_si_puo_richiedere(tmp_path, monkeypatch):
+    """Un rifiuto non e' una punizione: chi e' rifiutato puo' chiedere di nuovo.
+
+    `registrato` e non `sospeso` — magari il cliente non aveva ancora pagato, e la
+    sospensione resta un gesto separato del proprietario.
+    """
+    percorso, admin_s, cliente_s, cliente = _admin(tmp_path, monkeypatch, 'rifiuta.db')
+    main.chiedi_accesso(cliente_s)
+    numero = _corpo(main.elenco_richieste(admin_s))['richieste'][0]['richiesta']
+    esito = _corpo(main.rifiuta_richiesta(str(numero), admin_s))
+    assert esito['stato'] == 'registrato'
+    # E puo' richiedere: nessun 409.
+    assert _corpo(main.chiedi_accesso(cliente_s))['stato'] == 'in_attesa'
+    c = sqlite3.connect(percorso)
+    esiti = [r[0] for r in c.execute('SELECT outcome FROM access_requests ORDER BY id')]
+    c.close()
+    assert esiti == ['rifiutata', None], esiti
+
+
+def test_un_CLIENTE_sul_pannello_riceve_404_non_403(tmp_path, monkeypatch):
+    """`404` perche' un `403` confermerebbe a un estraneo che il pannello sta li'.
+
+    E' la stessa regola con cui un utente non vede i parser di un altro, ed e' scritta nella
+    Issue #2 per `/admin/*`.
+    """
+    import asyncio
+    from fastapi import HTTPException
+    _p, _admin_s, cliente_s, _cliente = _admin(tmp_path, monkeypatch, 'pannello.db')
+    with pytest.raises(HTTPException) as errore:
+        main.elenco_richieste(cliente_s)
+    assert errore.value.status_code == 404, f'{errore.value.status_code} invece di 404'
+    with pytest.raises(HTTPException) as errore:
+        asyncio.run(main.approva_richiesta('1', _CorpoFinto(cliente_s, {'giorni': 30})))
+    assert errore.value.status_code == 404, (
+        f'{errore.value.status_code} invece di 404: un cliente puo- dedurre che la rotta di '
+        'approvazione esiste')
+
+
+def test_i_giorni_FUORI_INTERVALLO_vengono_rifiutati(tmp_path, monkeypatch):
+    """Il limite esiste per fermare un refuso, non per fare da listino.
+
+    `3650` sono dieci anni: uno zero di troppo su una tastiera e' piu' probabile di un
+    abbonamento decennale. E `0` o un negativo non sono una concessione.
+    """
+    import asyncio
+    from fastapi import HTTPException
+    _p, admin_s, cliente_s, _c = _admin(tmp_path, monkeypatch, 'giorni_matti.db')
+    main.chiedi_accesso(cliente_s)
+    numero = _corpo(main.elenco_richieste(admin_s))['richieste'][0]['richiesta']
+    for giorni in (0, -5, 3651, 300000):
+        with pytest.raises(HTTPException) as errore:
+            asyncio.run(main.approva_richiesta(
+                str(numero), _CorpoFinto(admin_s, {'giorni': giorni})))
+        assert errore.value.status_code == 422, f'{giorni} giorni accettati'
