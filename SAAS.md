@@ -316,6 +316,18 @@ renderebbe lento e fragile) e il webhook (che dipende dai messaggi dei canali), 
 due è il posto giusto. `users.promemoria_per` conserva **quale** scadenza è stata annunciata e
 non un booleano: con un booleano il secondo rinnovo non avviserebbe mai più.
 
+La prenotazione si conferma **prima** dell'invio, per due ragioni misurate sulla PR #26: due giri
+concorrenti mandavano due avvisi per la stessa scadenza, e tenere aperta la transazione di
+scrittura durante la rete faceva rispondere «database is locked» a feed e webhook per tutta la
+durata del giro. **Il baratto è dichiarato: at-most-once.** Un crash fra la conferma e la chiamata
+a Telegram consuma il promemoria senza averlo mandato, e nessuno riprova per quel ciclo; la scelta
+opposta — inviare e poi scrivere — sposterebbe la finestra e produrrebbe avvisi **doppi**. Fra i
+due, un promemoria di cortesia perso vale meno di un cliente che riceve due volte lo stesso
+messaggio, e il costo è limitato perché la scadenza si vede comunque in dashboard. Un invio
+fallito invece **rilascia** la prenotazione, e il rilascio porta nella `WHERE` la prenotazione
+propria: se nel frattempo il proprietario ha rinnovato, non deve cancellare quella del ciclo
+nuovo.
+
 ## Token dei feed
 
 - Generati con almeno 18 byte casuali, prefisso `xt_`.

@@ -1219,3 +1219,77 @@ def test_la_MIGRAZIONE_non_muore_sui_duplicati_che_deve_correggere(tmp_path, mon
     assert tenuta == 1, f'la richiesta tenuta e- la {tenuta}, non la piu- vecchia'
     assert tutte == 3, f'{tutte} righe: la migrazione ha CANCELLATO invece di chiudere'
     assert indice == 1, 'l-indice non e- stato creato dopo la deduplica'
+
+
+def test_il_409_dell_INDICE_non_lascia_appeso_il_lock(tmp_path, monkeypatch):
+    """Verifica chiesta da Claude Fable 5 sulla PR #26, e vale trasformarla in misura.
+
+    Il `409` nasce da un `IntegrityError` **dentro** `BEGIN IMMEDIATE`: se quel percorso non
+    facesse `rollback`, il lock di scrittura resterebbe appeso e da quel momento feed e webhook
+    risponderebbero «database is locked» — un doppio clic di un cliente fermerebbe il servizio.
+
+    Nel codice il `raise` sta dentro il `try` che fa `rollback` e `close`, quindi la proprieta'
+    c'e'. Ma «c'e' se leggo bene» non e' una misura: questo test scrive da un'ALTRA connessione
+    subito dopo il rifiuto, e se il lock fosse appeso non riuscirebbe.
+    """
+    from fastapi import HTTPException
+    percorso, _admin_s, cliente_s, cliente = _admin(tmp_path, monkeypatch, 'lock_409.db')
+    c = sqlite3.connect(percorso)
+    c.execute('INSERT INTO access_requests(user_id) VALUES (?)', (cliente,))
+    c.commit()
+    c.close()
+
+    with pytest.raises(HTTPException) as errore:
+        main.chiedi_accesso(cliente_s)
+    assert errore.value.status_code == 409
+
+    altra = sqlite3.connect(percorso, timeout=1)
+    try:
+        altra.execute("INSERT INTO message_logs(user_id, text, esito)"
+                      " VALUES (?, 'dopo il 409', 'ok')", (cliente,))
+        altra.commit()
+    except sqlite3.OperationalError as e:
+        raise AssertionError(
+            f'dopo il 409 il database e- ancora bloccato ({e}): il rifiuto ha lasciato appesa '
+            'una transazione di scrittura, quindi un doppio clic ferma feed e webhook') from e
+    finally:
+        altra.close()
+
+
+def test_un_RINNOVO_durante_l_invio_non_perde_la_prenotazione_nuova(tmp_path, monkeypatch):
+    """Rilievo di GPT-5.5 sulla PR #26: il rilascio deve riguardare **la nostra** prenotazione.
+
+    Scenario: prenotiamo il promemoria per la scadenza X, l'invio va male, e nel frattempo il
+    proprietario ha rinnovato — quindi `promemoria_per` porta ormai la scadenza Y. Un rilascio
+    scritto come `SET promemoria_per=NULL WHERE id=?` cancellerebbe **Y**, e il giro successivo
+    rimanderebbe un avviso per un ciclo di cui il cliente e' giu' stato avvisato.
+
+    Il test fa avvenire il rinnovo **durante** l'invio, che e' l'unico momento in cui la finestra
+    esiste.
+    """
+    percorso, admin_s, _cliente_s, cliente = _admin(tmp_path, monkeypatch, 'rinnovo_invio.db')
+    nuova = int(time.time()) + 90 * GIORNO
+
+    def invio_con_rinnovo(chat_id, testo, *a, **k):
+        altra = sqlite3.connect(percorso, timeout=5)
+        altra.execute('UPDATE users SET access_expires_at=?, promemoria_per=? WHERE id=?',
+                      (nuova, nuova, cliente))
+        altra.commit()
+        altra.close()
+        return False, 'rifiutata'
+
+    monkeypatch.setattr(main, 'invia_messaggio_telegram', invio_con_rinnovo)
+    c = sqlite3.connect(percorso)
+    c.execute("UPDATE users SET status='attivo', access_expires_at=? WHERE id=?",
+              (int(time.time()) + 2 * GIORNO, cliente))
+    c.commit()
+    c.close()
+
+    main.manda_promemoria(admin_s)
+
+    c = sqlite3.connect(percorso)
+    resta = c.execute('SELECT promemoria_per FROM users WHERE id=?', (cliente,)).fetchone()[0]
+    c.close()
+    assert resta == nuova, (
+        f'promemoria_per e- {resta!r} invece della prenotazione nuova ({nuova}): il rilascio ha '
+        'cancellato la prenotazione di un ciclo piu- recente')

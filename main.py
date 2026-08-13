@@ -2771,10 +2771,19 @@ def manda_promemoria(request: Request):
     Finche' non viene chiamata, nessun promemoria parte: e' un compito che aspetta, non un
     compito perso. La riga in `admin_audit` dice quando e' stato fatto l'ultimo giro.
 
-    Un invio fallito **non** consuma il promemoria: `promemoria_per` si scrive solo se il
-    messaggio e' partito, cosi' il giro successivo riprova. E' il contrario di quello che si
-    fa con il freno del login, dove il tentativo si consuma prima: la' il rischio e' che
-    qualcuno provi troppe volte, qui il rischio e' che il cliente non sappia che scade.
+    Un invio fallito **non** consuma il promemoria: la prenotazione viene rilasciata, cosi' il
+    giro successivo riprova. E' il contrario di quello che si fa con il freno del login, dove il
+    tentativo si consuma prima: la' il rischio e' che qualcuno provi troppe volte, qui il rischio
+    e' che il cliente non sappia che scade.
+
+    **Baratto dichiarato: at-most-once.** La prenotazione si conferma **prima** dell'invio, e
+    questo lascia una finestra — un crash del processo fra il `commit` e la chiamata a Telegram
+    consuma il promemoria senza averlo mandato, e nessuno riprova per quel ciclo. La scelta
+    opposta (inviare e poi scrivere) sposterebbe la finestra sull'altro lato e produrrebbe
+    avvisi **doppi** allo stesso cliente. Fra i due, un promemoria di cortesia perso vale meno di
+    un cliente che riceve due volte lo stesso messaggio, e il costo e' limitato: la scadenza la
+    vede comunque in dashboard, e il feed gli si spegne solo alla data. Chiesto da Claude Fable 5
+    sulla PR #26, e la richiesta era giusta — «accettabile solo se documentato».
     """
     amministratore = _solo_amministratore(request)
     adesso = int(time.time())
@@ -2819,8 +2828,12 @@ def manda_promemoria(request: Request):
             # o il cliente non saprebbe mai di stare scadendo proprio nel caso in cui il canale
             # e' rotto. E si registra che non e' raggiungibile, perche' il proprietario deve
             # poterlo contattare a mano.
+            # La `WHERE` porta la prenotazione **nostra**: se nel frattempo il proprietario ha
+            # rinnovato, `promemoria_per` non e' piu' quella e il rilascio non deve toccarla —
+            # cancellerebbe la prenotazione di un ciclo piu' recente, cioe' farebbe rimandare
+            # un avviso giu' mandato. Rilievo di GPT-5.5 sulla PR #26.
             c.execute('UPDATE users SET promemoria_per=NULL, telegram_reachable=0'
-                      ' WHERE id=?', (utente,))
+                      ' WHERE id=? AND promemoria_per=?', (utente, scadenza))
             c.commit()
             falliti.append({'utente': utente, 'motivo': motivo})
     _annota_admin(c, amministratore['id'], 'promemoria_inviati')
