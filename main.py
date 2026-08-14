@@ -1666,7 +1666,7 @@ def store_signal(c, csv_text_value, parser, profile=PIERO_PROFILE):
     else:
         c.execute('DELETE FROM signals WHERE user_id=? OR profile=?', (utente, profile))
     c.execute('INSERT INTO signals(csv,parser,profile,user_id,expires_at) VALUES (?,?,?,?,?)',
-              (csv_text_value, parser, profile, utente, int(__import__('time').time()) + 90))
+              (csv_text_value, parser, profile, utente, int(time.time()) + 90))
 
 
 def parse_message(message, cfg):
@@ -2393,30 +2393,34 @@ def feed_utente_csv(slug: str, token: str | None = Query(None)):
     non_trovato = HTTPException(404, 'Not Found')
     if not token:
         raise non_trovato
+    # `try/finally` e non chiusure per ramo: questo e' il percorso che XTrader
+    # interroga a raffica, e un'eccezione fra l'apertura e la chiusura — un
+    # `database is locked` sulla DELETE, per dire — lascerebbe una connessione
+    # aperta A OGNI poll. Segnalato da CodeRabbit sulla PR #43; `genera_token_feed`
+    # aveva gia' la stessa forma per la stessa ragione.
     c = db()
-    riga = c.execute('SELECT id, token_hash, status, access_expires_at, is_admin'
-                     ' FROM users WHERE slug=?', (slug,)).fetchone()
-    if riga is None or not riga[1]:
+    try:
+        riga = c.execute('SELECT id, token_hash, status, access_expires_at, is_admin'
+                         ' FROM users WHERE slug=?', (slug,)).fetchone()
+        if riga is None or not riga[1]:
+            raise non_trovato
+        utente, atteso, status, scadenza, admin = riga
+        if not secrets.compare_digest(hash_token_feed(token).encode('utf-8'),
+                                      atteso.encode('utf-8')):
+            raise non_trovato
+        # L'abbonamento: stessa decisione di `accesso_bloccato_del_profilo`, letta
+        # direttamente dall'utente perche' qui l'utente C'E' — non serve il ponte
+        # `origin_profile`. Il proprietario (`is_admin`) non e' un abbonamento.
+        if not admin and stato_effettivo(status, scadenza) in ACCESSI_BLOCCATI:
+            return Response(empty_csv(), media_type='text/csv',
+                            headers={'Cache-Control': 'no-store'})
+        c.execute("DELETE FROM signals WHERE user_id=? AND expires_at IS NOT NULL"
+                  " AND expires_at <= strftime('%s','now')", (utente,))
+        c.commit()
+        r = c.execute('SELECT csv FROM signals WHERE user_id=? ORDER BY id DESC LIMIT 1',
+                      (utente,)).fetchone()
+    finally:
         c.close()
-        raise non_trovato
-    utente, atteso, status, scadenza, admin = riga
-    if not secrets.compare_digest(hash_token_feed(token).encode('utf-8'),
-                                  atteso.encode('utf-8')):
-        c.close()
-        raise non_trovato
-    # L'abbonamento: stessa decisione di `accesso_bloccato_del_profilo`, letta
-    # direttamente dall'utente perche' qui l'utente C'E' — non serve il ponte
-    # `origin_profile`. Il proprietario (`is_admin`) non e' un abbonamento.
-    if not admin and stato_effettivo(status, scadenza) in ACCESSI_BLOCCATI:
-        c.close()
-        return Response(empty_csv(), media_type='text/csv',
-                        headers={'Cache-Control': 'no-store'})
-    c.execute("DELETE FROM signals WHERE user_id=? AND expires_at IS NOT NULL"
-              " AND expires_at <= strftime('%s','now')", (utente,))
-    c.commit()
-    r = c.execute('SELECT csv FROM signals WHERE user_id=? ORDER BY id DESC LIMIT 1',
-                  (utente,)).fetchone()
-    c.close()
     # Stesso fallback di `profile_csv`, per la stessa ragione: una riga scritta
     # da una versione precedente non deve uscire rotta, e un raise sul percorso
     # di consegna sarebbe un 500 verso XTrader. Lo slug come etichetta del log:
@@ -2980,6 +2984,7 @@ def genera_token_feed(request: Request):
     c = db()
     try:
         slug = utente['slug']
+        base = slug
         if not slug:
             base = re.sub(r'[^a-z0-9-]+', '-',
                           (utente['first_name'] or 'utente').lower()).strip('-') or 'utente'
@@ -2991,18 +2996,26 @@ def genera_token_feed(request: Request):
                       (slug, hash_token_feed(token), token[:9], utente['id']))
         except sqlite3.IntegrityError:
             # La corsa sul vincolo UNIQUE di `slug`: due primi-token simultanei di
-            # utenti col lo stesso nome. Chi perde NON riceve un 500 con traccia:
+            # utenti con lo stesso nome. Chi perde NON riceve un 500 con traccia:
             # riprova una volta rileggendo gli slug presi, e se perde anche quella
             # e' un 503 con l'invito a riprovare — la stessa forma della corsa
             # gemella sul CRUD dei parser.
+            #
+            # Il retry riparte dalla BASE, non dal candidato appena perso: da
+            # `_slug_libero(candidato_perso)` una collisione su `base-2`
+            # produrrebbe `base-2-2`, uno slug che finisce nell'URL del cliente.
+            # Segnalato da CodeRabbit sulla PR #43, vincolato da
+            # `test_la_corsa_sullo_slug_RIPARTE_dalla_base_non_dal_candidato`.
             presi = {r[0] for r in c.execute(
                 'SELECT slug FROM users WHERE slug IS NOT NULL').fetchall()}
-            slug = _slug_libero(slug, presi)
+            slug = _slug_libero(base, presi)
             try:
                 c.execute('UPDATE users SET slug=?, token_hash=?, token_prefix=? WHERE id=?',
                           (slug, hash_token_feed(token), token[:9], utente['id']))
             except sqlite3.IntegrityError:
-                raise HTTPException(503, 'slug conteso: riprova')
+                # `from None`: la traccia dell'IntegrityError racconta lo schema del
+                # database a chi riceve un errore HTTP, e il 503 e' gia' la decisione.
+                raise HTTPException(503, 'slug conteso: riprova') from None
         c.commit()
     finally:
         c.close()

@@ -204,7 +204,9 @@ nessuna parte che dicesse perche'. E' il caso di chi configura ADMIN_PASSWORD_HA
 non il bot, cioe' l'emergenza per cui quel percorso esiste.
 
 GET /api/me
-Chi e' l'utente della sessione: {"utente","nome","stato","admin","accesso_scade"}.
+Chi e' l'utente della sessione: {"utente","nome","stato","admin","accesso_scade",
+"giorni_rimasti","slug","token_prefix"}. Mai il token: il prefisso sono i primi
+9 caratteri, per riconoscere in UI quale token e' armato.
 401 se il cookie manca, non e' firmato, e' scaduto, o se session_version e' cambiata.
 Non restituisce mai un token, ne' l'hash della password, ne' il telegram_id.
 Rinnova il cookie: e' la rotta che rende i 20 minuti "di inattivita'" (vedi sotto).

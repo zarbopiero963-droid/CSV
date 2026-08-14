@@ -291,7 +291,7 @@ def test_generare_il_token_lo_mostra_UNA_volta_e_salva_solo_l_hash(tmp_path, mon
     corpo = json.loads(bytes(main.genera_token_feed(Richiesta()).body).decode())
     token = corpo['token']
     assert token.startswith('xt_'), f'il token non ha il prefisso xt_: {token[:6]}…'
-    assert len(token) >= 21, 'token piu' ' corto di xt_ + 18 byte'
+    assert len(token) >= 21, "token piu' corto di xt_ + 18 byte"
     assert corpo['token_prefix'] == token[:9]
     assert corpo['feed'].endswith('.csv'), f'la risposta non dice l\'URL del feed: {corpo}'
 
@@ -358,6 +358,48 @@ def test_generare_il_token_ASSEGNA_uno_slug_a_chi_non_lo_ha(tmp_path, monkeypatc
     assert slug, 'l\'utente e\' rimasto senza slug'
     assert corpo['feed'] == f'/feed/{slug}.csv'
     assert slug == slug.lower(), 'lo slug deve essere minuscolo: finisce in un URL'
+
+
+def test_la_corsa_sullo_slug_RIPARTE_dalla_base_non_dal_candidato(tmp_path, monkeypatch):
+    """Il retry dopo `IntegrityError` ricalcola dalla BASE, non dal candidato perso.
+
+    Segnalato da CodeRabbit sulla PR #43: ripartendo dal candidato, una collisione
+    su `base-2` produrrebbe `base-2-2` — uno slug brutto e instabile che finisce
+    nell'URL che il cliente incolla in XTrader. La corsa vera (due primi-token
+    simultanei) non si riproduce in processo: qui si forza il primo candidato su
+    uno slug GIA' occupato, cosi' l'UPDATE solleva davvero `IntegrityError` e il
+    retry deve dimostrare da dove riparte.
+    """
+    percorso = _relay_in_processo(tmp_path, monkeypatch, 'corsa_slug.db')
+    _utente_con_feed(percorso, slug='occupato', token='xt_token-occupato-00000')
+    risposta = main.login_telegram(main.LoginTelegramIn(**_dati_login(id='444000444')))
+    cookie = None
+    for pezzo in (risposta.headers.get('set-cookie') or '').split(';'):
+        chiave, _, valore = pezzo.strip().partition('=')
+        if chiave == main.NOME_COOKIE:
+            cookie = valore
+
+    class Richiesta:
+        cookies = {main.NOME_COOKIE: cookie}
+
+    vero = main._slug_libero
+    basi_chieste = []
+
+    def truccato(base, presi):
+        basi_chieste.append(base)
+        if len(basi_chieste) == 1:
+            return 'occupato'  # gia' preso in `users` → l'UPDATE solleva IntegrityError
+        return vero(base, presi)
+
+    monkeypatch.setattr(main, '_slug_libero', truccato)
+    corpo = json.loads(bytes(main.genera_token_feed(Richiesta()).body).decode())
+    slug = corpo['feed'].rsplit('/', 1)[-1][:-len('.csv')]
+    assert len(basi_chieste) == 2, f'atteso un retry: chiamate {basi_chieste}'
+    assert basi_chieste[1] == basi_chieste[0], (
+        f'il retry e\' ripartito da {basi_chieste[1]!r} invece che dalla base '
+        f'{basi_chieste[0]!r}: una collisione su base-2 produrrebbe base-2-2')
+    assert slug != 'occupato' and not slug.startswith('occupato-'), (
+        f'lo slug finale {slug!r} deriva dal candidato perso, non dalla base')
 
 
 def test_senza_sessione_NIENTE_token(tmp_path, monkeypatch):

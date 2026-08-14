@@ -49,7 +49,7 @@ La barra dei menu di XTrader con il menu «Funzioni» aperto. Elenca tutte le fi
 
 *Usare per:* Dire all'utente come raggiungere una finestra. Per il bridge: Funzioni → Segnali, oppure il tasto F11.
 
-*Privacy:* ATTENZIONE: la barra del titolo mostra due campi dell'Abbonamento del proprietario — data di scadenza e data/ora dell'ultimo accesso precedente. Sono metadati di account, non credenziali: qui si descrivono e basta, i valori restano solo dentro l'immagine.
+*Privacy:* la barra del titolo è stata **oscurata prima del commit**: nell'originale mostrava due metadati dell'abbonamento del proprietario (data di scadenza e ultimo accesso), nell'immagine pubblicata il riquadro è nero. I valori non compaiono né qui né nell'immagine.
 
 ### 02-20260708-170631.png
 
@@ -67,7 +67,7 @@ La finestra Segnali (F11), divisa in due. In alto l'elenco FONTI con la barra co
 
 La finestra di creazione/modifica di una fonte segnali. Campi nell'ordine: «Nome Servizio» (testo libero); scelta esclusiva fra «URL» (con campo indirizzo) e «Nome File» (con campo percorso e pulsante sfoglia); casella «Aggiorna automaticamente ogni» con intervallo in formato hh:mm:ss; casella «Escludi automaticamente segnali non validati»; menu «Riconoscimento selezioni» qui aperto sulle due sole opzioni disponibili: «MarketId, SelectionId» e «EventName,MarketType,SelectionName». In fondo Annulla e Ok.
 
-*Usare per:* È IL passo centrale del collegamento BetRelay→XTrader: si sceglie «Nome File», si punta al CSV del bridge e si imposta il refresh automatico. Il manuale non mostra questa dialog.
+*Usare per:* È IL passo centrale del collegamento BetRelay→XTrader: si sceglie «URL», si incolla l'indirizzo personale del feed (`https://…/feed/<slug>.csv?token=xt_…`) e si imposta il refresh automatico. «Nome File» è la variante del Bridge locale, che scrive un file su disco: per il servizio web non funziona. Il manuale non mostra questa dialog.
 
 *Privacy:* pulito — tutti i campi vuoti
 

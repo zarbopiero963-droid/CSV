@@ -62,11 +62,11 @@ Due rilievi, entrambi non sensibili ma segnalati per correttezza:
 
 | Cosa | Dove | Valutazione |
 |---|---|---|
-| Barra del titolo con **«Data Scadenza Abbonamento: 20/07/2026»** e **«Ultimo accesso precedente: 06/07/2026 16:50:53»** | `varie/01` | dato di abbonamento del proprietario, non una credenziale |
-| Nome di strategia personale **`SIG_PREMATCH_BASE`** | `varie/10`, `azioni-se-vero-se-falso/01` e `02`, `condizioni/01`, `02`, `03`, `10`, `11`, `15`, `69` | nome scelto dal proprietario, visibile nell'elenco strategie |
+| Barra del titolo con due metadati dell'abbonamento del proprietario (data di scadenza e ultimo accesso) | `varie/01` | **oscurata prima del commit**: nell'immagine pubblicata il riquadro e' nero, e i valori non compaiono nemmeno in questo catalogo (vedi «Cosa e' cambiato entrando nel repository») |
+| Nome di strategia personale **`SIG_PREMATCH_BASE`** | `varie/10`, `azioni-se-vero-se-falso/01` e `02`, `condizioni/01`, `02`, `03`, `10`, `11`, `15`, `69` — 10 immagini | nome scelto dal proprietario, visibile nell'elenco strategie; lasciato per scelta consapevole |
 
-Nessuno dei due impedisce la pubblicazione. Se il proprietario preferisce, si possono oscurare con
-un ritaglio o una sfocatura prima di usarli in una guida pubblica.
+Solo il primo conteneva dati d'account, ed e' stato oscurato. Il secondo non impedisce la
+pubblicazione; volendo si puo' sfocare prima di usare quelle immagini in una guida pubblica.
 
 Condizioni e azioni portano ovunque i **nomi di default generati dal programma**
 (`Nuova Condizione #1`, `Nuova Azione #2`, `Nuova Regola #1`), quindi non rivelano nulla del
@@ -117,8 +117,11 @@ parte utile — e' intatto.
 **2 — `condizioni/FORMULA.pdf` NON e' stato incluso.** E' la stampa integrale di un articolo del
 servizio assistenza del produttore di XTrader: ripubblicarlo in un repository pubblico e' una
 questione di licenza, non di privacy, e non e' una decisione che spetta a chi committa. Il file
-resta nel pacchetto originale del proprietario. Il `manifest.json` lo elenca ancora: e' l'unica
-differenza fra manifesto e contenuto, ed e' voluta.
+resta nel pacchetto originale del proprietario. Il `manifest.json` lo elenca ancora — e' l'unica
+differenza fra manifesto e contenuto, ed e' voluta — ma **senza il link di download**: il
+`drive_id` originario e' stato rimosso perche' CodeRabbit ha misurato (PR #43) che il file era
+scaricabile senza autenticazione, e un link pubblico a contenuto sotto licenza in un repository
+pubblico e' una ripubblicazione con un giro in piu'.
 
 **Verifica eseguita, non dichiarata.** Tutte e 102 le immagini sono state passate all'OCR
 (`tesseract`, italiano+inglese) cercando: abbonamento, scadenza, ultimo accesso, saldo, username,
@@ -129,8 +132,10 @@ licenza, API key, indirizzi e-mail e sequenze di 7+ cifre. Esito:
   una tendina, non un saldo: nessun valore;
 - **1 immagine** con l'etichetta «Username:» → dialog «Invia E-mail» con **tutti i campi vuoti**,
   verificata a vista;
-- **4 immagini** con `SIG_PREMATCH_BASE`, nome di una strategia del proprietario: materiale suo,
-  non un dato sensibile. Lasciato, ma segnalato qui perche' la scelta sia consapevole;
+- **10 immagini** con `SIG_PREMATCH_BASE`, nome di una strategia del proprietario (l'OCR ne
+  aveva lette 4; le altre 6 sono emerse dal controllo a vista, ed e' l'inventario della tabella
+  sopra a fare fede): materiale suo, non un dato sensibile. Lasciato, ma segnalato qui perche'
+  la scelta sia consapevole;
 - le sequenze di 7+ cifre sono date e orari del palinsesto (`08/07/2026 17:30`) letti male
   dall'OCR, piu' nomi di squadre e competizioni: dati pubblici.
 
