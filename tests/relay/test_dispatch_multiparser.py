@@ -402,6 +402,63 @@ def test_un_profilo_creato_a_CALDO_dispatcha_senza_riavvio(tmp_path, monkeypatch
         f'la chat di un profilo creato a caldo e\' stata ignorata: {esito!r}')
 
 
+def test_il_profilo_a_caldo_che_ordina_DOPO_quello_linkato_non_resta_muto(tmp_path, monkeypatch):
+    """Il fallback deve integrare TUTTI i profili scoperti, non il primo alfabetico.
+
+    Bloccante di GPT-5.5 sul fix precedente, ed era un bug vero DEL fix: il
+    fallback guardava solo il primo profilo in ordine di nome che elenca la
+    chat. Se quello e' gia' rappresentato dai link (PIERO), un profilo a caldo
+    che ordina DOPO (`ZZZ-CALDO`) non veniva mai considerato e restava muto
+    fino al riavvio — l'immagine speculare del caso gia' testato, dove il
+    profilo a caldo ordinava prima.
+    """
+    percorso = _relay(tmp_path, monkeypatch, 'caldo_dopo.db')
+    _riavvio(monkeypatch)  # PIERO ha i suoi link su CHAT
+    _secondo_profilo(percorso, 'ZZZ-CALDO', chat=CHAT,
+                     config=CONFIG_STESSO_MESSAGGIO)  # NIENTE riavvio
+
+    _consegna()
+    per_utente = {r[0]: r[1] for r in _segnali(percorso)}
+    assert 'PIERO' in per_utente, f'PIERO (via link) senza segnale: {sorted(per_utente)}'
+    assert 'ZZZ-CALDO' in per_utente, (
+        f'il profilo a caldo che ordina DOPO quello linkato e\' rimasto muto: '
+        f'{sorted(per_utente)}')
+
+
+def test_due_consegne_SIMULTANEE_con_lo_stesso_update_id_elaborano_una_volta(tmp_path, monkeypatch):
+    """Il dedup regge anche la corsa: due POST identici INSIEME, una elaborazione.
+
+    Bloccante di GPT-5.5: il controllo in testa piu' il marker in coda lasciava
+    passare due consegne identiche ARRIVATE INSIEME (il marker dell'una non e'
+    ancora committato quando l'altra controlla). Il servizio e' un processo solo
+    (Procfile senza --workers, misurato): una prenotazione in-flight per
+    processo chiude la finestra senza toccare la garanzia sul crash — il marker
+    resta nella transazione del segnale.
+    """
+    import threading
+
+    percorso = _relay(tmp_path, monkeypatch, 'corsa_dedup.db')
+    _riavvio(monkeypatch)
+
+    esiti, via = [], threading.Barrier(2)
+
+    def consegna():
+        via.wait()
+        esiti.append(_consegna(update_id=4242))
+
+    fili = [threading.Thread(target=consegna) for _ in range(2)]
+    for f in fili:
+        f.start()
+    for f in fili:
+        f.join()
+
+    duplicati = [e for e in esiti if e.get('ignored') == 'duplicate']
+    elaborati = [e for e in esiti if 'ignored' not in e]
+    assert len(elaborati) == 1 and len(duplicati) == 1, (
+        f'attese una elaborazione e un duplicato: {esiti!r}')
+    assert len(_segnali(percorso)) == 1
+
+
 def test_un_profilo_a_caldo_su_una_chat_GIA_collegata_non_resta_muto(tmp_path, monkeypatch):
     """Il caso che il fallback semplice non copriva: bloccante di Fable sulla PR #44.
 

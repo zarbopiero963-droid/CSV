@@ -3993,6 +3993,17 @@ async def telegram_webhook(request: Request):
                                    payload.get('update_id'))
 
 
+# Le consegne in volo IN QUESTO processo, per il dedup delle simultanee: il
+# marker su `webhook_seen` viaggia nella transazione del segnale (crash-safe) ma
+# non puo' fermare due consegne identiche ARRIVATE INSIEME — il marker dell'una
+# non e' ancora committato quando l'altra controlla. Il servizio e' un processo
+# solo (`Procfile` senza `--workers`, misurato): una prenotazione in memoria
+# chiude la finestra senza indebolire la garanzia sul crash. Bloccante di
+# GPT-5.5 e Fable sulla PR #44.
+_CONSEGNE_IN_VOLO = set()
+_LOCK_CONSEGNE = threading.Lock()
+
+
 def _processa_messaggio_canale(chat_id, text, update_id=None):
     """Il dispatch: chat → i parser collegati, ognuno verso il feed del SUO utente.
 
@@ -4023,11 +4034,27 @@ def _processa_messaggio_canale(chat_id, text, update_id=None):
     aveva gia' i link di qualcun altro). I link arrivano alla prossima
     migrazione; fino ad allora quel profilo passa da qui.
     """
+    chiave = str(update_id) if update_id is not None else None
+    if chiave is not None:
+        with _LOCK_CONSEGNE:
+            if chiave in _CONSEGNE_IN_VOLO:
+                return {'ok': True, 'ignored': 'duplicate'}
+            _CONSEGNE_IN_VOLO.add(chiave)
+    try:
+        return _elabora_consegna(chat_id, text, chiave)
+    finally:
+        if chiave is not None:
+            with _LOCK_CONSEGNE:
+                _CONSEGNE_IN_VOLO.discard(chiave)
+
+
+def _elabora_consegna(chat_id, text, chiave):
+    """Il corpo della consegna, con la prenotazione in-flight gia' presa."""
     c = db()
     try:
-        if update_id is not None and c.execute(
+        if chiave is not None and c.execute(
                 'SELECT 1 FROM webhook_seen WHERE update_id=?',
-                (str(update_id),)).fetchone():
+                (chiave,)).fetchone():
             return {'ok': True, 'ignored': 'duplicate'}
         riga_chat = c.execute(f'SELECT id FROM chats WHERE telegram_chat_id=?'
                               f' AND {TOPIC_CHAT}=?', (chat_id, '')).fetchone()
@@ -4058,14 +4085,17 @@ def _processa_messaggio_canale(chat_id, text, update_id=None):
                 etichetta = righe[0][11] or righe[0][10] or f'utente-{utente_id}'
                 esiti[etichetta] = _elabora_per_utente(c, riga_chat[0], utente_id,
                                                        righe, text)
-        # Il profilo legacy NON rappresentato nei link (o tutti i profili, se
-        # link non ce ne sono): vedi docstring.
-        profilo = _profilo_della_chat(c, chat_id)
-        if profilo and not _utente_del_profilo_nei_link(c, profilo['name'], link):
+        # TUTTI i profili legacy non rappresentati nei link, non il primo
+        # alfabetico: con due profili scoperti sulla stessa chat il secondo
+        # restava muto — bloccante di GPT-5.5 e Fable sul fix precedente, ed
+        # era l'immagine speculare del difetto che il fix chiudeva.
+        for profilo in _profili_della_chat(c, chat_id):
+            if _utente_del_profilo_nei_link(c, profilo['name'], link):
+                continue
             esiti[profilo['name']] = _elabora_profilo(c, profilo, text)
-        if update_id is not None:
+        if chiave is not None:
             c.execute('INSERT OR IGNORE INTO webhook_seen(update_id) VALUES (?)',
-                      (str(update_id),))
+                      (chiave,))
             c.execute("DELETE FROM webhook_seen WHERE created_at < datetime('now', '-7 days')")
         c.commit()
     finally:
@@ -4144,16 +4174,17 @@ def _raggruppa(righe, chiave):
     return gruppi
 
 
-def _profilo_della_chat(c, chat_id):
-    """Il primo profilo (in ordine di nome) che elenca questa chat, o None.
+def _profili_della_chat(c, chat_id):
+    """TUTTI i profili (in ordine di nome) che elencano questa chat.
 
-    E' la selezione storica del webhook, sopravvissuta SOLO per il fallback: nel
-    dispatch per link nessuno «vince» la chat, e questo lookup serve a trovare il
-    profilo che i link non rappresentano ancora.
+    Tutti e non il primo, ed e' la differenza col webhook storico: nel dispatch
+    per link nessuno «vince» la chat, e questo lookup serve a trovare OGNI
+    profilo che i link non rappresentano ancora — con due profili scoperti,
+    fermarsi al primo lasciava muto il secondo.
     """
     profiles = c.execute('SELECT name,chat_ids,parser FROM profiles ORDER BY name').fetchall()
-    return next((dict(zip(['name', 'chat_ids', 'parser'], row)) for row in profiles
-                 if chat_id in {x.strip() for x in row[1].split(',') if x.strip()}), None)
+    return [dict(zip(['name', 'chat_ids', 'parser'], row)) for row in profiles
+            if chat_id in {x.strip() for x in row[1].split(',') if x.strip()}]
 
 
 def _utente_del_profilo_nei_link(c, nome_profilo, link):
