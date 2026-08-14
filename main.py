@@ -4003,6 +4003,17 @@ async def telegram_webhook(request: Request):
 _CONSEGNE_IN_VOLO = set()
 _LOCK_CONSEGNE = threading.Lock()
 
+# L'ordine di arrivo e' l'ordine di scrittura. Con l'offload su to_thread due
+# consegne diverse elaborano in thread paralleli, e un messaggio VECCHIO dal
+# parse lento puo' finire dopo uno NUOVO, sovrascrivendone segnale e TTL — un
+# feed che torna indietro nel tempo ([REAL_FINDING] di GPT-5.6 Sol, PR #44).
+# Prima dell'offload il codice sincrono sull'event loop serializzava di fatto;
+# questo lock rende la proprieta' DELIBERATA senza rimettere il carico sul
+# loop: le altre rotte restano libere, le consegne del webhook si accodano.
+# (Sul percorso dei link la DELETE di pulizia apriva gia' la transazione prima
+# del parse e SQLite accodava il secondo scrittore: vera, ma accidentale.)
+_LOCK_ELABORAZIONE = threading.Lock()
+
 
 def _processa_messaggio_canale(chat_id, text, update_id=None):
     """Il dispatch: chat → i parser collegati, ognuno verso il feed del SUO utente.
@@ -4041,7 +4052,8 @@ def _processa_messaggio_canale(chat_id, text, update_id=None):
                 return {'ok': True, 'ignored': 'duplicate'}
             _CONSEGNE_IN_VOLO.add(chiave)
     try:
-        return _elabora_consegna(chat_id, text, chiave)
+        with _LOCK_ELABORAZIONE:
+            return _elabora_consegna(chat_id, text, chiave)
     finally:
         if chiave is not None:
             with _LOCK_CONSEGNE:
@@ -4090,7 +4102,8 @@ def _elabora_consegna(chat_id, text, chiave):
         # restava muto — bloccante di GPT-5.5 e Fable sul fix precedente, ed
         # era l'immagine speculare del difetto che il fix chiudeva.
         for profilo in _profili_della_chat(c, chat_id):
-            if _utente_del_profilo_nei_link(c, profilo['name'], link):
+            if riga_chat and _utente_del_profilo_nei_link(c, profilo['name'],
+                                                          riga_chat[0]):
                 continue
             esiti[profilo['name']] = _elabora_profilo(c, profilo, text)
         if chiave is not None:
@@ -4144,18 +4157,20 @@ def _elabora_per_utente(c, chat_riga_id, utente_id, righe, text):
     # visibile del vincente (slug, o name per i parser legacy).
     vincente, parsed = riconosciuti[-1]
     nome_vincente = vincente[10] or vincente[1]
-    for battuto, _ in riconosciuti[:-1]:
-        c.execute('INSERT INTO message_logs(user_id, parser_id, chat_id,'
-                  ' text, esito) VALUES (?,?,?,?,?)',
-                  (utente_id, battuto[0], chat_riga_id, text,
-                   f'riconosciuto, sostituito da {nome_vincente}'))
     try:
         store_signal(c, parsed['csv'], vincente[1], profile=None, utente=utente_id)
     except ValueError:
         # Deterministico: lo stesso messaggio produrrebbe lo stesso CSV rotto.
         # 200, cosi' Telegram non ritenta; il motivo resta su /health, non nella
-        # risposta di un endpoint pubblico.
+        # risposta di un endpoint pubblico. E NIENTE log dei battuti: si scrivono
+        # dopo il vincente, o racconterebbero una sostituzione mai avvenuta
+        # ([REAL_FINDING] di Fable al gate finale della PR #44).
         return 'csv_non_valido'
+    for battuto, _ in riconosciuti[:-1]:
+        c.execute('INSERT INTO message_logs(user_id, parser_id, chat_id,'
+                  ' text, esito) VALUES (?,?,?,?,?)',
+                  (utente_id, battuto[0], chat_riga_id, text,
+                   f'riconosciuto, sostituito da {nome_vincente}'))
     c.execute('INSERT INTO message_logs(user_id, parser_id, chat_id, text,'
               ' esito) VALUES (?,?,?,?,?)',
               (utente_id, vincente[0], chat_riga_id, text,
@@ -4187,15 +4202,33 @@ def _profili_della_chat(c, chat_id):
             if chat_id in {x.strip() for x in row[1].split(',') if x.strip()}]
 
 
-def _utente_del_profilo_nei_link(c, nome_profilo, link):
-    """Vero se l'utente di questo profilo e' gia' servito dai link della chat."""
+def _utente_del_profilo_nei_link(c, nome_profilo, chat_riga_id):
+    """Vero se l'utente di questo profilo e' RAPPRESENTATO dai link della chat.
+
+    La rappresentanza si misura su TUTTI i link dell'utente, SENZA il filtro
+    `active`: se l'utente ha un link su questa chat, il sistema dei link
+    possiede il suo dispatch — e `active=0` significa silenzio, non «torna al
+    fallback». Misurarla sui soli link attivi faceva rieseguire dal fallback il
+    parser che l'utente aveva appena disattivato ([REAL_FINDING] di GPT-5.6 Sol
+    al gate finale della PR #44).
+    """
     riga = c.execute('SELECT id FROM users WHERE origin_profile=?',
                      (nome_profilo,)).fetchone()
-    return riga is not None and any(r[9] == riga[0] for r in link)
+    if riga is None:
+        return False
+    return c.execute(
+        'SELECT 1 FROM parser_chats pc JOIN parsers p ON p.id = pc.parser_id'
+        ' WHERE pc.chat_id=? AND p.user_id=?',
+        (chat_riga_id, riga[0])).fetchone() is not None
 
 
 def _elabora_profilo(c, profile, text):
     """Il percorso legacy per UN profilo. Restituisce l'esito, non committa."""
+    # `active` vale anche qui: un parser disattivato non gira da nessun percorso.
+    attivo = c.execute('SELECT IFNULL(active, 1) FROM parsers WHERE name=?',
+                       (profile['parser'],)).fetchone()
+    if attivo is not None and not attivo[0]:
+        return 'parser_no_match'
     bloccato = accesso_bloccato_del_profilo(c, profile['name'])
     if bloccato:
         return f'access_{bloccato}'

@@ -267,6 +267,116 @@ def test_il_TTL_riparte_dalla_scrittura_VINCENTE(tmp_path, monkeypatch):
     assert scadenza == pytest.approx(int(time.time()) + 90, abs=5)
 
 
+def test_disattivare_TUTTI_i_parser_spegne_davvero_il_feed(tmp_path, monkeypatch):
+    """`active=0` su ogni parser dell'utente = silenzio, anche dal fallback.
+
+    [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #44, verificato vero:
+    il filtro `active=1` stava nella query dei link, quindi un utente con tutti
+    i parser disattivati spariva dai link, risultava «non rappresentato», e il
+    fallback legacy eseguiva comunque il suo parser — disattivato — scrivendo
+    segnali. Disattivare deve significare disattivare: la rappresentanza si
+    misura sui link SENZA il filtro active (il sistema dei link possiede il
+    dispatch di quell'utente, e active=0 lo silenzia), e il fallback stesso
+    rispetta `active` del parser del profilo.
+    """
+    percorso = _relay(tmp_path, monkeypatch, 'tutti_spenti.db')
+    _riavvio(monkeypatch)
+    c = sqlite3.connect(percorso)
+    c.execute('UPDATE parsers SET active=0 WHERE name=?', (main.DEFAULT_PARSER,))
+    c.commit()
+    c.close()
+
+    esito = _consegna()
+    assert not _segnali(percorso), (
+        f'un parser DISATTIVATO ha scritto un segnale via fallback: {esito!r}')
+
+
+def test_un_messaggio_LENTO_non_sovrascrive_quello_arrivato_DOPO(tmp_path, monkeypatch):
+    """L'ordine di arrivo e' l'ordine di scrittura, anche con un parse lento.
+
+    [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #44, verificato vero
+    ed era una regressione dell'offload su to_thread (#31 B1): prima il codice
+    sincrono sull'event loop serializzava le consegne di fatto; col threadpool
+    un messaggio VECCHIO dal parse lento poteva finire dopo uno NUOVO e
+    sovrascriverne segnale e TTL — un feed che torna indietro nel tempo.
+    Il lock di elaborazione ripristina l'ordine senza rimettere il carico
+    sull'event loop: le ALTRE rotte restano libere, le consegne si accodano.
+
+    La corsa si esercita sul percorso FALLBACK (profilo a caldo, chat senza
+    link), dove nessuna scrittura precede il parse: sul percorso dei link la
+    DELETE di pulizia apre la transazione PRIMA del parse e SQLite accoda gia'
+    il secondo scrittore — una serializzazione vera ma ACCIDENTALE, appesa alla
+    posizione di una pulizia. Il lock la rende deliberata su entrambi i percorsi.
+    """
+    import threading
+
+    percorso = _relay(tmp_path, monkeypatch, 'ordine_arrivo.db')
+    _riavvio(monkeypatch)
+    _secondo_profilo(percorso, 'CALDO-ORDINE', chat='-1002000000077', config={
+        'match': {'type': 'contains', 'value': 'SEGNALE'},
+        'columns': {
+            'EventName': {'source': 'line', 'anchor': 'evento', 'part': 'after',
+                          'marker': ':', 'transforms': [{'op': 'trim'}]},
+            'MarketType': {'source': 'constant', 'value': 'OVER_UNDER_15'},
+            'SelectionName': {'source': 'constant', 'value': 'Over 1,5 goal'},
+            'BetType': {'source': 'constant', 'value': 'PUNTA'},
+        },
+    })  # NIENTE riavvio: chat senza link, percorso fallback
+
+    vero = main.elabora_messaggio
+
+    def con_lentezza(text, cfg):
+        risultato = vero(text, cfg)
+        if 'LENTO' in text:
+            time.sleep(0.6)
+        return risultato
+
+    monkeypatch.setattr(main, 'elabora_messaggio', con_lentezza)
+    vecchio = 'SEGNALE\nEvento: Lento v Vecchio LENTO'
+    nuovo = 'SEGNALE\nEvento: Fresco v Nuovo'
+
+    t1 = threading.Thread(target=_consegna, args=(vecchio,),
+                          kwargs={'chat': '-1002000000077', 'update_id': 1})
+    t1.start()
+    time.sleep(0.2)  # il messaggio NUOVO arriva mentre il vecchio sta ancora macinando
+    t2 = threading.Thread(target=_consegna, args=(nuovo,),
+                          kwargs={'chat': '-1002000000077', 'update_id': 2})
+    t2.start()
+    t1.join()
+    t2.join()
+
+    righe = _segnali(percorso)
+    assert len(righe) == 1, righe
+    assert 'Fresco v Nuovo' in righe[0][1] and 'LENTO' not in righe[0][1], (
+        f'il messaggio vecchio e lento ha sovrascritto quello nuovo: {righe[0][1][:200]!r}')
+
+
+def test_se_il_vincente_fallisce_NIENTE_log_sostituito(tmp_path, monkeypatch):
+    """I log dei battuti si scrivono solo se il vincente scrive davvero.
+
+    [REAL_FINDING] di Fable al gate finale della PR #44: le righe «riconosciuto,
+    sostituito da X» venivano inserite PRIMA di `store_signal` — se il CSV del
+    vincente falliva (`csv_non_valido`), restavano log che raccontano una
+    sostituzione mai avvenuta. Non una perdita di dati: un log bugiardo, che per
+    la vista «perche' non ha fatto» e' comunque un difetto.
+    """
+    percorso = _relay(tmp_path, monkeypatch, 'log_veri.db')
+    _riavvio(monkeypatch)
+    _secondo_parser_di_piero(percorso, ordine=99)
+
+    def sempre_rotto(*a, **k):
+        raise ValueError('csv non valido (simulato)')
+
+    monkeypatch.setattr(main, 'store_signal', sempre_rotto)
+    esito = _consegna()
+    assert esito.get('ignored') == 'csv_non_valido', esito
+    c = sqlite3.connect(percorso)
+    log = [r[0] for r in c.execute('SELECT esito FROM message_logs').fetchall()]
+    c.close()
+    assert not any('sostituito' in e for e in log), (
+        f'log di una sostituzione mai avvenuta: {log}')
+
+
 # ----------------------------------------------------------- webhook duplicato
 
 def test_un_webhook_DUPLICATO_si_elabora_una_volta_sola(tmp_path, monkeypatch):
