@@ -62,7 +62,7 @@ Due rilievi, entrambi non sensibili ma segnalati per correttezza:
 
 | Cosa | Dove | Valutazione |
 |---|---|---|
-| Barra del titolo con due metadati dell'abbonamento del proprietario (data di scadenza e ultimo accesso) | `varie/01` | **oscurata prima del commit**: nell'immagine pubblicata il riquadro e' nero, e i valori non compaiono nemmeno in questo catalogo (vedi «Cosa e' cambiato entrando nel repository») |
+| Barra del titolo con due metadati dell'abbonamento del proprietario (data di scadenza e ultimo accesso) | `varie/01` | **oscurata prima del commit**: nell'immagine pubblicata al posto dei valori c'e' un riquadro bianco con la dicitura «dati abbonamento rimossi» (misurato con l'OCR sull'immagine committata), e i valori non compaiono nemmeno in questo catalogo (vedi «Cosa e' cambiato entrando nel repository») |
 | Nome di strategia personale **`SIG_PREMATCH_BASE`** | `varie/10`, `azioni-se-vero-se-falso/01` e `02`, `condizioni/01`, `02`, `03`, `10`, `11`, `15`, `69` — 10 immagini | nome scelto dal proprietario, visibile nell'elenco strategie; lasciato per scelta consapevole |
 
 Solo il primo conteneva dati d'account, ed e' stato oscurato. Il secondo non impedisce la

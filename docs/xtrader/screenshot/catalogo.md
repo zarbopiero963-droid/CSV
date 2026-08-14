@@ -49,7 +49,7 @@ La barra dei menu di XTrader con il menu «Funzioni» aperto. Elenca tutte le fi
 
 *Usare per:* Dire all'utente come raggiungere una finestra. Per il bridge: Funzioni → Segnali, oppure il tasto F11.
 
-*Privacy:* la barra del titolo è stata **oscurata prima del commit**: nell'originale mostrava due metadati dell'abbonamento del proprietario (data di scadenza e ultimo accesso), nell'immagine pubblicata il riquadro è nero. I valori non compaiono né qui né nell'immagine.
+*Privacy:* la barra del titolo è stata **oscurata prima del commit**: nell'originale mostrava due metadati dell'abbonamento del proprietario (data di scadenza e ultimo accesso), nell'immagine pubblicata al loro posto c'è un riquadro bianco con la dicitura «dati abbonamento rimossi» — misurato con l'OCR sull'immagine committata. I valori non compaiono né qui né nell'immagine.
 
 ### 02-20260708-170631.png
 
