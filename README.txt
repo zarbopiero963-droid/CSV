@@ -2,9 +2,91 @@ XTRADER SIGNAL RELAY
 
 Servizio HTTPS per produrre un CSV compatibile con XTrader.
 
+COME VA CONFIGURATA LA FONTE IN XTRADER  (obbligatorio, altrimenti il feed non funziona)
+XTrader legge il feed da Funzioni > Segnali (F11), tabella "Fonti": si aggiunge una fonte
+con l'URL del feed, la ricarica automatica e il suo intervallo. Due impostazioni di quella
+fonte non sono opzionali per noi.
+
+1) RICONOSCIMENTO DELLE SELEZIONI: PER NOME, mai per ID.
+   XTrader sa individuare la selezione in due modi: dagli id Betfair (MarketId +
+   SelectionId) oppure dai nomi (EventName + MarketType + SelectionName). Noi possiamo
+   usare SOLO il secondo, e non e' una preferenza: risolvere gli id richiede l'API di
+   Betfair Exchange, che il relay non ha. Per questo EventId, MarketId e SelectionId
+   escono SEMPRE vuoti dal nostro feed -- e' voluto, non incompleto.
+   Conseguenza: con la fonte impostata sul riconoscimento per id il feed non produce
+   nessuna scommessa, e XTrader non segnala un errore -- mostra un'icona rossa accanto al
+   segnale. Va impostato il riconoscimento per nome.
+   Ne segue anche quali colonne sono davvero obbligatorie: EventName, MarketType,
+   SelectionName (piu' BetType, che non serve al riconoscimento ma dice se puntare o
+   bancare). Sono le stesse quattro di COLONNE_OBBLIGATORIE in main.py.
+
+2) LINGUA DELLA FONTE: la stessa dei nomi che scriviamo.
+   Il riconoscimento per nome confronta i nostri EventName / MarketType / SelectionName
+   con il palinsesto Betfair nella lingua impostata sulla fonte. Se le due lingue non
+   coincidono, nessuna selezione viene trovata.
+   Per XTrader Italia: ITA. La famiglia Betting Toolkit usa ENG o ES, ed e' lo stesso asse
+   del separatore decimale e di BetType (vedi sotto): oggi il servizio scrive la sola
+   forma italiana.
+
+COLONNA PROVIDER: VUOTA DA CONTRATTO
+Provider e' il nome di CHI MANDA il segnale, non di chi lo legge: XTrader e' il
+consumatore, quindi scriverci "XTrader" e' sbagliato. Da contratto la colonna esce VUOTA.
+L'utente puo' valorizzarla come vuole quando configura il proprio parser -- serve a lui,
+perche' XTrader la usa come filtro ("solo i segnali di quel provider") e come
+discriminante fra segnali altrimenti identici. Il confronto non distingue maiuscole.
+
+NIENTE EMOJI NEL CSV -- IN NESSUNA COLONNA
+Regola di contratto, non un'avvertenza: nel CSV servito a XTrader non deve comparire
+nessuna emoji, in nessun campo. Un segnale che ne contiene viene marcato NON VALIDO, e --
+come sempre -- senza restituire un errore: solo un'icona rossa accanto al segnale.
+
+Le emoji stanno IN ENTRATA, non in uscita. I marcatori dei parser (🆚, ⏰, ✅) servono a
+riconoscere il messaggio e a dire DOVE leggere il dato: il valore estratto e' il testo
+DOPO il marcatore, mai il marcatore. E' la ragione per cui il parser di riferimento usa
+"testo dopo 🆚" e non "riga intera": una regola che prende la riga intera si porta
+l'emoji dentro EventName, il feed esce formalmente valido -- 14 colonne, virgolette,
+CRLF, BOM -- e XTrader lo scarta in silenzio.
+
+INTERVALLO DI RICARICA DELLA FONTE
+XTrader consente di impostare l'intervallo da 1 secondo in su. Il TTL del feed e' 90
+secondi, quindi qualunque intervallo ragionevole sta molto sotto: un segnale non puo'
+nascere e morire fra due letture. Un segnale gia' riconosciuto NON viene riletto come
+nuovo se la riga resta nel feed per tutti i 90 secondi: e' XTrader a evitare la doppia
+scommessa, non lo svuotamento.
+
+FORME LOCALIZZATE DEL CSV
+Tre cose dipendono dalla lingua del prodotto che legge il feed, e oggi ne serviamo una.
+
+   prodotto                     separatore decimale   BetType
+   XTrader Italia  (oggi)       virgola  "1,85"       PUNTA / BANCA
+   Betting Toolkit (in futuro)  punto    "1.85"       BACK / LAY
+
+BACK/LAY e' la nomenclatura Betfair generica che compare nel manuale di XTrader; il
+prodotto italiano scrive PUNTA/BANCA, ed e' cio' che XTrader stesso produce quando
+esporta un CSV.
+
 ENDPOINT PUBBLICO CSV
 GET /xtrader.csv?token=TOKEN
 Restituisce l'ultimo segnale ricevuto. Se non ci sono segnali restituisce la sola intestazione.
+
+IL FEED PER UTENTE (il percorso nuovo; /xtrader.csv resta l'alias del profilo PIERO)
+GET /feed/SLUG.csv?token=xt_...
+E' il feed di UN utente, autenticato dal SUO token, non da CSV_ACCESS_TOKEN.
+Ogni fallimento risponde 404, sempre lo stesso: slug inesistente, token assente,
+token sbagliato, token di un altro utente. Un 401 su uno slug esistente direbbe
+a chi enumera "questo cliente esiste, cerca il token"; il 404 uniforme non
+conferma niente. Alla scadenza dell'accesso il feed risponde 200 con la sola
+intestazione (per XTrader e' "nessun segnale", non un guasto) e il token NON
+viene revocato: al rinnovo il cliente non riconfigura XTrader.
+
+POST /api/me/token          (autenticazione a sessione, come /api/me)
+Conia o rigenera il token del feed. Il token in chiaro esiste SOLO in questa
+risposta: il server salva sha256(token) e da quel momento puo' solo verificare.
+La risposta porta {token, token_prefix, feed}; /api/me restituisce slug e
+token_prefix (i primi 9 caratteri, per riconoscere il token in UI), mai il token.
+Rigenerare sovrascrive l'hash: il token precedente smette di aprire il feed
+alla richiesta successiva. Chi non ha ancora uno slug (utenti nati dal login
+Telegram) lo riceve qui, derivato dal nome, minuscolo, stabile.
 
 GESTIONE MULTI-PARSER (ADMIN)
 I parser vengono salvati nel database SQLite e possono essere creati/modificati senza cambiare il codice.
@@ -122,7 +204,9 @@ nessuna parte che dicesse perche'. E' il caso di chi configura ADMIN_PASSWORD_HA
 non il bot, cioe' l'emergenza per cui quel percorso esiste.
 
 GET /api/me
-Chi e' l'utente della sessione: {"utente","nome","stato","admin","accesso_scade"}.
+Chi e' l'utente della sessione: {"utente","nome","stato","admin","accesso_scade",
+"giorni_rimasti","slug","token_prefix"}. Mai il token: il prefisso sono i primi
+9 caratteri, per riconoscere in UI quale token e' armato.
 401 se il cookie manca, non e' firmato, e' scaduto, o se session_version e' cambiata.
 Non restituisce mai un token, ne' l'hash della password, ne' il telegram_id.
 Rinnova il cookie: e' la rotta che rende i 20 minuti "di inattivita'" (vedi sotto).

@@ -330,14 +330,41 @@ nuovo.
 
 ## Token dei feed
 
-- Generati con almeno 18 byte casuali, prefisso `xt_`.
-- Sul server si conserva **solo** `sha256(token)`. I token hanno entropia alta:
-  non serve un KDF lento, serve non salvarli in chiaro.
-- Il token in chiaro esiste in una sola risposta HTTP, quella della generazione.
-- Si conserva un `token_prefix` di 9 caratteri per identificarlo nella UI.
-- Rigenerare invalida immediatamente il precedente.
-- Il token globale `CSV_ACCESS_TOKEN` oggi in uso è già circolato: va ruotato
-  prima dell'uso commerciale.
+**Implementato: il feed e il token vivono sull'UTENTE**, non sul parser. Le
+versioni precedenti di questo documento descrivevano un feed per parser: era il
+disegno del prototipo, ed era sbagliato rispetto alla decisione della Issue #2 —
+un utente ha **un** feed, `GET /feed/{slug}.csv?token=xt_…`, e i suoi parser si
+contendono la riga viva di quel feed.
+
+- Coniato da `POST /api/me/token` (sessione): `xt_` + 24 byte da CSPRNG
+  (`secrets.token_urlsafe`), sopra il minimo di 18 della Issue #2.
+- Sul server si conserva **solo** `sha256(token)` (`hash_token_feed` in
+  `main.py`). I token hanno entropia alta: non serve un KDF lento, serve non
+  salvarli in chiaro.
+- Il token in chiaro esiste in una sola risposta HTTP, quella della
+  generazione. `/api/me` restituisce `slug` e `token_prefix`, mai il token.
+- `token_prefix` = primi 9 caratteri (`xt_` + 6), per riconoscerlo nella UI.
+- Rigenerare sovrascrive l'hash: il precedente smette di aprire il feed alla
+  richiesta successiva. Non esiste un «disarmo» separato: rigenerare è la revoca.
+- Sul feed per utente ogni fallimento è **404 uniforme** — slug inesistente,
+  token assente, sbagliato o di un altro utente: un 401 su uno slug esistente
+  direbbe a chi enumera «questo cliente esiste».
+- Alla **scadenza dell'accesso** il feed risponde `200` con sola intestazione e
+  il token **non** viene revocato: «scaduto» e «revocato» sono stati diversi, e
+  al rinnovo il cliente non deve riconfigurare XTrader.
+- Chi nasce dal login Telegram non ha uno slug: glielo assegna il primo
+  `POST /api/me/token`, con la stessa `_slug_libero` deterministica della
+  migrazione.
+- Il token globale `CSV_ACCESS_TOKEN` protegge ancora gli alias legacy
+  (`/xtrader.csv`, `/profiles/{p}.csv`) ed è già circolato: va ruotato prima
+  dell'uso commerciale.
+
+**La chiave del segnale è l'utente.** `store_signal` risolve l'utente dal
+profilo (`origin_profile`), scrive `signals.user_id` e sostituisce la riga viva
+coprendo **entrambe** le chiavi (`user_id` e `profile`): una riga sola, leggibile
+sia dal percorso nuovo (per `user_id`) sia dagli alias legacy (per `profile`).
+È il prerequisito del dispatch multi-parser: due parser dello stesso utente si
+contendono una riga senza toccare quelle altrui.
 
 ## Motore di parsing
 
@@ -455,6 +482,99 @@ virgola, terminatore CRLF, **UTF-8 con BOM**.
 Colonne, ordine, quoting e terminatore sono sempre stati questi e non cambiano.
 **L'encoding invece è cambiato:** fino all'11/08/2026 il feed usciva senza BOM,
 e XTrader lo pretende. Non era un'aggiunta opzionale, era un difetto.
+
+## Come XTrader va configurato per leggere il feed
+
+Il contratto CSV non basta: due impostazioni **della fonte dentro XTrader** decidono se
+il feed produce scommesse o niente. Non sono consigli, sono condizioni — e XTrader non
+segnala un errore quando mancano, mostra un'icona rossa accanto al segnale.
+
+**Il riconoscimento deve essere per NOME, mai per ID.** XTrader individua la selezione in
+due modi alternativi: dagli id Betfair (`MarketId` + `SelectionId`) oppure dai nomi
+(`EventName` + `MarketType` + `SelectionName`). Il relay può usare **solo** il secondo, e
+non per scelta: risolvere gli id richiede l'API di Betfair Exchange, che il servizio non
+ha e non avrà. Per questo `EventId`, `MarketId` e `SelectionId` escono **sempre vuoti**
+dal feed — è il progetto, non una lacuna, e nel CSV prodotto da XTrader stesso sono vuoti
+anche lì.
+
+Da qui discendono le colonne obbligatorie, e spiegano perché sono quelle quattro:
+`EventName`, `MarketType`, `SelectionName` sono le tre che il riconoscimento per nome
+pretende; `BetType` non serve a riconoscere ma dice se puntare o bancare, e senza di essa
+la riga non è una scommessa. Sono `COLONNE_OBBLIGATORIE` in `main.py` e
+`REQUIRED_COLUMNS` in `web/engine.js`.
+
+**La lingua della fonte deve essere quella dei nomi che scriviamo.** Il confronto per nome
+avviene contro il palinsesto Betfair *nella lingua impostata sulla fonte*: lingue diverse,
+nessuna selezione trovata. Per XTrader Italia è `ITA`.
+
+### `Provider` esce vuota, e non è una dimenticanza
+
+`Provider` è il nome di **chi manda** il segnale, non di chi lo legge — XTrader è il
+consumatore, quindi scriverci `"XTrader"` è semanticamente sbagliato. **Da contratto la
+colonna esce vuota**, e l'utente la valorizza come vuole configurando il proprio parser:
+serve a lui, perché XTrader la usa come **filtro** («solo i segnali di quel provider») e
+come **discriminante** fra segnali altrimenti identici. Il confronto non distingue
+maiuscole.
+
+Va corretto un difetto nostro: `suggestConfig()` in `web/engine.js` propone oggi
+`Provider = "XTrader"` come costante. È il valore che compare nel CSV **prodotto da
+XTrader**, e per questo sembrava giusto — ma lì `Provider` vale `XTrader` proprio perché
+il file l'ha scritto XTrader. Nel nostro feed il provider siamo noi, o il canale, o niente.
+
+### Niente emoji nel CSV, in nessuna colonna
+
+È una **regola di contratto**, non un'avvertenza: nel CSV servito a XTrader non deve
+comparire nessuna emoji, in nessun campo. Un segnale che ne contiene viene marcato **non
+valido**, e come sempre senza restituire un errore — solo un'icona rossa accanto al
+segnale.
+
+**Le emoji stanno in entrata, non in uscita.** È la distinzione che tiene insieme questa
+regola con la «REGOLA CODIFICA» di `CLAUDE.md`, che sembra dire il contrario e non lo dice:
+lì gli emoji sono **dati portanti** perché sono i marcatori con cui il parser *riconosce*
+il messaggio e *individua* dove leggere il valore — `🆚`, `⏰`, `✅`. Servono sul lato
+Telegram. Il valore che finisce nel CSV è il testo **dopo** il marcatore, mai il marcatore.
+
+Il punto delicato è `EventName`: i messaggi cominciano quasi sempre col marcatore, e una
+regola che prende la **riga intera** invece del testo **dopo** se lo porta dentro. Allora
+succede la cosa peggiore — il feed esce **formalmente valido** (14 colonne, virgolette,
+CRLF, BOM), `verify_csv()` lo accetta perché controlla la forma e non il contenuto, e
+XTrader lo scarta **in silenzio**. Il parser di riferimento usa `part: 'after'` con
+`marker: '🆚'` esattamente per questo, ma un utente può configurarlo altrimenti.
+
+Ne segue dove va il controllo, e sono due punti come per il resto del contratto: **nel
+motore**, per colonna, così la diagnosi (#25) può dire *quale* campo contiene l'emoji e
+suggerire «testo dopo il marcatore» invece di «riga intera»; e in **`verify_csv()` /
+`verifyCsv()`** come pavimento, perché un CSV con un'emoji non è un CSV che XTrader legge.
+Con la regola già adottata nella #39 l'esito è lo **scarto**: un valore che il consumatore
+rifiuta non è un valore.
+
+### L'intervallo della fonte, e chi evita davvero la doppia scommessa
+
+XTrader consente di impostare l'intervallo di ricarica **da 1 secondo in su**. Il TTL del
+feed è 90 secondi, quindi qualunque intervallo realistico gli sta molto sotto: un segnale
+non può nascere e morire fra due letture.
+
+E la riga che resta nel feed per tutti i 90 secondi **non produce scommesse ripetute**: un
+segnale già riconosciuto non viene riletto come nuovo. La protezione contro la doppia
+scommessa è dunque **di XTrader**, non nostra — il nostro TTL impedisce che il segnale
+venga *riproposto come nuovo* dopo essere stato cancellato, che è una cosa diversa e
+complementare.
+
+### Le forme localizzate
+
+La lingua non governa solo il riconoscimento: governa **come si scrivono i valori**. Tre
+cose dipendono dal prodotto che legge il feed, e oggi ne serviamo una sola.
+
+| Prodotto | Lingua fonte | Separatore decimale | `BetType` |
+|---|---|---|---|
+| **XTrader Italia** *(oggi)* | `ITA` | virgola — `"1,85"` | `PUNTA` / `BANCA` |
+| Betting Toolkit *(in futuro)* | `ENG` / `ES` | punto — `"1.85"` | `BACK` / `LAY` |
+
+`BACK`/`LAY` è la nomenclatura **Betfair generica**, quella che compare nel manuale di
+XTrader; il prodotto italiano scrive `PUNTA`/`BANCA`, ed è ciò che XTrader produce quando
+esporta un CSV. Le due colonne di questa tabella sono **lo stesso asse**: quando nascerà
+la localizzazione al confine di scrittura, porterà entrambe le forme, non solo il
+separatore — e aggiungere una lingua sarà una riga di tabella.
 
 ## Verifica del formato
 
@@ -574,6 +694,11 @@ GET    /xtrader.csv?token=...                             alias legacy di PIERO
 POST   /telegram/webhook                                  unico bot, dispatch per chat_id
 ```
 
+> **Superato dal feed per utente.** Le righe `feed per parser` e
+> `POST /api/parsers/:id/token/rotate` di questo disegno descrivono il modello
+> vecchio: il feed reale è `GET /feed/{slug}.csv?token=xt_…` — uno per utente —
+> e il token si conia con `POST /api/me/token`. Vedi «Token dei feed».
+
 ### Cosa esiste DAVVERO: il CRUD dei parser per-utente
 
 Il primo pezzo del disegno sopra realizzato sul server, con i nomi veri (che
@@ -648,6 +773,8 @@ passare inosservata.
 | `POST /api/admin/requests/{id}/rifiuta` | torna `registrato`, così può richiedere | **`404`** |
 | `POST /api/admin/promemoria` | avvisa chi scade entro 5 giorni | **`404`** |
 | *le quattro del pannello* | | `404` e non `403`, perché un `403` conferma a un estraneo che il pannello sta lì. Per la stessa ragione corpo e `id` di percorso si leggono **a mano dopo** il controllo della sessione: lasciati a FastAPI, un estraneo riceveva `422`, cioè la stessa conferma per un'altra via — trovato dalla guardia sulle rotte, PR #26 |
+| `POST /api/me/token` | conia (o rigenera) il token del feed; il token in chiaro esiste solo qui | `401` senza sessione |
+| `GET /feed/{slug}.csv` | il feed dell'utente, autenticato dal **suo** token (`?token=xt_…`) | **`404` uniforme**: slug inesistente, token assente, sbagliato o altrui — un `401` su uno slug esistente direbbe a chi enumera che quel cliente esiste |
 
 `POST /api/logout` è pubblica **per scelta**, non per dimenticanza: cancella un cookie
 e non legge nulla. Metterle una serratura significherebbe che chi ha un cookie
@@ -657,7 +784,9 @@ l'unica uscita è svuotare i cookie a mano.
 `GET /api/me` non restituisce mai un token, né l'hash della password, né il
 `telegram_id`: i primi due sono segreti, il terzo non serve al browser e finirebbe nei
 log di qualunque proxy davanti al servizio. Restituisce `utente`, `nome`, `stato`,
-`admin`, `accesso_scade`.
+`admin`, `accesso_scade`, `giorni_rimasti`, `slug`, `token_prefix` — il prefisso
+non è il token: sono i primi 9 caratteri, quelli che la UI mostra per dire quale
+token è armato.
 
 **Il messaggio d'errore non distingue «firma sbagliata» da «firma scaduta».** Per
 differenza si impara, e chi prova non deve sapere quale dei due muri ha toccato.
@@ -1140,7 +1269,8 @@ senza doppio ruolo.
 | Fatto | Test hard del motore e del contratto CSV (`tests/engine/`), guardia sui workflow di review (`tests/safety/`) |
 | Fatto | Lo **schema** di questa sezione, creato in place su SQLite da `migra()`, con i dati esistenti travasati e i test in `tests/relay/test_schema.py`. Le tabelle esistono e i vincoli reggono; il *comportamento* che le usa è dei PR sotto |
 | Fatto | **Login Telegram reale e sessioni** (PR 6): le quattro rotte di «Le rotte di sessione che esistono davvero», il cookie firmato, le due porte del proprietario, e la NON-relazione fra sessione e feed. Manca il resto di M3: la web app è ancora sui dati finti |
-| M1 | Token hashati, verifica chat, feed per utente, compatibilità `/xtrader.csv`. **Postgres differito** e non più urgente: i dati persistono già, `DB_PATH` in produzione è `/data/signals.db` dentro il volume (misurato il 12/08/2026) |
+| Fatto | **Un feed per utente** (PR 1 del piano sincronizzato in #2): `GET /feed/{slug}.csv?token=xt_…`, token coniato da `POST /api/me/token` e conservato solo come hash, segnale a chiave `user_id`, 404 uniforme, alias `/xtrader.csv` e `/profiles/{p}.csv` intatti. Test in `tests/relay/test_feed_utente.py` |
+| M1 | Verifica chat. **Postgres differito** e non più urgente: i dati persistono già, `DB_PATH` in produzione è `/data/signals.db` dentro il volume (misurato il 12/08/2026) |
 | M2 | Motore di parsing generico in Python, endpoint di test, dispatch multi-parser nel webhook |
 | Fatto | **Accesso su approvazione** (PR 7), lato server: `stato_effettivo` / `giorni_rimasti` / `nuova_scadenza` come fonte unica, la richiesta del cliente col deep link del bot, la decisione del proprietario con i giorni liberi e l'errore di invio **non ingoiato**, il promemoria a 5 giorni una volta per scadenza, e gli effetti della scadenza su feed e webhook. Il **token non viene revocato** alla scadenza |
 | M3 | La web app collegata al backend: le schermate di questo flusso (richiesta, giorni rimasti, accesso scaduto) non esistono ancora — il prototipo è sui dati finti |
