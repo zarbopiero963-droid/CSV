@@ -106,14 +106,19 @@ webhook_seen
 
 profiles           ← tabella PREESISTENTE, invariata
   name (primary key), chat_ids, parser
-  resta la fonte del filtro delle chat finché il dispatch multi-parser non arriva
+  dal dispatch multi-parser (PR 2 di #2) è la SORGENTE della semina di
+  parser_chats a ogni migrazione, e il fallback del webhook per le chat/profili
+  che i link non rappresentano ancora
 ```
 
-`webhook_seen`, `message_logs` e `feed_reads` **esistono ma nessun codice le legge
-ancora**: il dedup degli `update_id`, i log persistenti e il conteggio delle letture
-sono comportamenti dei PR successivi. Le tabelle nascono adesso perché aggiungerle
-dopo vorrebbe dire una seconda migrazione su un database con dati dei clienti;
-dichiararle funzionanti sarebbe la copertura finta che `CLAUDE.md` vieta.
+`webhook_seen` e `message_logs` sono **vive dal dispatch multi-parser** (PR 2 di
+#2): la prima fa il dedup degli `update_id` — il marker si scrive **nella stessa
+transazione del segnale**, vedi «Il dispatch multi-parser» — la seconda riceve
+gli esiti («segnale scritto», «riconosciuto, sostituito da …»), entrambe con
+pulizia a 7 giorni sulla scrittura. `feed_reads` **esiste ma nessun codice la
+legge ancora**: il conteggio delle letture è di un PR successivo. Le tabelle
+sono nate insieme perché aggiungerle dopo avrebbe voluto dire una seconda
+migrazione su un database con dati dei clienti.
 
 ### Cosa fa la migrazione con i dati che trova
 
@@ -439,6 +444,45 @@ scritta): da ora il server la legge. Le rotte che la **scrivono** — la creazio
 un parser dalla web app — arrivano col passo successivo (M3); finché non esistono,
 in produzione nessun parser ha `config_json` e il dispatcher instrada tutto su
 `parse_message`, quindi il comportamento è identico a prima.
+
+### Il dispatch multi-parser: chat → N parser, ognuno al SUO feed
+
+Dalla PR 2 della sequenza (#2, chiude il pericolo 1 di #25) il webhook non prende
+più «il primo profilo in ordine alfabetico che contiene la chat»: legge
+**`parser_chats`**, che la migrazione semina dai profili
+(`_collega_parser_alle_chat`) e che collega ogni chat ai parser che la ascoltano.
+
+Le regole, nell'ordine in cui il codice le applica (`_processa_messaggio_canale`):
+
+- ogni consegna porta un `update_id`: la **prima** vince (`webhook_seen`,
+  `INSERT OR IGNORE`), le riconsegne di Telegram escono come `duplicate` senza
+  rielaborare — senza questo, ogni retry riarmava il TTL e un segnale «da 90
+  secondi» viveva più a lungo a ogni riconsegna;
+- l'elaborazione gira **fuori dall'event loop** (`asyncio.to_thread`, #31 B1):
+  un parser lento non ferma le altre richieste del servizio;
+- i parser collegati alla chat si raggruppano **per utente**; l'accesso
+  scaduto/sospeso salta l'utente (stessa `_blocco_della_riga` del feed);
+- ogni parser attivo (`active=1`) elabora **in modo indipendente**; fra i parser
+  dello **stesso** utente che riconoscono lo stesso messaggio **vince l'ultimo**
+  nell'ordine dichiarato (`parsers.ordine`, poi `name`), e i battuti restano in
+  `message_logs` come «riconosciuto, sostituito da …»;
+- il vincente scrive nel feed del **suo** utente (`store_signal` con `utente=`,
+  che risolve anche il profilo legacy dal ponte `origin_profile`: gli alias
+  `/xtrader.csv` e `/profiles/{p}.csv` continuano a leggere);
+- utenti **diversi** sulla stessa chat non si toccano: due profili sulla stessa
+  chat sono due link, due utenti, due feed — nessuno «vince» più la chat.
+
+**Il fallback legacy esiste e ha un solo caso:** una chat senza alcun link in
+`parser_chats` (un profilo creato a caldo via API riceve i link alla prossima
+migrazione) passa dal vecchio percorso per profili. La semina collega solo i
+parser che **appartengono all'utente del profilo**: se due profili nominano lo
+stesso parser, quello del non-proprietario resta sul fallback — un link seminato
+lì manderebbe i segnali al feed del proprietario del parser, il legame
+cross-tenant che i test della deduplica vietano.
+
+`message_logs` e `webhook_seen` — entrambe tabelle finora **morte** — ricevono le
+prime scritture, e la pulizia oltre i **7 giorni** viaggia con la scrittura
+stessa, non con un timer.
 
 ### ReDoS: il timeout sulle regex dell'utente
 
@@ -1271,7 +1315,7 @@ senza doppio ruolo.
 | Fatto | **Login Telegram reale e sessioni** (PR 6): le quattro rotte di «Le rotte di sessione che esistono davvero», il cookie firmato, le due porte del proprietario, e la NON-relazione fra sessione e feed. Manca il resto di M3: la web app è ancora sui dati finti |
 | Fatto | **Un feed per utente** (PR 1 del piano sincronizzato in #2): `GET /feed/{slug}.csv?token=xt_…`, token coniato da `POST /api/me/token` e conservato solo come hash, segnale a chiave `user_id`, 404 uniforme, alias `/xtrader.csv` e `/profiles/{p}.csv` intatti. Test in `tests/relay/test_feed_utente.py` |
 | M1 | Verifica chat. **Postgres differito** e non più urgente: i dati persistono già, `DB_PATH` in produzione è `/data/signals.db` dentro il volume (misurato il 12/08/2026) |
-| M2 | Motore di parsing generico in Python, endpoint di test, dispatch multi-parser nel webhook |
+| Fatto | **Dispatch multi-parser** (PR 2 del piano sincronizzato in #2): chat → N parser via `parser_chats`, `active` e `ordine` finalmente letti, vince l'ultimo con i battuti in `message_logs`, dedup `webhook_seen`, elaborazione fuori dall'event loop (#31 B1). Chiude il pericolo 1 di #25. Il motore Python e l'endpoint di test c'erano già (PR #28-#30). Test in `tests/relay/test_dispatch_multiparser.py` |
 | Fatto | **Accesso su approvazione** (PR 7), lato server: `stato_effettivo` / `giorni_rimasti` / `nuova_scadenza` come fonte unica, la richiesta del cliente col deep link del bot, la decisione del proprietario con i giorni liberi e l'errore di invio **non ingoiato**, il promemoria a 5 giorni una volta per scadenza, e gli effetti della scadenza su feed e webhook. Il **token non viene revocato** alla scadenza |
 | M3 | La web app collegata al backend: le schermate di questo flusso (richiesta, giorni rimasti, accesso scaduto) non esistono ancora — il prototipo è sui dati finti |
 | M4 | Log persistenti, sospensione, suggerimento AI lato server, abbonamenti |
