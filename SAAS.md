@@ -456,6 +456,46 @@ Colonne, ordine, quoting e terminatore sono sempre stati questi e non cambiano.
 **L'encoding invece è cambiato:** fino all'11/08/2026 il feed usciva senza BOM,
 e XTrader lo pretende. Non era un'aggiunta opzionale, era un difetto.
 
+## Come XTrader va configurato per leggere il feed
+
+Il contratto CSV non basta: due impostazioni **della fonte dentro XTrader** decidono se
+il feed produce scommesse o niente. Non sono consigli, sono condizioni — e XTrader non
+segnala un errore quando mancano, mostra un'icona rossa accanto al segnale.
+
+**Il riconoscimento deve essere per NOME, mai per ID.** XTrader individua la selezione in
+due modi alternativi: dagli id Betfair (`MarketId` + `SelectionId`) oppure dai nomi
+(`EventName` + `MarketType` + `SelectionName`). Il relay può usare **solo** il secondo, e
+non per scelta: risolvere gli id richiede l'API di Betfair Exchange, che il servizio non
+ha e non avrà. Per questo `EventId`, `MarketId` e `SelectionId` escono **sempre vuoti**
+dal feed — è il progetto, non una lacuna, e nel CSV prodotto da XTrader stesso sono vuoti
+anche lì.
+
+Da qui discendono le colonne obbligatorie, e spiegano perché sono quelle quattro:
+`EventName`, `MarketType`, `SelectionName` sono le tre che il riconoscimento per nome
+pretende; `BetType` non serve a riconoscere ma dice se puntare o bancare, e senza di essa
+la riga non è una scommessa. Sono `COLONNE_OBBLIGATORIE` in `main.py` e
+`REQUIRED_COLUMNS` in `web/engine.js`.
+
+**La lingua della fonte deve essere quella dei nomi che scriviamo.** Il confronto per nome
+avviene contro il palinsesto Betfair *nella lingua impostata sulla fonte*: lingue diverse,
+nessuna selezione trovata. Per XTrader Italia è `ITA`.
+
+### Le forme localizzate
+
+La lingua non governa solo il riconoscimento: governa **come si scrivono i valori**. Tre
+cose dipendono dal prodotto che legge il feed, e oggi ne serviamo una sola.
+
+| Prodotto | Lingua fonte | Separatore decimale | `BetType` |
+|---|---|---|---|
+| **XTrader Italia** *(oggi)* | `ITA` | virgola — `"1,85"` | `PUNTA` / `BANCA` |
+| Betting Toolkit *(in futuro)* | `ENG` / `ES` | punto — `"1.85"` | `BACK` / `LAY` |
+
+`BACK`/`LAY` è la nomenclatura **Betfair generica**, quella che compare nel manuale di
+XTrader; il prodotto italiano scrive `PUNTA`/`BANCA`, ed è ciò che XTrader produce quando
+esporta un CSV. Le due colonne di questa tabella sono **lo stesso asse**: quando nascerà
+la localizzazione al confine di scrittura, porterà entrambe le forme, non solo il
+separatore — e aggiungere una lingua sarà una riga di tabella.
+
 ## Verifica del formato
 
 Il contratto non è affidato a una convenzione: c'è una funzione che lo controlla,

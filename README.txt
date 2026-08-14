@@ -2,6 +2,43 @@ XTRADER SIGNAL RELAY
 
 Servizio HTTPS per produrre un CSV compatibile con XTrader.
 
+COME VA CONFIGURATA LA FONTE IN XTRADER  (obbligatorio, altrimenti il feed non funziona)
+XTrader legge il feed da Funzioni > Segnali (F11), tabella "Fonti": si aggiunge una fonte
+con l'URL del feed, la ricarica automatica e il suo intervallo. Due impostazioni di quella
+fonte non sono opzionali per noi.
+
+1) RICONOSCIMENTO DELLE SELEZIONI: PER NOME, mai per ID.
+   XTrader sa individuare la selezione in due modi: dagli id Betfair (MarketId +
+   SelectionId) oppure dai nomi (EventName + MarketType + SelectionName). Noi possiamo
+   usare SOLO il secondo, e non e' una preferenza: risolvere gli id richiede l'API di
+   Betfair Exchange, che il relay non ha. Per questo EventId, MarketId e SelectionId
+   escono SEMPRE vuoti dal nostro feed -- e' voluto, non incompleto.
+   Conseguenza: con la fonte impostata sul riconoscimento per id il feed non produce
+   nessuna scommessa, e XTrader non segnala un errore -- mostra un'icona rossa accanto al
+   segnale. Va impostato il riconoscimento per nome.
+   Ne segue anche quali colonne sono davvero obbligatorie: EventName, MarketType,
+   SelectionName (piu' BetType, che non serve al riconoscimento ma dice se puntare o
+   bancare). Sono le stesse quattro di COLONNE_OBBLIGATORIE in main.py.
+
+2) LINGUA DELLA FONTE: la stessa dei nomi che scriviamo.
+   Il riconoscimento per nome confronta i nostri EventName / MarketType / SelectionName
+   con il palinsesto Betfair nella lingua impostata sulla fonte. Se le due lingue non
+   coincidono, nessuna selezione viene trovata.
+   Per XTrader Italia: ITA. La famiglia Betting Toolkit usa ENG o ES, ed e' lo stesso asse
+   del separatore decimale e di BetType (vedi sotto): oggi il servizio scrive la sola
+   forma italiana.
+
+FORME LOCALIZZATE DEL CSV
+Tre cose dipendono dalla lingua del prodotto che legge il feed, e oggi ne serviamo una.
+
+   prodotto                     separatore decimale   BetType
+   XTrader Italia  (oggi)       virgola  "1,85"       PUNTA / BANCA
+   Betting Toolkit (in futuro)  punto    "1.85"       BACK / LAY
+
+BACK/LAY e' la nomenclatura Betfair generica che compare nel manuale di XTrader; il
+prodotto italiano scrive PUNTA/BANCA, ed e' cio' che XTrader stesso produce quando
+esporta un CSV.
+
 ENDPOINT PUBBLICO CSV
 GET /xtrader.csv?token=TOKEN
 Restituisce l'ultimo segnale ricevuto. Se non ci sono segnali restituisce la sola intestazione.
