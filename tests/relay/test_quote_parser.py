@@ -176,11 +176,14 @@ def test_un_titolo_OLTRE_il_tetto_e_respinto_in_creazione_e_modifica(tmp_path, m
     stato, dettaglio = _crea(anna, titolo='x' * 500)
     assert stato == 422, (
         f'un titolo di 500 caratteri e\' stato accettato in creazione: {stato}')
+    assert str(main.MAX_TITOLO_PARSER) in str(dettaglio), (
+        f'il messaggio non dice il limite: {dettaglio!r}')
     stato, corpo = _crea(anna, titolo='Normale')
     assert stato == 200
     stato, dettaglio = _modifica(anna, corpo['slug'], titolo='y' * 500)
     assert stato == 422, (
         f'un titolo di 500 caratteri e\' stato accettato in MODIFICA: {stato}')
+    assert str(main.MAX_TITOLO_PARSER) in str(dettaglio)
 
 
 def test_una_config_OLTRE_il_tetto_e_respinta_in_creazione_e_modifica(tmp_path, monkeypatch):
@@ -192,11 +195,14 @@ def test_una_config_OLTRE_il_tetto_e_respinta_in_creazione_e_modifica(tmp_path, 
     stato, dettaglio = _crea(anna, config=gonfia)
     assert stato == 422, (
         f'una config da 50k caratteri e\' stata accettata in creazione: {stato}')
+    assert str(main.MAX_CONFIG_PARSER) in str(dettaglio), (
+        f'il messaggio non dice il limite: {dettaglio!r}')
     stato, corpo = _crea(anna)
     assert stato == 200
     stato, dettaglio = _modifica(anna, corpo['slug'], config=gonfia)
     assert stato == 422, (
         f'una config da 50k caratteri e\' stata accettata in MODIFICA: {stato}')
+    assert str(main.MAX_CONFIG_PARSER) in str(dettaglio)
 
 
 def test_il_bordo_esatto_dei_tetti(tmp_path, monkeypatch):
@@ -256,6 +262,7 @@ def test_i_messaggi_della_richiesta_di_accesso_dicono_GIA(tmp_path, monkeypatch)
     class Richiesta:
         cookies = {main.NOME_COOKIE: cookie}
 
+    # Ramo 1 — accesso gia' attivo.
     c = sqlite3.connect(percorso)
     c.execute("UPDATE users SET status='attivo', access_expires_at=NULL"
               " WHERE telegram_id='888000888'")
@@ -266,3 +273,28 @@ def test_i_messaggi_della_richiesta_di_accesso_dicono_GIA(tmp_path, monkeypatch)
     assert e.value.status_code == 409
     assert "gia'" in e.value.detail and 'giu' not in e.value.detail, (
         f'il messaggio dice ancora «giu\'»: {e.value.detail!r}')
+
+    # Ramo 2 — richiesta gia' in corso (stato in_attesa): la prima richiesta
+    # passa, la seconda trova lo stato e rifiuta col messaggio corretto.
+    c = sqlite3.connect(percorso)
+    c.execute("UPDATE users SET status='registrato' WHERE telegram_id='888000888'")
+    c.commit()
+    c.close()
+    main.chiedi_accesso(Richiesta())
+    with pytest.raises(main.HTTPException) as e:
+        main.chiedi_accesso(Richiesta())
+    assert e.value.status_code == 409
+    assert "gia'" in e.value.detail and 'giu' not in e.value.detail
+
+    # Ramo 3 — la corsa persa sull'INSERT (l'indice richiesta_aperta_unica dice
+    # no): stato NON in_attesa ma richiesta aperta gia' a database, come la
+    # lascerebbe l'altro processo che ha vinto la corsa.
+    c = sqlite3.connect(percorso)
+    c.execute("UPDATE users SET status='registrato' WHERE telegram_id='888000888'")
+    c.commit()
+    c.close()
+    with pytest.raises(main.HTTPException) as e:
+        main.chiedi_accesso(Richiesta())
+    assert e.value.status_code == 409
+    assert "gia'" in e.value.detail and 'giu' not in e.value.detail, (
+        f'il ramo della corsa dice ancora «giu\'»: {e.value.detail!r}')
