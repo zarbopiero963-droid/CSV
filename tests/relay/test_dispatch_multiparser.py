@@ -351,6 +351,36 @@ def test_un_messaggio_LENTO_non_sovrascrive_quello_arrivato_DOPO(tmp_path, monke
         f'il messaggio vecchio e lento ha sovrascritto quello nuovo: {righe[0][1][:200]!r}')
 
 
+def test_la_pulizia_dei_log_gira_anche_SENZA_link_attivi(tmp_path, monkeypatch):
+    """La promessa dei 7 giorni vale anche quando nessun link e' attivo.
+
+    [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #44, vero in un angolo
+    reale: la DELETE dei log vecchi stava solo nel ramo con link, quindi un
+    servizio coi parser tutti disattivati (o solo su fallback) conservava i
+    testi gia' registrati OLTRE i 7 giorni dichiarati — una violazione di
+    retention, non un'ipotesi. La pulizia ora viaggia col commit che ogni
+    consegna fa comunque per il marker del dedup.
+    """
+    percorso = _relay(tmp_path, monkeypatch, 'pulizia_sempre.db')
+    _riavvio(monkeypatch)
+    c = sqlite3.connect(percorso)
+    c.execute("INSERT INTO message_logs(user_id, parser_id, chat_id, text, esito,"
+              " created_at) VALUES (1, 1, 1, 'testo vecchio', 'segnale',"
+              " datetime('now', '-8 days'))")
+    c.execute('UPDATE parsers SET active=0 WHERE name=?', (main.DEFAULT_PARSER,))
+    c.commit()
+    c.close()
+
+    _consegna(update_id=55)  # consegna su servizio senza parser attivi
+    c = sqlite3.connect(percorso)
+    vecchi = c.execute("SELECT COUNT(*) FROM message_logs"
+                       " WHERE created_at < datetime('now', '-7 days')").fetchone()[0]
+    c.close()
+    assert vecchi == 0, (
+        f'{vecchi} log oltre i 7 giorni sopravvivono quando nessun link e\' attivo: '
+        'la retention dichiarata non vale')
+
+
 def test_se_il_vincente_fallisce_NIENTE_log_sostituito(tmp_path, monkeypatch):
     """I log dei battuti si scrivono solo se il vincente scrive davvero.
 

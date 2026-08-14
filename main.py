@@ -4090,9 +4090,6 @@ def _elabora_consegna(chat_id, text, chiave):
                 (riga_chat[0],)).fetchall()
         esiti = {}
         if link:
-            # Pulizia dei log oltre i 7 giorni: viaggia con la scrittura, non con
-            # un timer — la stessa scelta di `webhook_seen`, per la stessa ragione.
-            c.execute("DELETE FROM message_logs WHERE created_at < datetime('now', '-7 days')")
             for utente_id, righe in _raggruppa(link, chiave=lambda r: r[9]):
                 etichetta = righe[0][11] or righe[0][10] or f'utente-{utente_id}'
                 esiti[etichetta] = _elabora_per_utente(c, riga_chat[0], utente_id,
@@ -4110,6 +4107,11 @@ def _elabora_consegna(chat_id, text, chiave):
             c.execute('INSERT OR IGNORE INTO webhook_seen(update_id) VALUES (?)',
                       (chiave,))
             c.execute("DELETE FROM webhook_seen WHERE created_at < datetime('now', '-7 days')")
+        # La pulizia dei log sta QUI e non nel ramo con link: la promessa dei 7
+        # giorni vale anche per un servizio coi parser tutti disattivati o solo
+        # su fallback, dove quel ramo non gira mai — [REAL_FINDING] di GPT-5.6
+        # Sol al gate finale. Viaggia nel commit che la consegna fa comunque.
+        c.execute("DELETE FROM message_logs WHERE created_at < datetime('now', '-7 days')")
         c.commit()
     finally:
         c.close()
