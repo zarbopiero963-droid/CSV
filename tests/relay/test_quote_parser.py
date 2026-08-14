@@ -50,14 +50,22 @@ def _ambiente_pulito(monkeypatch):
 
 
 class RichiestaConCorpo:
-    """Il minimo che le rotte del CRUD leggono: cookie di sessione e corpo JSON."""
+    """Il minimo che le rotte del CRUD leggono: cookie di sessione e corpo JSON.
+
+    Espone l'interfaccia REALE di lettura (`headers` + `stream()`), non un
+    `json()` gia' materializzato: da quando il corpo ha un tetto in byte
+    (`_json_dal_corpo`), un fake che consegnasse l'oggetto gia' parsato
+    renderebbe il tetto invisibile a tutti i test di questo file.
+    """
 
     def __init__(self, cookie, corpo):
         self.cookies = {main.NOME_COOKIE: cookie}
-        self._corpo = corpo
+        self._grezzo = json.dumps(corpo).encode()
+        self.headers = {'content-length': str(len(self._grezzo))}
 
-    async def json(self):
-        return self._corpo
+    async def stream(self):
+        for i in range(0, len(self._grezzo), 8192):
+            yield self._grezzo[i:i + 8192]
 
 
 def _relay(tmp_path, monkeypatch, nome):
@@ -298,3 +306,91 @@ def test_i_messaggi_della_richiesta_di_accesso_dicono_GIA(tmp_path, monkeypatch)
     assert e.value.status_code == 409
     assert "gia'" in e.value.detail and 'giu' not in e.value.detail, (
         f'il ramo della corsa dice ancora «giu\'»: {e.value.detail!r}')
+
+
+# ------------------------------------------------- il tetto sul CORPO, in byte
+
+class RichiestaCorpoGrezzo:
+    """Una richiesta con l'interfaccia VERA di lettura del corpo: headers + stream.
+
+    Il fake storico di questo file espone solo `json()`, cioe' il corpo gia'
+    materializzato: qualunque tetto sui byte risulterebbe invisibile. Questo fake
+    serve i byte a pezzi come farebbe uvicorn, e conta quanti pezzi gli sono stati
+    chiesti: se il tetto funziona, la lettura si ferma PRIMA di aver consumato
+    tutto. `json()` resta presente solo perche' il test deve poter girare (rosso)
+    anche sul codice vecchio, che leggeva con `request.json()`.
+    """
+
+    def __init__(self, cookie, grezzo, content_length=None):
+        self.cookies = {main.NOME_COOKIE: cookie}
+        self._grezzo = grezzo
+        self.headers = {}
+        if content_length is not None:
+            self.headers['content-length'] = str(content_length)
+        self.pezzi_serviti = 0
+        self.pezzi_totali = (len(grezzo) + 8191) // 8192
+
+    async def stream(self):
+        for i in range(0, len(self._grezzo), 8192):
+            self.pezzi_serviti += 1
+            yield self._grezzo[i:i + 8192]
+
+    async def json(self):
+        return json.loads(self._grezzo)
+
+
+def _corpo_gonfio():
+    """Un corpo JSON valido ma enorme: ~100 KiB, ben oltre MAX_CORPO_JSON."""
+    return json.dumps({'titolo': 'x', 'config': {'pad': 'a' * 100_000},
+                       'active': True}).encode()
+
+
+def test_un_corpo_enorme_SENZA_content_length_e_respinto_a_meta_lettura(
+        tmp_path, monkeypatch):
+    """Chi mente sull'intestazione (o usa il chunked) va fermato DALLA LETTURA.
+
+    Atteso: 413 prima di aver consumato tutto lo stream. Sul codice vecchio la
+    rotta materializza l'intero corpo con `request.json()` e risponde 422 dal
+    tetto sul CAMPO — a quel punto i 100 KiB sono gia' tutti in RAM, che e'
+    esattamente cio' che il bloccante di GPT-5.6 Sol contesta.
+    """
+    _relay(tmp_path, monkeypatch, 'corpo1.db')
+    anna = _cookie_di('771000771')
+    richiesta = RichiestaCorpoGrezzo(anna, _corpo_gonfio())
+    with pytest.raises(main.HTTPException) as e:
+        asyncio.run(main.crea_parser_mio(richiesta))
+    assert e.value.status_code == 413, (
+        f'atteso 413 dal tetto sul corpo, arrivato {e.value.status_code}: '
+        f'{e.value.detail!r}')
+    assert str(main.MAX_CORPO_JSON) in str(e.value.detail)
+    assert richiesta.pezzi_serviti < richiesta.pezzi_totali, (
+        'lo stream e\' stato consumato per intero: il tetto non ha fermato la lettura')
+
+
+def test_un_content_length_oltre_il_tetto_e_respinto_SENZA_leggere(
+        tmp_path, monkeypatch):
+    """Il client onesto che dichiara un corpo enorme non fa leggere neanche un byte."""
+    _relay(tmp_path, monkeypatch, 'corpo2.db')
+    anna = _cookie_di('772000772')
+    grezzo = _corpo_gonfio()
+    richiesta = RichiestaCorpoGrezzo(anna, grezzo, content_length=len(grezzo))
+    with pytest.raises(main.HTTPException) as e:
+        asyncio.run(main.modifica_parser_mio('slug-qualunque', richiesta))
+    assert e.value.status_code == 413
+    assert richiesta.pezzi_serviti == 0, (
+        f'il corpo e\' stato letto ({richiesta.pezzi_serviti} pezzi) nonostante '
+        f'il Content-Length dichiarato oltre il tetto')
+
+
+def test_un_corpo_normale_passa_dal_tetto_sul_corpo(tmp_path, monkeypatch):
+    """Guardia sul verso opposto: il corpo legittimo (config vera) resta sotto il
+    tetto e la creazione riesce attraverso l'interfaccia reale headers+stream."""
+    _relay(tmp_path, monkeypatch, 'corpo3.db')
+    anna = _cookie_di('773000773')
+    grezzo = json.dumps({'titolo': 'Parser Normale', 'config': CONFIG_WEB,
+                         'active': True}).encode()
+    assert len(grezzo) <= main.MAX_CORPO_JSON
+    richiesta = RichiestaCorpoGrezzo(anna, grezzo, content_length=len(grezzo))
+    risposta = asyncio.run(main.crea_parser_mio(richiesta))
+    corpo = json.loads(bytes(risposta.body).decode())
+    assert corpo['slug']

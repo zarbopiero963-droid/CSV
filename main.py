@@ -678,6 +678,10 @@ def _intero_da_env(nome, default):
 MAX_PARSER_PER_UTENTE = _intero_da_env('MAX_PARSER_PER_UTENTE', 20)
 MAX_TITOLO_PARSER = 80
 MAX_CONFIG_PARSER = 20_000
+# In BYTE, sul corpo HTTP grezzo: i tetti sui campi qui sopra si misurano solo DOPO la
+# deserializzazione, e a quel punto il corpo e' gia' tutto in RAM. 64 KiB lasciano oltre
+# 3x di margine a un corpo legittimo (config 20k + titolo 80, serializzati ASCII).
+MAX_CORPO_JSON = 65_536
 
 class MessageIn(BaseModel):
     message: str
@@ -3303,7 +3307,7 @@ async def approva_richiesta(richiesta: str, request: Request):
     amministratore = _solo_amministratore(request)
     numero = _identificativo_o_404(richiesta)
     try:
-        dati = GiorniIn(**(await request.json()))
+        dati = GiorniIn(**(await _json_dal_corpo(request)))
     except HTTPException:
         raise
     except Exception:
@@ -3810,6 +3814,47 @@ def lista_parser_miei(request: Request):
                                   [_vista_parser(r) for r in righe])
 
 
+async def _json_dal_corpo(request):
+    """Il corpo JSON della richiesta, con un tetto sui BYTE misurato PRIMA del parsing.
+
+    `request.json()` deserializza qualunque cosa arrivi: un tenant autenticato
+    poteva mandare un corpo da centinaia di megabyte e farlo materializzare in RAM
+    sul container condiviso prima che i tetti sui CAMPI (`_valida_tetti_parser`)
+    rispondessero 422 — a danno gia' fatto. Bloccante di GPT-5.6 Sol sulla PR #45.
+
+    Due misure, perche' nessuna basta da sola: il `Content-Length` dichiarato ferma
+    il client onesto senza leggere un byte; la lettura a pezzi ferma chi mente
+    sull'intestazione o usa il chunked encoding, interrompendo lo stream appena il
+    totale supera il tetto. Oltre il tetto → **413** col limite nel messaggio.
+
+    Un corpo che non e' JSON valido solleva `ValueError` dal `json.loads`: i
+    chiamanti lo trasformano nel loro 422, come facevano con `request.json()`.
+
+    Il webhook Telegram NON passa di qui, deliberatamente: il suo 403 sul secret
+    scatta prima di leggere il corpo (l'estraneo non arriva al parsing), i payload
+    di Telegram sono piccoli per costruzione, e quel percorso e' area dichiarata
+    sana (regola 5) — non si tocca dentro una correzione sul CRUD.
+    """
+    dichiarati = request.headers.get('content-length')
+    if dichiarati is not None:
+        try:
+            annunciati = int(dichiarati)
+        except ValueError:
+            annunciati = None
+        if annunciati is not None and annunciati > MAX_CORPO_JSON:
+            raise HTTPException(
+                413, f'corpo troppo grande: massimo {MAX_CORPO_JSON} byte')
+    pezzi = []
+    totale = 0
+    async for pezzo in request.stream():
+        totale += len(pezzo)
+        if totale > MAX_CORPO_JSON:
+            raise HTTPException(
+                413, f'corpo troppo grande: massimo {MAX_CORPO_JSON} byte')
+        pezzi.append(pezzo)
+    return json.loads(b''.join(pezzi))
+
+
 async def _parser_in_dal_corpo(request):
     """`ParserMioIn` dal corpo JSON, o `422` — senza mai riportare il corpo ricevuto.
 
@@ -3822,7 +3867,7 @@ async def _parser_in_dal_corpo(request):
     JSON → 422, come farebbe FastAPI.
     """
     try:
-        return ParserMioIn(**(await request.json()))
+        return ParserMioIn(**(await _json_dal_corpo(request)))
     except HTTPException:
         raise
     except Exception:
@@ -3928,7 +3973,7 @@ async def prova_parser_mio(slug: str, request: Request):
     """
     utente = _sessione_valida(request)
     try:
-        dati = MessageIn(**(await request.json()))
+        dati = MessageIn(**(await _json_dal_corpo(request)))
     except HTTPException:
         raise
     except Exception:

@@ -628,14 +628,21 @@ def _corpo(risposta):
 
 
 class _CorpoFinto:
-    """Una richiesta con cookie **e** corpo JSON, per le rotte che lo leggono a mano."""
+    """Una richiesta con cookie **e** corpo JSON, per le rotte che lo leggono a mano.
+
+    Con l'interfaccia REALE di lettura (`headers` + `stream()`), perche' la lettura
+    passa da `_json_dal_corpo` col tetto in byte: un `json()` gia' materializzato
+    scavalcherebbe il codice che i test devono esercitare.
+    """
 
     def __init__(self, richiesta, dati):
+        import json as _json
         self.cookies = richiesta.cookies
-        self._dati = dati
+        self._grezzo = _json.dumps(dati).encode()
+        self.headers = {'content-length': str(len(self._grezzo))}
 
-    async def json(self):
-        return self._dati
+    async def stream(self):
+        yield self._grezzo
 
 
 def test_una_richiesta_DOPPIA_viene_rifiutata(tmp_path, monkeypatch):

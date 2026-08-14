@@ -115,7 +115,12 @@ QUOTE E TETTI PER-TENANT (il database e il volume Railway sono CONDIVISI)
   sull'ultimo posto non la bucano, il perdente riceve il 409;
 - titolo massimo 80 caratteri, config massima 20000 caratteri (JSON serializzato):
   oltre, 422 col limite — su creazione E modifica, o un parser gia' dentro si
-  gonfierebbe con una PUT.
+  gonfierebbe con una PUT;
+- corpo HTTP massimo 65536 byte sulle rotte autenticate che leggono JSON (CRUD
+  parser, prova messaggio, concessione giorni admin): oltre, 413 PRIMA del
+  parsing — il Content-Length dichiarato ferma il client onesto senza leggere,
+  la lettura a pezzi ferma chi mente sull'intestazione o usa il chunked. Senza,
+  un corpo enorme si materializzava tutto in RAM prima del 422 sui campi.
 I messaggi dicono il limite e non nominano risorse di altri utenti.
 
 PROFILI E FEED SEPARATI
