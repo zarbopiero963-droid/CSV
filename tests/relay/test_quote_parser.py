@@ -394,3 +394,38 @@ def test_un_corpo_normale_passa_dal_tetto_sul_corpo(tmp_path, monkeypatch):
     risposta = asyncio.run(main.crea_parser_mio(richiesta))
     corpo = json.loads(bytes(risposta.body).decode())
     assert corpo['slug']
+
+
+def test_un_content_length_NON_numerico_non_scavalca_il_tetto(tmp_path, monkeypatch):
+    """Un'intestazione malformata non e' un lasciapassare: decide la lettura vera.
+
+    `annunciati` non parsabile viene ignorato, e il corpo oltre il tetto va
+    fermato comunque dalla lettura a pezzi. Suggerito da GPT-5.5 sulla PR #45.
+    """
+    _relay(tmp_path, monkeypatch, 'corpo4.db')
+    anna = _cookie_di('774000774')
+    richiesta = RichiestaCorpoGrezzo(anna, _corpo_gonfio())
+    richiesta.headers['content-length'] = 'banana'
+    with pytest.raises(main.HTTPException) as e:
+        asyncio.run(main.crea_parser_mio(richiesta))
+    assert e.value.status_code == 413
+    assert richiesta.pezzi_serviti < richiesta.pezzi_totali
+
+
+def test_un_JSON_malformato_sotto_il_tetto_resta_un_422(tmp_path, monkeypatch):
+    """Il tetto non cambia il contratto d'errore: corpo non-JSON → 422, come prima.
+
+    `_json_dal_corpo` lascia salire il `ValueError` di `json.loads` e il
+    chiamante lo trasforma nel suo 422 — la stessa risposta che dava
+    `request.json()`. Suggerito da GPT-5.5 sulla PR #45.
+    """
+    _relay(tmp_path, monkeypatch, 'corpo5.db')
+    anna = _cookie_di('775000775')
+    grezzo = b'{"titolo": "x", QUESTO NON E\' JSON'
+    richiesta = RichiestaCorpoGrezzo(anna, grezzo, content_length=len(grezzo))
+    with pytest.raises(main.HTTPException) as e:
+        asyncio.run(main.crea_parser_mio(richiesta))
+    assert e.value.status_code == 422, (
+        f'un corpo non-JSON sotto il tetto deve restare 422, arrivato '
+        f'{e.value.status_code}: {e.value.detail!r}')
+    assert 'corpo non valido' in str(e.value.detail)
