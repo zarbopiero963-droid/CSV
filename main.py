@@ -2191,9 +2191,12 @@ def profile_csv(profile, token):
         c.close()
         return Response(empty_csv(), media_type='text/csv',
                         headers={'Cache-Control': 'no-store'})
-    c.execute("DELETE FROM signals WHERE profile=? AND expires_at IS NOT NULL AND expires_at <= strftime('%s','now')", (profile,))
-    c.commit()
-    r = c.execute('SELECT csv FROM signals WHERE profile=? ORDER BY id DESC LIMIT 1', (profile,)).fetchone()
+    # Stessa forma del feed per utente, per la stessa ragione (regola 2): il poll
+    # e' una lettura, il TTL sta nel filtro, la pulizia la fa `store_signal` alla
+    # scrittura successiva. Prima qui c'era DELETE + commit a ogni interrogazione.
+    r = c.execute("SELECT csv FROM signals WHERE profile=?"
+                  " AND (expires_at IS NULL OR expires_at > strftime('%s','now'))"
+                  ' ORDER BY id DESC LIMIT 1', (profile,)).fetchone()
     c.close()
     # store_signal() verifica cio' che SCRIVE, ma una riga finita nel database da
     # una versione precedente e' gia' la' e uscirebbe cosi' com'e' — senza BOM,
@@ -2414,11 +2417,18 @@ def feed_utente_csv(slug: str, token: str | None = Query(None)):
         if not admin and stato_effettivo(status, scadenza) in ACCESSI_BLOCCATI:
             return Response(empty_csv(), media_type='text/csv',
                             headers={'Cache-Control': 'no-store'})
-        c.execute("DELETE FROM signals WHERE user_id=? AND expires_at IS NOT NULL"
-                  " AND expires_at <= strftime('%s','now')", (utente,))
-        c.commit()
-        r = c.execute('SELECT csv FROM signals WHERE user_id=? ORDER BY id DESC LIMIT 1',
-                      (utente,)).fetchone()
+        # La consegna e' una LETTURA: il TTL vive nel filtro, non in una DELETE.
+        # La prima versione cancellava le righe scadute qui, come `profile_csv` di
+        # allora — cioe' una transazione di SCRITTURA per ogni poll, anche a vuoto,
+        # e XTrader interroga a raffica: su N clienti sono N scritture al secondo
+        # che serializzano sul write-lock di SQLite, in contesa con il webhook.
+        # Bloccante di GPT-5.6 Sol sulla PR #43. La pulizia spetta a
+        # `store_signal`, che cancella per entrambe le chiavi alla scrittura
+        # successiva: resta al piu' una riga scaduta per utente, invisibile a
+        # questo filtro. Vincolato dal test sul database di sola lettura.
+        r = c.execute("SELECT csv FROM signals WHERE user_id=?"
+                      " AND (expires_at IS NULL OR expires_at > strftime('%s','now'))"
+                      ' ORDER BY id DESC LIMIT 1', (utente,)).fetchone()
     finally:
         c.close()
     # Stesso fallback di `profile_csv`, per la stessa ragione: una riga scritta

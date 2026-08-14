@@ -413,6 +413,46 @@ def test_senza_sessione_NIENTE_token(tmp_path, monkeypatch):
     assert e.value.status_code == 401
 
 
+def test_il_poll_del_feed_NON_scrive_sul_database(tmp_path, monkeypatch):
+    """La consegna e' una LETTURA: regge anche su un database di sola lettura.
+
+    Bloccante di GPT-5.6 Sol sulla PR #43: il percorso del feed faceva DELETE +
+    commit a ogni poll, anche a vuoto — e XTrader interroga a raffica. Su un
+    utente non si vede; su N utenti sono N transazioni di scrittura al secondo
+    che serializzano sul write-lock di SQLite, in contesa col webhook.
+
+    Il test impone la proprieta' nel modo piu' duro: connessione SQLite aperta
+    con `mode=ro` — non un `chmod`, che i test eseguiti da root attraverserebbero
+    senza accorgersene (misurato: con `chmod 444` il vecchio codice passava,
+    perche' root ignora i permessi del file). Se il percorso di consegna prova a
+    scrivere, SQLite solleva «attempt to write a readonly database» e il test e'
+    rosso — che e' esattamente cio' che faceva il codice precedente. La pulizia
+    delle righe scadute spetta a `store_signal`, che gia' cancella per entrambe
+    le chiavi alla scrittura successiva; il filtro sul TTL sta nella SELECT, e il
+    test del segnale STANTIO in `test_accesso.py` vincola che una riga oltre il
+    TTL non esca mai.
+
+    Vale per ENTRAMBI i percorsi — nuovo e legacy — perche' hanno la stessa
+    forma (regola 2: la classe, non il sito).
+    """
+    percorso = _relay_in_processo(tmp_path, monkeypatch, 'sola_lettura.db')
+    utente = _utente_con_feed(percorso)
+    _segnale_di(percorso, utente, 'Lettura v Pura')
+
+    def db_sola_lettura():
+        c = sqlite3.connect(f'file:{percorso}?mode=ro', uri=True)
+        c.execute('PRAGMA busy_timeout = 5000')
+        return c
+
+    monkeypatch.setattr(main, 'db', db_sola_lettura)
+    corpo = bytes(main.feed_utente_csv('marco', token='xt_token-di-prova-abcdef').body)
+    assert b'Lettura v Pura' in corpo, (
+        f'il feed per utente su database di sola lettura non consegna: {corpo[:120]!r}')
+    corpo = bytes(main.xtrader_csv(token=TOKEN_DI_PROVA).body)
+    assert corpo.startswith(main.CSV_BOM.encode('utf-8')), (
+        f'il feed legacy su database di sola lettura non risponde: {corpo[:40]!r}')
+
+
 # ----------------------------------------------- i byte HTTP del percorso vero
 
 def test_HTTP_la_rotta_nuova_serve_text_csv_col_BOM(tmp_path, monkeypatch):

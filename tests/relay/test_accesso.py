@@ -536,14 +536,14 @@ def test_un_segnale_STANTIO_non_riemerge_quando_l_accesso_torna(tmp_path, monkey
 
     L'osservazione e' esatta — mentre l'accesso e' bloccato nessuno cancella i segnali oltre
     il TTL — e la conseguenza che ne trae non lo e': il segnale stantio **non** puo' essere
-    consegnato. In `profile_csv` la `DELETE` dei segnali scaduti sta **prima** della `SELECT`,
-    quindi la prima richiesta dopo lo sblocco pulisce e poi legge: non c'e' un momento in cui
-    una riga oltre il TTL viene servita.
+    consegnato. Dalla PR #43 il motivo e' il **filtro sul TTL nella SELECT**: una riga
+    scaduta e' invisibile a ogni lettura, sbloccata o no, e la pulizia fisica spetta a
+    `store_signal` alla scrittura successiva. (Prima il meccanismo era una DELETE prima
+    della SELECT: funzionava, ma era una transazione di scrittura per ogni poll — su questo
+    percorso, che XTrader interroga a raffica, e' stata tolta su bloccante di GPT-5.6 Sol.)
 
-    Questo test misura quell'ordine, che e' la ragione per cui il ramo bloccato puo'
-    permettersi di non scrivere niente — e non scrivere e' cio' che si vuole: XTrader
-    interroga il feed a raffica, e una `DELETE` con `commit` per ogni interrogazione di un
-    cliente bloccato sarebbe una scrittura continua per un feed che non consegna nulla.
+    Questo test misura la proprieta' che conta — nessun momento in cui una riga oltre il
+    TTL viene servita — qualunque sia il meccanismo.
     """
     percorso = str(tmp_path / 'stantio.db')
     monkeypatch.setattr(main, 'DB_PATH', percorso)
@@ -572,10 +572,20 @@ def test_un_segnale_STANTIO_non_riemerge_quando_l_accesso_torna(tmp_path, monkey
     corpo = bytes(main.named_profile_csv('MARCO', token=TOKEN_DI_PROVA).body)
     assert corpo == main.empty_csv().encode('utf-8'), (
         f'un segnale oltre il TTL e- riemerso al rinnovo: {corpo[:120]!r}')
-    c = sqlite3.connect(percorso)
-    restano = c.execute("SELECT COUNT(*) FROM signals WHERE profile='MARCO'").fetchone()[0]
+    # La riga stantia PUO' restare fisicamente nel database — la consegna e' una
+    # lettura e non cancella niente — purche' resti invisibile. A portarla via e'
+    # la SCRITTURA successiva dello stesso feed: e' il contratto della pulizia
+    # dalla PR #43, e questa parte lo misura.
+    c = main.db()
+    main.store_signal(c, main.make_csv(_riga_con_evento('Nuovo v Segnale')),
+                      main.DEFAULT_PARSER, 'MARCO')
+    c.commit()
+    righe = c.execute("SELECT COUNT(*), MAX(csv LIKE '%Nuovo v Segnale%')"
+                      " FROM signals WHERE profile='MARCO'").fetchone()
     c.close()
-    assert restano == 0, f'{restano} segnali stantii sopravvivono alla prima lettura'
+    assert righe == (1, 1), (
+        f'{righe[0]} righe dopo la scrittura successiva (attesa 1, quella nuova): '
+        'la riga stantia doveva sparire con la prima scrittura')
 
 
 # ------------------------------------------------- richiesta, decisione, notifica
