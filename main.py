@@ -644,6 +644,45 @@ HEADERS = ['Provider','EventId','EventName','MarketId','MarketName','MarketType'
 DEFAULT_PARSER = 'Parser_Telegram_XTrader_v1'
 PIERO_PROFILE = 'PIERO'
 
+# I tetti per-tenant del CRUD parser (#31 B2). La regola che servono: «tutto
+# personale del cliente, non deve bloccare gli altri» — senza, una sessione
+# approvata puo' gonfiare lo SQLite e il volume Railway CONDIVISO. Il numero
+# massimo si regola da variabile (Railway) senza deploy; i tetti di dimensione
+# sono generosi rispetto all'uso reale (una config tipica sta sotto i 2k) e
+# stretti rispetto all'abuso.
+def _intero_da_env(nome, default):
+    """Un intero da una variabile d'ambiente, che NON butta giu' l'avvio.
+
+    `int(os.getenv(...))` nudo crasha all'import con una variabile vuota o non
+    numerica — un refuso nel pannello Railway diventerebbe un servizio che non
+    parte. Stessa classe del fail-closed di `auth()`: un errore di configurazione
+    va assorbito con un default dichiarato nel log, non trasformato in un boot
+    rotto. Segnalato da GPT-5.5 sulla PR #45.
+    """
+    grezzo = os.getenv(nome)
+    if grezzo is None or not grezzo.strip():
+        return default
+    try:
+        valore = int(grezzo)
+    except ValueError:
+        logging.getLogger('xtrader.relay').warning(
+            '%s=%r non e\' un intero: uso il default %d', nome, grezzo, default)
+        return default
+    if valore < 1:
+        logging.getLogger('xtrader.relay').warning(
+            '%s=%d non e\' positivo: uso il default %d', nome, valore, default)
+        return default
+    return valore
+
+
+MAX_PARSER_PER_UTENTE = _intero_da_env('MAX_PARSER_PER_UTENTE', 20)
+MAX_TITOLO_PARSER = 80
+MAX_CONFIG_PARSER = 20_000
+# In BYTE, sul corpo HTTP grezzo: i tetti sui campi qui sopra si misurano solo DOPO la
+# deserializzazione, e a quel punto il corpo e' gia' tutto in RAM. 64 KiB lasciano oltre
+# 3x di margine a un corpo legittimo (config 20k + titolo 80, serializzati ASCII).
+MAX_CORPO_JSON = 65_536
+
 class MessageIn(BaseModel):
     message: str
 
@@ -3181,9 +3220,9 @@ def chiedi_accesso(request: Request):
             raise HTTPException(401, 'sessione assente o scaduta')
         stato = stato_effettivo(riga[0], riga[1])
         if stato == 'attivo':
-            raise HTTPException(409, 'accesso giu\' attivo')
+            raise HTTPException(409, 'accesso gia\' attivo')
         if stato == 'in_attesa':
-            raise HTTPException(409, 'richiesta giu\' in corso')
+            raise HTTPException(409, 'richiesta gia\' in corso')
         if stato == 'sospeso':
             # Un sospeso non rientra da se' chiedendo di nuovo: la sospensione e' una decisione
             # del proprietario, e una richiesta che la aggirasse la renderebbe inutile.
@@ -3197,7 +3236,7 @@ def chiedi_accesso(request: Request):
             # Senza questo ramo il perdente riceveva un **500** su un doppio clic. Bloccante di
             # Claude Fable 5 sulla PR #26: la rilettura dentro la transazione copre un processo
             # solo, e con due worker l'indice diventa l'unico arbitro.
-            raise HTTPException(409, 'richiesta giu\' in corso')
+            raise HTTPException(409, 'richiesta gia\' in corso')
         c.execute("UPDATE users SET status='in_attesa' WHERE id=?", (utente['id'],))
         raggiungibile = bool(riga[2])
         c.commit()
@@ -3268,7 +3307,7 @@ async def approva_richiesta(richiesta: str, request: Request):
     amministratore = _solo_amministratore(request)
     numero = _identificativo_o_404(richiesta)
     try:
-        dati = GiorniIn(**(await request.json()))
+        dati = GiorniIn(**(await _json_dal_corpo(request)))
     except HTTPException:
         raise
     except Exception:
@@ -3633,6 +3672,19 @@ def _vista_parser(riga):
             'config': json.loads(riga[4]) if riga[4] else {}, 'ordine': riga[5]}
 
 
+def _valida_tetti_parser(titolo, config):
+    """I tetti di DIMENSIONE, al confine di scrittura: creazione E modifica.
+
+    Fonte unica (regola 3): un tetto controllato solo alla creazione lascerebbe
+    gonfiare con la PUT un parser gia' dentro. Il messaggio dice il limite e non
+    nomina niente di altrui: e' un errore dell'utente sul suo input.
+    """
+    if len(titolo) > MAX_TITOLO_PARSER:
+        raise HTTPException(422, f'titolo troppo lungo: massimo {MAX_TITOLO_PARSER} caratteri')
+    if len(json.dumps(config)) > MAX_CONFIG_PARSER:
+        raise HTTPException(422, f'config troppo grande: massimo {MAX_CONFIG_PARSER} caratteri')
+
+
 def _valida_config_parser(config):
     """Controlla una config al confine di SCRITTURA, con un errore chiaro all'utente.
 
@@ -3725,6 +3777,20 @@ def _crea_parser_utente(c, user_id, titolo, config, active):
             # altro e il nome cambia. Segnalato da Claude Fable 5 sulla PR #30.
             falliti.add(slug)
             continue
+    if nome is not None:
+        # La quota si misura DOPO l'INSERT, dentro il write-lock che l'INSERT ha
+        # preso: misurata prima, il COUNT e' una SELECT che non apre la
+        # transazione, e due POST concorrenti sull'ultimo posto leggevano
+        # entrambi «uno sotto quota» e la bucavano — riprodotto dal test della
+        # corsa. Cosi' il perdente conta a riga gia' inserita, riceve il 409 e il
+        # rollback (la close senza commit del chiamante) toglie la sua riga.
+        # `409` e non `422`: non e' l'input a essere storto, e' lo stato — la
+        # quota, che si alza da variabile su Railway senza deploy.
+        quanti = c.execute('SELECT COUNT(*) FROM parsers WHERE user_id=?',
+                           (user_id,)).fetchone()[0]
+        if quanti > MAX_PARSER_PER_UTENTE:
+            raise HTTPException(
+                409, f'quota parser esaurita: massimo {MAX_PARSER_PER_UTENTE} per utente')
     if nome is None:
         raise HTTPException(409, 'creazione non riuscita per contesa, riprova')
     # `id` = `rowid`, come fa la migrazione: e' il surrogato stabile a cui punta
@@ -3748,6 +3814,47 @@ def lista_parser_miei(request: Request):
                                   [_vista_parser(r) for r in righe])
 
 
+async def _json_dal_corpo(request):
+    """Il corpo JSON della richiesta, con un tetto sui BYTE misurato PRIMA del parsing.
+
+    `request.json()` deserializza qualunque cosa arrivi: un tenant autenticato
+    poteva mandare un corpo da centinaia di megabyte e farlo materializzare in RAM
+    sul container condiviso prima che i tetti sui CAMPI (`_valida_tetti_parser`)
+    rispondessero 422 — a danno gia' fatto. Bloccante di GPT-5.6 Sol sulla PR #45.
+
+    Due misure, perche' nessuna basta da sola: il `Content-Length` dichiarato ferma
+    il client onesto senza leggere un byte; la lettura a pezzi ferma chi mente
+    sull'intestazione o usa il chunked encoding, interrompendo lo stream appena il
+    totale supera il tetto. Oltre il tetto → **413** col limite nel messaggio.
+
+    Un corpo che non e' JSON valido solleva `ValueError` dal `json.loads`: i
+    chiamanti lo trasformano nel loro 422, come facevano con `request.json()`.
+
+    Il webhook Telegram NON passa di qui, deliberatamente: il suo 403 sul secret
+    scatta prima di leggere il corpo (l'estraneo non arriva al parsing), i payload
+    di Telegram sono piccoli per costruzione, e quel percorso e' area dichiarata
+    sana (regola 5) — non si tocca dentro una correzione sul CRUD.
+    """
+    dichiarati = request.headers.get('content-length')
+    if dichiarati is not None:
+        try:
+            annunciati = int(dichiarati)
+        except ValueError:
+            annunciati = None
+        if annunciati is not None and annunciati > MAX_CORPO_JSON:
+            raise HTTPException(
+                413, f'corpo troppo grande: massimo {MAX_CORPO_JSON} byte')
+    pezzi = []
+    totale = 0
+    async for pezzo in request.stream():
+        totale += len(pezzo)
+        if totale > MAX_CORPO_JSON:
+            raise HTTPException(
+                413, f'corpo troppo grande: massimo {MAX_CORPO_JSON} byte')
+        pezzi.append(pezzo)
+    return json.loads(b''.join(pezzi))
+
+
 async def _parser_in_dal_corpo(request):
     """`ParserMioIn` dal corpo JSON, o `422` — senza mai riportare il corpo ricevuto.
 
@@ -3760,7 +3867,7 @@ async def _parser_in_dal_corpo(request):
     JSON → 422, come farebbe FastAPI.
     """
     try:
-        return ParserMioIn(**(await request.json()))
+        return ParserMioIn(**(await _json_dal_corpo(request)))
     except HTTPException:
         raise
     except Exception:
@@ -3775,6 +3882,7 @@ async def crea_parser_mio(request: Request):
     titolo = dati.titolo.strip()
     if not titolo:
         raise HTTPException(422, 'titolo mancante')
+    _valida_tetti_parser(titolo, dati.config)
     _valida_config_parser(dati.config)
     c = db()
     # `try/finally`: `_crea_parser_utente` puo' sollevare 409 (contesa esaurita), e
@@ -3799,6 +3907,7 @@ async def modifica_parser_mio(slug: str, request: Request):
     titolo = dati.titolo.strip()
     if not titolo:
         raise HTTPException(422, 'titolo mancante')
+    _valida_tetti_parser(titolo, dati.config)
     _valida_config_parser(dati.config)
     c = db()
     try:
@@ -3864,7 +3973,7 @@ async def prova_parser_mio(slug: str, request: Request):
     """
     utente = _sessione_valida(request)
     try:
-        dati = MessageIn(**(await request.json()))
+        dati = MessageIn(**(await _json_dal_corpo(request)))
     except HTTPException:
         raise
     except Exception:

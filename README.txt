@@ -108,6 +108,21 @@ La config viene validata alla creazione (struttura + dry-run): una config storta
 422 col motivo. La prova (/test) e' a secco: non scrive nel feed di nessuno, e dice
 se la condizione ha combaciato e quali colonne obbligatorie mancano.
 
+QUOTE E TETTI PER-TENANT (il database e il volume Railway sono CONDIVISI)
+- massimo MAX_PARSER_PER_UTENTE parser per utente (default 20, si alza dalla
+  variabile su Railway senza deploy): oltre, la creazione risponde 409 col limite.
+  La quota e' misurata dentro il write-lock dell'INSERT: due creazioni simultanee
+  sull'ultimo posto non la bucano, il perdente riceve il 409;
+- titolo massimo 80 caratteri, config massima 20000 caratteri (JSON serializzato):
+  oltre, 422 col limite — su creazione E modifica, o un parser gia' dentro si
+  gonfierebbe con una PUT;
+- corpo HTTP massimo 65536 byte sulle rotte autenticate che leggono JSON (CRUD
+  parser, prova messaggio, concessione giorni admin): oltre, 413 PRIMA del
+  parsing — il Content-Length dichiarato ferma il client onesto senza leggere,
+  la lettura a pezzi ferma chi mente sull'intestazione o usa il chunked. Senza,
+  un corpo enorme si materializzava tutto in RAM prima del 422 sui campi.
+I messaggi dicono il limite e non nominano risorse di altri utenti.
+
 PROFILI E FEED SEPARATI
 Ogni profilo ha i suoi chat_id, il suo parser e il suo CSV indipendente.
 GET /profiles/NOME.csv?token=TOKEN

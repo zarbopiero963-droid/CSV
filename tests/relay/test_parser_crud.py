@@ -521,8 +521,13 @@ def test_crea_CHIUDE_la_connessione_anche_su_409(tmp_path, monkeypatch):
     monkeypatch.setattr(main, '_crea_parser_utente', solleva_409)
 
     class Req:
-        async def json(self):
-            return {'titolo': 'X', 'config': {'match': {'type': 'contains', 'value': 'zzz'}}}
+        # L'interfaccia reale di lettura del corpo (`_json_dal_corpo`): headers + stream.
+        grezzo = json.dumps({'titolo': 'X', 'config': {'match': {'type': 'contains',
+                                                                 'value': 'zzz'}}}).encode()
+        headers = {'content-length': str(len(grezzo))}
+
+        async def stream(self):
+            yield self.grezzo
 
     with pytest.raises(main.HTTPException) as e:
         asyncio.run(main.crea_parser_mio(Req()))
@@ -578,8 +583,12 @@ def test_PUT_che_perde_la_corsa_con_una_DELETE_da_404_non_500(tmp_path, monkeypa
     monkeypatch.setattr(main, '_sessione_valida', lambda r: {'id': 1, 'versione': 1})
 
     class Req:
-        async def json(self):
-            return {'titolo': 'Rinominato', 'config': config}
+        # L'interfaccia reale di lettura del corpo (`_json_dal_corpo`): headers + stream.
+        grezzo = json.dumps({'titolo': 'Rinominato', 'config': config}).encode()
+        headers = {'content-length': str(len(grezzo))}
+
+        async def stream(self):
+            yield self.grezzo
 
     try:
         with pytest.raises(main.HTTPException) as e:

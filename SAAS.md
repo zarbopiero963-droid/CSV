@@ -757,6 +757,28 @@ DELETE /api/me/parsers/{slug}          elimina il proprio
 POST   /api/me/parsers/{slug}/test     { message } → { matched, missing, complete, event?, csv? }
 ```
 
+**Quote e tetti per-tenant** (#31 B2, PR 3 della sequenza #2 — vincolati da
+`tests/relay/test_quote_parser.py`): il database e il volume Railway sono
+**condivisi**, quindi la creazione ha un tetto di `MAX_PARSER_PER_UTENTE` parser
+per utente (default 20, si alza da variabile su Railway senza deploy) — oltre,
+**409** col limite nel messaggio; `titolo` massimo 80 caratteri e `config`
+massima 20.000 caratteri di JSON — oltre, **422**, su creazione **e** modifica.
+La quota è misurata **dentro il write-lock dell'INSERT** (contata prima, due
+creazioni simultanee sull'ultimo posto la bucavano — misurato dal test della
+corsa): il perdente riceve il 409 e il rollback toglie la sua riga. I messaggi
+non nominano risorse di altri utenti.
+
+Il corpo HTTP stesso ha un tetto in **byte** (`MAX_CORPO_JSON`, 64 KiB), misurato
+**prima** del parsing (`_json_dal_corpo`, bloccante di GPT-5.6 Sol sulla PR #45):
+senza, un tenant autenticato poteva far materializzare in RAM un corpo arbitrario
+sul container condiviso prima che i tetti sui campi rispondessero 422. Oltre →
+**413**: il `Content-Length` dichiarato respinge senza leggere un byte, la lettura
+a pezzi interrompe lo stream di chi mente sull'intestazione o usa il chunked.
+Vale sulle rotte autenticate che leggono JSON a mano (CRUD parser, prova
+messaggio, concessione giorni admin). Il webhook Telegram non passa di qui: il
+403 sul secret scatta prima di leggere il corpo, e i payload di Telegram sono
+piccoli per costruzione.
+
 Regole, tutte vincolate da `tests/relay/test_parser_crud.py`:
 
 - **`user_id` viene SEMPRE dalla sessione**, mai dal corpo: un `user_id` messo nel
