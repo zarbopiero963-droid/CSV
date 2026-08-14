@@ -480,6 +480,47 @@ la riga non è una scommessa. Sono `COLONNE_OBBLIGATORIE` in `main.py` e
 avviene contro il palinsesto Betfair *nella lingua impostata sulla fonte*: lingue diverse,
 nessuna selezione trovata. Per XTrader Italia è `ITA`.
 
+### `Provider` esce vuota, e non è una dimenticanza
+
+`Provider` è il nome di **chi manda** il segnale, non di chi lo legge — XTrader è il
+consumatore, quindi scriverci `"XTrader"` è semanticamente sbagliato. **Da contratto la
+colonna esce vuota**, e l'utente la valorizza come vuole configurando il proprio parser:
+serve a lui, perché XTrader la usa come **filtro** («solo i segnali di quel provider») e
+come **discriminante** fra segnali altrimenti identici. Il confronto non distingue
+maiuscole.
+
+Va corretto un difetto nostro: `suggestConfig()` in `web/engine.js` propone oggi
+`Provider = "XTrader"` come costante. È il valore che compare nel CSV **prodotto da
+XTrader**, e per questo sembrava giusto — ma lì `Provider` vale `XTrader` proprio perché
+il file l'ha scritto XTrader. Nel nostro feed il provider siamo noi, o il canale, o niente.
+
+### Niente emoji nei valori
+
+XTrader **non accetta emoji** nei valori del CSV: un segnale che ne contiene viene marcato
+**non valido**, e come sempre senza restituire un errore — solo un'icona rossa accanto al
+segnale.
+
+Il vincolo è stato dichiarato dal proprietario per `Provider`; finché non è misurato il
+contrario conviene trattarlo come una regola su **tutte** le colonne. Il punto delicato è
+`EventName`: i messaggi Telegram cominciano quasi sempre con un marcatore emoji (`🆚`), e
+una regola che prende la **riga intera** invece del testo **dopo** il marcatore si
+porterebbe l'emoji dentro il valore. Il parser di riferimento usa `part: 'after'` con
+`marker: '🆚'` esattamente per questo, ma un utente può configurarlo altrimenti — ed è un
+caso che la diagnosi per colonna (#25) dovrebbe saper spiegare, perché il feed uscirebbe
+formalmente valido e XTrader lo scarterebbe in silenzio.
+
+### L'intervallo della fonte, e chi evita davvero la doppia scommessa
+
+XTrader consente di impostare l'intervallo di ricarica **da 1 secondo in su**. Il TTL del
+feed è 90 secondi, quindi qualunque intervallo realistico gli sta molto sotto: un segnale
+non può nascere e morire fra due letture.
+
+E la riga che resta nel feed per tutti i 90 secondi **non produce scommesse ripetute**: un
+segnale già riconosciuto non viene riletto come nuovo. La protezione contro la doppia
+scommessa è dunque **di XTrader**, non nostra — il nostro TTL impedisce che il segnale
+venga *riproposto come nuovo* dopo essere stato cancellato, che è una cosa diversa e
+complementare.
+
 ### Le forme localizzate
 
 La lingua non governa solo il riconoscimento: governa **come si scrivono i valori**. Tre

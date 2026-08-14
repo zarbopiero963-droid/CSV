@@ -28,6 +28,30 @@ fonte non sono opzionali per noi.
    del separatore decimale e di BetType (vedi sotto): oggi il servizio scrive la sola
    forma italiana.
 
+COLONNA PROVIDER: VUOTA DA CONTRATTO
+Provider e' il nome di CHI MANDA il segnale, non di chi lo legge: XTrader e' il
+consumatore, quindi scriverci "XTrader" e' sbagliato. Da contratto la colonna esce VUOTA.
+L'utente puo' valorizzarla come vuole quando configura il proprio parser -- serve a lui,
+perche' XTrader la usa come filtro ("solo i segnali di quel provider") e come
+discriminante fra segnali altrimenti identici. Il confronto non distingue maiuscole.
+
+SOLO TESTO: NIENTE EMOJI NEI VALORI
+XTrader non accetta emoji nei valori del CSV: un segnale che ne contiene viene marcato
+NON VALIDO, e -- come sempre -- senza restituire un errore, solo con un'icona rossa
+accanto al segnale. Detto dal proprietario per la colonna Provider; vale la pena
+trattarlo come una regola su tutte le colonne finche' non e' misurato il contrario.
+Attenzione a EventName: i messaggi Telegram cominciano spesso con un marcatore emoji
+(🆚), e una regola che estrae la riga intera invece del testo DOPO il marcatore si
+porterebbe l'emoji dentro il valore. Il parser di riferimento usa "testo dopo 🆚"
+proprio per questo.
+
+INTERVALLO DI RICARICA DELLA FONTE
+XTrader consente di impostare l'intervallo da 1 secondo in su. Il TTL del feed e' 90
+secondi, quindi qualunque intervallo ragionevole sta molto sotto: un segnale non puo'
+nascere e morire fra due letture. Un segnale gia' riconosciuto NON viene riletto come
+nuovo se la riga resta nel feed per tutti i 90 secondi: e' XTrader a evitare la doppia
+scommessa, non lo svuotamento.
+
 FORME LOCALIZZATE DEL CSV
 Tre cose dipendono dalla lingua del prodotto che legge il feed, e oggi ne serviamo una.
 
