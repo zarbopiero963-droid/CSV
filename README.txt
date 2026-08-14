@@ -35,15 +35,17 @@ L'utente puo' valorizzarla come vuole quando configura il proprio parser -- serv
 perche' XTrader la usa come filtro ("solo i segnali di quel provider") e come
 discriminante fra segnali altrimenti identici. Il confronto non distingue maiuscole.
 
-SOLO TESTO: NIENTE EMOJI NEI VALORI
-XTrader non accetta emoji nei valori del CSV: un segnale che ne contiene viene marcato
-NON VALIDO, e -- come sempre -- senza restituire un errore, solo con un'icona rossa
-accanto al segnale. Detto dal proprietario per la colonna Provider; vale la pena
-trattarlo come una regola su tutte le colonne finche' non e' misurato il contrario.
-Attenzione a EventName: i messaggi Telegram cominciano spesso con un marcatore emoji
-(🆚), e una regola che estrae la riga intera invece del testo DOPO il marcatore si
-porterebbe l'emoji dentro il valore. Il parser di riferimento usa "testo dopo 🆚"
-proprio per questo.
+NIENTE EMOJI NEL CSV -- IN NESSUNA COLONNA
+Regola di contratto, non un'avvertenza: nel CSV servito a XTrader non deve comparire
+nessuna emoji, in nessun campo. Un segnale che ne contiene viene marcato NON VALIDO, e --
+come sempre -- senza restituire un errore: solo un'icona rossa accanto al segnale.
+
+Le emoji stanno IN ENTRATA, non in uscita. I marcatori dei parser (🆚, ⏰, ✅) servono a
+riconoscere il messaggio e a dire DOVE leggere il dato: il valore estratto e' il testo
+DOPO il marcatore, mai il marcatore. E' la ragione per cui il parser di riferimento usa
+"testo dopo 🆚" e non "riga intera": una regola che prende la riga intera si porta
+l'emoji dentro EventName, il feed esce formalmente valido -- 14 colonne, virgolette,
+CRLF, BOM -- e XTrader lo scarta in silenzio.
 
 INTERVALLO DI RICARICA DELLA FONTE
 XTrader consente di impostare l'intervallo da 1 secondo in su. Il TTL del feed e' 90

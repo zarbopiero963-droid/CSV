@@ -494,20 +494,32 @@ Va corretto un difetto nostro: `suggestConfig()` in `web/engine.js` propone oggi
 XTrader**, e per questo sembrava giusto — ma lì `Provider` vale `XTrader` proprio perché
 il file l'ha scritto XTrader. Nel nostro feed il provider siamo noi, o il canale, o niente.
 
-### Niente emoji nei valori
+### Niente emoji nel CSV, in nessuna colonna
 
-XTrader **non accetta emoji** nei valori del CSV: un segnale che ne contiene viene marcato
-**non valido**, e come sempre senza restituire un errore — solo un'icona rossa accanto al
+È una **regola di contratto**, non un'avvertenza: nel CSV servito a XTrader non deve
+comparire nessuna emoji, in nessun campo. Un segnale che ne contiene viene marcato **non
+valido**, e come sempre senza restituire un errore — solo un'icona rossa accanto al
 segnale.
 
-Il vincolo è stato dichiarato dal proprietario per `Provider`; finché non è misurato il
-contrario conviene trattarlo come una regola su **tutte** le colonne. Il punto delicato è
-`EventName`: i messaggi Telegram cominciano quasi sempre con un marcatore emoji (`🆚`), e
-una regola che prende la **riga intera** invece del testo **dopo** il marcatore si
-porterebbe l'emoji dentro il valore. Il parser di riferimento usa `part: 'after'` con
-`marker: '🆚'` esattamente per questo, ma un utente può configurarlo altrimenti — ed è un
-caso che la diagnosi per colonna (#25) dovrebbe saper spiegare, perché il feed uscirebbe
-formalmente valido e XTrader lo scarterebbe in silenzio.
+**Le emoji stanno in entrata, non in uscita.** È la distinzione che tiene insieme questa
+regola con la «REGOLA CODIFICA» di `CLAUDE.md`, che sembra dire il contrario e non lo dice:
+lì gli emoji sono **dati portanti** perché sono i marcatori con cui il parser *riconosce*
+il messaggio e *individua* dove leggere il valore — `🆚`, `⏰`, `✅`. Servono sul lato
+Telegram. Il valore che finisce nel CSV è il testo **dopo** il marcatore, mai il marcatore.
+
+Il punto delicato è `EventName`: i messaggi cominciano quasi sempre col marcatore, e una
+regola che prende la **riga intera** invece del testo **dopo** se lo porta dentro. Allora
+succede la cosa peggiore — il feed esce **formalmente valido** (14 colonne, virgolette,
+CRLF, BOM), `verify_csv()` lo accetta perché controlla la forma e non il contenuto, e
+XTrader lo scarta **in silenzio**. Il parser di riferimento usa `part: 'after'` con
+`marker: '🆚'` esattamente per questo, ma un utente può configurarlo altrimenti.
+
+Ne segue dove va il controllo, e sono due punti come per il resto del contratto: **nel
+motore**, per colonna, così la diagnosi (#25) può dire *quale* campo contiene l'emoji e
+suggerire «testo dopo il marcatore» invece di «riga intera»; e in **`verify_csv()` /
+`verifyCsv()`** come pavimento, perché un CSV con un'emoji non è un CSV che XTrader legge.
+Con la regola già adottata nella #39 l'esito è lo **scarto**: un valore che il consumatore
+rifiuta non è un valore.
 
 ### L'intervallo della fonte, e chi evita davvero la doppia scommessa
 
