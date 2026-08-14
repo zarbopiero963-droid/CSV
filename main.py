@@ -1638,11 +1638,35 @@ def make_csv(row):
 
 
 def store_signal(c, csv_text_value, parser, profile=PIERO_PROFILE):
-    # One message produces one row; the next message only replaces this profile's row.
+    # One message produces one row; the next message only replaces THIS OWNER's row.
     # Fail closed: a CSV that does not pass verification is never stored.
+    #
+    # La chiave del segnale e' l'UTENTE (Issue #2: feed, token e timer stanno
+    # sull'utente), risolto dal profilo via `origin_profile` — lo stesso ponte di
+    # `accesso_bloccato_del_profilo`. La colonna `profile` continua a essere
+    # scritta perche' gli alias legacy (`/xtrader.csv`, `/profiles/{p}.csv`)
+    # leggono per profilo: due chiavi sulla stessa riga, non due righe.
+    #
+    # Il DELETE copre ENTRAMBE le chiavi. Solo `user_id` lascerebbe viva una riga
+    # legacy dello stesso profilo scritta prima di questa versione, e il percorso
+    # vecchio — che legge `ORDER BY id DESC` — la scavalcherebbe da solo, ma la
+    # pulizia del TTL per profilo non la troverebbe piu' sua; solo `profile`
+    # lascerebbe viva la riga di un ALTRO profilo dello stesso utente, cioe' due
+    # segnali vivi per lo stesso feed utente: un segnale stantio accanto a quello
+    # nuovo, che e' esattamente cio' che «una riga viva per utente» vieta.
     verify_csv(csv_text_value)
-    c.execute('DELETE FROM signals WHERE profile=?', (profile,))
-    c.execute('INSERT INTO signals(csv,parser,profile,expires_at) VALUES (?,?,?,?)', (csv_text_value, parser, profile, int(__import__('time').time()) + 90))
+    riga = c.execute('SELECT id FROM users WHERE origin_profile=?', (profile,)).fetchone()
+    utente = riga[0] if riga else None
+    if utente is None:
+        # Profilo senza utente collegato: la chiave utente non esiste, resta il
+        # comportamento storico. Non e' un errore — un profilo puo' nascere prima
+        # del suo utente — e inventare una riga in `users` da qui violerebbe la
+        # regola per cui l'identita' non si crea su un percorso di scrittura segnali.
+        c.execute('DELETE FROM signals WHERE profile=?', (profile,))
+    else:
+        c.execute('DELETE FROM signals WHERE user_id=? OR profile=?', (utente, profile))
+    c.execute('INSERT INTO signals(csv,parser,profile,user_id,expires_at) VALUES (?,?,?,?,?)',
+              (csv_text_value, parser, profile, utente, int(__import__('time').time()) + 90))
 
 
 def parse_message(message, cfg):
@@ -2330,6 +2354,84 @@ def xtrader_csv(token: str | None = Query(None)):
 def named_profile_csv(profile: str, token: str | None = Query(None)):
     return profile_csv(profile, token)
 
+
+def hash_token_feed(token):
+    """L'impronta con cui un token di feed vive sul server: sha256 esadecimale.
+
+    Fonte unica per chi CONIA (`genera_token_feed`) e per chi VERIFICA
+    (`feed_utente_csv`): due formule divergerebbero al primo ritocco, e il
+    sintomo sarebbe «nessun token apre piu' nessun feed» senza un errore.
+
+    sha256 semplice e non scrypt, ed e' una scelta con un motivo: il token e'
+    generato dal server con `secrets.token_urlsafe(24)` — 192 bit di caso — non
+    scelto da una persona. Un derivatore lento serve contro i dizionari, e su
+    192 bit casuali un dizionario non esiste; qui conta che la verifica sia
+    economica, perche' XTrader interroga il feed a raffica.
+    """
+    return hashlib.sha256(token.encode('utf-8')).hexdigest()
+
+
+@app.get('/feed/{slug}.csv')
+def feed_utente_csv(slug: str, token: str | None = Query(None)):
+    """Il feed di UN utente: `/feed/{slug}.csv?token=xt_…` (Issue #2, PR «un feed per utente»).
+
+    Ogni fallimento e' **404**, sempre lo stesso: slug inesistente, token
+    assente, token sbagliato, token di un altro utente, feed non ancora armato.
+    Un 401 su uno slug esistente direbbe a chi enumera «questo cliente esiste,
+    cerca il token»; il 404 uniforme non conferma niente. E' la stessa ragione
+    del 404 sui parser altrui, applicata all'unica rotta pubblica per-utente.
+
+    Il token e' dell'UTENTE, non il `CSV_ACCESS_TOKEN` condiviso: qui `auth()`
+    non c'entra, e un servizio senza quella variabile serve comunque i feed
+    per-utente — il fail-closed di `auth()` protegge le rotte che usano il
+    token condiviso, questa ha la sua serratura per riga di `users`.
+
+    Alla scadenza dell'accesso: `200` con sola intestazione, il token NON si
+    revoca — identico a `profile_csv`, ed e' contratto (Issue #2): per XTrader
+    un errore HTTP e' un guasto, «nessun segnale» e' uno stato normale.
+    """
+    non_trovato = HTTPException(404, 'Not Found')
+    if not token:
+        raise non_trovato
+    c = db()
+    riga = c.execute('SELECT id, token_hash, status, access_expires_at, is_admin'
+                     ' FROM users WHERE slug=?', (slug,)).fetchone()
+    if riga is None or not riga[1]:
+        c.close()
+        raise non_trovato
+    utente, atteso, status, scadenza, admin = riga
+    if not secrets.compare_digest(hash_token_feed(token).encode('utf-8'),
+                                  atteso.encode('utf-8')):
+        c.close()
+        raise non_trovato
+    # L'abbonamento: stessa decisione di `accesso_bloccato_del_profilo`, letta
+    # direttamente dall'utente perche' qui l'utente C'E' — non serve il ponte
+    # `origin_profile`. Il proprietario (`is_admin`) non e' un abbonamento.
+    if not admin and stato_effettivo(status, scadenza) in ACCESSI_BLOCCATI:
+        c.close()
+        return Response(empty_csv(), media_type='text/csv',
+                        headers={'Cache-Control': 'no-store'})
+    c.execute("DELETE FROM signals WHERE user_id=? AND expires_at IS NOT NULL"
+              " AND expires_at <= strftime('%s','now')", (utente,))
+    c.commit()
+    r = c.execute('SELECT csv FROM signals WHERE user_id=? ORDER BY id DESC LIMIT 1',
+                  (utente,)).fetchone()
+    c.close()
+    # Stesso fallback di `profile_csv`, per la stessa ragione: una riga scritta
+    # da una versione precedente non deve uscire rotta, e un raise sul percorso
+    # di consegna sarebbe un 500 verso XTrader. Lo slug come etichetta del log:
+    # e' gia' nell'URL, non e' un segreto.
+    body = empty_csv()
+    if r:
+        try:
+            body = verify_csv(r[0])
+        except ValueError as e:
+            if _registra_scarto(slug, r[0], e):
+                logging.getLogger('xtrader.relay').warning(
+                    'feed dell\'utente %s degradato a sola intestazione: %s', slug, e)
+            body = empty_csv()
+    return Response(body, media_type='text/csv', headers={'Cache-Control': 'no-store'})
+
 # Il nome del cookie di sessione, in un posto solo perche' lo leggono in quattro.
 NOME_COOKIE = 'betrelay_sessione'
 
@@ -2428,14 +2530,18 @@ def utente_dalla_sessione(request):
     if revoca_identita_stantia(c) is not None:
         c.commit()
     riga = c.execute('SELECT id, session_version, status, is_admin, first_name,'
-                     ' access_expires_at FROM users WHERE id=?',
+                     ' access_expires_at, slug, token_prefix FROM users WHERE id=?',
                      (sessione['utente'],)).fetchone()
     c.close()
     if not riga or riga[1] != sessione['versione']:
         return None
+    # `slug` e `token_prefix` servono a `/api/me` e a `genera_token_feed`: il
+    # prefisso NON e' il token — sono i primi 9 caratteri, quelli che la UI
+    # mostra per riconoscere quale token e' armato — e lo slug e' gia' nell'URL
+    # del feed, quindi nessuno dei due e' un segreto.
     return {'id': riga[0], 'versione': riga[1], 'status': riga[2],
             'is_admin': bool(riga[3]), 'first_name': riga[4],
-            'access_expires_at': riga[5]}
+            'access_expires_at': riga[5], 'slug': riga[6], 'token_prefix': riga[7]}
 
 
 def _rispondi_con_sessione(utente, versione, corpo):
@@ -2833,12 +2939,75 @@ def chi_sono(request: Request):
     # `stato_effettivo` e non `utente['status']`: la colonna dice cio' che il proprietario ha
     # deciso, non se quella decisione e' ancora valida adesso. Misurato prima: un cliente
     # scaduto ieri leggeva `stato: attivo` con una scadenza nel passato accanto.
+    # `slug` e `token_prefix`, MAI il token: il prefisso serve alla UI per dire
+    # «il token armato e' xt_Ab12…» senza poterlo ricostruire, e lo slug e' il
+    # pezzo pubblico dell'URL del feed. Il token in chiaro esiste solo nella
+    # risposta di `genera_token_feed`, una volta.
     return _rispondi_con_sessione(utente['id'], utente['versione'], {
         'utente': utente['id'], 'nome': utente['first_name'],
         'stato': stato_effettivo(utente['status'], utente['access_expires_at']),
         'admin': utente['is_admin'],
         'accesso_scade': utente['access_expires_at'],
-        'giorni_rimasti': giorni_rimasti(utente['access_expires_at'])})
+        'giorni_rimasti': giorni_rimasti(utente['access_expires_at']),
+        'slug': utente['slug'], 'token_prefix': utente['token_prefix']})
+
+
+@app.post('/api/me/token')
+def genera_token_feed(request: Request):
+    """Conia (o rigenera) il token del feed dell'utente della sessione.
+
+    Il token esiste in chiaro **in questa risposta e mai piu'**: il server salva
+    `sha256` (vedi `hash_token_feed`) e da quel momento puo' solo verificare,
+    non mostrare. `/api/me` restituisce il prefisso, che non e' il token.
+
+    Rigenerare SOVRASCRIVE l'hash: il token precedente smette di aprire il feed
+    alla richiesta successiva. E' il gesto con cui un cliente che ha esposto il
+    proprio URL se ne libera — per questo non c'e' un percorso di «disarmo»
+    separato: rigenerare e' la revoca.
+
+    La forma: `xt_` + `token_urlsafe(24)` — 24 byte da CSPRNG, sopra il minimo
+    di 18 fissato nella Issue #2. `token_prefix` sono i primi 9 caratteri
+    (`xt_` + 6), abbastanza per riconoscere il token in UI e troppo pochi per
+    indovinarlo: ne mancano 26 di alfabeto urlsafe.
+
+    Chi nasce dal login Telegram non ha uno slug (lo assegna solo la migrazione,
+    ai profili): il primo token glielo crea, derivandolo dal nome con la stessa
+    `_slug_libero` deterministica della migrazione. Minuscolo e senza sorprese,
+    perche' finisce in un URL che il cliente incolla in XTrader.
+    """
+    utente = _sessione_valida(request)
+    token = 'xt_' + secrets.token_urlsafe(24)
+    c = db()
+    try:
+        slug = utente['slug']
+        if not slug:
+            base = re.sub(r'[^a-z0-9-]+', '-',
+                          (utente['first_name'] or 'utente').lower()).strip('-') or 'utente'
+            presi = {r[0] for r in c.execute(
+                'SELECT slug FROM users WHERE slug IS NOT NULL').fetchall()}
+            slug = _slug_libero(base, presi)
+        try:
+            c.execute('UPDATE users SET slug=?, token_hash=?, token_prefix=? WHERE id=?',
+                      (slug, hash_token_feed(token), token[:9], utente['id']))
+        except sqlite3.IntegrityError:
+            # La corsa sul vincolo UNIQUE di `slug`: due primi-token simultanei di
+            # utenti col lo stesso nome. Chi perde NON riceve un 500 con traccia:
+            # riprova una volta rileggendo gli slug presi, e se perde anche quella
+            # e' un 503 con l'invito a riprovare — la stessa forma della corsa
+            # gemella sul CRUD dei parser.
+            presi = {r[0] for r in c.execute(
+                'SELECT slug FROM users WHERE slug IS NOT NULL').fetchall()}
+            slug = _slug_libero(slug, presi)
+            try:
+                c.execute('UPDATE users SET slug=?, token_hash=?, token_prefix=? WHERE id=?',
+                          (slug, hash_token_feed(token), token[:9], utente['id']))
+            except sqlite3.IntegrityError:
+                raise HTTPException(503, 'slug conteso: riprova')
+        c.commit()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'], {
+        'token': token, 'token_prefix': token[:9], 'feed': f'/feed/{slug}.csv'})
 
 
 def _sessione_valida(request):

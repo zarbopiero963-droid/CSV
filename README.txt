@@ -69,6 +69,25 @@ ENDPOINT PUBBLICO CSV
 GET /xtrader.csv?token=TOKEN
 Restituisce l'ultimo segnale ricevuto. Se non ci sono segnali restituisce la sola intestazione.
 
+IL FEED PER UTENTE (il percorso nuovo; /xtrader.csv resta l'alias del profilo PIERO)
+GET /feed/SLUG.csv?token=xt_...
+E' il feed di UN utente, autenticato dal SUO token, non da CSV_ACCESS_TOKEN.
+Ogni fallimento risponde 404, sempre lo stesso: slug inesistente, token assente,
+token sbagliato, token di un altro utente. Un 401 su uno slug esistente direbbe
+a chi enumera "questo cliente esiste, cerca il token"; il 404 uniforme non
+conferma niente. Alla scadenza dell'accesso il feed risponde 200 con la sola
+intestazione (per XTrader e' "nessun segnale", non un guasto) e il token NON
+viene revocato: al rinnovo il cliente non riconfigura XTrader.
+
+POST /api/me/token          (autenticazione a sessione, come /api/me)
+Conia o rigenera il token del feed. Il token in chiaro esiste SOLO in questa
+risposta: il server salva sha256(token) e da quel momento puo' solo verificare.
+La risposta porta {token, token_prefix, feed}; /api/me restituisce slug e
+token_prefix (i primi 9 caratteri, per riconoscere il token in UI), mai il token.
+Rigenerare sovrascrive l'hash: il token precedente smette di aprire il feed
+alla richiesta successiva. Chi non ha ancora uno slug (utenti nati dal login
+Telegram) lo riceve qui, derivato dal nome, minuscolo, stabile.
+
 GESTIONE MULTI-PARSER (ADMIN)
 I parser vengono salvati nel database SQLite e possono essere creati/modificati senza cambiare il codice.
 GET /api/parsers

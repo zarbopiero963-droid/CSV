@@ -1311,7 +1311,7 @@ Devi verificare:
 - `python -m py_compile main.py` e l'import dell'app riescono;
 - nessun segreto nel repository né nelle variabili committate;
 - il deploy non fa push né merge automatico;
-- gli endpoint esistenti rispondono ancora: `/health`, `/`, `/xtrader.csv`, `/profiles/{…}.csv`,
+- gli endpoint esistenti rispondono ancora: `/health`, `/`, `/xtrader.csv`, `/feed/{slug}.csv`, `/profiles/{…}.csv`,
   `/api/*`, `/app/`;
 - se il webhook Telegram viene registrato all'avvio, un `PUBLIC_URL` sbagliato non deve far
   crashare l'avvio.

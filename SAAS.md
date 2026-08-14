@@ -330,14 +330,41 @@ nuovo.
 
 ## Token dei feed
 
-- Generati con almeno 18 byte casuali, prefisso `xt_`.
-- Sul server si conserva **solo** `sha256(token)`. I token hanno entropia alta:
-  non serve un KDF lento, serve non salvarli in chiaro.
-- Il token in chiaro esiste in una sola risposta HTTP, quella della generazione.
-- Si conserva un `token_prefix` di 9 caratteri per identificarlo nella UI.
-- Rigenerare invalida immediatamente il precedente.
-- Il token globale `CSV_ACCESS_TOKEN` oggi in uso è già circolato: va ruotato
-  prima dell'uso commerciale.
+**Implementato: il feed e il token vivono sull'UTENTE**, non sul parser. Le
+versioni precedenti di questo documento descrivevano un feed per parser: era il
+disegno del prototipo, ed era sbagliato rispetto alla decisione della Issue #2 —
+un utente ha **un** feed, `GET /feed/{slug}.csv?token=xt_…`, e i suoi parser si
+contendono la riga viva di quel feed.
+
+- Coniato da `POST /api/me/token` (sessione): `xt_` + 24 byte da CSPRNG
+  (`secrets.token_urlsafe`), sopra il minimo di 18 della Issue #2.
+- Sul server si conserva **solo** `sha256(token)` (`hash_token_feed` in
+  `main.py`). I token hanno entropia alta: non serve un KDF lento, serve non
+  salvarli in chiaro.
+- Il token in chiaro esiste in una sola risposta HTTP, quella della
+  generazione. `/api/me` restituisce `slug` e `token_prefix`, mai il token.
+- `token_prefix` = primi 9 caratteri (`xt_` + 6), per riconoscerlo nella UI.
+- Rigenerare sovrascrive l'hash: il precedente smette di aprire il feed alla
+  richiesta successiva. Non esiste un «disarmo» separato: rigenerare è la revoca.
+- Sul feed per utente ogni fallimento è **404 uniforme** — slug inesistente,
+  token assente, sbagliato o di un altro utente: un 401 su uno slug esistente
+  direbbe a chi enumera «questo cliente esiste».
+- Alla **scadenza dell'accesso** il feed risponde `200` con sola intestazione e
+  il token **non** viene revocato: «scaduto» e «revocato» sono stati diversi, e
+  al rinnovo il cliente non deve riconfigurare XTrader.
+- Chi nasce dal login Telegram non ha uno slug: glielo assegna il primo
+  `POST /api/me/token`, con la stessa `_slug_libero` deterministica della
+  migrazione.
+- Il token globale `CSV_ACCESS_TOKEN` protegge ancora gli alias legacy
+  (`/xtrader.csv`, `/profiles/{p}.csv`) ed è già circolato: va ruotato prima
+  dell'uso commerciale.
+
+**La chiave del segnale è l'utente.** `store_signal` risolve l'utente dal
+profilo (`origin_profile`), scrive `signals.user_id` e sostituisce la riga viva
+coprendo **entrambe** le chiavi (`user_id` e `profile`): una riga sola, leggibile
+sia dal percorso nuovo (per `user_id`) sia dagli alias legacy (per `profile`).
+È il prerequisito del dispatch multi-parser: due parser dello stesso utente si
+contendono una riga senza toccare quelle altrui.
 
 ## Motore di parsing
 
@@ -667,6 +694,11 @@ GET    /xtrader.csv?token=...                             alias legacy di PIERO
 POST   /telegram/webhook                                  unico bot, dispatch per chat_id
 ```
 
+> **Superato dal feed per utente.** Le righe `feed per parser` e
+> `POST /api/parsers/:id/token/rotate` di questo disegno descrivono il modello
+> vecchio: il feed reale è `GET /feed/{slug}.csv?token=xt_…` — uno per utente —
+> e il token si conia con `POST /api/me/token`. Vedi «Token dei feed».
+
 ### Cosa esiste DAVVERO: il CRUD dei parser per-utente
 
 Il primo pezzo del disegno sopra realizzato sul server, con i nomi veri (che
@@ -741,6 +773,8 @@ passare inosservata.
 | `POST /api/admin/requests/{id}/rifiuta` | torna `registrato`, così può richiedere | **`404`** |
 | `POST /api/admin/promemoria` | avvisa chi scade entro 5 giorni | **`404`** |
 | *le quattro del pannello* | | `404` e non `403`, perché un `403` conferma a un estraneo che il pannello sta lì. Per la stessa ragione corpo e `id` di percorso si leggono **a mano dopo** il controllo della sessione: lasciati a FastAPI, un estraneo riceveva `422`, cioè la stessa conferma per un'altra via — trovato dalla guardia sulle rotte, PR #26 |
+| `POST /api/me/token` | conia (o rigenera) il token del feed; il token in chiaro esiste solo qui | `401` senza sessione |
+| `GET /feed/{slug}.csv` | il feed dell'utente, autenticato dal **suo** token (`?token=xt_…`) | **`404` uniforme**: slug inesistente, token assente, sbagliato o altrui — un `401` su uno slug esistente direbbe a chi enumera che quel cliente esiste |
 
 `POST /api/logout` è pubblica **per scelta**, non per dimenticanza: cancella un cookie
 e non legge nulla. Metterle una serratura significherebbe che chi ha un cookie
@@ -750,7 +784,9 @@ l'unica uscita è svuotare i cookie a mano.
 `GET /api/me` non restituisce mai un token, né l'hash della password, né il
 `telegram_id`: i primi due sono segreti, il terzo non serve al browser e finirebbe nei
 log di qualunque proxy davanti al servizio. Restituisce `utente`, `nome`, `stato`,
-`admin`, `accesso_scade`.
+`admin`, `accesso_scade`, `giorni_rimasti`, `slug`, `token_prefix` — il prefisso
+non è il token: sono i primi 9 caratteri, quelli che la UI mostra per dire quale
+token è armato.
 
 **Il messaggio d'errore non distingue «firma sbagliata» da «firma scaduta».** Per
 differenza si impara, e chi prova non deve sapere quale dei due muri ha toccato.
@@ -1233,7 +1269,8 @@ senza doppio ruolo.
 | Fatto | Test hard del motore e del contratto CSV (`tests/engine/`), guardia sui workflow di review (`tests/safety/`) |
 | Fatto | Lo **schema** di questa sezione, creato in place su SQLite da `migra()`, con i dati esistenti travasati e i test in `tests/relay/test_schema.py`. Le tabelle esistono e i vincoli reggono; il *comportamento* che le usa è dei PR sotto |
 | Fatto | **Login Telegram reale e sessioni** (PR 6): le quattro rotte di «Le rotte di sessione che esistono davvero», il cookie firmato, le due porte del proprietario, e la NON-relazione fra sessione e feed. Manca il resto di M3: la web app è ancora sui dati finti |
-| M1 | Token hashati, verifica chat, feed per utente, compatibilità `/xtrader.csv`. **Postgres differito** e non più urgente: i dati persistono già, `DB_PATH` in produzione è `/data/signals.db` dentro il volume (misurato il 12/08/2026) |
+| Fatto | **Un feed per utente** (PR 1 del piano sincronizzato in #2): `GET /feed/{slug}.csv?token=xt_…`, token coniato da `POST /api/me/token` e conservato solo come hash, segnale a chiave `user_id`, 404 uniforme, alias `/xtrader.csv` e `/profiles/{p}.csv` intatti. Test in `tests/relay/test_feed_utente.py` |
+| M1 | Verifica chat. **Postgres differito** e non più urgente: i dati persistono già, `DB_PATH` in produzione è `/data/signals.db` dentro il volume (misurato il 12/08/2026) |
 | M2 | Motore di parsing generico in Python, endpoint di test, dispatch multi-parser nel webhook |
 | Fatto | **Accesso su approvazione** (PR 7), lato server: `stato_effettivo` / `giorni_rimasti` / `nuova_scadenza` come fonte unica, la richiesta del cliente col deep link del bot, la decisione del proprietario con i giorni liberi e l'errore di invio **non ingoiato**, il promemoria a 5 giorni una volta per scadenza, e gli effetti della scadenza su feed e webhook. Il **token non viene revocato** alla scadenza |
 | M3 | La web app collegata al backend: le schermate di questo flusso (richiesta, giorni rimasti, accesso scaduto) non esistono ancora — il prototipo è sui dati finti |

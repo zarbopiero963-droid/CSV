@@ -107,6 +107,14 @@ ROTTE_CON_AUTENTICAZIONE_PROPRIA = {
     ('PUT', '/api/me/parsers/{slug}'): 401,
     ('DELETE', '/api/me/parsers/{slug}'): 401,
     ('POST', '/api/me/parsers/{slug}/test'): 401,
+    # Il feed per utente: la serratura e' il token DELL'UTENTE (hash su `users`),
+    # non `CSV_ACCESS_TOKEN`. Ogni fallimento e' **404 uniforme** — slug
+    # inesistente, token assente o sbagliato, token altrui — perche' un 401 su
+    # uno slug esistente direbbe a chi enumera «questo cliente esiste». I casi
+    # positivi e l'isolamento stanno in `test_feed_utente.py`.
+    ('GET', '/feed/{slug}.csv'): 404,
+    # Conia il token del feed: autenticazione a sessione, come `/api/me`.
+    ('POST', '/api/me/token'): 401,
 }
 
 # I MOUNT sono un'altra cosa dalle rotte, e vanno dichiarati a parte: non hanno
