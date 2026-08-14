@@ -149,7 +149,12 @@ def test_la_quota_regge_la_CORSA_sull_ultimo_posto(tmp_path, monkeypatch):
     quanti = c.execute('SELECT COUNT(*) FROM parsers p JOIN users u ON u.id=p.user_id'
                        " WHERE u.telegram_id='333000333'").fetchone()[0]
     c.close()
-    assert quanti <= 2, f'{quanti} parser oltre la quota di 2: la corsa l\'ha bucata ({esiti})'
+    # ESATTAMENTE un successo e un 409, non «al piu' due»: la versione lasca
+    # passerebbe anche se entrambe le richieste fallissero — segnalato da
+    # GPT-5.5, ed e' la differenza fra un tetto e un servizio rotto.
+    assert sorted(esiti) == [200, 409], (
+        f'attesi un 200 e un 409 sulla corsa: {esiti}')
+    assert quanti == 2, f'{quanti} parser dopo la corsa: attesi esattamente 2'
 
 
 def test_il_messaggio_di_quota_non_nomina_risorse_ALTRUI(tmp_path, monkeypatch):
@@ -192,6 +197,45 @@ def test_una_config_OLTRE_il_tetto_e_respinta_in_creazione_e_modifica(tmp_path, 
     stato, dettaglio = _modifica(anna, corpo['slug'], config=gonfia)
     assert stato == 422, (
         f'una config da 50k caratteri e\' stata accettata in MODIFICA: {stato}')
+
+
+def test_il_bordo_esatto_dei_tetti(tmp_path, monkeypatch):
+    """Al limite esatto passa; un carattere oltre no — con la STESSA
+    serializzazione usata per salvare (json.dumps), non una stima."""
+    _relay(tmp_path, monkeypatch, 'bordo.db')
+    anna = _cookie_di('999000999')
+    assert _crea(anna, titolo='t' * main.MAX_TITOLO_PARSER)[0] == 200
+    assert _crea(anna, titolo='t' * (main.MAX_TITOLO_PARSER + 1))[0] == 422
+
+    base = {'match': {'type': 'contains', 'value': 'SEGNALE'},
+            'columns': {'EventName': {'source': 'constant', 'value': ''},
+                        'MarketType': {'source': 'constant', 'value': 'OVER_UNDER_15'},
+                        'SelectionName': {'source': 'constant', 'value': 'Over 1,5 goal'},
+                        'BetType': {'source': 'constant', 'value': 'PUNTA'}}}
+    scheletro = len(json.dumps(base)) - len(json.dumps(''))  # il posto del valore
+    riempi = main.MAX_CONFIG_PARSER - scheletro - 2  # le virgolette del valore JSON
+    base['columns']['EventName']['value'] = 'x' * riempi
+    assert len(json.dumps(base)) == main.MAX_CONFIG_PARSER
+    assert _crea(anna, titolo='Al Limite', config=base)[0] == 200
+    base['columns']['EventName']['value'] += 'x'
+    assert _crea(anna, titolo='Oltre Il Limite', config=base)[0] == 422
+
+
+def test_la_variabile_della_quota_NON_butta_giu_l_avvio(monkeypatch):
+    """`MAX_PARSER_PER_UTENTE` vuota o non numerica sul pannello Railway non deve
+    trasformarsi in un servizio che non parte — segnalato da GPT-5.5, stessa
+    classe del fail-closed di auth(): l'errore di configurazione si assorbe con
+    il default, dichiarato nel log."""
+    monkeypatch.setenv('MAX_PARSER_PER_UTENTE', '')
+    assert main._intero_da_env('MAX_PARSER_PER_UTENTE', 20) == 20
+    monkeypatch.setenv('MAX_PARSER_PER_UTENTE', 'venti')
+    assert main._intero_da_env('MAX_PARSER_PER_UTENTE', 20) == 20
+    monkeypatch.setenv('MAX_PARSER_PER_UTENTE', '-3')
+    assert main._intero_da_env('MAX_PARSER_PER_UTENTE', 20) == 20
+    monkeypatch.setenv('MAX_PARSER_PER_UTENTE', '7')
+    assert main._intero_da_env('MAX_PARSER_PER_UTENTE', 20) == 7
+    monkeypatch.delenv('MAX_PARSER_PER_UTENTE')
+    assert main._intero_da_env('MAX_PARSER_PER_UTENTE', 20) == 20
 
 
 def test_una_config_NORMALE_resta_sotto_i_tetti(tmp_path, monkeypatch):

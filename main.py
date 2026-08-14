@@ -650,7 +650,32 @@ PIERO_PROFILE = 'PIERO'
 # massimo si regola da variabile (Railway) senza deploy; i tetti di dimensione
 # sono generosi rispetto all'uso reale (una config tipica sta sotto i 2k) e
 # stretti rispetto all'abuso.
-MAX_PARSER_PER_UTENTE = int(os.getenv('MAX_PARSER_PER_UTENTE', '20'))
+def _intero_da_env(nome, default):
+    """Un intero da una variabile d'ambiente, che NON butta giu' l'avvio.
+
+    `int(os.getenv(...))` nudo crasha all'import con una variabile vuota o non
+    numerica — un refuso nel pannello Railway diventerebbe un servizio che non
+    parte. Stessa classe del fail-closed di `auth()`: un errore di configurazione
+    va assorbito con un default dichiarato nel log, non trasformato in un boot
+    rotto. Segnalato da GPT-5.5 sulla PR #45.
+    """
+    grezzo = os.getenv(nome)
+    if grezzo is None or not grezzo.strip():
+        return default
+    try:
+        valore = int(grezzo)
+    except ValueError:
+        logging.getLogger('xtrader.relay').warning(
+            '%s=%r non e\' un intero: uso il default %d', nome, grezzo, default)
+        return default
+    if valore < 1:
+        logging.getLogger('xtrader.relay').warning(
+            '%s=%d non e\' positivo: uso il default %d', nome, valore, default)
+        return default
+    return valore
+
+
+MAX_PARSER_PER_UTENTE = _intero_da_env('MAX_PARSER_PER_UTENTE', 20)
 MAX_TITOLO_PARSER = 80
 MAX_CONFIG_PARSER = 20_000
 
