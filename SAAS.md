@@ -106,14 +106,19 @@ webhook_seen
 
 profiles           ← tabella PREESISTENTE, invariata
   name (primary key), chat_ids, parser
-  resta la fonte del filtro delle chat finché il dispatch multi-parser non arriva
+  dal dispatch multi-parser (PR 2 di #2) è la SORGENTE della semina di
+  parser_chats a ogni migrazione, e il fallback del webhook per le chat/profili
+  che i link non rappresentano ancora
 ```
 
-`webhook_seen`, `message_logs` e `feed_reads` **esistono ma nessun codice le legge
-ancora**: il dedup degli `update_id`, i log persistenti e il conteggio delle letture
-sono comportamenti dei PR successivi. Le tabelle nascono adesso perché aggiungerle
-dopo vorrebbe dire una seconda migrazione su un database con dati dei clienti;
-dichiararle funzionanti sarebbe la copertura finta che `CLAUDE.md` vieta.
+`webhook_seen` e `message_logs` sono **vive dal dispatch multi-parser** (PR 2 di
+#2): la prima fa il dedup degli `update_id` — il marker si scrive **nella stessa
+transazione del segnale**, vedi «Il dispatch multi-parser» — la seconda riceve
+gli esiti («segnale scritto», «riconosciuto, sostituito da …»), entrambe con
+pulizia a 7 giorni sulla scrittura. `feed_reads` **esiste ma nessun codice la
+legge ancora**: il conteggio delle letture è di un PR successivo. Le tabelle
+sono nate insieme perché aggiungerle dopo avrebbe voluto dire una seconda
+migrazione su un database con dati dei clienti.
 
 ### Cosa fa la migrazione con i dati che trova
 

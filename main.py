@@ -3983,32 +3983,17 @@ async def telegram_webhook(request: Request):
         finally:
             c.close()
         return {'ok': True, 'start': True}
-    # Dedup delle riconsegne: Telegram ritenta le consegne che crede fallite, e
-    # senza questo controllo ogni retry rifaceva DELETE+INSERT e RIARMAVA il TTL —
-    # un segnale «da 90 secondi» che vive piu' a lungo a ogni riconsegna e' una
-    # puntata che nessuno ha scelto. `INSERT OR IGNORE` su PRIMARY KEY: la prima
-    # consegna vince, le successive con lo stesso `update_id` escono qui. La
-    # pulizia a 7 giorni viaggia con la scrittura, come per `message_logs`.
-    update_id = payload.get('update_id')
-    if update_id is not None:
-        c = db()
-        try:
-            nuovo = c.execute('INSERT OR IGNORE INTO webhook_seen(update_id) VALUES (?)',
-                              (str(update_id),)).rowcount
-            c.execute("DELETE FROM webhook_seen WHERE created_at < datetime('now', '-7 days')")
-            c.commit()
-        finally:
-            c.close()
-        if not nuovo:
-            return {'ok': True, 'ignored': 'duplicate'}
     # L'elaborazione sta FUORI dall'event loop (asyncio.to_thread): SQLite e il
     # motore di parsing sono sincroni, e sul percorso che riceve OGNI messaggio di
     # OGNI canale un parser lento non deve fermare le altre richieste del servizio
     # (#31 B1). La regex utente resta comunque capata da REGEX_BUDGET_PARSER_S.
-    return await asyncio.to_thread(_processa_messaggio_canale, chat_id, text)
+    # Il dedup dell'`update_id` vive DENTRO l'elaborazione, non qui: il marker va
+    # committato nella stessa transazione del segnale (vedi il docstring sotto).
+    return await asyncio.to_thread(_processa_messaggio_canale, chat_id, text,
+                                   payload.get('update_id'))
 
 
-def _processa_messaggio_canale(chat_id, text):
+def _processa_messaggio_canale(chat_id, text, update_id=None):
     """Il dispatch: chat → i parser collegati, ognuno verso il feed del SUO utente.
 
     Modello della Issue #2: la chat si collega ai PARSER (`parser_chats`, seminata
@@ -4021,78 +4006,72 @@ def _processa_messaggio_canale(chat_id, text):
     Chiude il pericolo 1 della #25: nessun profilo «vince» piu' la chat in ordine
     alfabetico. Due profili sulla stessa chat sono due link, due utenti, due feed.
 
-    Se la chat non ha NESSUN link si passa al percorso legacy per profili: e' il
-    caso del profilo creato a caldo via API, che i link li riceve alla prossima
-    migrazione — senza fallback resterebbe muto fino al riavvio.
+    **Il dedup e la scrittura sono UNA transazione.** Il marker di `webhook_seen`
+    si controlla in testa (una riconsegna esce subito come `duplicate`, senza
+    riarmare il TTL) ma si SCRIVE in coda, nello stesso commit del segnale: o
+    entrambi, o nessuno. La prima versione lo committava PRIMA di elaborare, e un
+    guasto fra il marker e `store_signal` perdeva il segnale per sempre — il
+    retry di Telegram usciva come duplicato con niente nel feed. Bloccante di
+    Claude Fable 5 e rischio di GPT-5.5 sulla PR #44, convergenti. Il baratto
+    residuo e' dichiarato: due consegne IDENTICHE e simultanee possono elaborare
+    entrambe (stesso contenuto, stesso segnale — innocuo); un guasto a meta' non
+    perde mai il segnale, che per un relay di puntate e' il verso giusto.
+
+    Il percorso legacy per profili serve due casi: la chat senza nessun link, e
+    il profilo creato a caldo il cui UTENTE non e' rappresentato nei link della
+    chat (bloccante 2 di Fable: prima restava muto fino al riavvio se la chat
+    aveva gia' i link di qualcun altro). I link arrivano alla prossima
+    migrazione; fino ad allora quel profilo passa da qui.
     """
     c = db()
     try:
+        if update_id is not None and c.execute(
+                'SELECT 1 FROM webhook_seen WHERE update_id=?',
+                (str(update_id),)).fetchone():
+            return {'ok': True, 'ignored': 'duplicate'}
         riga_chat = c.execute(f'SELECT id FROM chats WHERE telegram_chat_id=?'
                               f' AND {TOPIC_CHAT}=?', (chat_id, '')).fetchone()
         link = []
         if riga_chat:
+            # `p.user_id IS NOT NULL`: un parser senza proprietario non ha un
+            # feed in cui scrivere — `store_signal` con entrambe le chiavi NULL
+            # accumulerebbe righe orfane che nessuna DELETE toglie (rischio di
+            # GPT-5.5, bloccante 3 di Fable). La semina non puo' crearlo (esige
+            # il JOIN con users); una riga scritta a mano si', e resta esclusa.
             link = c.execute(
                 'SELECT p.id, p.name, p.header, p.market_name, p.market_type,'
                 ' p.selection_name, p.handicap, p.bet_type, p.config_json,'
                 ' p.user_id, p.slug, u.origin_profile, u.status,'
                 ' u.access_expires_at, u.is_admin'
                 ' FROM parser_chats pc JOIN parsers p ON p.id = pc.parser_id'
-                ' LEFT JOIN users u ON u.id = p.user_id'
+                ' JOIN users u ON u.id = p.user_id'
                 ' WHERE pc.chat_id=? AND IFNULL(p.active, 1)=1'
+                ' AND p.user_id IS NOT NULL'
                 ' ORDER BY p.user_id, p.ordine, p.name',
                 (riga_chat[0],)).fetchall()
-        if not link:
-            return _processa_via_profili(c, chat_id, text)
-        # Pulizia dei log oltre i 7 giorni: viaggia con la scrittura, non con un
-        # timer — e' la stessa scelta di `webhook_seen`, per la stessa ragione.
-        c.execute("DELETE FROM message_logs WHERE created_at < datetime('now', '-7 days')")
         esiti = {}
-        for utente_id, righe in _raggruppa(link, chiave=lambda r: r[9]):
-            etichetta = righe[0][11] or righe[0][10] or f'utente-{utente_id}'
-            # Accesso scaduto o sospeso: non si elabora e non si logga — il log e'
-            # una funzione del servizio, non un archivio (vedi PR #26).
-            bloccato = _blocco_della_riga(righe[0][12], righe[0][13], righe[0][14])
-            if bloccato:
-                esiti[etichetta] = f'access_{bloccato}'
-                continue
-            riconosciuti = []
-            for r in righe:
-                cfg = dict(zip(['name', 'header', 'market_name', 'market_type',
-                                'selection_name', 'handicap', 'bet_type',
-                                'config_json'], (r[1], r[2], r[3], r[4], r[5],
-                                                 r[6], r[7], r[8])))
-                parsed = elabora_messaggio(text, cfg)
-                if parsed:
-                    riconosciuti.append((r, parsed))
-            if not riconosciuti:
-                esiti[etichetta] = 'parser_no_match'
-                continue
-            # Vince l'ULTIMO nell'ordine dichiarato; i battuti nei log, col nome
-            # visibile del vincente (slug, o name per i parser legacy).
-            vincente, parsed = riconosciuti[-1]
-            nome_vincente = vincente[10] or vincente[1]
-            for battuto, _ in riconosciuti[:-1]:
-                c.execute('INSERT INTO message_logs(user_id, parser_id, chat_id,'
-                          ' text, esito) VALUES (?,?,?,?,?)',
-                          (utente_id, battuto[0], riga_chat[0], text,
-                           f'riconosciuto, sostituito da {nome_vincente}'))
-            try:
-                store_signal(c, parsed['csv'], vincente[1], profile=None,
-                             utente=utente_id)
-            except ValueError:
-                # Deterministico: lo stesso messaggio produrrebbe lo stesso CSV
-                # rotto. 200, cosi' Telegram non ritenta; il motivo resta su
-                # /health, non nella risposta di un endpoint pubblico.
-                esiti[etichetta] = 'csv_non_valido'
-                continue
-            c.execute('INSERT INTO message_logs(user_id, parser_id, chat_id, text,'
-                      ' esito) VALUES (?,?,?,?,?)',
-                      (utente_id, vincente[0], riga_chat[0], text,
-                       f'segnale scritto ({nome_vincente})'))
-            esiti[etichetta] = {'event': parsed['event']}
+        if link:
+            # Pulizia dei log oltre i 7 giorni: viaggia con la scrittura, non con
+            # un timer — la stessa scelta di `webhook_seen`, per la stessa ragione.
+            c.execute("DELETE FROM message_logs WHERE created_at < datetime('now', '-7 days')")
+            for utente_id, righe in _raggruppa(link, chiave=lambda r: r[9]):
+                etichetta = righe[0][11] or righe[0][10] or f'utente-{utente_id}'
+                esiti[etichetta] = _elabora_per_utente(c, riga_chat[0], utente_id,
+                                                       righe, text)
+        # Il profilo legacy NON rappresentato nei link (o tutti i profili, se
+        # link non ce ne sono): vedi docstring.
+        profilo = _profilo_della_chat(c, chat_id)
+        if profilo and not _utente_del_profilo_nei_link(c, profilo['name'], link):
+            esiti[profilo['name']] = _elabora_profilo(c, profilo, text)
+        if update_id is not None:
+            c.execute('INSERT OR IGNORE INTO webhook_seen(update_id) VALUES (?)',
+                      (str(update_id),))
+            c.execute("DELETE FROM webhook_seen WHERE created_at < datetime('now', '-7 days')")
         c.commit()
     finally:
         c.close()
+    if not esiti:
+        return {'ok': True, 'ignored': 'chat_not_allowed'}
     # La forma della risposta: identica a prima quando la chat serve UN utente —
     # e' il contratto che i test del webhook vincolano — aggregata quando sono
     # di piu'. Telegram la ignora; serve ai log e ai test.
@@ -4107,6 +4086,53 @@ def _processa_messaggio_canale(chat_id, text):
     return {'ok': True, 'ignored': 'parser_no_match'}
 
 
+def _elabora_per_utente(c, chat_riga_id, utente_id, righe, text):
+    """I parser di UN utente su un messaggio: vince l'ultimo, i battuti nei log.
+
+    Restituisce il valore dell'esito: `{'event': ...}` se il segnale e' scritto,
+    altrimenti la stringa del motivo (`parser_no_match`, `csv_non_valido`,
+    `access_<stato>`). Non committa: la transazione e' del chiamante, insieme al
+    marker del dedup.
+    """
+    # Accesso scaduto o sospeso: non si elabora e non si logga — il log e' una
+    # funzione del servizio, non un archivio (vedi PR #26).
+    bloccato = _blocco_della_riga(righe[0][12], righe[0][13], righe[0][14])
+    if bloccato:
+        return f'access_{bloccato}'
+    riconosciuti = []
+    for r in righe:
+        cfg = dict(zip(['name', 'header', 'market_name', 'market_type',
+                        'selection_name', 'handicap', 'bet_type',
+                        'config_json'], (r[1], r[2], r[3], r[4], r[5],
+                                         r[6], r[7], r[8])))
+        parsed = elabora_messaggio(text, cfg)
+        if parsed:
+            riconosciuti.append((r, parsed))
+    if not riconosciuti:
+        return 'parser_no_match'
+    # Vince l'ULTIMO nell'ordine dichiarato; i battuti nei log, col nome
+    # visibile del vincente (slug, o name per i parser legacy).
+    vincente, parsed = riconosciuti[-1]
+    nome_vincente = vincente[10] or vincente[1]
+    for battuto, _ in riconosciuti[:-1]:
+        c.execute('INSERT INTO message_logs(user_id, parser_id, chat_id,'
+                  ' text, esito) VALUES (?,?,?,?,?)',
+                  (utente_id, battuto[0], chat_riga_id, text,
+                   f'riconosciuto, sostituito da {nome_vincente}'))
+    try:
+        store_signal(c, parsed['csv'], vincente[1], profile=None, utente=utente_id)
+    except ValueError:
+        # Deterministico: lo stesso messaggio produrrebbe lo stesso CSV rotto.
+        # 200, cosi' Telegram non ritenta; il motivo resta su /health, non nella
+        # risposta di un endpoint pubblico.
+        return 'csv_non_valido'
+    c.execute('INSERT INTO message_logs(user_id, parser_id, chat_id, text,'
+              ' esito) VALUES (?,?,?,?,?)',
+              (utente_id, vincente[0], chat_riga_id, text,
+               f'segnale scritto ({nome_vincente})'))
+    return {'event': parsed['event']}
+
+
 def _raggruppa(righe, chiave):
     """Gruppi contigui per chiave, nell'ordine d'arrivo (le righe sono gia' ORDER BY)."""
     gruppi = []
@@ -4118,32 +4144,40 @@ def _raggruppa(righe, chiave):
     return gruppi
 
 
-def _processa_via_profili(c, chat_id, text):
-    """Il percorso legacy per profili, per le chat senza link in `parser_chats`.
+def _profilo_della_chat(c, chat_id):
+    """Il primo profilo (in ordine di nome) che elenca questa chat, o None.
 
-    E' il comportamento storico (primo profilo in ordine di nome che elenca la
-    chat), conservato SOLO come fallback: un profilo creato a caldo via API
-    riceve i link alla prossima migrazione, e fino ad allora passa da qui.
-    Chi chiama ha aperto la connessione e la chiude; qui non si chiude niente.
+    E' la selezione storica del webhook, sopravvissuta SOLO per il fallback: nel
+    dispatch per link nessuno «vince» la chat, e questo lookup serve a trovare il
+    profilo che i link non rappresentano ancora.
     """
     profiles = c.execute('SELECT name,chat_ids,parser FROM profiles ORDER BY name').fetchall()
-    profile = next((dict(zip(['name', 'chat_ids', 'parser'], row)) for row in profiles
-                    if chat_id in {x.strip() for x in row[1].split(',') if x.strip()}), None)
-    if not profile:
-        return {'ok': True, 'ignored': 'chat_not_allowed'}
+    return next((dict(zip(['name', 'chat_ids', 'parser'], row)) for row in profiles
+                 if chat_id in {x.strip() for x in row[1].split(',') if x.strip()}), None)
+
+
+def _utente_del_profilo_nei_link(c, nome_profilo, link):
+    """Vero se l'utente di questo profilo e' gia' servito dai link della chat."""
+    riga = c.execute('SELECT id FROM users WHERE origin_profile=?',
+                     (nome_profilo,)).fetchone()
+    return riga is not None and any(r[9] == riga[0] for r in link)
+
+
+def _elabora_profilo(c, profile, text):
+    """Il percorso legacy per UN profilo. Restituisce l'esito, non committa."""
     bloccato = accesso_bloccato_del_profilo(c, profile['name'])
     if bloccato:
-        return {'ok': True, 'ignored': f'access_{bloccato}'}
+        return f'access_{bloccato}'
     cfg = get_parser(c, profile['parser'])
     parsed = elabora_messaggio(text, cfg)
     if not parsed:
-        return {'ok': True, 'ignored': 'parser_no_match'}
+        return 'parser_no_match'
     try:
         store_signal(c, parsed['csv'], profile['parser'], profile['name'])
     except ValueError:
-        return {'ok': True, 'ignored': 'csv_non_valido'}
-    c.commit()
-    return {'ok': True, 'profile': profile['name'], 'event': parsed['event']}
+        return 'csv_non_valido'
+    return {'event': parsed['event']}
+
 
 # Prototipo della web app SaaS: file statici, nessuna dipendenza aggiuntiva.
 # Montato per ultimo per non intercettare gli endpoint del relay. `WEB_DIR` e'

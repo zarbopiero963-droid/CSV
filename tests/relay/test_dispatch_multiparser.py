@@ -119,10 +119,55 @@ def _segnali(percorso):
     """Le righe vive di `signals`, per etichetta utente."""
     c = sqlite3.connect(percorso)
     righe = c.execute(
-        'SELECT COALESCE(u.origin_profile, u.slug), s.csv, s.expires_at'
+        'SELECT COALESCE(u.origin_profile, u.slug, s.profile), s.csv, s.expires_at'
         ' FROM signals s LEFT JOIN users u ON u.id = s.user_id').fetchall()
     c.close()
     return righe
+
+
+def test_un_utente_BLOCCATO_non_ferma_gli_altri_sulla_stessa_chat(tmp_path, monkeypatch):
+    """L'accesso scaduto di uno non tocca il feed dell'altro, e non si logga.
+
+    Copre il ramo `access_<stato>` del dispatch (segnalato scoperto da
+    CodeRabbit): l'utente bloccato viene saltato PRIMA del parsing — niente
+    segnale, e niente riga in `message_logs`, che e' una funzione del servizio e
+    non un archivio dei messaggi di chi non ha accesso (PR #26).
+    """
+    percorso = _relay(tmp_path, monkeypatch, 'bloccato_fra_due.db')
+    _secondo_profilo(percorso, 'ALTRO', config=CONFIG_STESSO_MESSAGGIO)
+    _riavvio(monkeypatch)
+    c = sqlite3.connect(percorso)
+    altro = c.execute("SELECT id FROM users WHERE origin_profile='ALTRO'").fetchone()[0]
+    c.execute("UPDATE users SET status='attivo', access_expires_at=? WHERE id=?",
+              (int(time.time()) - 86400, altro))
+    c.commit()
+    c.close()
+
+    esito = _consegna()
+    per_utente = {r[0]: r[1] for r in _segnali(percorso)}
+    assert 'PIERO' in per_utente, f'l\'utente sano non ha ricevuto: {esito!r}'
+    assert 'ALTRO' not in per_utente, 'l\'utente scaduto ha ricevuto un segnale'
+    c = sqlite3.connect(percorso)
+    log_altro = c.execute('SELECT COUNT(*) FROM message_logs WHERE user_id=?',
+                          (altro,)).fetchone()[0]
+    c.close()
+    assert log_altro == 0, 'il messaggio di un utente bloccato e\' finito nei log'
+
+
+def test_due_utenti_serviti_dalla_stessa_consegna_risposta_AGGREGATA(tmp_path, monkeypatch):
+    """Quando la chat serve piu' utenti la risposta aggrega, con ok=True.
+
+    Il contratto a chiave singola ({'profile','event'}) vale per la chat di UN
+    utente — lo vincolano i 35 test legacy — e qui si vincola l'altra meta'.
+    """
+    percorso = _relay(tmp_path, monkeypatch, 'aggregata.db')
+    _secondo_profilo(percorso, 'ALTRO', config=CONFIG_STESSO_MESSAGGIO)
+    _riavvio(monkeypatch)
+
+    esito = _consegna()
+    assert esito.get('ok') is True, esito
+    assert set(esito.get('utenti', {})) == {'PIERO', 'ALTRO'}, (
+        f'attesa la mappa aggregata dei due utenti serviti: {esito!r}')
 
 
 # ------------------------------------------------------ il pericolo 1 si chiude
@@ -245,6 +290,38 @@ def test_un_webhook_DUPLICATO_si_elabora_una_volta_sola(tmp_path, monkeypatch):
         'la riconsegna ha riscritto il segnale: il TTL e\' ripartito')
 
 
+def test_un_fallimento_a_meta_NON_brucia_il_retry(tmp_path, monkeypatch):
+    """Se l'elaborazione fallisce, la riconsegna di Telegram DEVE rielaborare.
+
+    Bloccante di Claude Fable 5 e rischio di GPT-5.5 sulla PR #44, convergenti:
+    la prima versione committava il marker di `webhook_seen` PRIMA di elaborare,
+    quindi un crash fra il marker e `store_signal` perdeva il segnale per sempre
+    — il retry usciva come `duplicate` con niente nel feed. Il marker va scritto
+    nella STESSA transazione del segnale: o entrambi, o nessuno.
+    """
+    percorso = _relay(tmp_path, monkeypatch, 'retry_vivo.db')
+    _riavvio(monkeypatch)
+
+    vero = main.store_signal
+    guasti = []
+
+    def guasto_una_volta(*a, **k):
+        if not guasti:
+            guasti.append(True)
+            raise sqlite3.OperationalError('database is locked (simulato)')
+        return vero(*a, **k)
+
+    monkeypatch.setattr(main, 'store_signal', guasto_una_volta)
+    with pytest.raises(Exception):
+        _consegna(update_id=909)  # il guasto DEVE propagarsi: 500 → Telegram ritenta
+    assert not _segnali(percorso), 'il primo tentativo guasto ha scritto comunque'
+
+    esito = _consegna(update_id=909)  # la riconsegna, stesso update_id
+    assert esito.get('ignored') != 'duplicate', (
+        'la riconsegna dopo un guasto esce come duplicate: segnale perso per sempre')
+    assert _segnali(percorso), 'la riconsegna non ha scritto il segnale'
+
+
 def test_update_id_DIVERSO_si_elabora_normalmente(tmp_path, monkeypatch):
     """Il verso opposto: il dedup ferma i duplicati, non le consegne nuove."""
     percorso = _relay(tmp_path, monkeypatch, 'non_duplicato.db')
@@ -252,6 +329,40 @@ def test_update_id_DIVERSO_si_elabora_normalmente(tmp_path, monkeypatch):
     e1 = _consegna(update_id=1)
     e2 = _consegna(update_id=2)
     assert 'ignored' not in e1 and 'ignored' not in e2, (e1, e2)
+
+
+def test_un_link_con_parser_SENZA_utente_non_scrive_chiavi_nulle(tmp_path, monkeypatch):
+    """Un parser orfano (user_id NULL) collegato a mano non inquina il feed.
+
+    Rischio segnalato da GPT-5.5 sulla PR #44: la semina non puo' creare un link
+    del genere (esige il JOIN con `users`), ma una riga scritta a mano nel
+    database si'. Senza guardia, quel parser scriverebbe una riga di `signals`
+    con user_id E profile NULL — e `DELETE WHERE profile=NULL` non cancella mai
+    niente in SQL, quindi le righe si ACCUMULEREBBERO a ogni messaggio: un feed
+    di nessuno che cresce per sempre. La guardia lo esclude dal dispatch; la
+    chat resta servita dai parser con un proprietario.
+    """
+    percorso = _relay(tmp_path, monkeypatch, 'orfano.db')
+    _riavvio(monkeypatch)
+    c = sqlite3.connect(percorso)
+    c.execute('INSERT INTO parsers(name, header, config_json) VALUES (?,?,?)',
+              ('Orfano', 'inutilizzato', json.dumps(CONFIG_STESSO_MESSAGGIO)))
+    c.execute("UPDATE parsers SET id=rowid WHERE name='Orfano'")
+    pid = c.execute("SELECT id FROM parsers WHERE name='Orfano'").fetchone()[0]
+    cid = c.execute('SELECT id FROM chats WHERE telegram_chat_id=?', (CHAT,)).fetchone()[0]
+    c.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (?,?)', (pid, cid))
+    c.commit()
+    c.close()
+
+    _consegna()
+    _consegna(update_id=2)  # una seconda consegna: le righe nulle si accumulerebbero
+    c = sqlite3.connect(percorso)
+    nulle = c.execute('SELECT COUNT(*) FROM signals WHERE user_id IS NULL'
+                      ' AND profile IS NULL').fetchone()[0]
+    di_piero = c.execute('SELECT COUNT(*) FROM signals WHERE user_id IS NOT NULL').fetchone()[0]
+    c.close()
+    assert nulle == 0, f'{nulle} righe di segnale senza proprietario: crescono per sempre'
+    assert di_piero == 1, 'il parser CON proprietario doveva continuare a scrivere'
 
 
 # ---------------------------------------------------- il riavvio non rimescola
@@ -289,3 +400,25 @@ def test_un_profilo_creato_a_CALDO_dispatcha_senza_riavvio(tmp_path, monkeypatch
     esito = _consegna(chat='-1002000000099')
     assert 'ignored' not in esito, (
         f'la chat di un profilo creato a caldo e\' stata ignorata: {esito!r}')
+
+
+def test_un_profilo_a_caldo_su_una_chat_GIA_collegata_non_resta_muto(tmp_path, monkeypatch):
+    """Il caso che il fallback semplice non copriva: bloccante di Fable sulla PR #44.
+
+    La chat ha GIA' i link di PIERO; un profilo nuovo creato a caldo sulla STESSA
+    chat non ha ancora i suoi (arrivano alla prossima migrazione). Col fallback
+    «solo se la chat non ha nessun link», il profilo nuovo restava muto fino al
+    riavvio — e PIERO, servito dai link, mascherava il silenzio. Il percorso
+    legacy deve integrare il profilo il cui utente NON e' rappresentato nei link.
+    """
+    percorso = _relay(tmp_path, monkeypatch, 'caldo_su_collegata.db')
+    _riavvio(monkeypatch)  # PIERO ha i suoi link su CHAT
+    _secondo_profilo(percorso, 'AGGIUNTO', chat=CHAT,
+                     config=CONFIG_STESSO_MESSAGGIO)  # NIENTE riavvio
+
+    _consegna()
+    per_utente = {r[0]: r[1] for r in _segnali(percorso)}
+    assert 'PIERO' in per_utente, f'PIERO (via link) senza segnale: {sorted(per_utente)}'
+    assert 'AGGIUNTO' in per_utente, (
+        f'il profilo a caldo su una chat gia\' collegata e\' rimasto muto: '
+        f'{sorted(per_utente)}')
