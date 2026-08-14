@@ -846,6 +846,44 @@ _PERCORSI_MIGRATI: set = set()
 _LOCK_MIGRAZIONE = threading.Lock()
 
 
+def _collega_parser_alle_chat(c):
+    """Semina `parser_chats` dai profili: il parser di ogni profilo si collega alle sue chat.
+
+    E' il ponte fra il mondo legacy (profili con `chat_ids` a virgole) e il
+    dispatch per-utente: ogni riga qui dice «questo parser elabora i messaggi di
+    questa chat», e il webhook la legge al posto del primo-profilo-alfabetico.
+    Due profili sulla stessa chat producono DUE link — ognuno al proprio parser,
+    ognuno verso il feed del proprio utente — ed e' cosi' che il pericolo 1
+    della #25 si chiude: nessuno «vince» la chat, ognuno riceve il suo.
+
+    Idempotente per il PRIMARY KEY della tabella. Come il seme dei profili,
+    risemina a ogni avvio anche un link cancellato a mano: oggi nessuna API
+    cancella i link (arriva con la verifica chat), e questa riga muore insieme
+    al seme quando la rimozione del seme (#25 lavoro E) tocchera' anche lei.
+    """
+    for nome, chat_ids, parser_nome in c.execute(
+            'SELECT name, chat_ids, parser FROM profiles ORDER BY name').fetchall():
+        # Il link nasce solo se il parser appartiene all'UTENTE di questo profilo.
+        # Due profili possono nominare lo stesso parser, ma il parser ha UN
+        # proprietario: un link seminato dall'altro profilo manderebbe i segnali
+        # della sua chat al feed del proprietario del parser — il legame fra
+        # utenti diversi che il test cross-tenant della deduplica vieta. Il
+        # profilo il cui parser e' altrui resta sul percorso legacy (fallback),
+        # che scrive per profilo e quindi nel feed giusto.
+        pid = c.execute(
+            'SELECT p.id FROM parsers p JOIN users u ON u.id = p.user_id'
+            ' WHERE p.name=? AND p.id IS NOT NULL AND u.origin_profile=?',
+            (parser_nome, nome)).fetchone()
+        if not pid:
+            continue
+        for chat in {x.strip() for x in (chat_ids or '').split(',') if x.strip()}:
+            cid = c.execute(f'SELECT id FROM chats WHERE telegram_chat_id=?'
+                            f' AND {TOPIC_CHAT}=?', (chat, '')).fetchone()
+            if cid:
+                c.execute('INSERT OR IGNORE INTO parser_chats(parser_id, chat_id)'
+                          ' VALUES (?,?)', (pid[0], cid[0]))
+
+
 def migra(c):
     """Porta il database allo schema corrente. Idempotente: si puo' rieseguire.
 
@@ -1211,9 +1249,21 @@ def accesso_bloccato_del_profilo(c, profilo):
     """
     riga = c.execute('SELECT status, access_expires_at, is_admin FROM users'
                      ' WHERE origin_profile=?', (profilo,)).fetchone()
-    if riga is None or riga[2]:
+    if riga is None:
         return None
-    stato = stato_effettivo(riga[0], riga[1])
+    return _blocco_della_riga(riga[0], riga[1], riga[2])
+
+
+def _blocco_della_riga(status, access_expires_at, is_admin):
+    """La stessa decisione, sui valori di una riga di `users` gia' in mano.
+
+    Fonte unica (regola 3) per `accesso_bloccato_del_profilo`, per il feed
+    per-utente e per il dispatch del webhook: tre lettori, una decisione.
+    Il proprietario (`is_admin`) non e' un abbonamento — vedi sopra.
+    """
+    if is_admin:
+        return None
+    stato = stato_effettivo(status, access_expires_at)
     return stato if stato in ACCESSI_BLOCCATI else None
 
 
@@ -1470,6 +1520,9 @@ def _travasa_nel_multiutente(c):
     c.execute('CREATE UNIQUE INDEX IF NOT EXISTS parsers_utente_slug'
               ' ON parsers (user_id, slug)')
     c.execute('CREATE UNIQUE INDEX IF NOT EXISTS parsers_id ON parsers (id)')
+    # I link chat→parser, seminati dai profili. Sta DOPO `_completa_colonne_nuove`
+    # perche' ha bisogno di `parsers.id`, che e' quella funzione a riempire.
+    _collega_parser_alle_chat(c)
     # `users.origin_profile` e' UNIQUE nel CREATE TABLE, ma un database che riceve la
     # colonna dall'ALTER non ha il vincolo: SQLite non sa aggiungerne con ADD COLUMN.
     # I due percorsi finivano quindi con garanzie diverse, e quello senza garanzia era
@@ -1637,9 +1690,14 @@ def make_csv(row):
     return csv_text(HEADERS, row)
 
 
-def store_signal(c, csv_text_value, parser, profile=PIERO_PROFILE):
+def store_signal(c, csv_text_value, parser, profile=PIERO_PROFILE, utente=None):
     # One message produces one row; the next message only replaces THIS OWNER's row.
     # Fail closed: a CSV that does not pass verification is never stored.
+    #
+    # Due modi di nominare il proprietario, UNA riga: i chiamanti legacy passano
+    # `profile` e l'utente si risolve dal ponte `origin_profile`; il dispatch
+    # multi-parser passa `utente` e il profilo si risolve al contrario, cosi' gli
+    # alias legacy continuano a leggere. Con entrambi, comandano quelli passati.
     #
     # La chiave del segnale e' l'UTENTE (Issue #2: feed, token e timer stanno
     # sull'utente), risolto dal profilo via `origin_profile` — lo stesso ponte di
@@ -1655,14 +1713,23 @@ def store_signal(c, csv_text_value, parser, profile=PIERO_PROFILE):
     # segnali vivi per lo stesso feed utente: un segnale stantio accanto a quello
     # nuovo, che e' esattamente cio' che «una riga viva per utente» vieta.
     verify_csv(csv_text_value)
-    riga = c.execute('SELECT id FROM users WHERE origin_profile=?', (profile,)).fetchone()
-    utente = riga[0] if riga else None
+    if utente is None and profile is not None:
+        riga = c.execute('SELECT id FROM users WHERE origin_profile=?', (profile,)).fetchone()
+        utente = riga[0] if riga else None
+    elif utente is not None and profile is None:
+        # Il ponte al contrario: il dispatch per-utente conosce l'utente, e se
+        # quell'utente viene da un profilo la colonna legacy va scritta comunque —
+        # e' quella che `/xtrader.csv` e `/profiles/{p}.csv` leggono.
+        riga = c.execute('SELECT origin_profile FROM users WHERE id=?', (utente,)).fetchone()
+        profile = riga[0] if riga else None
     if utente is None:
         # Profilo senza utente collegato: la chiave utente non esiste, resta il
         # comportamento storico. Non e' un errore — un profilo puo' nascere prima
         # del suo utente — e inventare una riga in `users` da qui violerebbe la
         # regola per cui l'identita' non si crea su un percorso di scrittura segnali.
         c.execute('DELETE FROM signals WHERE profile=?', (profile,))
+    elif profile is None:
+        c.execute('DELETE FROM signals WHERE user_id=?', (utente,))
     else:
         c.execute('DELETE FROM signals WHERE user_id=? OR profile=?', (utente, profile))
     c.execute('INSERT INTO signals(csv,parser,profile,user_id,expires_at) VALUES (?,?,?,?,?)',
@@ -2411,10 +2478,9 @@ def feed_utente_csv(slug: str, token: str | None = Query(None)):
         if not secrets.compare_digest(hash_token_feed(token).encode('utf-8'),
                                       atteso.encode('utf-8')):
             raise non_trovato
-        # L'abbonamento: stessa decisione di `accesso_bloccato_del_profilo`, letta
-        # direttamente dall'utente perche' qui l'utente C'E' — non serve il ponte
-        # `origin_profile`. Il proprietario (`is_admin`) non e' un abbonamento.
-        if not admin and stato_effettivo(status, scadenza) in ACCESSI_BLOCCATI:
+        # L'abbonamento: stessa decisione di `accesso_bloccato_del_profilo`, via
+        # la stessa `_blocco_della_riga` — qui l'utente C'E', non serve il ponte.
+        if _blocco_della_riga(status, scadenza, admin):
             return Response(empty_csv(), media_type='text/csv',
                             headers={'Cache-Control': 'no-store'})
         # La consegna e' una LETTURA: il TTL vive nel filtro, non in una DELETE.
@@ -3917,41 +3983,166 @@ async def telegram_webhook(request: Request):
         finally:
             c.close()
         return {'ok': True, 'start': True}
+    # Dedup delle riconsegne: Telegram ritenta le consegne che crede fallite, e
+    # senza questo controllo ogni retry rifaceva DELETE+INSERT e RIARMAVA il TTL —
+    # un segnale «da 90 secondi» che vive piu' a lungo a ogni riconsegna e' una
+    # puntata che nessuno ha scelto. `INSERT OR IGNORE` su PRIMARY KEY: la prima
+    # consegna vince, le successive con lo stesso `update_id` escono qui. La
+    # pulizia a 7 giorni viaggia con la scrittura, come per `message_logs`.
+    update_id = payload.get('update_id')
+    if update_id is not None:
+        c = db()
+        try:
+            nuovo = c.execute('INSERT OR IGNORE INTO webhook_seen(update_id) VALUES (?)',
+                              (str(update_id),)).rowcount
+            c.execute("DELETE FROM webhook_seen WHERE created_at < datetime('now', '-7 days')")
+            c.commit()
+        finally:
+            c.close()
+        if not nuovo:
+            return {'ok': True, 'ignored': 'duplicate'}
+    # L'elaborazione sta FUORI dall'event loop (asyncio.to_thread): SQLite e il
+    # motore di parsing sono sincroni, e sul percorso che riceve OGNI messaggio di
+    # OGNI canale un parser lento non deve fermare le altre richieste del servizio
+    # (#31 B1). La regex utente resta comunque capata da REGEX_BUDGET_PARSER_S.
+    return await asyncio.to_thread(_processa_messaggio_canale, chat_id, text)
+
+
+def _processa_messaggio_canale(chat_id, text):
+    """Il dispatch: chat → i parser collegati, ognuno verso il feed del SUO utente.
+
+    Modello della Issue #2: la chat si collega ai PARSER (`parser_chats`, seminata
+    dai profili in `_collega_parser_alle_chat`); ogni parser attivo elabora in
+    modo indipendente e scrive nel feed del proprio utente. Fra i parser dello
+    STESSO utente che riconoscono lo stesso messaggio vince l'ULTIMO nell'ordine
+    dichiarato (`parsers.ordine`), e i battuti restano in `message_logs` come
+    «riconosciuto, sostituito da» — e' cio' che la UI promette di mostrare.
+
+    Chiude il pericolo 1 della #25: nessun profilo «vince» piu' la chat in ordine
+    alfabetico. Due profili sulla stessa chat sono due link, due utenti, due feed.
+
+    Se la chat non ha NESSUN link si passa al percorso legacy per profili: e' il
+    caso del profilo creato a caldo via API, che i link li riceve alla prossima
+    migrazione — senza fallback resterebbe muto fino al riavvio.
+    """
     c = db()
+    try:
+        riga_chat = c.execute(f'SELECT id FROM chats WHERE telegram_chat_id=?'
+                              f' AND {TOPIC_CHAT}=?', (chat_id, '')).fetchone()
+        link = []
+        if riga_chat:
+            link = c.execute(
+                'SELECT p.id, p.name, p.header, p.market_name, p.market_type,'
+                ' p.selection_name, p.handicap, p.bet_type, p.config_json,'
+                ' p.user_id, p.slug, u.origin_profile, u.status,'
+                ' u.access_expires_at, u.is_admin'
+                ' FROM parser_chats pc JOIN parsers p ON p.id = pc.parser_id'
+                ' LEFT JOIN users u ON u.id = p.user_id'
+                ' WHERE pc.chat_id=? AND IFNULL(p.active, 1)=1'
+                ' ORDER BY p.user_id, p.ordine, p.name',
+                (riga_chat[0],)).fetchall()
+        if not link:
+            return _processa_via_profili(c, chat_id, text)
+        # Pulizia dei log oltre i 7 giorni: viaggia con la scrittura, non con un
+        # timer — e' la stessa scelta di `webhook_seen`, per la stessa ragione.
+        c.execute("DELETE FROM message_logs WHERE created_at < datetime('now', '-7 days')")
+        esiti = {}
+        for utente_id, righe in _raggruppa(link, chiave=lambda r: r[9]):
+            etichetta = righe[0][11] or righe[0][10] or f'utente-{utente_id}'
+            # Accesso scaduto o sospeso: non si elabora e non si logga — il log e'
+            # una funzione del servizio, non un archivio (vedi PR #26).
+            bloccato = _blocco_della_riga(righe[0][12], righe[0][13], righe[0][14])
+            if bloccato:
+                esiti[etichetta] = f'access_{bloccato}'
+                continue
+            riconosciuti = []
+            for r in righe:
+                cfg = dict(zip(['name', 'header', 'market_name', 'market_type',
+                                'selection_name', 'handicap', 'bet_type',
+                                'config_json'], (r[1], r[2], r[3], r[4], r[5],
+                                                 r[6], r[7], r[8])))
+                parsed = elabora_messaggio(text, cfg)
+                if parsed:
+                    riconosciuti.append((r, parsed))
+            if not riconosciuti:
+                esiti[etichetta] = 'parser_no_match'
+                continue
+            # Vince l'ULTIMO nell'ordine dichiarato; i battuti nei log, col nome
+            # visibile del vincente (slug, o name per i parser legacy).
+            vincente, parsed = riconosciuti[-1]
+            nome_vincente = vincente[10] or vincente[1]
+            for battuto, _ in riconosciuti[:-1]:
+                c.execute('INSERT INTO message_logs(user_id, parser_id, chat_id,'
+                          ' text, esito) VALUES (?,?,?,?,?)',
+                          (utente_id, battuto[0], riga_chat[0], text,
+                           f'riconosciuto, sostituito da {nome_vincente}'))
+            try:
+                store_signal(c, parsed['csv'], vincente[1], profile=None,
+                             utente=utente_id)
+            except ValueError:
+                # Deterministico: lo stesso messaggio produrrebbe lo stesso CSV
+                # rotto. 200, cosi' Telegram non ritenta; il motivo resta su
+                # /health, non nella risposta di un endpoint pubblico.
+                esiti[etichetta] = 'csv_non_valido'
+                continue
+            c.execute('INSERT INTO message_logs(user_id, parser_id, chat_id, text,'
+                      ' esito) VALUES (?,?,?,?,?)',
+                      (utente_id, vincente[0], riga_chat[0], text,
+                       f'segnale scritto ({nome_vincente})'))
+            esiti[etichetta] = {'event': parsed['event']}
+        c.commit()
+    finally:
+        c.close()
+    # La forma della risposta: identica a prima quando la chat serve UN utente —
+    # e' il contratto che i test del webhook vincolano — aggregata quando sono
+    # di piu'. Telegram la ignora; serve ai log e ai test.
+    if len(esiti) == 1:
+        etichetta, esito = next(iter(esiti.items()))
+        if isinstance(esito, dict):
+            return {'ok': True, 'profile': etichetta, 'event': esito['event']}
+        return {'ok': True, 'ignored': esito}
+    scritti = {k: v['event'] for k, v in esiti.items() if isinstance(v, dict)}
+    if scritti:
+        return {'ok': True, 'utenti': scritti}
+    return {'ok': True, 'ignored': 'parser_no_match'}
+
+
+def _raggruppa(righe, chiave):
+    """Gruppi contigui per chiave, nell'ordine d'arrivo (le righe sono gia' ORDER BY)."""
+    gruppi = []
+    for r in righe:
+        if gruppi and chiave(gruppi[-1][1][0]) == chiave(r):
+            gruppi[-1][1].append(r)
+        else:
+            gruppi.append((chiave(r), [r]))
+    return gruppi
+
+
+def _processa_via_profili(c, chat_id, text):
+    """Il percorso legacy per profili, per le chat senza link in `parser_chats`.
+
+    E' il comportamento storico (primo profilo in ordine di nome che elenca la
+    chat), conservato SOLO come fallback: un profilo creato a caldo via API
+    riceve i link alla prossima migrazione, e fino ad allora passa da qui.
+    Chi chiama ha aperto la connessione e la chiude; qui non si chiude niente.
+    """
     profiles = c.execute('SELECT name,chat_ids,parser FROM profiles ORDER BY name').fetchall()
     profile = next((dict(zip(['name', 'chat_ids', 'parser'], row)) for row in profiles
                     if chat_id in {x.strip() for x in row[1].split(',') if x.strip()}), None)
     if not profile:
-        c.close()
         return {'ok': True, 'ignored': 'chat_not_allowed'}
-    # Accesso scaduto o sospeso: non si elabora e **non si registra nel log**. Il log dei
-    # messaggi e' una funzione del servizio, non un archivio: continuare a riempirlo per chi
-    # non ha accesso significherebbe conservare i messaggi dei suoi canali senza dargli
-    # niente in cambio. E il feed resta com'era — non si svuota e non si aggiorna: allo
-    # scadere ci pensa il TTL di 90 secondi, che e' l'unico che deve toccarlo.
     bloccato = accesso_bloccato_del_profilo(c, profile['name'])
     if bloccato:
-        c.close()
         return {'ok': True, 'ignored': f'access_{bloccato}'}
     cfg = get_parser(c, profile['parser'])
     parsed = elabora_messaggio(text, cfg)
     if not parsed:
-        c.close()
         return {'ok': True, 'ignored': 'parser_no_match'}
     try:
         store_signal(c, parsed['csv'], profile['parser'], profile['name'])
     except ValueError:
-        # Deterministic failure: the same message would produce the same broken
-        # CSV, so answer 200 and let Telegram stop retrying.
-        #
-        # The reason does NOT leave in the response: this endpoint is public,
-        # Telegram posts to it, and there is no reason to tell an arbitrary
-        # caller how the CSV is built. The condition stays visible on /health,
-        # which verifies the format on every call.
-        c.close()
         return {'ok': True, 'ignored': 'csv_non_valido'}
     c.commit()
-    c.close()
     return {'ok': True, 'profile': profile['name'], 'event': parsed['event']}
 
 # Prototipo della web app SaaS: file statici, nessuna dipendenza aggiuntiva.

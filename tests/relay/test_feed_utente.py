@@ -453,6 +453,72 @@ def test_il_poll_del_feed_NON_scrive_sul_database(tmp_path, monkeypatch):
         f'il feed legacy su database di sola lettura non risponde: {corpo[:40]!r}')
 
 
+def test_conii_CONCORRENTI_lasciano_uno_stato_coerente(tmp_path, monkeypatch):
+    """Quattro conii simultanei dello stesso utente: vince l'ultimo, stato coerente.
+
+    Dal finding di GPT-5.6 Sol sul gate finale della PR #43, verificato la' con
+    questo stesso scenario e smentito come difetto: «solo l'ultimo hash resta» e'
+    la semantica documentata della rotazione — due rigenerazioni IN FILA hanno la
+    stessa proprieta' — e lo stato «strappato» (hash di un token, prefix di un
+    altro) non puo' esistere perche' le tre colonne viaggiano in un solo UPDATE.
+    Questo test tiene vincolate entrambe le cose: esattamente UN token apre il
+    feed, e prefix/hash nel database appartengono a quel token.
+    """
+    import threading
+
+    percorso = _relay_in_processo(tmp_path, monkeypatch, 'conii_concorrenti.db')
+    risposta = main.login_telegram(main.LoginTelegramIn(**_dati_login(id='606000606')))
+    cookie = None
+    for pezzo in (risposta.headers.get('set-cookie') or '').split(';'):
+        chiave, _, valore = pezzo.strip().partition('=')
+        if chiave == main.NOME_COOKIE:
+            cookie = valore
+
+    class Richiesta:
+        cookies = {main.NOME_COOKIE: cookie}
+
+    ricevuti, errori = [], []
+    via = threading.Barrier(4)
+
+    def conia():
+        try:
+            via.wait()
+            corpo = json.loads(bytes(main.genera_token_feed(Richiesta()).body).decode())
+            ricevuti.append(corpo['token'])
+        except Exception as e:  # noqa: BLE001 - il tipo dell'errore E' il risultato
+            errori.append(repr(e))
+
+    fili = [threading.Thread(target=conia) for _ in range(4)]
+    for f in fili:
+        f.start()
+    for f in fili:
+        f.join()
+    assert len(ricevuti) == 4 and not errori, (ricevuti, errori)
+
+    c = sqlite3.connect(percorso)
+    c.execute("UPDATE users SET status='attivo' WHERE telegram_id='606000606'")
+    c.commit()
+    slug, hash_db, prefix_db = c.execute(
+        "SELECT slug, token_hash, token_prefix FROM users"
+        " WHERE telegram_id='606000606'").fetchone()
+    c.close()
+
+    aperti = []
+    for tok in ricevuti:
+        try:
+            stato = main.feed_utente_csv(slug, token=tok).status_code
+        except main.HTTPException as e:
+            stato = e.status_code
+        if stato == 200:
+            aperti.append(tok)
+    assert len(aperti) == 1, (
+        f'{len(aperti)} token su 4 aprono il feed: la rotazione deve lasciarne UNO')
+    vincente = aperti[0]
+    assert hash_db == hashlib.sha256(vincente.encode('utf-8')).hexdigest()
+    assert prefix_db == vincente[:9], (
+        f'stato STRAPPATO: prefix {prefix_db!r} di un token, hash di un altro')
+
+
 # ----------------------------------------------- i byte HTTP del percorso vero
 
 def test_HTTP_la_rotta_nuova_serve_text_csv_col_BOM(tmp_path, monkeypatch):

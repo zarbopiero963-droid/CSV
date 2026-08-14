@@ -460,9 +460,14 @@ def test_parsers_ha_una_colonna_id_a_cui_parser_chats_puo_puntare(tmp_path):
     ids = [r[0] for r in c.execute('SELECT id FROM parsers').fetchall()]
     assert all(i is not None for i in ids), f'id non riempiti: {ids}'
     assert len(set(ids)) == len(ids), f'id non univoci: {ids}'
-    # e il collegamento diventa possibile
-    chat = c.execute('SELECT id FROM chats LIMIT 1').fetchone()[0]
-    c.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (?,?)', (ids[0], chat))
+    # E il collegamento non e' solo POSSIBILE: dal PR sul dispatch multi-parser la
+    # migrazione lo semina dai profili (`_collega_parser_alle_chat`), quindi qui
+    # si misura che i link esistano e riferiscano id veri di entrambe le tabelle.
+    link = c.execute('SELECT parser_id, chat_id FROM parser_chats').fetchall()
+    assert link, 'la semina non ha creato nessun link chat-parser dai profili'
+    for pid, cid in link:
+        assert c.execute('SELECT 1 FROM parsers WHERE id=?', (pid,)).fetchone(), pid
+        assert c.execute('SELECT 1 FROM chats WHERE id=?', (cid,)).fetchone(), cid
 
 
 def test_una_migrazione_fallita_non_lascia_la_connessione_aperta(tmp_path, monkeypatch):
@@ -678,8 +683,10 @@ def test_la_deduplica_non_ORFANA_le_associazioni_parser_chat(tmp_path):
     che questo test vuole misurare. Perche- l'`id` del parser esista serve una prima
     `migra()`, quindi lo stato duplicato si costruisce DOPO.
 
-    Oggi nessun codice scrive in `parser_chats` — quindi non e- un bug attivo, e- il PR
-    sul dispatch multi-parser che lo renderebbe attivo trovandoselo gia- chiuso.
+    Dal PR sul dispatch multi-parser la migrazione SEMINA `parser_chats` dai
+    profili, quindi accanto alla riga sotto esame vivono i link legittimi delle
+    altre chat del profilo: le asserzioni guardano la chat duplicata, non la
+    tabella intera.
     """
     c = _database_di_produzione(tmp_path / 'orfane.db')
     main.migra(c)
@@ -699,8 +706,12 @@ def test_la_deduplica_non_ORFANA_le_associazioni_parser_chat(tmp_path):
     main.migra(c)
 
     righe = c.execute('SELECT parser_id, chat_id FROM parser_chats').fetchall()
-    assert righe == [(parser, vincente)], (
-        f'associazione orfana o persa: {righe}, la chat sopravvissuta e- {vincente}')
+    assert (parser, vincente) in righe, (
+        f'associazione persa: {righe}, la chat sopravvissuta e- {vincente}')
+    assert (parser, perdente) not in righe, (
+        f'associazione orfana verso la chat cancellata {perdente}: {righe}')
+    # E nessun'altra riga riferisce la chat cancellata.
+    assert all(cid != perdente for _, cid in righe), righe
 
 
 def test_una_seconda_migrazione_non_TENTA_di_reinserire_le_chat(tmp_path):
@@ -1124,7 +1135,10 @@ def test_la_deduplica_regge_un_parser_associato_a_ENTRAMBE_le_duplicate(tmp_path
 
     main.migra(c)  # non deve sollevare
 
-    righe = c.execute('SELECT parser_id, chat_id FROM parser_chats').fetchall()
+    # Solo le righe del parser 7, quello sotto esame: la semina dai profili
+    # (dispatch multi-parser) aggiunge i link legittimi del parser di PIERO.
+    righe = [r for r in c.execute('SELECT parser_id, chat_id FROM parser_chats').fetchall()
+             if r[0] == 7]
     assert righe == [(7, vincente)], (
         f'atteso la sola associazione (7, {vincente}): {righe}')
     superstiti = c.execute('SELECT COUNT(*) FROM chats WHERE telegram_chat_id=?',

@@ -148,6 +148,26 @@ Il webhook e la rotta di prova passano da elabora_messaggio, che sceglie:
 Le rotte che creano parser con config_json dalla web app arrivano piu' avanti;
 finche' non esistono, in produzione tutti i parser sono "senza config_json".
 
+IL DISPATCH: CHAT -> N PARSER, OGNUNO AL SUO FEED
+Il webhook non prende piu' "il primo profilo in ordine alfabetico che contiene la
+chat" (il difetto misurato nella Issue #25: un profilo dal nome che ordina prima
+di PIERO dirottava la produzione in silenzio). Legge parser_chats, seminata dalla
+migrazione a partire dai profili:
+- ogni consegna porta un update_id: la PRIMA vince, le riconsegne di Telegram
+  escono come {"ignored":"duplicate"} senza rielaborare ne' riarmare il TTL;
+- l'elaborazione gira fuori dall'event loop (un parser lento non ferma le altre
+  richieste del servizio);
+- ogni parser ATTIVO collegato alla chat elabora in modo indipendente e scrive
+  nel feed del SUO utente; fra i parser dello stesso utente che riconoscono lo
+  stesso messaggio vince l'ULTIMO nell'ordine dichiarato (parsers.ordine), e i
+  battuti restano in message_logs come "riconosciuto, sostituito da ...";
+- utenti diversi sulla stessa chat non si toccano: due profili sulla stessa chat
+  sono due feed indipendenti.
+Una chat senza alcun link (un profilo creato a caldo via API: i link arrivano
+alla prossima migrazione) passa dal percorso legacy per profili, identico a prima.
+message_logs e webhook_seen si ripuliscono da sole oltre i 7 giorni, alla
+scrittura successiva.
+
 Le regex di un parser configurabile (condizione o colonna) le scrive l'utente e
 girano sul worker condiviso: hanno un TIMEOUT DURO (modulo regex, che lo `re` di
 stdlib non ha). Il deadline e' a due livelli: 0,1 s per singolo match, e un BUDGET DI
