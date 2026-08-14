@@ -644,6 +644,16 @@ HEADERS = ['Provider','EventId','EventName','MarketId','MarketName','MarketType'
 DEFAULT_PARSER = 'Parser_Telegram_XTrader_v1'
 PIERO_PROFILE = 'PIERO'
 
+# I tetti per-tenant del CRUD parser (#31 B2). La regola che servono: «tutto
+# personale del cliente, non deve bloccare gli altri» — senza, una sessione
+# approvata puo' gonfiare lo SQLite e il volume Railway CONDIVISO. Il numero
+# massimo si regola da variabile (Railway) senza deploy; i tetti di dimensione
+# sono generosi rispetto all'uso reale (una config tipica sta sotto i 2k) e
+# stretti rispetto all'abuso.
+MAX_PARSER_PER_UTENTE = int(os.getenv('MAX_PARSER_PER_UTENTE', '20'))
+MAX_TITOLO_PARSER = 80
+MAX_CONFIG_PARSER = 20_000
+
 class MessageIn(BaseModel):
     message: str
 
@@ -3181,9 +3191,9 @@ def chiedi_accesso(request: Request):
             raise HTTPException(401, 'sessione assente o scaduta')
         stato = stato_effettivo(riga[0], riga[1])
         if stato == 'attivo':
-            raise HTTPException(409, 'accesso giu\' attivo')
+            raise HTTPException(409, 'accesso gia\' attivo')
         if stato == 'in_attesa':
-            raise HTTPException(409, 'richiesta giu\' in corso')
+            raise HTTPException(409, 'richiesta gia\' in corso')
         if stato == 'sospeso':
             # Un sospeso non rientra da se' chiedendo di nuovo: la sospensione e' una decisione
             # del proprietario, e una richiesta che la aggirasse la renderebbe inutile.
@@ -3197,7 +3207,7 @@ def chiedi_accesso(request: Request):
             # Senza questo ramo il perdente riceveva un **500** su un doppio clic. Bloccante di
             # Claude Fable 5 sulla PR #26: la rilettura dentro la transazione copre un processo
             # solo, e con due worker l'indice diventa l'unico arbitro.
-            raise HTTPException(409, 'richiesta giu\' in corso')
+            raise HTTPException(409, 'richiesta gia\' in corso')
         c.execute("UPDATE users SET status='in_attesa' WHERE id=?", (utente['id'],))
         raggiungibile = bool(riga[2])
         c.commit()
@@ -3633,6 +3643,19 @@ def _vista_parser(riga):
             'config': json.loads(riga[4]) if riga[4] else {}, 'ordine': riga[5]}
 
 
+def _valida_tetti_parser(titolo, config):
+    """I tetti di DIMENSIONE, al confine di scrittura: creazione E modifica.
+
+    Fonte unica (regola 3): un tetto controllato solo alla creazione lascerebbe
+    gonfiare con la PUT un parser gia' dentro. Il messaggio dice il limite e non
+    nomina niente di altrui: e' un errore dell'utente sul suo input.
+    """
+    if len(titolo) > MAX_TITOLO_PARSER:
+        raise HTTPException(422, f'titolo troppo lungo: massimo {MAX_TITOLO_PARSER} caratteri')
+    if len(json.dumps(config)) > MAX_CONFIG_PARSER:
+        raise HTTPException(422, f'config troppo grande: massimo {MAX_CONFIG_PARSER} caratteri')
+
+
 def _valida_config_parser(config):
     """Controlla una config al confine di SCRITTURA, con un errore chiaro all'utente.
 
@@ -3725,6 +3748,20 @@ def _crea_parser_utente(c, user_id, titolo, config, active):
             # altro e il nome cambia. Segnalato da Claude Fable 5 sulla PR #30.
             falliti.add(slug)
             continue
+    if nome is not None:
+        # La quota si misura DOPO l'INSERT, dentro il write-lock che l'INSERT ha
+        # preso: misurata prima, il COUNT e' una SELECT che non apre la
+        # transazione, e due POST concorrenti sull'ultimo posto leggevano
+        # entrambi «uno sotto quota» e la bucavano — riprodotto dal test della
+        # corsa. Cosi' il perdente conta a riga gia' inserita, riceve il 409 e il
+        # rollback (la close senza commit del chiamante) toglie la sua riga.
+        # `409` e non `422`: non e' l'input a essere storto, e' lo stato — la
+        # quota, che si alza da variabile su Railway senza deploy.
+        quanti = c.execute('SELECT COUNT(*) FROM parsers WHERE user_id=?',
+                           (user_id,)).fetchone()[0]
+        if quanti > MAX_PARSER_PER_UTENTE:
+            raise HTTPException(
+                409, f'quota parser esaurita: massimo {MAX_PARSER_PER_UTENTE} per utente')
     if nome is None:
         raise HTTPException(409, 'creazione non riuscita per contesa, riprova')
     # `id` = `rowid`, come fa la migrazione: e' il surrogato stabile a cui punta
@@ -3775,6 +3812,7 @@ async def crea_parser_mio(request: Request):
     titolo = dati.titolo.strip()
     if not titolo:
         raise HTTPException(422, 'titolo mancante')
+    _valida_tetti_parser(titolo, dati.config)
     _valida_config_parser(dati.config)
     c = db()
     # `try/finally`: `_crea_parser_utente` puo' sollevare 409 (contesa esaurita), e
@@ -3799,6 +3837,7 @@ async def modifica_parser_mio(slug: str, request: Request):
     titolo = dati.titolo.strip()
     if not titolo:
         raise HTTPException(422, 'titolo mancante')
+    _valida_tetti_parser(titolo, dati.config)
     _valida_config_parser(dati.config)
     c = db()
     try:
