@@ -1,0 +1,525 @@
+{
+ "condizioni": [
+  {
+   "file": "01-20260706-165210.png",
+   "originale": "Immagine 2026-07-06 165210.png",
+   "drive_id": "1MbIAour7GCHxuIMU44aIHUwdwKy0VEzo"
+  },
+  {
+   "file": "02-20260706-165253.png",
+   "originale": "Immagine 2026-07-06 165253.png",
+   "drive_id": "1xjr7hAKQh9m4vJ0RzZP37VwCXxKZvXyG"
+  },
+  {
+   "file": "03-20260706-165321.png",
+   "originale": "Immagine 2026-07-06 165321.png",
+   "drive_id": "18cCZGjYQdpPyCLIGhZItSTz5UahpRCSI"
+  },
+  {
+   "file": "04-20260706-165419.png",
+   "originale": "Immagine 2026-07-06 165419.png",
+   "drive_id": "1HLk2nh3_eZpRqSb5gud7D2lmZPvAPgKw"
+  },
+  {
+   "file": "05-20260706-165445.png",
+   "originale": "Immagine 2026-07-06 165445.png",
+   "drive_id": "1tDdftZWNNqKcPNuzHclouxg-c5_STUgP"
+  },
+  {
+   "file": "06-20260706-165519.png",
+   "originale": "Immagine 2026-07-06 165519.png",
+   "drive_id": "10HvU9qRsJV6kqd8_gEEqTd7lfXOYuQQI"
+  },
+  {
+   "file": "07-20260706-165543.png",
+   "originale": "Immagine 2026-07-06 165543.png",
+   "drive_id": "1AlK4KxujXxbW6hpPXx0gIV8trr7Bya9E"
+  },
+  {
+   "file": "08-20260706-165603.png",
+   "originale": "Immagine 2026-07-06 165603.png",
+   "drive_id": "1hB2hBw9i6PZu0nIa9kSkC2QK6qcKd8Ei"
+  },
+  {
+   "file": "09-20260706-165624.png",
+   "originale": "Immagine 2026-07-06 165624.png",
+   "drive_id": "1fIkW-aMLu13DoXXniN5Vm38dOSfLXtx5"
+  },
+  {
+   "file": "10-20260706-165913.png",
+   "originale": "Immagine 2026-07-06 165913.png",
+   "drive_id": "1eDbusZwkZSCI-ysr8hWgp5w4Uj-hiTdo"
+  },
+  {
+   "file": "11-20260706-165935.png",
+   "originale": "Immagine 2026-07-06 165935.png",
+   "drive_id": "18KX_aFHbpKui315nARhE5gHu0EJExhZI"
+  },
+  {
+   "file": "12-20260706-170011.png",
+   "originale": "Immagine 2026-07-06 170011.png",
+   "drive_id": "1CoZ8ka8lNDT7l8PKHMyHy3VeBlIIxotq"
+  },
+  {
+   "file": "13-20260706-170051.png",
+   "originale": "Immagine 2026-07-06 170051.png",
+   "drive_id": "173W_xMHgA4xn6-RkrNLpiWNkbwanU8J9"
+  },
+  {
+   "file": "14-20260706-170129.png",
+   "originale": "Immagine 2026-07-06 170129.png",
+   "drive_id": "1ihS3rxSgKyahsxdASbBnY8_GAHHipJ8g"
+  },
+  {
+   "file": "15-20260706-170200.png",
+   "originale": "Immagine 2026-07-06 170200.png",
+   "drive_id": "1c3bNTyFCdS-6sMSAUvDxKMTDBQmDtm5G"
+  },
+  {
+   "file": "16-20260706-170233.png",
+   "originale": "Immagine 2026-07-06 170233.png",
+   "drive_id": "1VWXb2BjICdrDoGDxKms8_H5Gfkvb7qN7"
+  },
+  {
+   "file": "17-20260706-181819.png",
+   "originale": "Immagine 2026-07-06 181819.png",
+   "drive_id": "1NJel91HRLm7a78JZQ_EZonhte17_mVM6"
+  },
+  {
+   "file": "18-20260706-182041.png",
+   "originale": "Immagine 2026-07-06 182041.png",
+   "drive_id": "1k095eKTAwjlOQ0B-1IIF4zD44EiVHyox"
+  },
+  {
+   "file": "19-20260706-185503.png",
+   "originale": "Immagine 2026-07-06 185503.png",
+   "drive_id": "1JeO9EwpCS3BdmpuAWfO3TbsbF3fWM-Cv"
+  },
+  {
+   "file": "20-20260706-185533.png",
+   "originale": "Immagine 2026-07-06 185533.png",
+   "drive_id": "19NCnUVtAouyJcdAZMhYLZqoqtlIGQCLu"
+  },
+  {
+   "file": "21-20260706-185605.png",
+   "originale": "Immagine 2026-07-06 185605.png",
+   "drive_id": "1UEZcpqDNojWWnBlBgoPCH95LOzlEh5Us"
+  },
+  {
+   "file": "22-20260706-185650.png",
+   "originale": "Immagine 2026-07-06 185650.png",
+   "drive_id": "1EOsvxs5PNmmNrFHFjTyj2jyt_Mb9Sjxk"
+  },
+  {
+   "file": "23-20260706-185750.png",
+   "originale": "Immagine 2026-07-06 185750.png",
+   "drive_id": "1Ekpaa0IQ5iCY5PKPH7AmWBqfyabG_lG1"
+  },
+  {
+   "file": "24-20260706-185827.png",
+   "originale": "Immagine 2026-07-06 185827.png",
+   "drive_id": "18ygly-OESFF7ojZ_LB3d0RiiZhuqlHFI"
+  },
+  {
+   "file": "25-20260706-185905.png",
+   "originale": "Immagine 2026-07-06 185905.png",
+   "drive_id": "11J1AJUU5WQieucuYI2_JArzk_Yc_E5fF"
+  },
+  {
+   "file": "26-20260706-185932.png",
+   "originale": "Immagine 2026-07-06 185932.png",
+   "drive_id": "1Uo8mGxtaJ8AA3mChI8f1ynsAfqNJngQa"
+  },
+  {
+   "file": "27-20260706-190001.png",
+   "originale": "Immagine 2026-07-06 190001.png",
+   "drive_id": "1FwTnWtHO5C0z0elZcsGl-utLF73Vjrfq"
+  },
+  {
+   "file": "28-20260706-190037.png",
+   "originale": "Immagine 2026-07-06 190037.png",
+   "drive_id": "1Drh_mcvjPwpf3xobCtd6MG3X4y3_1lCW"
+  },
+  {
+   "file": "29-20260706-190129.png",
+   "originale": "Immagine 2026-07-06 190129.png",
+   "drive_id": "1aSmM3Oa1r28FTj4LZsQpNedGTEopMBzo"
+  },
+  {
+   "file": "30-20260706-190432.png",
+   "originale": "Immagine 2026-07-06 190432.png",
+   "drive_id": "1_EDjgylx4QZN87S502HpeNLTrDcU2z5D"
+  },
+  {
+   "file": "31-20260706-190517.png",
+   "originale": "Immagine 2026-07-06 190517.png",
+   "drive_id": "1LgXZH5lDNLUR63hmAXyOGqmFTZhpCtCH"
+  },
+  {
+   "file": "32-20260706-190550.png",
+   "originale": "Immagine 2026-07-06 190550.png",
+   "drive_id": "1IszsvlHk2f4wy9Eslg1bEmRI5e4W8wRu"
+  },
+  {
+   "file": "33-20260706-190945.png",
+   "originale": "Immagine 2026-07-06 190945.png",
+   "drive_id": "149orr9Xn7F2_euwXzq9d8_MWWjsKUOEa"
+  },
+  {
+   "file": "34-20260706-191403.png",
+   "originale": "Immagine 2026-07-06 191403.png",
+   "drive_id": "1oQSJ-IottzW_cN97neofLko0sluTS2mg"
+  },
+  {
+   "file": "35-20260706-191442.png",
+   "originale": "Immagine 2026-07-06 191442.png",
+   "drive_id": "1IKJCSVXD02eEXxQD-aWTDpZK4KUwnZXu"
+  },
+  {
+   "file": "36-20260706-191515.png",
+   "originale": "Immagine 2026-07-06 191515.png",
+   "drive_id": "1h8btkUohD4t9ptmmCrcM3IUi1WQQKnTP"
+  },
+  {
+   "file": "37-20260706-191632.png",
+   "originale": "Immagine 2026-07-06 191632.png",
+   "drive_id": "1Z36wGiYcJRfzZTXmbjZwCRgPf0cDGIWi"
+  },
+  {
+   "file": "38-20260706-191823.png",
+   "originale": "Immagine 2026-07-06 191823.png",
+   "drive_id": "192cx8AediNxorm3bCviwza0AeNcl4VlN"
+  },
+  {
+   "file": "39-20260706-191858.png",
+   "originale": "_Immagine 2026-07-06 191858.png",
+   "drive_id": "1Fir8KxACnTQAidRuSOowlUfDXZFLxCX"
+  },
+  {
+   "file": "40-20260706-191927.png",
+   "originale": "Immagine 2026-07-06 191927.png",
+   "drive_id": "1hOtJztelddY4XE8Ln-X_LVT0gNKLP8Rw"
+  },
+  {
+   "file": "41-20260706-191955.png",
+   "originale": "Immagine 2026-07-06 191955.png",
+   "drive_id": "1Fo57Ohcsud38TjOGrWMkOqmNB8aVjz_h"
+  },
+  {
+   "file": "42-20260706-192032.png",
+   "originale": "Immagine 2026-07-06 192032.png",
+   "drive_id": "1xJeIUTkP2IGCBgh9hUyAmoRd7RSfHXxG"
+  },
+  {
+   "file": "43-20260706-192116.png",
+   "originale": "Immagine 2026-07-06 192116.png",
+   "drive_id": "1IDToQ09JscRnsu3d7U7Paysq6n_ytQfr"
+  },
+  {
+   "file": "44-20260706-192155.png",
+   "originale": "Immagine 2026-07-06 192155.png",
+   "drive_id": "1A0a4aIZVM0cRFhLKY0qCTlvNgXqyyLxQ"
+  },
+  {
+   "file": "45-20260706-192218.png",
+   "originale": "Immagine 2026-07-06 192218.png",
+   "drive_id": "1vAPDsmc9Buz3uyVstV-n1lSwQJX8LZ8n"
+  },
+  {
+   "file": "46-20260706-192238.png",
+   "originale": "Immagine 2026-07-06 192238.png",
+   "drive_id": "1C3vRToHyS1mi0etvlsTyE7kmjNX0pxwQ"
+  },
+  {
+   "file": "47-20260706-192258.png",
+   "originale": "Immagine 2026-07-06 192258.png",
+   "drive_id": "1JVzVyxw_837zzib3nyj-0CZUwrLhTAbh"
+  },
+  {
+   "file": "48-20260706-192319.png",
+   "originale": "Immagine 2026-07-06 192319.png",
+   "drive_id": "1pXpzkJDhRlGPQJtOww0DhunA19QAkazY"
+  },
+  {
+   "file": "49-20260706-192340.png",
+   "originale": "Immagine 2026-07-06 192340.png",
+   "drive_id": "1CQmu1-BfH8UpePnIKNZzZkV-eONmgJqb"
+  },
+  {
+   "file": "50-20260706-192404.png",
+   "originale": "Immagine 2026-07-06 192404.png",
+   "drive_id": "1e2csymWLVfQuwOSJgI_9UZlokPdCP69V"
+  },
+  {
+   "file": "51-20260706-192425.png",
+   "originale": "Immagine 2026-07-06 192425.png",
+   "drive_id": "1WRjg8Nn4FDUw4CTRLB6DamA5ud2LcUhS"
+  },
+  {
+   "file": "52-20260706-192449.png",
+   "originale": "Immagine 2026-07-06 192449.png",
+   "drive_id": "1xhcyyy3EGWkwwzFdnKKTYUPpV45_xHwb"
+  },
+  {
+   "file": "53-20260706-192509.png",
+   "originale": "Immagine 2026-07-06 192509.png",
+   "drive_id": "1t9PMSA34cMT_qFXHPCM7WNAJNwR-2TcT"
+  },
+  {
+   "file": "54-20260706-192544.png",
+   "originale": "Immagine 2026-07-06 192544.png",
+   "drive_id": "1yTb3LMlJgToRXKbUyS7TgyJCmN_JGMpL"
+  },
+  {
+   "file": "55-20260706-192604.png",
+   "originale": "Immagine 2026-07-06 192604.png",
+   "drive_id": "10pXk-nDfMYorfk_faOwndSdh-jVikpvS"
+  },
+  {
+   "file": "56-20260706-192624.png",
+   "originale": "Immagine 2026-07-06 192624.png",
+   "drive_id": "1dp549LQg4D2tXOYE-lQK4GBYyLO3ljBc"
+  },
+  {
+   "file": "57-20260706-192653.png",
+   "originale": "Immagine 2026-07-06 192653.png",
+   "drive_id": "1H6Kex-iO68dTdEfUg_6WQsX4Vi0iFRH-"
+  },
+  {
+   "file": "58-20260706-192712.png",
+   "originale": "Immagine 2026-07-06 192712.png",
+   "drive_id": "1IStizV1BBHNmiv4k4qFY_wfTdggKEUTs"
+  },
+  {
+   "file": "59-20260706-192730.png",
+   "originale": "Immagine 2026-07-06 192730.png",
+   "drive_id": "1rzldOLR7dVkx5wW4yYj1kQv4aSdF-ADw"
+  },
+  {
+   "file": "60-20260706-192747.png",
+   "originale": "Immagine 2026-07-06 192747.png",
+   "drive_id": "10zdRKbvrrqcsD0rneZEetRYb5TN1j_YK"
+  },
+  {
+   "file": "61-20260706-192809.png",
+   "originale": "Immagine 2026-07-06 192809.png",
+   "drive_id": "1Ih3y0w7W7do63JJxL1BQ30Exf7CIyTRN"
+  },
+  {
+   "file": "62-20260706-192828.png",
+   "originale": "Immagine 2026-07-06 192828.png",
+   "drive_id": "19L3AqF04ScGndpQ62Y8QKHaXSWOhEdPB"
+  },
+  {
+   "file": "63-20260706-192850.png",
+   "originale": "Immagine 2026-07-06 192850.png",
+   "drive_id": "17dGDs2otDa3-IInQhL62kbsUVbWt2z92"
+  },
+  {
+   "file": "64-20260706-192913.png",
+   "originale": "Immagine 2026-07-06 192913.png",
+   "drive_id": "1s8rByH3kzi9rYLas6nsyV-0-2rujJ3q2"
+  },
+  {
+   "file": "65-20260706-192938.png",
+   "originale": "Immagine 2026-07-06 192938.png",
+   "drive_id": "1JIY2nRatJmx78rOdDYE9lic0r5cj7JNX"
+  },
+  {
+   "file": "66-20260706-192959.png",
+   "originale": "Immagine 2026-07-06 192959.png",
+   "drive_id": "1ChJOjphm4yVXQMKLT8hLes8lOL3exRRj"
+  },
+  {
+   "file": "67-20260706-193022.png",
+   "originale": "Immagine 2026-07-06 193022.png",
+   "drive_id": "1g5PyKpU-_ogJBtK_NqfEH3Lp3grLDiaC"
+  },
+  {
+   "file": "68-20260706-193100.png",
+   "originale": "Immagine 2026-07-06 193100.png",
+   "drive_id": "1shuEv8REtcCw_aOUEcP2N5j3TzJvcyt0"
+  },
+  {
+   "file": "69-20260706-193722.png",
+   "originale": "_Immagine 2026-07-06 193722.png",
+   "drive_id": "1ayRc41WMfjY4baNn6dogrAxswMkEj68"
+  },
+  {
+   "file": "FORMULA.pdf",
+   "originale": "FORMULA.pdf",
+   "drive_id": "13BMIuvyXuIHeyvapgX4xnrkqIb6ErHZJ"
+  }
+ ],
+ "azioni-se-vero": [
+  {
+   "file": "01-20260708-165342.png",
+   "originale": "Immagine 2026-07-08 165342.png",
+   "drive_id": "1voV9LpPxu3BN66JleBBgF8iASRD5pS_d"
+  },
+  {
+   "file": "02-20260708-165425.png",
+   "originale": "Immagine 2026-07-08 165425.png",
+   "drive_id": "1RGrGfc9AXYMUWqH2TE3qZupBLNmRVj6B"
+  },
+  {
+   "file": "03-20260708-165503.png",
+   "originale": "Immagine 2026-07-08 165503.png",
+   "drive_id": "16Og43iEhEh0NagvZahBWMUWBzKeyaQbU"
+  },
+  {
+   "file": "04-20260708-165534.png",
+   "originale": "Immagine 2026-07-08 165534.png",
+   "drive_id": "1GZhcrcmI5KScHLrmH2QD34WCYI4QHdb8"
+  },
+  {
+   "file": "05-20260708-165559.png",
+   "originale": "Immagine 2026-07-08 165559.png",
+   "drive_id": "1sA4X8UH22YR9XngjU-IGzAffGgeUVWCj"
+  },
+  {
+   "file": "06-20260708-165641.png",
+   "originale": "Immagine 2026-07-08 165641.png",
+   "drive_id": "1uG57zcDob2h0igytKnibqzcpiVTLdqd9"
+  },
+  {
+   "file": "07-20260708-165714.png",
+   "originale": "Immagine 2026-07-08 165714.png",
+   "drive_id": "1wDnjaTnWIKVX_077RJfgnZEpmHvq0D9z"
+  },
+  {
+   "file": "08-20260708-165747.png",
+   "originale": "Immagine 2026-07-08 165747.png",
+   "drive_id": "1rSw1YC4O5BLjit9buY_D0-O7NT9MJkDG"
+  },
+  {
+   "file": "09-20260708-165832.png",
+   "originale": "Immagine 2026-07-08 165832.png",
+   "drive_id": "1dKrYGV5mdz3jpG0LTLfUAPkKnlsIOGcJ"
+  },
+  {
+   "file": "10-20260708-165900.png",
+   "originale": "Immagine 2026-07-08 165900.png",
+   "drive_id": "1cPo21TI0ViIIXo5-qd_hrCES8t3TMoss"
+  },
+  {
+   "file": "11-20260708-165927.png",
+   "originale": "Immagine 2026-07-08 165927.png",
+   "drive_id": "1EYMB5edSoFy_HXonWAnRNrXlCwVKjTYj"
+  },
+  {
+   "file": "12-20260708-165948.png",
+   "originale": "Immagine 2026-07-08 165948.png",
+   "drive_id": "1P-GQkgAZLYHQa8W7s3ml2xKPX03gw4WR"
+  },
+  {
+   "file": "13-20260708-170012.png",
+   "originale": "Immagine 2026-07-08 170012.png",
+   "drive_id": "1jaGz1-DrJVkyzw2zFQ3-dJHPA4YcQvGd"
+  },
+  {
+   "file": "14-20260708-170037.png",
+   "originale": "Immagine 2026-07-08 170037.png",
+   "drive_id": "1gnMAN7U1ssjgA9_rqzV7EdDRhF2yMyob"
+  },
+  {
+   "file": "15-20260708-170103.png",
+   "originale": "Immagine 2026-07-08 170103.png",
+   "drive_id": "1PEUo2gHDdu9_bnntheKU6nbftpd03xGQ"
+  },
+  {
+   "file": "16-20260708-170134.png",
+   "originale": "Immagine 2026-07-08 170134.png",
+   "drive_id": "1qAKbfVRE72B2GyrushY0EuOqS_yBhs6U"
+  },
+  {
+   "file": "17-20260708-170228.png",
+   "originale": "Immagine 2026-07-08 170228.png",
+   "drive_id": "11yszcrn1LhTY_mhPU9klQ8uMfc5xM4qt"
+  },
+  {
+   "file": "18-20260708-170254.png",
+   "originale": "Immagine 2026-07-08 170254.png",
+   "drive_id": "1bpTKdm4o-_7EBucGhP9Z-u00j-1MqF0w"
+  },
+  {
+   "file": "19-20260708-170316.png",
+   "originale": "Immagine 2026-07-08 170316.png",
+   "drive_id": "1IzDhij9uMhVm6juwYvsewtNuiNdRASRz"
+  },
+  {
+   "file": "20-20260708-170340.png",
+   "originale": "Immagine 2026-07-08 170340.png",
+   "drive_id": "1IzdBfHHCfkADYBwuzUkBQl8xKoHpPwUw"
+  },
+  {
+   "file": "21-20260708-170505.png",
+   "originale": "Immagine 2026-07-08 170505.png",
+   "drive_id": "1em0nOpyKH_IomtxevdO1gSHil0l_osg2"
+  }
+ ],
+ "azioni-se-vero-se-falso": [
+  {
+   "file": "01-20260706-194027.png",
+   "originale": "Immagine 2026-07-06 194027.png",
+   "drive_id": "15yzNKMumCOu1jEdoJW8eXhXHNQ0yOn1v"
+  },
+  {
+   "file": "02-20260706-194058.png",
+   "originale": "Immagine 2026-07-06 194058.png",
+   "drive_id": "1FTxu7_CRecFq2UFxt6au40wPYo5wAO4x"
+  }
+ ],
+ "varie": [
+  {
+   "file": "01-20260708-170559.png",
+   "originale": "Immagine 2026-07-08 170559.png",
+   "drive_id": "11tfM5o3pjeh_4iKPklDTLCeFm33AYcat"
+  },
+  {
+   "file": "02-20260708-170631.png",
+   "originale": "Immagine 2026-07-08 170631.png",
+   "drive_id": "1Gl8H_ezqS4kwDuy1SlmZG1sVtCzXiIjP"
+  },
+  {
+   "file": "03-20260708-170658.png",
+   "originale": "Immagine 2026-07-08 170658.png",
+   "drive_id": "1Qj-RB3OBdq4OZxhsmi3rc_yJSaIhEvUy"
+  },
+  {
+   "file": "04-20260708-170716.png",
+   "originale": "Immagine 2026-07-08 170716.png",
+   "drive_id": "19Y09kvZ-3I7UvWC0R_HuHKPw1TJ1_xYz"
+  },
+  {
+   "file": "05-20260708-170856.png",
+   "originale": "Immagine 2026-07-08 170856.png",
+   "drive_id": "1iB2x7dqcT_doQaLipwHejvHQgV2KhdTE"
+  },
+  {
+   "file": "06-20260708-171008.png",
+   "originale": "Immagine 2026-07-08 171008.png",
+   "drive_id": "1m4z9MxMCOYUqvU-0HoQ0ygqE70a3138O"
+  },
+  {
+   "file": "07-20260708-171054.png",
+   "originale": "Immagine 2026-07-08 171054.png",
+   "drive_id": "1Si0swg7gYOrrMQXLZa9VLzULYoJSJOyI"
+  },
+  {
+   "file": "08-20260708-171117.png",
+   "originale": "Immagine 2026-07-08 171117.png",
+   "drive_id": "1U_biOdl9t1YG882mMJrkZWUwmexEM9vD"
+  },
+  {
+   "file": "09-20260708-171138.png",
+   "originale": "Immagine 2026-07-08 171138.png",
+   "drive_id": "1f6aSx02VxtYipbReqGqHNMksic4w_6r5"
+  },
+  {
+   "file": "10-20260708-171225.png",
+   "originale": "Immagine 2026-07-08 171225.png",
+   "drive_id": "1_j58ApbZzLhufUj0n-A1Ad5o2GbT2Bwo"
+  }
+ ]
+}

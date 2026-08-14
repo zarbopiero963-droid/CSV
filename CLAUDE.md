@@ -30,6 +30,7 @@ Il merge resta sempre manuale del repository owner.
 | Generatore della copia a file unico del prototipo | `tools/build_single_file.py` |
 | Architettura SaaS, modello dati, contratto API | `SAAS.md` |
 | Documentazione operativa endpoint e variabili | `README.txt` |
+| Screenshot reali di XTrader + catalogo (materia prima per le guide e per il chatbot) | `docs/xtrader/screenshot/` |
 | Deploy | `Procfile`, `railway.json`, `requirements.txt` |
 | Workflow di review AI (GPT-5.5, Fable 5, GPT-5.6 Sol) | `.github/workflows/pr-review-*.yml` |
 | Guardia sui workflow di review | `tests/safety/test_ai_audit_workflows.py` |
@@ -1525,7 +1526,7 @@ installate in posti diversi. Aspetta i loro check, leggi i loro commenti, fai il
 | Workflow GLM 5.2 | non importato per scelta: i reviewer a API key qui sono tre. Non contarlo né aspettarlo. |
 | ~~Workflow di build/test propri del repo~~ | **Creato il 12/08/2026**: `.github/workflows/test.yml` esegue `pytest -q` su ogni PR e sui push a `main`, con `TEST_RUNTIME_OBBLIGATORIO=1` perche' uno skip per runtime mancante non possa lasciarlo verde. Prima non esisteva e i test giravano solo in locale. |
 | ~~Test del relay (`main.py`)~~ | **Creati l'11/08/2026** in `tests/relay/test_csv_contract.py` col passaggio a UTF-8 con BOM: byte della risposta HTTP, `verify_csv()`, fail-closed di `store_signal`, esito del verificatore su `/health`. `tests/` ha ora quattro cartelle. |
-| `docs/` | i documenti del Bridge citati sopra non esistono qui e non vanno inventati. |
+| `docs/` | esiste dal 14/08/2026, ma contiene **solo** `docs/xtrader/screenshot/` — materia prima fornita dal proprietario, non una guida. I documenti del Bridge citati sopra continuano a non esistere qui e non vanno inventati. |
 | `AGENTS.md` | questo file è autosufficiente; se AGENTS.md verrà aggiunto, ha precedenza. |
 | Motore di parsing Python | oggi il motore vive solo in `web/engine.js`. Quando nascerà quello Python, la regola 3 diventa vincolante su entrambi. |
 
