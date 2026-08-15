@@ -430,6 +430,24 @@ non finito       → scarta    (inf supera i confronti nel verso sbagliato)
 fuori intervallo → scarta    (nomina il tetto e il separatore decimale)
 ```
 
+**Il verdetto corre sul valore normalizzato, non sul testo grezzo.** Prima di
+ogni controllo il valore passa dalla classe condivisa degli spazi uniformi
+(`_piatto` in `main.py`, `piatto` in `web/engine.js`): gli spazi ai bordi —
+inclusi BOM e separatori di controllo — vengono perdonati, quelli **dentro** il
+numero no. I default dei due linguaggi divergono proprio lì (`strip()` non
+toglie `\ufeff`, `trim()` non toglie `\x1c-\x1f`/`\x85`), e un verdetto preso
+sul testo grezzo dava anteprima «completa» nel browser e feed vuoto in
+produzione. La stessa classe governa l'**emptiness** delle colonne obbligatorie
+e la trasformazione **`trim`**, che tocca il valore estratto e quindi i byte
+della riga CSV. [REAL_FINDING] dei gate finali sulla PR #47.
+
+**Nessuno scarto senza riconoscimento.** `scarti` viene calcolato solo se la
+condizione del parser è soddisfatta (`matched`): un parser mai riconosciuto ma
+con una costante numerica invalida produrrebbe motivi per qualunque messaggio
+della chat, e il dispatch li archivierebbe in `message_logs` come «scartato»
+sotto un parser che non c'entra, conservando testo estraneo. Non riconosciuto =
+`parser_no_match`, senza riga di log. [REAL_FINDING] di GPT-5.6 Sol, PR #47.
+
 **Si scarta il messaggio intero, non si svuota la colonna.** Svuotare fabbrica
 una riga che il messaggio non dice: `Price` vuota significa «la quota la mette
 XTrader», `Handicap` vuoto significa una linea diversa, `Points` vuoto significa

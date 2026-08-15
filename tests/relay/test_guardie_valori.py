@@ -459,3 +459,81 @@ def test_lo_scarto_del_PRIMO_parser_resta_attribuito_a_lui(tmp_path, monkeypatch
     assert scarti, 'nessuna riga di scarto'
     assert all(r[0] == storico for r in scarti), (
         f'il motivo del primo parser e\' attribuito a un altro: {scarti}')
+
+
+# ------------------- il verdetto corre sul valore NORMALIZZATO (gate PR #47)
+
+def test_il_BOM_ai_bordi_non_cambia_il_verdetto():
+    """I default di `strip()` e `trim()` divergono anche sul VERDETTO.
+
+    `'\\ufeff2'` era una quota valida nel browser (il `trim` di JS toglie il
+    BOM) e «non un numero» in produzione (lo `strip` di Python no): anteprima
+    verde, feed vuoto — la divergenza che le guardie esistono per chiudere. Con
+    `'\\x1c2'` i ruoli si invertono. Il verdetto deve correre sul valore
+    normalizzato dalla classe condivisa, come gia' il citato. [REAL_FINDING] di
+    Claude Fable 5 e GPT-5.6 Sol al gate finale della PR #47.
+    """
+    assert main.motivo_valore_numerico('Price', '\ufeff2') is None, (
+        'il BOM ai bordi cambia il verdetto: lo stesso valore in JS passa')
+    assert main.motivo_valore_numerico('Price', '\x1c2') is None, (
+        'il separatore di controllo ai bordi cambia il verdetto')
+
+
+def test_un_valore_di_soli_spazi_uniformi_e_VUOTO():
+    """`'\\ufeff\\xa0'`: vuoto per il `trim` di JS (ammesso), non-vuoto per lo
+    `strip` di Python (scartato). Dopo la normalizzazione, vuoto per entrambi."""
+    assert main.motivo_valore_numerico('Price', '\ufeff\xa0') is None
+
+
+def test_lo_spazio_DENTRO_il_numero_resta_scartato():
+    """La normalizzazione perdona i bordi, non il corpo: `'1 5'` non e' un numero."""
+    assert main.motivo_valore_numerico('Price', '1\xa05') is not None
+
+
+def test_un_parser_che_NON_riconosce_non_produce_scarti():
+    """`scarti` senza riconoscimento: [REAL_FINDING] di GPT-5.6 Sol (PR #47).
+
+    Un parser la cui condizione NON e' soddisfatta ma con una costante numerica
+    invalida produceva scarti per qualunque messaggio della chat: il dispatch li
+    scriveva in `message_logs` come «scartato», attribuiti a un parser che non
+    c'entrava, conservando testo estraneo. Non riconosciuto = nessun motivo.
+    """
+    r = main.esegui_parser('oggi si parla di altro', _config(Points='999999'))
+    assert r['matched'] is False
+    assert r['scarti'] == [], (
+        f'un parser che non riconosce ha prodotto scarti: {_motivi(r)}')
+
+
+def test_nessun_log_da_un_parser_che_non_riconosce(tmp_path, monkeypatch):
+    """Il percorso vero del dispatch: messaggio estraneo → NESSUNA riga di log.
+
+    E' la promessa del commento in `_elabora_per_utente`: «i log sono una
+    funzione del servizio, non un archivio dei messaggi». Senza il gate sul
+    riconoscimento, ogni chiacchiera della chat finiva archiviata come
+    «scartato» sotto un parser che non c'entrava.
+    """
+    import asyncio
+    import json
+    import sqlite3
+
+    from tests.dati import relay_in_processo
+    from tests.relay.test_webhook import BOT_FINTO, CHAT, RichiestaFinta
+
+    percorso = relay_in_processo(monkeypatch, tmp_path / 'estranei.db', chat_ids=CHAT)
+    monkeypatch.setattr(main, 'SEGRETO_WEBHOOK', main.webhook_secret(BOT_FINTO))
+    c = sqlite3.connect(percorso)
+    c.execute('UPDATE parsers SET config_json=? WHERE name=?',
+              (json.dumps(_config(Points='999999')), main.DEFAULT_PARSER))
+    c.commit()
+    c.close()
+
+    payload = {'message': {'chat': {'id': int(CHAT)},
+                           'text': 'chiacchiere della chat, nessun segnale'}}
+    asyncio.run(main.telegram_webhook(RichiestaFinta(
+        {'X-Telegram-Bot-Api-Secret-Token': main.webhook_secret(BOT_FINTO)}, payload)))
+
+    c = sqlite3.connect(percorso)
+    righe = c.execute('SELECT parser_id, esito FROM message_logs').fetchall()
+    c.close()
+    assert not righe, (
+        f'un messaggio mai riconosciuto e\' stato archiviato nei log: {righe}')

@@ -537,6 +537,37 @@ function casiConfronto() {
     MSG, conNumeri('Price', 'a\u001cb\u001dc\u001ed\u001fe\u0085f'));
   aggiungi('guardie: BOM dentro il valore → citato uguale nei due motori',
     MSG, conNumeri('Price', 'a\ufeffb\u00a0c\u2028d'));
+  // I default di `strip()`/`trim()` divergevano anche sul VERDETTO, non solo sul
+  // citato: `'\ufeff2'` passava in JS (il `trim` toglie il BOM) ed era «non
+  // numerico» in Python — anteprima verde nel browser, feed vuoto in
+  // produzione. Con `'\x1c2'` i ruoli si invertono. Il verdetto corre sul
+  // valore normalizzato dalla classe condivisa, in entrambi i motori.
+  // [REAL_FINDING] di Claude Fable 5 e GPT-5.6 Sol al gate finale della PR #47.
+  aggiungi('guardie: BOM ai bordi del valore → stesso verdetto nei due motori',
+    MSG, conNumeri('Price', '\ufeff2'));
+  aggiungi('guardie: separatore di controllo ai bordi → stesso verdetto',
+    MSG, conNumeri('Price', '\u001c2'));
+  aggiungi('guardie: valore di soli spazi uniformi → vuoto in entrambi',
+    MSG, conNumeri('Price', '\ufeff\u00a0'));
+  aggiungi('guardie: spazio uniforme DENTRO il numero → scartato in entrambi',
+    MSG, conNumeri('Price', '1\u00a05'));
+  // L'emptiness delle obbligatorie aveva la stessa coppia divergente: una
+  // SelectionName di solo BOM era «mancante» in JS e «valorizzata» in Python.
+  aggiungi('guardie: obbligatoria di solo BOM → mancante in entrambi i motori',
+    MSG, conNumeri('SelectionName', '\ufeff'));
+  // E la trasformazione `trim` e' la stessa coppia sul VALORE estratto, cioe'
+  // sui byte della riga CSV: i due motori devono produrre la stessa riga.
+  aggiungi('guardie: trasformazione trim con spazi esotici ai bordi → stessa riga',
+    MSG, { ...conNumeri('Price', ''),
+           columns: { ...conNumeri('Price', '').columns,
+                      Price: { source: 'constant', value: '\ufeff1.9\u001c',
+                               transforms: [{ op: 'trim' }] } } });
+  // Condizione NON soddisfatta → NESSUNO scarto, in nessuno dei due motori: o il
+  // dispatch loggherebbe «scartato» un messaggio mai riconosciuto, attribuendolo
+  // a un parser che non c'entra e conservando testo estraneo in `message_logs`.
+  // [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #47.
+  aggiungi('guardie: condizione non soddisfatta → nessuno scarto',
+    'oggi si parla di altro', conNumeri('Points', '999999'));
   aggiungi('guardie: sole costanti sulle obbligatorie → nessuna riga', 'ciao a tutti', {
     match: { type: 'contains', value: 'a' },
     columns: { ...soloEmpty,

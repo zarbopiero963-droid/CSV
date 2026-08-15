@@ -154,6 +154,12 @@ intervallo — e nomina il separatore delle migliaia, che e' la causa piu' comun
 Un parser le cui colonne obbligatorie sono TUTTE costanti non scrive: produrrebbe
 la stessa scommessa per qualunque messaggio riconosciuto.
 Una chiave di colonna che non e' una delle 14 da' 422 col suggerimento.
+Il verdetto corre sul valore NORMALIZZATO dalla classe condivisa degli spazi
+(identica nei due motori): spazi, BOM e separatori di controllo ai bordi vengono
+perdonati, dentro il numero no. Senza, i default di strip() e trim() divergevano
+e lo stesso valore era valido nel browser e scartato in produzione.
+I motivi di scarto esistono solo per i messaggi RICONOSCIUTI dalla condizione:
+un messaggio estraneo resta parser_no_match e non produce righe di log.
 
 PROVA DI UN PARSER
 POST /api/parsers/NOME/test

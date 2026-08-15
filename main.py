@@ -2031,12 +2031,28 @@ INTERVALLI_NUMERICI = {
 # `\d` questa riga sarebbe stata una guardia che non guarda. Misurato scrivendola
 # sbagliata: `motivo_valore_numerico('Price', '١٩')` restituiva `None`, cioe'
 # «accettabile», ed era esattamente il caso che la regola esiste per fermare.
-# Gli spazi da normalizzare nel valore citato: classe esplicita, gemella di
-# `SPAZI_UNIFORMI` in `web/engine.js`. Vedi `motivo_valore_numerico` per la
-# tabella delle divergenze fra i default dei due linguaggi.
-SPAZI_UNIFORMI = re.compile(
-    '[\t\n\v\f\r \x1c-\x1f\x85\u00a0\u1680\u2000-\u200a'
-    '\u2028\u2029\u202f\u205f\u3000\ufeff]+')
+# Gli spazi uniformi fra i due motori: classe esplicita, gemella di
+# `SPAZI_CLASSE` in `web/engine.js`. Vedi `motivo_valore_numerico` per la
+# tabella delle divergenze fra i default dei due linguaggi. Non serve solo al
+# valore citato nei motivi: e' la classe su cui corrono il VERDETTO numerico,
+# l'emptiness delle obbligatorie e la trasformazione `trim` — ovunque i default
+# di `strip()`/`trim()` farebbero divergere i due motori.
+_SPAZI_CLASSE = ('[\t\n\v\f\r \x1c-\x1f\x85\u00a0\u1680\u2000-\u200a'
+                 '\u2028\u2029\u202f\u205f\u3000\ufeff]')
+SPAZI_UNIFORMI = re.compile(_SPAZI_CLASSE + '+')
+BORDI_UNIFORMI = re.compile('^' + _SPAZI_CLASSE + '+|' + _SPAZI_CLASSE + '+$')
+
+
+def _piatto(testo):
+    """Spazi uniformi → ' ', bordi tolti. Gemella di `piatto` in engine.js.
+
+    E' la normalizzazione che PRECEDE ogni verdetto dei motori: `strip()` di
+    Python non toglie `\\ufeff`, `trim()` di JS non toglie `\\x1c-\\x1f`/`\\x85`,
+    e un verdetto preso sul testo grezzo diverge fra browser e produzione —
+    anteprima «completa» e feed vuoto. [REAL_FINDING] di Claude Fable 5 e
+    GPT-5.6 Sol al gate finale della PR #47.
+    """
+    return SPAZI_UNIFORMI.sub(' ', testo).strip()
 
 _NUMERO_ASCII = re.compile(r'^[+-]?(?:[0-9]+(?:[.,][0-9]*)?|[.,][0-9]+)$')
 
@@ -2071,9 +2087,13 @@ def motivo_valore_numerico(colonna, valore):
     intervallo = INTERVALLI_NUMERICI.get(colonna)
     if intervallo is None:
         return None
-    testo = _testo_canonico(valore).strip()
-    if not testo:
-        return None
+    # Niente `strip()` qui: il verdetto corre sul valore NORMALIZZATO dalla
+    # classe condivisa (`piano`, sotto), non sul testo grezzo. Lo `strip()` di
+    # Python non toglie `\ufeff` e il `trim()` di JS non toglie `\x1c-\x1f`:
+    # `'\ufeff2'` era una quota valida nel browser e «non un numero» in
+    # produzione — anteprima verde, feed vuoto. [REAL_FINDING] di Claude
+    # Fable 5 e GPT-5.6 Sol al gate finale della PR #47.
+    testo = _testo_canonico(valore)
     # Il valore citato nel motivo si taglia: finisce in `message_logs` e nella
     # UI, e un'estrazione sbagliata puo' portarsi dietro una riga intera — il
     # caso dell'infinito ne cita 400 cifre. Il taglio e' identico in JS, o i due
@@ -2092,17 +2112,19 @@ def motivo_valore_numerico(colonna, valore):
     # Il BOM e' il caso che conta di piu' qui dentro: e' un carattere portante
     # del contratto CSV, e i due motori lo trattavano al contrario. Segnalato da
     # Claude Fable 5 sulla PR #47, che ne aveva visto due su tre.
-    piano = SPAZI_UNIFORMI.sub(' ', testo).strip()
+    piano = _piatto(testo)
+    if not piano:
+        return None
     citato = piano if len(piano) <= 60 else piano[:60] + '…'
-    if not _NUMERO_ASCII.match(testo):
-        if sum(testo.count(s) for s in '.,') > 1:
+    if not _NUMERO_ASCII.match(piano):
+        if sum(piano.count(s) for s in '.,') > 1:
             return (f'{colonna}: «{citato}» non e\' un numero. Probabile causa: il '
                     'separatore delle migliaia — controlla le trasformazioni della regola.')
         return (f'{colonna}: «{citato}» non e\' un numero valido. XTrader legge solo '
                 'cifre ASCII: controlla la regola, sta leggendo la parte sbagliata '
                 'del messaggio.')
     try:
-        numero = float(testo.replace(',', '.'))
+        numero = float(piano.replace(',', '.'))
     except ValueError:
         return f'{colonna}: «{citato}» non e\' un numero.'
     if not math.isfinite(numero):
@@ -2177,7 +2199,11 @@ def _sostituisci_ultima(testo, da, a):
 # stringa in JavaScript, e replicarlo con lo `str.replace` di Python — che di
 # default le cambia TUTTE — sarebbe una divergenza silenziosa fra i due motori.
 TRASFORMAZIONI_MOTORE = {
-    'trim': lambda v, t: v.strip(),
+    # `BORDI_UNIFORMI`, non `v.strip()`: il `trim` tocca il VALORE estratto,
+    # cioe' i byte della riga CSV, e i default di `strip()`/`trim()` divergono
+    # su `\ufeff` e `\x1c-\x1f` — la stessa riga usciva diversa fra anteprima
+    # e produzione (classe del [REAL_FINDING] dei gate, PR #47).
+    'trim': lambda v, t: BORDI_UNIFORMI.sub('', v),
     'replace_last': lambda v, t: _sostituisci_ultima(v, t.get('from', ''), t.get('to', '')),
     'replace_all': lambda v, t: (t.get('to', '').join(v.split(t.get('from')))
                                  if t.get('from') else v),
@@ -2371,12 +2397,20 @@ def esegui_parser(message, config):
     # sarebbe letta come vuota qui e valorizzata in JS — i due motori
     # divergerebbero su `missing` e `complete`, cioe' l-utente vedrebbe «completo»
     # nel browser e feed vuoto in produzione. Segnalato da CodeRabbit, PR #28.
+    # `_piatto`, non `strip()`: l'emptiness ha la stessa coppia divergente del
+    # verdetto numerico — una obbligatoria di solo BOM era «mancante» in JS e
+    # «valorizzata» in Python (stessa classe del [REAL_FINDING] dei gate, PR #47).
     def _vuota(valore):
-        return not str('' if valore is None else valore).strip()
+        return not _piatto(str('' if valore is None else valore))
 
     mancanti = [c for c in COLONNE_OBBLIGATORIE if _vuota(row[HEADERS.index(c)])]
+    # Nessuno scarto senza riconoscimento: un parser la cui condizione non e'
+    # soddisfatta ma con una costante numerica invalida produrrebbe motivi per
+    # QUALUNQUE messaggio della chat, e il dispatch li archivierebbe come
+    # «scartato» sotto un parser che non c'entra, conservando testo estraneo.
+    # [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #47.
     scarti = [m for m in (motivo_valore_numerico(c, row[HEADERS.index(c)])
-                          for c in INTERVALLI_NUMERICI) if m]
+                          for c in INTERVALLI_NUMERICI) if m] if matched else []
     # Il gate di CONTENUTO (#41): almeno una colonna obbligatoria deve venire da
     # un'estrazione REALE che ha prodotto qualcosa. Un parser con tutte e quattro
     # le obbligatorie costanti produce una riga piazzabile per QUALSIASI messaggio
@@ -2408,8 +2442,10 @@ def _estrazione_reale(colonne, row):
         if not isinstance(regola, dict):
             continue
         if regola.get('source') in ('line', 'regex', 'message'):
-            if str('' if row[HEADERS.index(colonna)] is None
-                   else row[HEADERS.index(colonna)]).strip():
+            # `_piatto`, non `strip()`: stessa emptiness di `_vuota`, o i due
+            # motori divergerebbero sui caratteri che i default non coprono.
+            if _piatto(str('' if row[HEADERS.index(colonna)] is None
+                           else row[HEADERS.index(colonna)])):
                 return True
     return False
 
