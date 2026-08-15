@@ -122,14 +122,23 @@ code, .mono { font-family: var(--mono); font-size: 13px; }
   font-weight: 700; font-size: 20px;
 }
 .tg-btn {
+  /* Dalla #32 e' un LINK (la modalita' redirect di oauth.telegram.org), non piu'
+     un <button>: gli stili base dei bottoni non lo raggiungono e la classe deve
+     bastare da sola. */
+  display: block;
   width: 100%;
   background: var(--accent);
-  border-color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
   color: #04121b;
   font-weight: 600;
   padding: 12px;
   margin-top: 20px;
+  text-align: center;
+  text-decoration: none;
+  cursor: pointer;
 }
+.tg-btn:hover { background: var(--accent-2); border-color: var(--accent-2); }
 .sep {
   display: flex; align-items: center; gap: 12px;
   color: var(--txt-3); font-size: 12px; margin: 22px 0 14px;

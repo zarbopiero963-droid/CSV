@@ -9,8 +9,11 @@ con StaticFiles: qualunque file la- dentro e- scaricabile pubblicamente su /app
 senza token. Un generatore lato server e il suo output non hanno motivo di essere
 serviti a un browser. La guardia e- in tests/safety/test_static_mount.py.
 
-Concatena engine.js, api.js e app.js in un solo modulo, ricostruendo l'oggetto
-`api` che le viste usano come namespace, e incorpora il CSS.
+Concatena engine.js, api_finta.js e app.js in un solo modulo, ricostruendo
+l'oggetto `api` che le viste usano come namespace, e incorpora il CSS.
+`api_finta.js` e NON `api.js`: la copia si apre da file://, dove `fetch` verso
+il backend non esiste — il layer finto espone la stessa superficie su
+localStorage, ed e' l'unico posto in cui viene usato.
 
 Il JavaScript viene emesso in ASCII puro con escape \\uXXXX: in un file unico il
 codice viene decodificato con la codifica del documento, non sempre UTF-8, e un
@@ -107,15 +110,16 @@ def build():
             % ' '.join('U+%04X' % ord(c) for c in non_ascii)
         )
     engine = (WEB / 'engine.js').read_text(encoding='utf-8')
-    api = (WEB / 'api.js').read_text(encoding='utf-8')
+    api = (WEB / 'api_finta.js').read_text(encoding='utf-8')
     app = (WEB / 'app.js').read_text(encoding='utf-8')
 
-    # app.js importa api.js come namespace: qui il namespace va ricostruito.
+    # app.js importa api.js come namespace: qui il namespace va ricostruito
+    # dal layer finto, che espone le stesse funzioni.
     api_names = re.findall(r'^export\s+(?:async\s+)?function\s+(\w+)', api, re.M)
 
     js = '\n'.join([
         '/* ===== engine.js ===== */', strip_module_syntax(engine),
-        '/* ===== api.js ===== */', strip_module_syntax(api),
+        '/* ===== api_finta.js ===== */', strip_module_syntax(api),
         'const api = { %s };' % ', '.join(api_names),
         '/* ===== app.js ===== */', strip_module_syntax(app),
     ])

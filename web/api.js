@@ -1,360 +1,227 @@
-// Layer API del prototipo. Nessuna rete: i dati vivono in localStorage.
-// Le firme di questo modulo SONO il contratto REST che il backend M1 deve esporre;
-// per passare al backend reale si sostituisce il corpo di ogni funzione con una
-// fetch verso l'endpoint indicato nel commento, senza toccare le viste.
+// Il layer di accesso al backend VERO (#32). Le viste parlano solo con questo
+// modulo: la copia dimostrativa a file unico usa invece `api_finta.js`, che
+// espone la stessa superficie su localStorage — e' il motivo per cui i nomi
+// qui sotto non si cambiano senza cambiare anche quella.
+//
+// Due regole di forma, entrambe eredita' del backend:
+//
+// - la CACHE e' sincrona. Le viste leggono `me()`, `settings()` e `getParser()`
+//   senza `await`, perche' ridisegnare una vista non deve rifare un giro di
+//   rete; la cache si riempie in `boot()` e si aggiorna a ogni scrittura,
+//   che restituisce sempre lo stato nuovo del server, mai una copia locale
+//   «ottimista» che potrebbe divergere.
+// - nessun token viene MAI conservato qui. Il token del feed esiste in chiaro
+//   solo nella risposta di `POST /api/me/token`, passa al chiamante e sparisce:
+//   in cache resta il prefisso, che il server stesso considera pubblicabile.
 
-import { COLUMNS, emptyRule, runParser, toCsv, suggestConfig,
-         unknownColumns } from './engine.js';
+import { suggestConfig } from './engine.js';
 
-const KEY = 'xtrader-proto-v1';
-const LAG = 220; // finta latenza, per vedere gli stati di caricamento
+const stato = {
+  me: null,        // la risposta di GET /api/me, o null senza sessione
+  settings: null,  // la risposta di GET /api/settings (pubblica, sempre presente)
+  parsers: [],     // la risposta di GET /api/me/parsers
+};
 
-const wait = ms => new Promise(r => setTimeout(r, ms));
-const uid = p => p + '_' + Math.random().toString(36).slice(2, 10);
+/* ------------------------------------------------------------------ http */
 
-function seed() {
-  // Parser d'esempio: replica il parser oggi in produzione, così si vede
-  // subito come appare una configurazione completa accanto a una vuota.
-  const cols = {};
-  for (const c of COLUMNS) cols[c] = emptyRule();
-  cols.Provider = { source: 'constant', value: 'XTrader' };
-  cols.EventName = { source: 'line', anchor: '🆚', part: 'after', marker: '🆚',
-                     transforms: [{ op: 'replace_last', from: ' v ', to: ' - ' }, { op: 'trim' }] };
-  cols.MarketName = { source: 'constant', value: 'Over/Under 1,5 gol' };
-  cols.MarketType = { source: 'constant', value: 'OVER_UNDER_15' };
-  cols.SelectionName = { source: 'constant', value: 'Over 1,5 goal' };
-  cols.Handicap = { source: 'constant', value: '0' };
-  cols.BetType = { source: 'constant', value: 'PUNTA' };
-
-  return {
-    user: null,
-    settings: {
-      bot_username: 'XTraderSignalBot',
-      bot_url: 'https://t.me/XTraderSignalBot',
-      bot_add_to_group_url: 'https://t.me/XTraderSignalBot?startgroup=true',
-      base_url: 'https://csv-production-b04e.up.railway.app',
-    },
-    parsers: [{
-      id: 'prs_demo01',
-      slug: 'over-15-premacht',
-      name: 'Over 1,5 PREMACHT',
-      active: true,
-      token_prefix: 'xt_7f3a91',
-      has_token: true,
-      chat_ids: ['cht_demo01'],
-      sample_message: 'P.Bet. PREMACHT 0,5HT\n🆚 Manchester City v Aston Villa\n⏰ 20:45\n@ 1.42',
-      config: { match: { type: 'contains', value: 'P.Bet. PREMACHT 0,5HT' }, columns: cols },
-      created_at: '2026-07-02T10:14:00Z',
-    }],
-    chats: [{
-      id: 'cht_demo01',
-      telegram_chat_id: '-1001987654321',
-      message_thread_id: null,
-      title: 'Segnali Calcio PRO',
-      type: 'supergroup',
-      verified_at: '2026-07-02T10:02:00Z',
-    }],
-    logs: [
-      { id: 'log_3', parser_id: 'prs_demo01', chat_id: 'cht_demo01', matched: true,
-        text: 'P.Bet. PREMACHT 0,5HT\n🆚 Manchester City v Aston Villa', at: '2026-08-10T14:22:11Z' },
-      { id: 'log_2', parser_id: 'prs_demo01', chat_id: 'cht_demo01', matched: false,
-        text: 'Buongiorno a tutti, oggi 4 segnali in programma', at: '2026-08-10T13:58:03Z' },
-      { id: 'log_1', parser_id: 'prs_demo01', chat_id: 'cht_demo01', matched: true,
-        text: 'P.Bet. PREMACHT 0,5HT\n🆚 Roma v Lazio', at: '2026-08-10T12:31:47Z' },
-    ],
-    signals: {}, // parser_id -> { csv, expires_at }
-    pending_verification: null,
-  };
-}
-
-let db = load();
-
-function load() {
+// Un errore HTTP diventa un Error col `detail` del server: e' gia' una frase
+// in italiano pensata per l'utente (401 «sessione assente», 422 coi tetti...).
+async function http(metodo, percorso, corpo) {
+  let risposta;
   try {
-    const raw = localStorage.getItem(KEY);
-    if (raw) return JSON.parse(raw);
-  } catch { /* storage non disponibile: si riparte dai dati iniziali */ }
-  return seed();
-}
-
-function save() {
-  try { localStorage.setItem(KEY, JSON.stringify(db)); } catch { /* ignora */ }
-}
-
-function clone(v) { return JSON.parse(JSON.stringify(v)); }
-
-export function resetAll() {
-  db = seed();
-  save();
-}
-
-/* ------------------------------------------------------------------ auth */
-
-// POST /api/auth/telegram/widget  (verifica lato server l'HMAC del widget)
-export async function loginWidget() {
-  await wait(LAG);
-  db.user = { id: 'usr_piero', telegram_id: '482913771', username: 'piero_zar',
-              first_name: 'Piero', slug: 'PIERO', status: 'active' };
-  save();
-  return clone(db.user);
-}
-
-// POST /api/auth/telegram/code  { code }
-export async function loginCode(code) {
-  await wait(LAG);
-  if (!/^\d{6}$/.test((code || '').trim())) {
-    throw new Error('Il codice deve essere di 6 cifre. Aprilo dal bot con /login.');
+    risposta = await fetch(percorso, {
+      method: metodo,
+      headers: corpo === undefined ? {} : { 'Content-Type': 'application/json' },
+      body: corpo === undefined ? undefined : JSON.stringify(corpo),
+    });
+  } catch {
+    throw new Error('il server non risponde: controlla la connessione');
   }
-  return loginWidget();
+  if (!risposta.ok) {
+    let dettaglio = '';
+    try { dettaglio = (await risposta.json()).detail || ''; } catch { /* non JSON */ }
+    const errore = new Error(dettaglio || `errore ${risposta.status}`);
+    errore.status = risposta.status;
+    throw errore;
+  }
+  return risposta.json();
 }
 
-// GET /api/me
-export function me() { return db.user ? clone(db.user) : null; }
+/* ------------------------------------------------------------------ boot */
 
-// POST /api/auth/logout
-export async function logout() { db.user = null; save(); }
+// Il ritorno dal login Telegram in modalita' redirect: oauth.telegram.org
+// rimanda qui con `#tgAuthResult=<base64url del JSON firmato>`. Si consuma
+// PRIMA di leggere la sessione, e il frammento si toglie dall'URL comunque
+// vada: un hash firmato che resta nella barra finirebbe nella cronologia e
+// in ogni copia-incolla dell'indirizzo.
+async function consumaRitornoTelegram() {
+  const pezzo = (location.hash.match(/tgAuthResult=([A-Za-z0-9_-]+)/) || [])[1];
+  if (!pezzo) return null;
+  history.replaceState(null, '', location.pathname + location.search);
+  let campi;
+  try {
+    const base64 = pezzo.replace(/-/g, '+').replace(/_/g, '/');
+    campi = JSON.parse(atob(base64));
+  } catch {
+    return 'risposta di Telegram non leggibile: riprova';
+  }
+  try {
+    await http('POST', '/api/login/telegram', campi);
+    return null;
+  } catch (e) {
+    return e.message;
+  }
+}
 
-// GET /api/settings  (valori impostati dall'admin, uguali per tutti gli utenti)
-export function settings() { return clone(db.settings); }
+// Riempie la cache prima del primo render. Restituisce l'eventuale errore del
+// ritorno da Telegram, che la pagina di login deve mostrare: un login fallito
+// in silenzio e' il sintomo che la #23 e' esistita per chiudere.
+export async function boot() {
+  const erroreLogin = await consumaRitornoTelegram();
+  stato.settings = await http('GET', '/api/settings');
+  await ricaricaSessione();
+  return erroreLogin;
+}
 
-/* --------------------------------------------------------------- parsers */
+async function ricaricaSessione() {
+  try {
+    stato.me = await http('GET', '/api/me');
+  } catch {
+    stato.me = null;
+    stato.parsers = [];
+    return;
+  }
+  stato.parsers = await http('GET', '/api/me/parsers');
+}
 
-// GET /api/parsers  → solo i parser dell'utente autenticato
+/* --------------------------------------------------------------- sessione */
+
+export function me() { return stato.me; }
+export function settings() { return stato.settings; }
+
+export async function loginPassword(username, password) {
+  await http('POST', '/api/login/password', { username, password });
+  await ricaricaSessione();
+}
+
+// Il link «Accedi con Telegram» in modalita' redirect: e' l'unica modalita'
+// del login ufficiale che non richiede lo script di telegram.org, che le
+// regole del repository vietano (nessun CDN, nessuna dipendenza esterna).
+// Vuole il `bot_id` NUMERICO — non lo username — e un `origin` che combaci
+// col dominio configurato sul bot via BotFather (/setdomain).
+export function telegramAuthUrl() {
+  const s = stato.settings;
+  if (!s || !s.bot_id) return null;
+  const ritorno = location.origin + location.pathname;
+  return 'https://oauth.telegram.org/auth'
+    + '?bot_id=' + encodeURIComponent(s.bot_id)
+    + '&origin=' + encodeURIComponent(location.origin)
+    + '&request_access=write'
+    + '&return_to=' + encodeURIComponent(ritorno);
+}
+
+export async function logout() {
+  await http('POST', '/api/logout');
+  stato.me = null;
+  stato.parsers = [];
+}
+
+/* ----------------------------------------------------------------- parser */
+
+// La lista va sempre al server: e' il modo in cui un secondo dispositivo
+// dello stesso account vede i parser creati sul primo.
 export async function listParsers() {
-  await wait(LAG);
-  return clone(db.parsers);
+  stato.parsers = await http('GET', '/api/me/parsers');
+  return stato.parsers;
 }
 
-export function getParser(id) {
-  const p = db.parsers.find(x => x.id === id);
-  return p ? clone(p) : null;
+export function getParser(slug) {
+  return stato.parsers.find(p => p.slug === slug) || null;
 }
 
-// POST /api/parsers  { name }
-export async function createParser(name) {
-  await wait(LAG);
-  const clean = (name || '').trim();
-  if (!clean) throw new Error('Il nome è obbligatorio.');
-  if (db.parsers.some(p => p.name.toLowerCase() === clean.toLowerCase())) {
-    throw new Error('Hai già un parser con questo nome.');
-  }
-  const cols = {};
-  for (const c of COLUMNS) cols[c] = emptyRule();
-  const p = {
-    id: uid('prs'),
-    slug: slugify(clean),
-    name: clean,
-    active: true,
-    token_prefix: null,
-    has_token: false,
-    chat_ids: [],
-    sample_message: '',
-    config: { match: { type: 'contains', value: '' }, columns: cols },
-    created_at: new Date().toISOString(),
-  };
-  db.parsers.push(p);
-  save();
-  return clone(p);
+export async function createParser(titolo) {
+  const parser = await http('POST', '/api/me/parsers',
+                            { titolo, config: {}, active: true });
+  stato.parsers.push(parser);
+  return parser;
 }
 
-// Le sole chiavi che una PATCH puo' toccare. Un Object.assign copierebbe anche
-// id, slug, token_prefix e has_token: qui e' un prototipo, ma questo modulo e' il
-// contratto che il backend M1 ricopiera', e la' diventerebbe mass-assignment.
-const PARSER_PATCHABLE = ['name', 'active', 'config', 'sample_message'];
-
-// PATCH /api/parsers/:id  { name?, active?, config?, sample_message? }
-export async function updateParser(id, patch) {
-  await wait(80);
-  const p = db.parsers.find(x => x.id === id);
-  if (!p) throw new Error('Parser non trovato.');
-  // Una chiave che non e' una colonna del CSV verrebbe IGNORATA dal motore, che
-  // itera su COLUMNS: nessun errore, la regola semplicemente non esiste. Il
-  // wizard non puo' inventarne — costruisce dalla lista canonica — ma una config
-  // puo' arrivare da fuori, e il server la respinge con 422: qui si rifiuta con
-  // lo stesso criterio, o il prototipo direbbe «salvato» per qualcosa che il
-  // backend vero rifiuta. Segnalato da CodeRabbit sulla PR #47.
-  if (patch && patch.config) {
-    const sconosciute = unknownColumns(patch.config);
-    if (sconosciute.length) {
-      throw new Error(`Colonna sconosciuta: ${sconosciute.join(', ')}. `
-        + 'Le colonne sono quelle del CSV.');
-    }
-  }
-  for (const k of PARSER_PATCHABLE) {
-    if (patch && Object.hasOwn(patch, k)) p[k] = patch[k];
-  }
-  save();
-  return clone(p);
+// La PUT del server vuole il parser INTERO (titolo, config, active): la
+// patch parziale si completa qui dalla cache, cosi' le viste continuano a
+// mandare solo cio' che cambia.
+export async function updateParser(slug, patch) {
+  const attuale = getParser(slug);
+  if (!attuale) throw new Error('parser non trovato');
+  const nuovo = await http('PUT', `/api/me/parsers/${encodeURIComponent(slug)}`, {
+    titolo: patch.titolo ?? attuale.titolo,
+    config: patch.config ?? attuale.config,
+    active: patch.active ?? attuale.active,
+  });
+  const i = stato.parsers.findIndex(p => p.slug === slug);
+  if (i >= 0) stato.parsers[i] = nuovo;
+  return nuovo;
 }
 
-// DELETE /api/parsers/:id
-export async function deleteParser(id) {
-  await wait(LAG);
-  db.parsers = db.parsers.filter(p => p.id !== id);
-  db.logs = db.logs.filter(l => l.parser_id !== id);
-  delete db.signals[id];
-  save();
+export async function deleteParser(slug) {
+  await http('DELETE', `/api/me/parsers/${encodeURIComponent(slug)}`);
+  stato.parsers = stato.parsers.filter(p => p.slug !== slug);
 }
 
-function slugify(s) {
-  return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'parser';
+// La prova A SECCO sul server: stessa `esegui_parser` del webhook, nessuna
+// scrittura nel feed. La risposta porta anche `scarti` — il PERCHE' un valore
+// non ha raggiunto il feed (#39/#41) — che la vista deve mostrare.
+export function testParser(slug, message) {
+  return http('POST', `/api/me/parsers/${encodeURIComponent(slug)}/test`, { message });
 }
 
-/* ----------------------------------------------------------------- token */
-
-// POST /api/parsers/:id/token/rotate
-// Il token in chiaro esiste solo in questa risposta: il server ne conserva
-// soltanto l'hash. Rigenerare invalida immediatamente quello precedente.
-export async function rotateToken(id) {
-  await wait(LAG);
-  const p = db.parsers.find(x => x.id === id);
-  if (!p) throw new Error('Parser non trovato.');
-  const token = 'xt_' + Array.from(crypto.getRandomValues(new Uint8Array(18)))
-    .map(b => b.toString(16).padStart(2, '0')).join('');
-  p.token_prefix = token.slice(0, 9);
-  p.has_token = true;
-  save();
-  return { token, url: feedUrl(p, token) };
-}
-
-// DELETE /api/parsers/:id/token
-export async function revokeToken(id) {
-  await wait(LAG);
-  const p = db.parsers.find(x => x.id === id);
-  if (!p) throw new Error('Parser non trovato.');
-  p.token_prefix = null;
-  p.has_token = false;
-  save();
-}
-
-export function feedUrl(parser, token) {
-  const t = token || (parser.has_token ? parser.token_prefix + '…' : 'TOKEN');
-  return `${db.settings.base_url}/profiles/${db.user ? db.user.slug : 'PIERO'}/${parser.slug}.csv?token=${t}`;
-}
-
-/* ------------------------------------------------------------------ test */
-
-// POST /api/parsers/:id/test  { message }
-export async function testParser(id, message) {
-  await wait(LAG);
-  const p = db.parsers.find(x => x.id === id);
-  if (!p) throw new Error('Parser non trovato.');
-  const { matched, row, missing, complete } = runParser(message, p.config);
-  if (complete) {
-    // Il replace avviene solo dentro questo parser: gli altri feed non si toccano.
-    db.signals[id] = { csv: toCsv(row), expires_at: Date.now() + 90_000 };
-  }
-  db.logs.unshift({ id: uid('log'), parser_id: id, chat_id: p.chat_ids[0] || null,
-                    matched, complete, missing, text: message,
-                    at: new Date().toISOString() });
-  db.logs = db.logs.slice(0, 100);
-  save();
-  // Riconosciuto ma incompleto NON scrive: una riga senza evento sarebbe
-  // formalmente valida e priva di senso per XTrader.
-  return { matched, complete, missing, row, csv: complete ? toCsv(row) : null };
-}
-
-// POST /api/parsers/:id/suggest  { message }  → mappatura proposta dal modello
-export async function suggest(id, message) {
-  await wait(700); // il server reale interroga il modello: lo stato di attesa è reale
+// Il suggeritore resta nel browser: il motore JS e' gia' qui, e il messaggio
+// di esempio non ha motivo di viaggiare prima che l'utente salvi qualcosa.
+export function suggest(message) {
   return suggestConfig(message);
 }
 
-/* ------------------------------------------------------------------ chat */
+/* ------------------------------------------------- messaggio di esempio */
 
-// GET /api/chats
-export async function listChats() {
-  await wait(LAG);
-  return clone(db.chats);
+// Il messaggio di esempio del wizard vive nel browser, per slug: il server
+// non lo conserva (non e' un dato del contratto, e' un appunto di lavoro).
+const CHIAVE_CAMPIONE = 'xtrelay:campione:';
+
+export function sampleMessage(slug) {
+  try { return localStorage.getItem(CHIAVE_CAMPIONE + slug) || ''; }
+  catch { return ''; }
 }
 
-export function getChat(id) {
-  const c = db.chats.find(x => x.id === id);
-  return c ? clone(c) : null;
+export function saveSampleMessage(slug, testo) {
+  try { localStorage.setItem(CHIAVE_CAMPIONE + slug, testo); }
+  catch { /* modalita' privata: il wizard funziona, l'appunto non sopravvive */ }
 }
 
-// POST /api/chats/verify/start → codice usa-e-getta da incollare nella chat
-export async function startVerification() {
-  await wait(LAG);
-  const code = 'XT-' + Array.from(crypto.getRandomValues(new Uint8Array(3)))
-    .map(b => b.toString(36).toUpperCase().padStart(2, '0')).join('').slice(0, 6);
-  db.pending_verification = { code, expires_at: Date.now() + 600_000 };
-  save();
-  return clone(db.pending_verification);
-}
+/* ------------------------------------------------------- feed e token */
 
-// GET /api/chats/verify/status?code=…  (la UI fa polling finché il bot vede il codice)
-export async function verificationStatus() {
-  await wait(400);
-  const pv = db.pending_verification;
-  if (!pv) return { state: 'none' };
-  if (pv.chat) return { state: 'verified', chat: clone(pv.chat) };
-  // Il codice e' l'unica eccezione prevista al filtro delle chat: se restasse
-  // valido per sempre, quell'eccezione non si chiuderebbe mai.
-  if (Date.now() > pv.expires_at) {
-    db.pending_verification = null;
-    save();
-    return { state: 'expired' };
+// Il token e' DELL'UTENTE, non del parser: un solo URL da incollare in
+// XTrader, tutti i parser scrivono li'. Il token in chiaro esiste solo in
+// questa risposta: si passa al chiamante e non si conserva.
+export async function generateToken() {
+  const r = await http('POST', '/api/me/token');
+  if (stato.me) {
+    stato.me.token_prefix = r.token_prefix;
+    stato.me.slug = r.feed.replace(/^\/feed\//, '').replace(/\.csv$/, '');
   }
-  return { state: 'waiting' };
-}
-
-// Solo nel prototipo: simula il bot che legge il codice nel gruppo.
-// In produzione questo avviene dentro POST /telegram/webhook.
-export async function simulateVerificationMessage(title) {
-  const pv = db.pending_verification;
-  if (!pv) throw new Error('Nessuna verifica in corso.');
-  const chat = {
-    id: uid('cht'),
-    telegram_chat_id: '-100' + Math.floor(Math.random() * 9e9 + 1e9),
-    message_thread_id: null,
-    title: (title || '').trim() || 'Gruppo Telegram',
-    type: 'supergroup',
-    verified_at: new Date().toISOString(),
+  return {
+    token: r.token,
+    url: location.origin + r.feed + '?token=' + encodeURIComponent(r.token),
   };
-  db.chats.push(chat);
-  pv.chat = chat;
-  save();
-  return clone(chat);
 }
 
-export async function finishVerification() {
-  db.pending_verification = null;
-  save();
+// L'URL del feed mostrato quando il token NON e' in mano: il percorso e' vero,
+// il token e' il prefisso piu' un segnaposto, e la vista deve dirlo.
+export function feedUrl() {
+  if (!stato.me || !stato.me.slug) return null;
+  const prefisso = stato.me.token_prefix || '';
+  return location.origin + '/feed/' + stato.me.slug + '.csv?token='
+    + (prefisso ? prefisso + '…' : '…');
 }
 
-// DELETE /api/chats/:id
-export async function deleteChat(id) {
-  await wait(LAG);
-  db.chats = db.chats.filter(c => c.id !== id);
-  for (const p of db.parsers) p.chat_ids = p.chat_ids.filter(x => x !== id);
-  save();
-}
-
-// PUT /api/parsers/:id/chats  { chat_ids }  → la molti-a-molti parser ↔ chat
-export async function setParserChats(id, chatIds) {
-  await wait(120);
-  const p = db.parsers.find(x => x.id === id);
-  if (!p) throw new Error('Parser non trovato.');
-  p.chat_ids = [...chatIds];
-  save();
-  return clone(p);
-}
-
-/* ------------------------------------------------------------------- log */
-
-// GET /api/logs?parser_id=…   (mai token nei log)
-export async function listLogs(parserId) {
-  await wait(LAG);
-  const rows = parserId ? db.logs.filter(l => l.parser_id === parserId) : db.logs;
-  return clone(rows);
-}
-
-// Stato del feed: c'è un segnale vivo entro i 90 secondi?
-export function signalState(parserId) {
-  const s = db.signals[parserId];
-  if (!s) return { live: false };
-  const left = Math.ceil((s.expires_at - Date.now()) / 1000);
-  return left > 0 ? { live: true, seconds_left: left, csv: s.csv } : { live: false };
+export function hasToken() {
+  return Boolean(stato.me && stato.me.token_prefix);
 }

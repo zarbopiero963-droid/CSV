@@ -1,26 +1,29 @@
-"""Flusso completo del prototipo, pilotato da un browser vero.
+"""Flusso completo della web app REALE, pilotato da un browser vero (#32).
 
-CLAUDE.md pretende che una modifica a `web/` sia verificata caricando davvero la
-pagina: un `py_compile` non dice nulla sul JavaScript. Questo script esegue il
-percorso reale — login, wizard, mappatura colonna per colonna, prova messaggio,
-token, verifica chat, log — e asserisce il CSV prodotto e l'assenza di errori in
-console. Esce diverso da zero al primo problema.
+Dalla PR dell'aggancio la pagina su `/app` non e' piu' un prototipo a dati
+finti: parla col relay. Questo script esegue il percorso del cliente contro il
+servizio vero — login a password, dashboard, creazione parser, wizard, prova
+messaggio SUL SERVER, salvataggio persistente, token del feed una-volta-sola,
+lettura del feed via HTTP col token appena coniato, logout — e asserisce il CSV
+prodotto, i byte del feed e l'assenza di errori in console. Esce diverso da
+zero al primo problema.
 
-Lo avvia `test_prototype_flow.py`, che tira su il server. A mano:
+Lo avvia `test_prototype_flow.py`, che tira su il relay con
+`ADMIN_PASSWORD_HASH` derivato da `credenziali_prova.py`. A mano:
 
-    uvicorn main:app --port 8099
+    ADMIN_PASSWORD_HASH=... TELEGRAM_BOT_TOKEN=123456789:AAFinto \\
+        uvicorn main:app --port 8099
     python tests/web/prototype_flow.py http://127.0.0.1:8099/app/ /tmp/shots
 """
 
-import csv, io, sys, pathlib, tempfile
+import csv, io, json, sys, pathlib, tempfile, urllib.error, urllib.request
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 from playwright.sync_api import sync_playwright
 
 # Fonte unica dell-avvio del browser: il percorso pinnato in questo
-# ambiente, quello di Playwright in CI. Prima era ricopiato in cinque file.
+# ambiente, quello di Playwright in CI.
 from tests.runtime import apri_chromium  # noqa: E402
-
-# Chromium preinstallato nell'immagine; PLAYWRIGHT_BROWSERS_PATH punta qui.
+from tests.web.credenziali_prova import PASSWORD_PROVA, UTENTE_PROVA  # noqa: E402
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else 'http://127.0.0.1:8099/app/'
 OUT = pathlib.Path(sys.argv[2]) if len(sys.argv) > 2 else pathlib.Path(tempfile.mkdtemp())
@@ -33,45 +36,64 @@ def shot(page, name):
     page.screenshot(path=str(OUT / f'{name}.png'), full_page=True)
     print('shot', name)
 
+def _console(m):
+    if m.type != 'error':
+        return
+    # I 401 sono ATTESI tre volte in questo flusso — la sonda di sessione del
+    # boot senza cookie, il login volutamente sbagliato, la verifica post-logout
+    # — e Chromium li logga da se' come «Failed to load resource». Non sono
+    # errori della pagina. Ogni ALTRO codice (404 di un asset, 500 del server)
+    # resta un fallimento del test.
+    if 'Failed to load resource' in m.text and '401' in m.text:
+        return
+    errors.append(f'console.{m.type}: {m.text}')
+
 with sync_playwright() as pw:
     b = apri_chromium(pw)
     pg = b.new_page(viewport={'width': 1420, 'height': 1000})
-    pg.on('console', lambda m: errors.append(f'console.{m.type}: {m.text}') if m.type == 'error' else None)
+    pg.on('console', _console)
     pg.on('pageerror', lambda e: errors.append(f'pageerror: {e}'))
 
     pg.goto(BASE)
-    pg.wait_for_selector('.login')
+    pg.wait_for_selector('#login-pass')
     shot(pg, '01-login')
 
-    pg.click('[data-act="login-widget"]')
-    pg.wait_for_selector('.list-item')
-    shot(pg, '02-dashboard')
+    # La porta Telegram: un LINK verso oauth.telegram.org (modalita' redirect,
+    # nessuno script esterno), costruito col bot_id numerico di /api/settings.
+    # Non si clicca — navigherebbe verso Telegram — se ne asserisce la forma.
+    href = pg.get_attribute('a.tg-btn', 'href')
+    assert href and href.startswith('https://oauth.telegram.org/auth?bot_id=123456789'), href
+    assert 'AAFinto' not in href, 'il token del bot e\' finito nel link di login'
 
-    # parser esistente -> configurazione
-    pg.click('a.name')
-    pg.wait_for_selector('.wizard-grid')
-    shot(pg, '03-parser-esistente')
+    # Password sbagliata: l'errore del server compare nella pagina, non in console.
+    pg.fill('#login-user', UTENTE_PROVA)
+    pg.fill('#login-pass', 'password-sbagliata')
+    pg.click('[data-act="login-password"]')
+    pg.wait_for_function("document.getElementById('login-err')"
+                         " && document.getElementById('login-err').textContent.length > 0")
+    err = pg.inner_text('#login-err')
+    assert 'credenziali' in err.lower(), f'errore di login inatteso: {err!r}'
+    shot(pg, '02-login-sbagliato')
 
-    # feed tab
-    pg.click('text=Feed CSV')
-    pg.wait_for_selector('.csv-out')
-    shot(pg, '04-feed')
+    # Password giusta: sessione vera (cookie firmato dal server) e dashboard.
+    pg.fill('#login-pass', PASSWORD_PROVA)
+    pg.click('[data-act="login-password"]')
+    pg.wait_for_selector('.stats')
+    assert 'amministratore' in pg.inner_text('.head'), 'la pillola admin non compare'
+    shot(pg, '03-dashboard')
 
-    # nuovo parser
-    pg.click('nav a[href="#/parsers"]')
-    pg.wait_for_selector('.list-item')
-    shot(pg, '04b-lista-parser')
+    # nuovo parser: viene creato SUL SERVER (POST /api/me/parsers)
     pg.click('[data-act="new-parser"]')
     pg.fill('#np-name', 'Over 2,5 LIVE')
     pg.click('[data-act="create-parser"]')
     pg.wait_for_selector('#paste-msg')
-    shot(pg, '05-wizard-incolla')
+    shot(pg, '04-wizard-incolla')
 
-    # AI suggest
+    # suggeritore (client-side: il motore JS e' gia' nel browser)
     pg.fill('#paste-msg', MSG)
     pg.click('[data-act="ai-suggest"]')
     pg.wait_for_selector('.map-table', timeout=8000)
-    shot(pg, '06-suggerimento')
+    shot(pg, '05-suggerimento')
 
     # riparti dal messaggio e vai a mano: condizione
     pg.click('[data-act="wiz-restart"]')
@@ -81,20 +103,16 @@ with sync_playwright() as pw:
     pg.click('.frag >> nth=0')
     pg.click('[data-act="save-match"]')
     pg.wait_for_selector('[data-act="wiz-next"]')
-    shot(pg, '07-colonna-provider')
+    shot(pg, '06-colonna-provider')
 
     # Regressione del finding Critical di CodeRabbit: partendo da una regola SENZA
-    # trasformazioni (Provider e' una costante), readCurrentRule() in modalita' regex
-    # crea un oggetto nuovo con un array vuoto SUO. Se il gestore cattura la regola
-    # prima della rilettura, spinge la trasformazione in una copia orfana e la perde.
+    # trasformazioni, readCurrentRule() in modalita' regex crea un oggetto nuovo con
+    # un array vuoto SUO. Se il gestore cattura la regola prima della rilettura,
+    # spinge la trasformazione in una copia orfana e la perde.
     pg.click('[data-act="wiz-mode"][data-mode="regex"]')
     pg.wait_for_selector('#rule-pattern')
-    # La trasformazione si attiva PRIMA di digitare: se si digitasse per primo,
-    # l'evento input avrebbe gia' convertito la regola in regex e l'array delle
-    # trasformazioni risulterebbe condiviso, mascherando il difetto.
-    # click SINGOLO, non check(): check() ritenta finche' la casella non risulta
-    # spuntata, e il secondo tentativo mascherava il difetto (la regola era ormai
-    # diventata regex e l'array condiviso). Il difetto colpisce la PRIMA attivazione.
+    # click SINGOLO, non check(): check() ritenta e il secondo tentativo maschera
+    # il difetto — colpisce la PRIMA attivazione.
     pg.click('[data-act="toggle-transform"][data-op="lower"]')
     pg.wait_for_timeout(300)
     assert pg.is_checked('[data-act="toggle-transform"][data-op="lower"]'), \
@@ -106,17 +124,13 @@ with sync_playwright() as pw:
     pg.uncheck('[data-act="toggle-transform"][data-op="lower"]')
     pg.wait_for_timeout(200)
 
-    # Provider = costante
-    pg.click('[data-act="wiz-mode"][data-mode="constant"]')
-    pg.fill('#rule-const', 'XTrader')
-    prov = pg.inner_text('.xt tbody td >> nth=0')
-    assert prov == 'XTrader', f'anteprima Provider={prov!r}'
-    pg.click('[data-act="wiz-next"]')          # -> EventId
-    pg.click('[data-act="rule-empty"]')        # EventId vuoto -> EventName
+    # Provider resta VUOTA: e' il nome di chi manda, la scrive chi legge (#42).
+    pg.click('[data-act="rule-empty"]')       # Provider vuota -> EventId
+    pg.click('[data-act="rule-empty"]')       # EventId vuoto -> EventName
     pg.wait_for_selector('.frag')
     pg.click('.frag >> nth=1')                 # riga con l'emoji versus
     pg.wait_for_selector('#rule-anchor')
-    shot(pg, '08-eventname-frammento')
+    shot(pg, '07-eventname-frammento')
     ev = pg.inner_text('.xt tbody td >> nth=2')
     assert ev == 'Inter v Milan', f'EventName grezzo={ev!r}'
 
@@ -125,20 +139,11 @@ with sync_playwright() as pw:
     pg.wait_for_timeout(200)
     ev2 = pg.inner_text('.xt tbody td >> nth=2')
     assert ev2 == 'Inter - Milan', f'EventName trasformato={ev2!r}'
-    shot(pg, '09-eventname-trasformato')
+    shot(pg, '08-eventname-trasformato')
 
-    # Verso il riepilogo, ma NON a vuoto: dal 13/08/2026 le colonne obbligatorie sono
-    # quattro (EventName, MarketType, SelectionName, BetType), quindi un parser che
-    # lascia MarketType/SelectionName/BetType vuote e' «incompleto» e non manda segnali.
-    # Si impostano come costanti, com'e' un parser vero.
-    #
-    # La navigazione NON si fida dell-ordine hardcodato: `_costante(colonna, ...)`
-    # asserisce che il wizard sia davvero su quella colonna (il titolo bolla mostra
-    # `Colonna <nome>`) PRIMA di scrivere. Un riordino silenzioso degli step
-    # metterebbe altrimenti la costante nella colonna sbagliata senza far fallire il
-    # test. Chiesto da Claude Fable 5 sulla PR #28. E le attese sono legate allo
-    # STATO (colonna cambiata, `#rule-const` comparso), non a un timer fisso che su un
-    # runner lento farebbe cliccare prima del render. Segnalato da CodeRabbit, PR #28.
+    # Le colonne obbligatorie (MarketType, SelectionName, BetType) come costanti,
+    # com'e' un parser vero. `_costante` asserisce la colonna PRIMA di scrivere:
+    # un riordino silenzioso degli step non deve passare (chiesto da Fable 5, PR #28).
     def _colonna_corrente():
         return pg.inner_text('.bubble.ai strong.mono')
 
@@ -175,28 +180,30 @@ with sync_playwright() as pw:
     _costante('BetType', 'PUNTA')
     _avanti()                       # Points
     _al_riepilogo()
-    shot(pg, '10-riepilogo')
+    shot(pg, '09-riepilogo')
 
-    # prova messaggio: caso riconosciuto
+    # prova messaggio: gira SUL SERVER (POST /api/me/parsers/{slug}/test), lo
+    # stesso `esegui_parser` del webhook, a secco. Il CSV mostrato e' quello del
+    # server, byte per byte.
     pg.click('[data-act="run-test"]')
     pg.wait_for_selector('#test-csv')
+    csv_txt = pg.inner_text('#test-result')
+    assert 'Riconosciuto' in csv_txt, f'atteso esito riconosciuto: {csv_txt!r}'
     csv_txt = pg.inner_text('#test-csv')
-    assert 'Riconosciuto' in pg.inner_text('#test-result'), 'atteso esito riconosciuto'
     assert 'Inter - Milan' in csv_txt, f'CSV senza evento: {csv_txt!r}'
     assert csv_txt.count('"') == 56, f'campi quotati attesi 56, trovati {csv_txt.count(chr(34))}'
     assert csv_txt.strip().count(chr(10)) == 1, 'attese 2 righe: intestazione + segnale'
-    # Asserzione POSIZIONALE: le costanti devono stare nella colonna giusta, non solo
-    # comparire da qualche parte. Se il wizard riordinasse gli step, `_costante` gia'
-    # fallirebbe sull-asserzione di colonna; questo e' il secondo pavimento, sul CSV
-    # prodotto. Indici da HEADERS: EventName=2, MarketType=5, SelectionName=7, BetType=12.
-    righe = list(csv.reader(io.StringIO(csv_txt)))
+    # Asserzione POSIZIONALE sul CSV del SERVER. Indici da HEADERS: Provider=0,
+    # EventName=2, MarketType=5, SelectionName=7, BetType=12.
+    righe = list(csv.reader(io.StringIO(csv_txt.lstrip('\ufeff'))))
     assert len(righe) >= 2, f'CSV senza riga segnale: {csv_txt!r}'
     segnale = righe[1]
+    assert segnale[0] == '', f'Provider doveva restare vuota (#42): {segnale!r}'
     assert segnale[2] == 'Inter - Milan', f'EventName in colonna sbagliata: {segnale!r}'
     assert segnale[5] == 'OVER_UNDER_15', f'MarketType in colonna sbagliata: {segnale!r}'
     assert segnale[7] == 'Over 1,5 goal', f'SelectionName in colonna sbagliata: {segnale!r}'
     assert segnale[12] == 'PUNTA', f'BetType in colonna sbagliata: {segnale!r}'
-    shot(pg, '11-prova-ok')
+    shot(pg, '10-prova-ok')
     print('CSV riconosciuto:', repr(csv_txt))
 
     # prova messaggio: caso da ignorare (la condizione non corrisponde)
@@ -207,73 +214,81 @@ with sync_playwright() as pw:
     only_head = pg.inner_text('#test-csv')
     assert 'Inter' not in only_head, f'il feed non doveva cambiare: {only_head!r}'
     assert only_head.strip().count(chr(10)) == 0, 'atteso solo header'
-    shot(pg, '11b-prova-ignorata')
-    print('CSV ignorato:', repr(only_head))
+    shot(pg, '11-prova-ignorata')
 
-    # ripristina il messaggio buono e rilancia, per lasciare un segnale vivo nel feed
+    # ripristina il messaggio buono, rilancia e salva
     pg.fill('#test-msg', MSG)
     pg.click('[data-act="run-test"]')
     pg.wait_for_function("document.querySelector('#test-result')"
                          " && document.querySelector('#test-result').innerText.includes('Riconosciuto')")
-
     pg.click('[data-act="wiz-save"]')
-    pg.wait_for_timeout(400)
+    pg.wait_for_selector('.toast')
 
-    # token
-    pg.click('text=Feed CSV')
-    pg.wait_for_selector('[data-act="rotate-token"]')
-    pg.click('[data-act="rotate-token"]')
+    # PERSISTENZA: ricarica la pagina. La sessione sopravvive (cookie), la
+    # config sopravvive (e' sul server), e il riepilogo mostra il valore
+    # estratto dalla mappatura salvata. Con la vecchia demo a localStorage
+    # questo passo non dimostrava niente; adesso e' il punto della PR.
+    pg.reload()
+    pg.wait_for_selector('.map-table')
+    riepilogo = pg.inner_text('.map-table')
+    assert 'Inter - Milan' in riepilogo, (
+        f'la mappatura salvata non e\' tornata dal server: {riepilogo[:300]!r}')
+    shot(pg, '12-dopo-reload')
+
+    # token del feed: DELL'UTENTE, mostrato una volta sola
+    pg.click('nav a[href="#/feed"]')
+    pg.wait_for_selector('[data-act="ask-token"]')
+    shot(pg, '13-feed-senza-token')
+    pg.click('[data-act="ask-token"]')
     pg.wait_for_selector('.modal .secret')
-    shot(pg, '12-token')
+    segreti = pg.locator('.modal .secret').all_inner_texts()
+    token = segreti[0]
+    url_feed = segreti[1]
+    assert token.startswith('xt_') and len(token) > 20, f'token strano: {token!r}'
+    assert url_feed.endswith('?token=' + token) and '/feed/' in url_feed, url_feed
+    shot(pg, '14-token')
     pg.click('[data-act="after-token"]')
-    pg.wait_for_selector('.csv-out')
-    shot(pg, '13-feed-attivo')
+    pg.wait_for_selector('.copy-row')
+    # la pagina ora mostra solo il PREFISSO, mai il token intero
+    visibile = pg.inner_text('.main')
+    assert token not in visibile, 'il token intero e\' rimasto visibile dopo il modale'
+    assert token[:9] in visibile, 'il prefisso del token non compare'
 
-    # Terzo punto di aggancio del verificatore: quello che il cliente vede.
-    # Il pallino verde deve dirlo, non solo il codice deve saperlo.
-    pg.wait_for_selector('#csv-format')
-    stato = pg.inner_text('#csv-format')
-    assert stato == 'formato valido per XTrader', f'indicatore di formato: {stato!r}'
-    # E il CSV mostrato deve avere davvero il BOM, non solo il pallino verde.
-    primo = pg.evaluate("document.querySelector('.csv-out').textContent.codePointAt(0)")
-    assert primo == 0xfeff, f'il CSV mostrato non comincia col BOM: {primo:#x}'
+    # IL FEED VERO: l'URL appena coniato risponde 200 con la sola intestazione,
+    # UTF-8 con BOM — sono i byte che leggera' XTrader.
+    with urllib.request.urlopen(url_feed, timeout=10) as r:  # noqa: S310 - loopback
+        corpo = r.read()
+    assert corpo.startswith(('\ufeff"Provider"').encode('utf-8')), corpo[:30]
+    assert corpo.decode('utf-8').strip().count('\n') == 0, 'feed atteso a sola intestazione'
+    # e con un token sbagliato risponde 404, senza confermare che lo slug esiste
+    try:
+        urllib.request.urlopen(url_feed[:url_feed.rindex('=')] + '=xt_sbagliato', timeout=10)  # noqa: S310
+        raise AssertionError('un token sbagliato ha aperto il feed')
+    except urllib.error.HTTPError as e:
+        assert e.code == 404, f'atteso 404 sul token sbagliato, avuto {e.code}'
 
-    # verifica chat
+    # chat e log: dichiarati «prossimamente», non finti
     pg.click('nav a[href="#/chats"]')
-    pg.wait_for_selector('[data-act="verify-chat"]')
-    pg.click('[data-act="verify-chat"]')
-    pg.wait_for_selector('[data-act="verify-step2"]')
-    shot(pg, '14-collega-bot')
-    pg.click('[data-act="verify-step2"]')
-    pg.wait_for_selector('.code-big')
-    shot(pg, '15-codice-verifica')
-    pg.fill('#vf-title', 'Segnali LIVE Test')
-    pg.click('[data-act="simulate-verify"]')
-    pg.wait_for_selector('[data-act="after-verify"]')
-    pg.click('[data-act="after-verify"]')
-    pg.wait_for_selector('.list-item')
-    shot(pg, '16-chat-collegate')
-
-    # assegna la chat al nuovo parser
-    pg.click('nav a[href="#/parsers"]')
-    pg.wait_for_selector('.list-item')
-    pg.click('a.name >> nth=1')
-    pg.wait_for_selector('text=Chat assegnate')
-    pg.click('text=Chat assegnate')
-    pg.wait_for_selector('[data-act="toggle-chat"]')
-    boxes = pg.locator('[data-act="toggle-chat"]')
-    boxes.nth(boxes.count() - 1).check()
-    pg.wait_for_timeout(500)
-    shot(pg, '17-chat-assegnate')
-
-    # log
+    pg.wait_for_selector('.empty')
+    assert 'prossimamente' in pg.inner_text('.main')
     pg.click('nav a[href="#/logs"]')
-    pg.wait_for_selector('table')
-    shot(pg, '18-log')
+    pg.wait_for_selector('.empty')
+    assert 'prossimamente' in pg.inner_text('.main')
+    shot(pg, '15-prossimamente')
 
+    # impostazioni: prefisso del token e profilo, mai il token
     pg.click('nav a[href="#/settings"]')
-    pg.wait_for_selector('[data-act="reset-proto"]')
-    shot(pg, '19-impostazioni')
+    pg.wait_for_selector('table')
+    impostazioni = pg.inner_text('.main')
+    assert token[:9] in impostazioni and token not in impostazioni
+    shot(pg, '16-impostazioni')
+
+    # logout: si torna al login, e la sessione e' davvero chiusa
+    pg.click('[data-act="logout"]')
+    pg.wait_for_selector('#login-pass')
+    stato_me = pg.evaluate("fetch('/api/me').then(r => r.status)")
+    assert stato_me == 401, f'/api/me dopo il logout: atteso 401, avuto {stato_me}'
+    shot(pg, '17-logout')
 
     b.close()
 

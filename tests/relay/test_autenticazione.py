@@ -64,6 +64,12 @@ ROTTE_PUBBLICHE = {
     # un'operazione che ha ottenuto ciò che voleva. Non tocca il database e non
     # rivela niente — cancella un cookie.
     ('POST', '/api/logout'),
+    # I valori pubblici che la pagina di login conosce PRIMA della sessione (#32):
+    # bot_username, bot_id, base_url. Il bot_id e' il prefisso del token del bot
+    # prima dei due punti — pubblico per costruzione, compare in ogni embed del
+    # widget — e serve al link di oauth.telegram.org in modalita' redirect. Che il
+    # TOKEN non esca da qui lo vincola tests/relay/test_settings.py.
+    ('GET', '/api/settings'),
 }
 
 # La TERZA categoria, nata col PR 6: rotte che non usano `CSV_ACCESS_TOKEN` ma non

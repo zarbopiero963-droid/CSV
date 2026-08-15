@@ -3666,6 +3666,28 @@ def chi_sono(request: Request):
         'slug': utente['slug'], 'token_prefix': utente['token_prefix']})
 
 
+@app.get('/api/settings')
+def impostazioni_pubbliche():
+    """I valori PUBBLICI che la pagina di login conosce PRIMA della sessione (#32).
+
+    Servono al prototipo reale per costruire il link «Accedi con Telegram» nella
+    modalita' redirect di oauth.telegram.org — l'unica senza script esterni, che
+    CLAUDE.md vieta — la quale vuole il `bot_id` NUMERICO, non lo username. Il
+    `bot_id` e' il prefisso del token prima dei due punti ed e' pubblico per
+    costruzione (compare in ogni embed del widget); il token NO, e da questa
+    rotta non esce niente che non sia gia' visibile a chiunque apra il bot.
+    Nessuna autenticazione, deliberatamente: senza questi valori la pagina di
+    login non puo' nemmeno offrire la porta Telegram.
+    """
+    prefisso = BOT_TOKEN.split(':', 1)[0] if ':' in BOT_TOKEN else ''
+    return {
+        'bot_username': TELEGRAM_BOT_USERNAME,
+        'bot_id': prefisso if prefisso.isdigit() else None,
+        'base_url': os.getenv('PUBLIC_URL',
+                              'https://csv-production-b04e.up.railway.app'),
+    }
+
+
 @app.post('/api/me/token')
 def genera_token_feed(request: Request):
     """Conia (o rigenera) il token del feed dell'utente della sessione.

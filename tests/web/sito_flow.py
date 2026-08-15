@@ -43,13 +43,24 @@ errori = []
 risorse = []
 
 
+def _sonda_di_sessione(testo):
+    """Il 401 di GET /api/me e' ATTESO quando dalla facciata si entra in /app:
+    dall'aggancio (#32) l'app reale sonda la sessione al boot, e chi arriva dal
+    sito non ha un cookie. Non e' un errore della pagina. Ogni altro codice
+    (404 di un asset, 500) resta un fallimento."""
+    return '401' in testo and '/api/me' in testo
+
+
 def _ascolta(pagina):
     pagina.on('pageerror', lambda e: errori.append(f'pageerror: {e}'))
     pagina.on('console', lambda m: errori.append(f'console.{m.type}: {m.text}')
-              if m.type == 'error' else None)
+              if m.type == 'error'
+              and not ('Failed to load resource' in m.text and '401' in m.text)
+              else None)
     # Una risorsa mancante non e' un errore di console: si vede solo qui.
     pagina.on('response', lambda r: risorse.append(f'{r.status} {r.url}')
-              if r.status >= 400 else None)
+              if r.status >= 400 and not _sonda_di_sessione(f'{r.status} {r.url}')
+              else None)
 
 
 # Il margine laterale minimo che ogni blocco di testo deve avere dal bordo dello
@@ -145,7 +156,10 @@ with sync_playwright() as pw:
         pagina.wait_for_load_state('load')
         assert '/app/' in pagina.url, \
             f'{nome}: il pulsante non porta all\'applicazione, sono su {pagina.url}'
-        pagina.wait_for_selector('.proto')
+        # Dall'aggancio (#32) /app e' l'app reale: si atterra sulla pagina di
+        # login, non piu' sul banner «PROTOTIPO · DATI FINTI», che vive solo
+        # nella copia dimostrativa a file unico.
+        pagina.wait_for_selector('.login')
         pagina.screenshot(path=str(OUT / f'{nome}-3-applicazione.png'))
         print(f'  {nome}: il pulsante porta a {pagina.url}')
 

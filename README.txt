@@ -118,7 +118,7 @@ GET    /api/me/parsers                  i parser dell'utente
 POST   /api/me/parsers                  body {"titolo":"Test 1","config":{...},"active":true}
 PUT    /api/me/parsers/SLUG             aggiorna il proprio (lo slug non cambia con la rinomina)
 DELETE /api/me/parsers/SLUG             elimina il proprio
-POST   /api/me/parsers/SLUG/test        body {"message":"..."} -> {matched,missing,complete,event?,csv?}
+POST   /api/me/parsers/SLUG/test        body {"message":"..."} -> {matched,missing,scarti,complete,event?,csv?}
 La config viene validata alla creazione (struttura + dry-run): una config storta da'
 422 col motivo. La prova (/test) e' a secco: non scrive nel feed di nessuno, e dice
 se la condizione ha combaciato e quali colonne obbligatorie mancano.
@@ -294,6 +294,14 @@ POST /api/logout
 Cancella il cookie. Riesce sempre, anche senza sessione: chiudere una sessione che
 non esiste ha ottenuto cio' che voleva. NON incrementa session_version, che
 butterebbe fuori tutti i dispositivi.
+
+GET /api/settings
+I valori PUBBLICI che la pagina di login conosce PRIMA della sessione:
+{"bot_username","bot_id","base_url"}. Serve alla web app per costruire il link
+"Accedi con Telegram" in modalita' redirect di oauth.telegram.org (che vuole il
+bot_id NUMERICO, non lo username). bot_id e' il prefisso del token del bot prima
+dei due punti: pubblico per costruzione, compare in ogni embed del widget. Il
+token del bot NON esce mai da questa rotta. Nessuna autenticazione, di proposito.
 
 IL COOKIE E IL FEED NON SI TOCCANO
 Il cookie di sessione (betrelay_sessione) e' HttpOnly, Secure, SameSite=Lax, e scade
@@ -541,9 +549,13 @@ tests/relay/test_facciata.py, che prova anche la variante sbagliata.
 La pagina e' indicizzabile di proposito (nessun noindex): un sito che nessuno trova
 non e' un sito. /app resta noindex, perche' non ha niente da indicizzare.
 
-PROTOTIPO WEB APP
-Il prototipo dell'interfaccia multiutente e' servito su /app (file statici in web/).
-Usa dati finti nel browser, non tocca il relay. Architettura e contratto API in SAAS.md.
+WEB APP
+L'interfaccia multiutente e' servita su /app (file statici in web/). Dalla #32
+parla col relay VERO: login (Telegram in modalita' redirect, o password), CRUD dei
+propri parser, prova del messaggio sul server, token del feed a livello utente.
+Il layer di rete e' web/api.js; web/api_finta.js e' il gemello a dati finti usato
+SOLO dalla copia dimostrativa a file unico (tools/build_single_file.py), che si
+apre da file:// e non puo' fare fetch. Architettura e schermate in SAAS.md.
 Il pulsante «Entra» della facciata porta qui.
 
 VARIABILI RAILWAY

@@ -808,7 +808,7 @@ in entrambe le implementazioni. `verify_csv()` in `main.py` e `verifyCsv()` in
 `web/engine.js` verificano BOM, intestazione esatta nell'ordine, CRLF senza LF
 nudi, tutti i campi fra virgolette, 14 campi per riga, e al massimo due righe.
 
-È agganciata in **tre** punti, e il numero conta più della funzione:
+È agganciata in **due** punti, e il numero conta più della funzione:
 
 1. **`store_signal()`**, fail-closed: un CSV che non passa non viene memorizzato,
    quindi una riga malformata non esiste nemmeno per i 90 secondi del TTL.
@@ -817,8 +817,13 @@ nudi, tutti i campi fra virgolette, 14 campi per riga, e al massimo due righe.
    `degraded` con il motivo quando il controllo fallisce. `auth` risponde a una
    domanda diversa — se il token è configurato — e sta lì per la stessa ragione:
    un controllo che nessuno legge non è un controllo.
-3. **La vista Feed CSV del prototipo**, con l'indicatore «formato valido per
-   XTrader» / «formato non valido» e il motivo scritto sotto.
+
+Il terzo aggancio — l'indicatore «formato valido per XTrader» nella vista Feed del
+vecchio prototipo a dati finti — **non esiste più** dall'aggancio al backend (#32):
+l'app non può leggere il feed dell'utente, perché servirebbe il token, che il
+server non rimostra mai. Tornerà quando esisterà un'anteprima autenticata lato
+server; `verifyCsv()` in `web/engine.js` resta, vincolata dal confronto con
+l'implementazione Python in `tests/engine/`.
 
 Sul percorso di consegna del feed c'è **una sola** verifica, e non può produrre un
 errore: se la riga letta dal database non passa il controllo, si serve il feed
@@ -1529,7 +1534,8 @@ senza doppio ruolo.
 | Fatto | **Quote e tetti per-tenant** (PR 3 del piano sincronizzato in #2, #31 B2): `MAX_PARSER_PER_UTENTE` misurata dentro il write-lock dell'INSERT, tetti su titolo e config su creazione **e** modifica, tetto in byte sul corpo HTTP prima del parsing (`MAX_CORPO_JSON`). Test in `tests/relay/test_quote_parser.py` |
 | Fatto | **Rimozione del seme** (PR 4 del piano sincronizzato in #2, #25 lavoro E): `migra()` non ricrea piu' `Parser_Telegram_XTrader_v1` ne' il profilo `PIERO` a ogni avvio — cancellare e' durevole, rinominare non lascia doppioni, un database vergine nasce vuoto. Il travaso dei link `parser_chats` gira **una volta sola** (tabella `migrazioni`) e da li' in avanti i link seguono le scritture dei profili. `TELEGRAM_ALLOWED_CHAT_IDS` e' pensionata. Test in `tests/relay/test_rimozione_seme.py` |
 | Fatto | **Accesso su approvazione** (PR 7), lato server: `stato_effettivo` / `giorni_rimasti` / `nuova_scadenza` come fonte unica, la richiesta del cliente col deep link del bot, la decisione del proprietario con i giorni liberi e l'errore di invio **non ingoiato**, il promemoria a 5 giorni una volta per scadenza, e gli effetti della scadenza su feed e webhook. Il **token non viene revocato** alla scadenza |
-| M3 | La web app collegata al backend: le schermate di questo flusso (richiesta, giorni rimasti, accesso scaduto) non esistono ancora — il prototipo è sui dati finti |
+| Fatto | **Aggancio web app → backend** (PR 8 del piano sincronizzato in #2, #32 · 3.3a): `web/api.js` parla col relay via `fetch` (login a password, login Telegram in modalità redirect di oauth.telegram.org costruito col `bot_id` di `GET /api/settings`, CRUD parser, prova sul server con gli `scarti`, token del feed a livello utente), il vecchio layer a `localStorage` vive in `web/api_finta.js` per la sola copia dimostrativa a file unico. Test browser end-to-end in `tests/web/` |
+| M3 | Le schermate dell'accesso su approvazione (richiesta, attesa, scaduto) e il pannello admin: il backend c'è (PR 7), le viste arrivano con i PR 9–10 |
 | M4 | Log persistenti, sospensione, suggerimento AI lato server, abbonamenti |
 
 ## Facciata pubblica
@@ -1572,33 +1578,69 @@ Il testo dice quello che il servizio fa **oggi**. La pastiglia «Servizio in avv
 e la sezione «Come si entra» esistono perché l'accesso su approvazione non è ancora
 costruito: quando lo sarà, quella pastiglia va cambiata, non lasciata lì.
 
-## Prototipo
+## La web app su `/app`
 
 ```sh
 uvicorn main:app --reload
 ```
 
 Poi `http://127.0.0.1:8000/app/`, oppure `http://127.0.0.1:8000/` e il pulsante «Entra».
-I dati vivono in `localStorage`, si azzerano da Impostazioni.
+Dal PR dell'aggancio (#32 · 3.3a) **non è più un prototipo a dati finti**: le viste
+(`web/app.js`) parlano col relay attraverso `web/api.js`, e ciò che si salva finisce
+nel database del servizio. Il messaggio di esempio del wizard è l'unica cosa che resta
+nel browser (`localStorage`, per slug): è un appunto di lavoro, non un dato del contratto.
 
-### Vista «Feed CSV»
+### Login
 
-Accanto al titolo «Contenuto attuale del feed» c'è l'indicatore del formato, con
-due soli stati:
+Due porte, le stesse del backend (PR 6):
 
-| Etichetta | Quando |
-|---|---|
-| `formato valido per XTrader` | `verifyCsv()` non trova niente da segnalare |
-| `formato non valido` | qualunque violazione del contratto |
+- **«Accedi con Telegram»**: un link — non un widget, non uno script esterno, che le
+  regole del repository vietano — verso la modalità redirect di `oauth.telegram.org`,
+  costruito col `bot_id` numerico di `GET /api/settings`. Al ritorno la pagina consuma
+  il frammento `#tgAuthResult`, lo POSTa a `/api/login/telegram` e lo toglie dall'URL.
+  Se il servizio non ha un bot configurato, la porta non compare;
+- il modulo **Utente / Password** («Entra»): la porta di riserva dell'amministratore
+  (`POST /api/login/password`). L'errore del server compare sotto il pulsante, verbatim
+  («credenziali non valide», il 429 del freno, il 503 della variabile assente).
 
-Nel secondo caso, sotto il CSV compare il motivo in chiaro — «manca il BOM:
-XTrader non leggerebbe la prima colonna», «intestazione diversa dal contratto
-(11 colonne)» — perché un indicatore rosso senza spiegazione trasforma un difetto
-diagnosticabile in una telefonata.
+La sessione è il cookie firmato del server: al 401 (venti minuti di inattività) la
+pagina si ricarica e torna al login, senza stati intermedi bugiardi.
 
-La nota sotto il CSV dice, verbatim: «Un segnale resta nel feed 90 secondi, poi il
-CSV torna alla sola intestazione. Il timer di questo parser è indipendente da
-tutti gli altri. Il feed è UTF-8 con BOM, come XTrader lo pretende.»
+### Struttura
 
-Il BOM è un carattere a larghezza zero: nel blocco del CSV non si vede, ed è
-corretto che non si veda. Chi vuole verificarlo guarda l'indicatore, non il testo.
+Sidebar: «Dashboard», «Parser», «Feed CSV», «Chat Telegram», «Log messaggi»,
+«Impostazioni», più nome utente, profilo (slug) e «Esci».
+
+- **Dashboard**: la pillola dello stato dell'accesso («amministratore», «attivo, N
+  giorni rimasti», o lo stato grezzo), quattro contatori misurati («Parser», «Parser
+  attivi», «Token del feed generato», «Giorni di accesso rimasti») e l'elenco dei
+  parser. Nessun contatore finto: ciò che il backend non sa ancora dare non compare.
+- **Parser**: elenco (titolo, slug, colonne mappate su 14, attivo/sospeso), «Crea
+  nuovo parser» (POST `/api/me/parsers`), dettaglio con tab «Configurazione»,
+  «Chat assegnate», «Log». Il wizard è quello di sempre (condizione → 14 colonne →
+  riepilogo), ma **«Prova messaggio» gira sul server** (`POST
+  /api/me/parsers/{slug}/test`, lo stesso `esegui_parser` del webhook, a secco): il
+  CSV mostrato è quello del server byte per byte, e gli **`scarti`** — il perché un
+  valore non ha raggiunto il feed (#39/#41/#42) — compaiono in un banner sotto
+  l'esito. «Salva configurazione» fa la PUT; la prova salva prima di provare, perché
+  il server conosce solo ciò che è salvato. L'anteprima locale accanto al wizard
+  resta, dichiarata indicativa: «fa fede la prova sul server».
+- **Feed CSV**: il token è **dell'utente**, non del parser — un solo URL da incollare
+  in XTrader. «Genera token» / «Rigenera token» (`POST /api/me/token`) apre il modale
+  una-volta-sola con token e URL completo; chiuso quello, la pagina mostra solo il
+  prefisso. Rigenerare **è** la revoca, e la vista lo dice prima di farlo. La nota:
+  ogni segnale resta 90 secondi, ogni parser ha riga e timer propri, il feed è UTF-8
+  con BOM.
+- **Chat Telegram** e **Log messaggi**: dichiarate «prossimamente», con la pillola e
+  la spiegazione di cosa arriverà — non tabelle finte. Le rotte backend non esistono
+  ancora (3.2 / 3.3c).
+- **Impostazioni**: nome, stato, slug, prefisso del token (mai il token), e il link
+  `t.me` del bot del servizio.
+
+### La copia dimostrativa a file unico
+
+`tools/build_single_file.py` concatena **`web/api_finta.js`** al posto di `api.js`:
+la copia si apre da `file://`, dove `fetch` non esiste, e tutto vive in
+`localStorage` (login demo con qualunque coppia, token finto). I due layer espongono
+la stessa superficie, vincolata da `tests/web/test_api_parita.py`; il banner
+«PROTOTIPO · DATI FINTI» resta solo lì.
