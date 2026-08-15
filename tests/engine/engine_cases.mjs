@@ -471,6 +471,47 @@ function casiConfronto() {
       SelectionName: { source: 'constant', value: 'Over 1,5' },
       BetType: { source: 'constant', value: 'PUNTA' } },
   });
+  // --- Guardie sui valori estratti (#39) e sulla config (#41), PR 5 ---------
+  //
+  // I casi vivono qui perche' l'output JS e' l'ORACOLO del gemello Python: se le
+  // due implementazioni divergessero su un tetto o su un motivo, l'utente
+  // vedrebbe «completo» nel browser e feed scartato in produzione — o il
+  // contrario, che e' peggio.
+  const conNumeri = (colonna, valore) => ({
+    match: { type: 'contains', value: 'P.Bet.' },
+    columns: { ...soloEmpty,
+      EventName: { source: 'line', contains: 'P.Bet.' },
+      MarketType: { source: 'constant', value: 'OVER_UNDER_15' },
+      SelectionName: { source: 'constant', value: 'Over 1,5 goal' },
+      BetType: { source: 'constant', value: 'PUNTA' },
+      [colonna]: { source: 'constant', value: valore } },
+  });
+  const MSG = 'P.Bet. Juventus - Palermo';
+  aggiungi('guardie: Price vuota → PASSA (la quota la mette XTrader)',
+    MSG, conNumeri('Price', ''));
+  aggiungi('guardie: Price col separatore migliaia → scartato',
+    MSG, conNumeri('Price', '1.000.000'));
+  aggiungi('guardie: Price sotto la scala Betfair → fuori intervallo',
+    MSG, conNumeri('Price', '0.5'));
+  aggiungi('guardie: Price non numerica → motivo distinto',
+    MSG, conNumeri('Price', 'abc'));
+  aggiungi('guardie: Price in cifre arabo-indiane → scartata (solo ASCII)',
+    MSG, conNumeri('Price', '\u0661\u0669'));
+  aggiungi('guardie: Handicap patologico → scartato', MSG, conNumeri('Handicap', '999999'));
+  aggiungi('guardie: Handicap 0 e -1.5 → passano', MSG, conNumeri('Handicap', '-1.5'));
+  aggiungi('guardie: Points moltiplicatore assurdo → scartato',
+    MSG, conNumeri('Points', '1.000.000'));
+  aggiungi('guardie: Points non finito (400 cifre) → caso a se',
+    MSG, conNumeri('Points', '9'.repeat(400)));
+  aggiungi('guardie: Points 2 → passa', MSG, conNumeri('Points', '2'));
+  aggiungi('guardie: sole costanti sulle obbligatorie → nessuna riga', 'ciao a tutti', {
+    match: { type: 'contains', value: 'a' },
+    columns: { ...soloEmpty,
+      EventName: { source: 'constant', value: 'X' },
+      MarketType: { source: 'constant', value: 'OVER_UNDER_15' },
+      SelectionName: { source: 'constant', value: 'Over' },
+      BetType: { source: 'constant', value: 'PUNTA' } },
+  });
   return confronti;
 }
 

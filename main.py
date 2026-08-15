@@ -1,4 +1,4 @@
-import asyncio, base64, binascii, csv, hashlib, hmac, io, json, logging, os, re, secrets, sqlite3, threading, time
+import asyncio, base64, binascii, csv, difflib, hashlib, hmac, io, json, logging, math, os, re, secrets, sqlite3, threading, time
 from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -1996,6 +1996,105 @@ def parse_message(message, cfg):
 # browser e feed vuoto in produzione.
 COLONNE_OBBLIGATORIE = ['EventName', 'MarketType', 'SelectionName', 'BetType']
 
+# Le colonne che XTrader legge come NUMERI, con l'intervallo ammesso. Decisi nella
+# Issue #39 e non copiati dal Bridge:
+#
+# - `Price`/`MinPrice`/`MaxPrice` in `1.01–1000` e' la scala reale delle quote
+#   Betfair, non una convenzione nostra: sotto 1.01 non esiste quota, sopra 1000
+#   non esiste mercato, quindi fuori da li' non c'e' informazione da salvare;
+# - `|Handicap| <= 1000` e' un inviluppo volutamente largo: deve coprire ogni linea
+#   reale, comprese quelle grandi dei mercati a punti, e intercettare solo il
+#   patologico;
+# - `Points` in `0–1000`: e' il MOLTIPLICATORE dello stake di XTrader (risposta del
+#   proprietario: «points 2 e su XTrader 1 significa 2 euro»), quindi il tetto non
+#   chiede «e' troppo?» — quanto punta il cliente non ci riguarda — ma «puo' averlo
+#   scritto una persona?». Il `100` del Bridge NON si copia: scarterebbe segnali
+#   veri di chi usa un moltiplicatore alto.
+#
+# `Points` e' anche la piu' pericolosa delle cinque, ed e' il motivo per cui la
+# Issue esiste: un valore storto sulle altre rende la scommessa impossibile
+# (`Price` assurdo non si abbina), qui la moltiplica.
+INTERVALLI_NUMERICI = {
+    'Price': (1.01, 1000.0),
+    'MinPrice': (1.01, 1000.0),
+    'MaxPrice': (1.01, 1000.0),
+    'Handicap': (-1000.0, 1000.0),
+    'Points': (0.0, 1000.0),
+}
+
+# Cifre ASCII, un solo separatore decimale, segno facoltativo. `float()` di Python
+# leggerebbe anche `١٩` (arabo-indiane) e `１９` (fullwidth), ma XTrader legge solo
+# ASCII: un valore cosi' passerebbe i tetti e finirebbe verbatim nel CSV, dove il
+# consumatore non lo capisce — la colonna sembra piena e non lo e'.
+#
+# `[0-9]` scritto per esteso e NON `\d`, che in Python matcha le cifre Unicode: con
+# `\d` questa riga sarebbe stata una guardia che non guarda. Misurato scrivendola
+# sbagliata: `motivo_valore_numerico('Price', '١٩')` restituiva `None`, cioe'
+# «accettabile», ed era esattamente il caso che la regola esiste per fermare.
+_NUMERO_ASCII = re.compile(r'^[+-]?(?:[0-9]+(?:[.,][0-9]*)?|[.,][0-9]+)$')
+
+
+def motivo_valore_numerico(colonna, valore):
+    """`None` se il valore e' accettabile per quella colonna, altrimenti il MOTIVO.
+
+    Predicato unico (regola 3): lo chiamano il motore, il verificatore e — quando
+    esistera' il multi-riga (#35) — anche le righe di override. Nel Bridge erano
+    due controlli scritti a mano e identici, e aggiungere il tetto a uno solo aveva
+    lasciato aperto l'altro percorso.
+
+    L'ordine dei controlli e' parte della decisione (#39), non un dettaglio:
+
+    - **vuoto → ammesso.** E' il caso normale di `Price`: la quota la mette XTrader
+      dal proprio book. E' anche il test che protegge dall'eccesso di zelo;
+    - **cifre non ASCII → scartato**, prima di `float()`, che le leggerebbe;
+    - **non convertibile → scartato**, e se ci sono PIU' separatori il motivo nomina
+      il separatore delle migliaia: `1.000.000` e' il caso reale da cui nasce la
+      Issue, e mandare l'utente su «controlla la regola» sarebbe la pista sbagliata;
+    - **non finito → scartato**, e prima dei tetti: `float('9'*400)` e' `inf`, e
+      l'infinito supera i confronti nel verso sbagliato — un `Points > 0` senza
+      tetto superiore direbbe «valido» a un moltiplicatore infinito (bug misurato
+      nel Bridge);
+    - **fuori intervallo → scartato**, con il tetto nel messaggio e il separatore
+      decimale come causa probabile.
+
+    Il motivo deve dire **cosa fare**, non solo cosa non va: e' il vincolo della
+    #25, e la ragione per cui nel Bridge «fuori intervallo» annunciato come «non
+    numerico» mandava su due piste entrambe sbagliate.
+    """
+    intervallo = INTERVALLI_NUMERICI.get(colonna)
+    if intervallo is None:
+        return None
+    testo = str('' if valore is None else valore).strip()
+    if not testo:
+        return None
+    if not _NUMERO_ASCII.match(testo):
+        if sum(testo.count(s) for s in '.,') > 1:
+            return (f'{colonna}: «{testo}» non e\' un numero. Probabile causa: il '
+                    'separatore delle migliaia — controlla le trasformazioni della regola.')
+        return (f'{colonna}: «{testo}» non e\' un numero valido. XTrader legge solo '
+                'cifre ASCII: controlla la regola, sta leggendo la parte sbagliata '
+                'del messaggio.')
+    try:
+        numero = float(testo.replace(',', '.'))
+    except ValueError:
+        return f'{colonna}: «{testo}» non e\' un numero.'
+    if not math.isfinite(numero):
+        return (f'{colonna}: «{testo}» non e\' un numero finito. Il valore estratto e\' '
+                'troppo lungo per essere un numero reale: controlla la regola.')
+    minimo, massimo = intervallo
+    if not (minimo <= numero <= massimo):
+        return (f'{colonna}: {testo} e\' fuori dall\'intervallo ammesso '
+                f'({_numero_leggibile(minimo)}–{_numero_leggibile(massimo)}). Probabile '
+                'causa: il separatore delle migliaia letto come decimale — controlla le '
+                'trasformazioni «Virgola decimale → punto» e «Solo cifre e separatori» '
+                'nella regola.')
+    return None
+
+
+def _numero_leggibile(x):
+    """`1.01` resta `1.01`, `1000.0` diventa `1000`: il messaggio lo legge una persona."""
+    return f'{x:g}'
+
 
 def _taglia_codepoint(testo, n):
     """Primi `n` CODEPOINT, non le prime `n` unita' UTF-16 (`cutByCodePoint`).
@@ -2221,8 +2320,43 @@ def esegui_parser(message, config):
         return not str('' if valore is None else valore).strip()
 
     mancanti = [c for c in COLONNE_OBBLIGATORIE if _vuota(row[HEADERS.index(c)])]
-    return {'matched': matched, 'row': row, 'missing': mancanti,
-            'complete': matched and not mancanti}
+    scarti = [m for m in (motivo_valore_numerico(c, row[HEADERS.index(c)])
+                          for c in INTERVALLI_NUMERICI) if m]
+    # Il gate di CONTENUTO (#41): almeno una colonna obbligatoria deve venire da
+    # un'estrazione REALE che ha prodotto qualcosa. Un parser con tutte e quattro
+    # le obbligatorie costanti produce una riga piazzabile per QUALSIASI messaggio
+    # che soddisfi la condizione — misurato: «ciao a tutti» e «oggi partita»
+    # davano `complete=True`. Oggi va bene per accidente, perche' nell'uso normale
+    # almeno `EventName` si estrae; il caso reale e' chi prova il parser con valori
+    # fissi per vedere il CSV uscire e poi lo lascia attivo.
+    if matched and not mancanti and not _estrazione_reale(colonne, row):
+        scarti.append(
+            'nessuna colonna obbligatoria viene estratta dal messaggio: con soli '
+            'valori fissi questo parser scriverebbe la stessa scommessa per '
+            'qualunque messaggio. Almeno una fra '
+            + ', '.join(COLONNE_OBBLIGATORIE) + ' deve leggere dal messaggio.')
+    return {'matched': matched, 'row': row, 'missing': mancanti, 'scarti': scarti,
+            'complete': matched and not mancanti and not scarti}
+
+
+def _estrazione_reale(colonne, row):
+    """Vero se almeno una colonna OBBLIGATORIA legge dal messaggio e ha prodotto valore.
+
+    Non basta che la regola dichiari una sorgente d'estrazione: deve anche aver
+    estratto qualcosa. Una regola `line` che non trova la riga lascia il campo
+    vuoto, e in quel caso la riga cade gia' per `missing` — ma se l'utente ha messo
+    una costante su quella colonna e l'estrazione su un'altra, il conto va fatto
+    sui valori, non sulle intenzioni.
+    """
+    for colonna in COLONNE_OBBLIGATORIE:
+        regola = (colonne or {}).get(colonna) or {}
+        if not isinstance(regola, dict):
+            continue
+        if regola.get('source') in ('line', 'regex', 'message'):
+            if str('' if row[HEADERS.index(colonna)] is None
+                   else row[HEADERS.index(colonna)]).strip():
+                return True
+    return False
 
 
 def elabora_messaggio(message, cfg):
@@ -3919,6 +4053,23 @@ def _valida_config_parser(config):
     for nome, regola in (colonne or {}).items():
         if not isinstance(regola, dict):
             raise HTTPException(422, f'la regola della colonna {nome!r} deve essere un oggetto')
+        # Una chiave che non e' una delle 14 colonne veniva ACCETTATA e poi ignorata
+        # in silenzio: `esegui_parser` itera su `HEADERS`, quindi la regola non
+        # esisteva per il motore. Il caso peggiore e' completamente muto — `Prcie`
+        # invece di `Price` lascia la quota vuota per sempre, `missing` non se ne
+        # accorge (non e' obbligatoria) e `complete` resta `True`. Sulle
+        # obbligatorie il difetto e' fail-closed ma la DIAGNOSI e' falsa: il
+        # messaggio dice «manca EventName» e manda a controllare i delimitatori,
+        # mentre la causa e' un refuso di due lettere. Issue #41, gap 1.
+        #
+        # La lista si DERIVA da `HEADERS`, non si ricopia: aggiungere una colonna al
+        # CSV la rende disponibile al parser, e non esiste il caso «colonna che il
+        # parser conosce e il CSV no».
+        if nome not in HEADERS:
+            vicine = difflib.get_close_matches(str(nome), HEADERS, n=1)
+            suggerimento = f' Forse intendevi {vicine[0]!r}?' if vicine else ''
+            raise HTTPException(
+                422, f'{nome!r} non e\' una colonna del CSV.{suggerimento}')
     # Numeri JSON non-finiti (`NaN`, `Infinity`): `request.json()` li accetta e
     # `json.dumps` di default li serializza come JSON NON standard. Verrebbero scritti,
     # ma `JSONResponse` li rifiuta quando riserializza `config` a ogni lista/creazione:
@@ -4203,8 +4354,12 @@ async def prova_parser_mio(slug: str, request: Request):
         return _rispondi_con_sessione(utente['id'], utente['versione'],
                                       {'matched': False, 'missing': [], 'complete': False,
                                        'errore': 'config non eseguibile'})
+    # `scarti` nella risposta, non solo nel log: e' la diagnosi che dice all'utente
+    # PERCHE' il messaggio non produce riga, e senza di essa la prova mostrerebbe
+    # «non completo» con `missing` vuota — cioe' il sintomo senza la causa, che e'
+    # il difetto che la #39 e la #41 esistono per chiudere.
     corpo = {'matched': risultato['matched'], 'missing': risultato['missing'],
-             'complete': risultato['complete']}
+             'scarti': risultato.get('scarti') or [], 'complete': risultato['complete']}
     if risultato['complete']:
         row = ['' if v is None else v for v in risultato['row']]
         corpo['event'] = str(row[HEADERS.index('EventName')])

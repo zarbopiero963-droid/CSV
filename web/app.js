@@ -250,7 +250,8 @@ const HINTS = {
   MinPrice: 'Quota minima accettabile. Vuoto se non la usi.',
   MaxPrice: 'Quota massima accettabile. Vuoto se non la usi.',
   BetType: 'PUNTA oppure BANCA.',
-  Points: 'Punti o stake. È l\'ultima colonna del CSV.',
+  Points: 'Moltiplicatore dello stake di XTrader. Con 2, una puntata da 1 € diventa 2 €. '
+        + 'Vuoto se non lo usi.',
 };
 
 function currentRow() {

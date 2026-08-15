@@ -403,13 +403,64 @@ Sorgenti supportate: `empty`, `constant`, `message`, `line` (con `part` `whole` 
 `after`), `regex`. Trasformazioni: `trim`, `replace_last`, `replace_all`, `upper`,
 `lower`, `comma_to_dot`, `dot_to_comma`, `digits_only`.
 
+### Guardie sui valori estratti e sulla config (#39 + #41)
+
+Il motore controlla il **senso** di alcuni valori, non solo la loro presenza:
+`verify_csv()` guarda il formato (14 colonne, virgolette, CRLF, BOM) e non può
+accorgersi di una quota da un milione. Fino alla PR 5 in `main.py` non esisteva
+nessun `float()`: qualunque cosa la regola estraesse finiva verbatim nel CSV.
+
+**Le cinque colonne numeriche e i loro intervalli** (`INTERVALLI_NUMERICI` in
+`main.py`, `NUMERIC_RANGES` in `web/engine.js`):
+
+| Colonna | Intervallo | Perché |
+|---|---|---|
+| `Price` · `MinPrice` · `MaxPrice` | `1.01 – 1000` | è la scala reale delle quote Betfair, non una convenzione: fuori da lì non c'è informazione da salvare |
+| `Handicap` | `−1000 – +1000` | inviluppo volutamente largo: deve coprire ogni linea reale e intercettare solo il patologico |
+| `Points` | `0 – 1000` | è il **moltiplicatore** dello stake di XTrader: il tetto non chiede «è troppo?» — quanto punta il cliente non ci riguarda — ma «può averlo scritto una persona?» |
+
+**L'ordine dei controlli è parte del contratto**, non un dettaglio
+implementativo:
+
+```
+vuoto            → ammesso   (è il caso normale di Price: la quota la mette XTrader)
+cifre non ASCII  → scarta    (float() leggerebbe ١٩, XTrader no)
+non convertibile → scarta    (con più separatori il motivo nomina le migliaia)
+non finito       → scarta    (inf supera i confronti nel verso sbagliato)
+fuori intervallo → scarta    (nomina il tetto e il separatore decimale)
+```
+
+**Si scarta il messaggio intero, non si svuota la colonna.** Svuotare fabbrica
+una riga che il messaggio non dice: `Price` vuota significa «la quota la mette
+XTrader», `Handicap` vuoto significa una linea diversa, `Points` vuoto significa
+1×. La regola generale: *si può svuotare solo una colonna la cui assenza il
+consumatore interpreta come «non specificato», mai una la cui assenza interpreta
+come un valore.*
+
+**Il gate di contenuto:** almeno una colonna **obbligatoria** deve venire da
+un'estrazione reale (`line`, `regex`, `message`) e aver prodotto un valore. Un
+parser con le quattro obbligatorie tutte costanti scriverebbe la stessa
+scommessa per qualunque messaggio che soddisfi la condizione — misurato:
+«ciao a tutti» produceva una riga piazzabile.
+
+**Le chiavi di `columns` sono le 14 colonne del CSV**, derivate da `HEADERS`:
+una chiave con un refuso viene respinta con **422** e il suggerimento della
+colonna vicina. Prima veniva accettata e poi ignorata dal motore, che itera su
+`HEADERS`: sulle obbligatorie la diagnosi era falsa («manca EventName», mentre
+la causa era il refuso), sulle facoltative non c'era **nessun** sintomo.
+
+I motivi compaiono in `scarti` e nella risposta di `POST /api/me/parsers/{slug}/test`:
+devono dire **cosa fare**, non solo cosa non va.
+
 Il confronto della riga e il taglio del marcatore ignorano entrambi maiuscole e
 minuscole. Le ancore vengono tagliate per **codepoint**, non per unità UTF-16:
 un emoji astrale a cavallo del taglio lascerebbe un surrogato spaiato, e
 un'ancora così non combacerebbe più con nessuna riga, in silenzio.
 
-`runParser` restituisce quattro campi: `matched` (la condizione combacia), `row`
-(le 14 colonne), `missing` (le colonne obbligatorie risultate vuote) e `complete`.
+`runParser` restituisce cinque campi: `matched` (la condizione combacia), `row`
+(le 14 colonne), `missing` (le colonne obbligatorie risultate vuote), `scarti` (i
+motivi per cui il messaggio non deve produrre riga, vedi «Guardie sui valori»
+sotto) e `complete`.
 **Chi scrive il feed deve guardare `complete`, non `matched`:** un messaggio
 riconosciuto ma privo dell'evento produrrebbe una riga formalmente valida e priva
 di senso per XTrader. Le colonne obbligatorie sono in `REQUIRED_COLUMNS` e dal

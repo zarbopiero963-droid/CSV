@@ -136,6 +136,81 @@ export function matches(message, cond) {
 // divergono darebbero a un utente «completo» nel browser e feed vuoto in produzione.
 export const REQUIRED_COLUMNS = ['EventName', 'MarketType', 'SelectionName', 'BetType'];
 
+// Le colonne che XTrader legge come NUMERI, con l'intervallo ammesso. Gemella di
+// `INTERVALLI_NUMERICI` in main.py: due implementazioni dello stesso contratto,
+// cambiate nello stesso momento o l'utente vedrebbe «completo» nel browser e feed
+// vuoto in produzione. Decisi nella Issue #39 — `1.01-1000` e' la scala reale
+// delle quote Betfair; l'handicap ha un inviluppo largo apposta; `Points` e' il
+// moltiplicatore dello stake e il tetto non giudica quanto punta il cliente,
+// chiede solo se puo' averlo scritto una persona.
+export const NUMERIC_RANGES = {
+  Price: [1.01, 1000], MinPrice: [1.01, 1000], MaxPrice: [1.01, 1000],
+  Handicap: [-1000, 1000], Points: [0, 1000],
+};
+
+// `[0-9]` e non `\d`: in JavaScript `\d` e' gia' solo ASCII, ma la riga gemella in
+// Python con `\d` accetterebbe le cifre arabo-indiane — scritto per esteso in
+// entrambi, cosi' le due non possono divergere su una sottigliezza che non solleva.
+const ASCII_NUMBER = /^[+-]?(?:[0-9]+(?:[.,][0-9]*)?|[.,][0-9]+)$/;
+
+const readable = x => String(x);
+
+// `null` se il valore e' accettabile per quella colonna, altrimenti il MOTIVO.
+// Gemella di `motivo_valore_numerico` in main.py, stesso ordine dei controlli:
+// vuoto ammesso (la quota la mette XTrader), cifre non ASCII, non convertibile
+// (col separatore delle migliaia nominato quando ce n'e' piu' d'uno), non finito
+// (prima dei tetti: l'infinito supera i confronti nel verso sbagliato), fuori
+// intervallo. Il motivo dice cosa fare, non solo cosa non va.
+export function numericReason(column, value) {
+  const range = NUMERIC_RANGES[column];
+  if (!range) return null;
+  const text = String(value ?? '').trim();
+  if (!text) return null;
+  if (!ASCII_NUMBER.test(text)) {
+    const separators = (text.match(/[.,]/g) || []).length;
+    if (separators > 1) {
+      return `${column}: «${text}» non e' un numero. Probabile causa: il separatore `
+        + 'delle migliaia — controlla le trasformazioni della regola.';
+    }
+    return `${column}: «${text}» non e' un numero valido. XTrader legge solo cifre `
+      + "ASCII: controlla la regola, sta leggendo la parte sbagliata del messaggio.";
+  }
+  const n = Number(text.replace(',', '.'));
+  if (!Number.isFinite(n)) {
+    return `${column}: «${text}» non e' un numero finito. Il valore estratto e' `
+      + 'troppo lungo per essere un numero reale: controlla la regola.';
+  }
+  const [min, max] = range;
+  if (n < min || n > max) {
+    return `${column}: ${text} e' fuori dall'intervallo ammesso `
+      + `(${readable(min)}–${readable(max)}). Probabile causa: il separatore delle `
+      + 'migliaia letto come decimale — controlla le trasformazioni «Virgola '
+      + 'decimale → punto» e «Solo cifre e separatori» nella regola.';
+  }
+  return null;
+}
+
+// Le chiavi di `columns` che non sono colonne del CSV. Gemella del controllo in
+// `_valida_config_parser`: il wizard costruisce la config dalla lista canonica e
+// non puo' inventarne, ma una config puo' arrivare da fuori (file unico, copia
+// incollata), e una chiave con un refuso verrebbe ignorata in silenzio dal motore.
+// La lista si deriva da `COLUMNS`, mai ricopiata.
+export function unknownColumns(config) {
+  return Object.keys((config || {}).columns || {}).filter(c => !COLUMNS.includes(c));
+}
+
+// Vero se almeno una colonna OBBLIGATORIA legge dal messaggio e ha prodotto un
+// valore. Gemella di `_estrazione_reale`: senza, un parser di sole costanti
+// scriverebbe la stessa scommessa per qualunque messaggio riconosciuto.
+function realExtraction(columns, row) {
+  return REQUIRED_COLUMNS.some(c => {
+    const rule = (columns || {})[c];
+    if (!rule || typeof rule !== 'object') return false;
+    if (!['line', 'regex', 'message'].includes(rule.source)) return false;
+    return Boolean(String(row[COLUMNS.indexOf(c)] ?? '').trim());
+  });
+}
+
 // Esegue il parser sul messaggio.
 //
 // Restituisce:
@@ -156,7 +231,17 @@ export function runParser(message, config) {
   // nel wizard, mentre questo controllo e' il pavimento che non deve dipendere
   // dalla configurazione.
   const missing = REQUIRED_COLUMNS.filter(c => !String(row[COLUMNS.indexOf(c)] ?? '').trim());
-  return { matched, row, missing, complete: matched && missing.length === 0 };
+  const scarti = Object.keys(NUMERIC_RANGES)
+    .map(c => numericReason(c, row[COLUMNS.indexOf(c)]))
+    .filter(Boolean);
+  if (matched && missing.length === 0 && !realExtraction(config.columns, row)) {
+    scarti.push("nessuna colonna obbligatoria viene estratta dal messaggio: con soli "
+      + 'valori fissi questo parser scriverebbe la stessa scommessa per qualunque '
+      + 'messaggio. Almeno una fra ' + REQUIRED_COLUMNS.join(', ')
+      + ' deve leggere dal messaggio.');
+  }
+  return { matched, row, missing, scarti,
+           complete: matched && missing.length === 0 && scarti.length === 0 };
 }
 
 // XTrader legge il feed come UTF-8 CON BOM. Provato su x1.csv, il file che il

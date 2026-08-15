@@ -191,7 +191,11 @@ def test_i_due_motori_producono_lo_STESSO_runParser(casi):
         except Exception as e:  # noqa: BLE001 - un'eccezione E' una divergenza
             divergenti.append(f'{nome}: Python SOLLEVA {type(e).__name__}: {e}')
             continue
-        for campo in ('matched', 'row', 'missing', 'complete'):
+        # `scarti` sta fra i campi confrontati, e non e' un di piu': e' il MOTIVO
+        # mostrato all'utente. Due motori che scartano lo stesso messaggio per
+        # ragioni diverse manderebbero il cliente su due piste diverse — e' il
+        # difetto del Bridge che la #39 ha deciso di non ereditare.
+        for campo in ('matched', 'row', 'missing', 'scarti', 'complete'):
             if ottenuto[campo] != atteso[campo]:
                 divergenti.append(
                     f'{nome} · {campo}: JS={atteso[campo]!r} Python={ottenuto[campo]!r}')
