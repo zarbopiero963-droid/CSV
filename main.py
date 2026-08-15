@@ -1863,6 +1863,20 @@ def verify_csv(text):
     for n, line in enumerate(lines[1:], start=2):
         if not _ROW.match(line):
             raise ValueError('riga %d non ha %d campi tutti fra virgolette' % (n, len(HEADERS)))
+        # Il formato dei campi NUMERICI e' parte del contratto (#40): per
+        # XTrader il separatore decimale e' la virgola, e un punto qui e' una
+        # localizzazione mancata — il caso pericoloso non e' «non funziona»,
+        # e' `"1.85"` letto come migliaia. Senza questo controllo la decisione
+        # della #40 varrebbe quanto valeva la riga «senza BOM»: un'affermazione
+        # mai misurata. Il parsing passa dal modulo csv, non da uno split:
+        # virgole e virgolette DENTRO i valori non devono spostare gli indici.
+        campi = next(csv.reader(io.StringIO(line)))
+        for colonna in INTERVALLI_NUMERICI:
+            valore = campi[HEADERS.index(colonna)]
+            if valore and not _NUMERO_FEED.match(valore):
+                raise ValueError(
+                    '%s nel feed non e\' nella forma localizzata del contratto '
+                    '(virgola decimale): %r' % (colonna, valore))
     return text
 
 
@@ -2055,6 +2069,31 @@ def _piatto(testo):
     return SPAZI_UNIFORMI.sub(' ', testo).strip()
 
 _NUMERO_ASCII = re.compile(r'^[+-]?(?:[0-9]+(?:[.,][0-9]*)?|[.,][0-9]+)$')
+
+# Il separatore decimale del feed e' una proprieta' del CONTRATTO, non una
+# scelta dell'utente (#40). Per XTrader si scrive la VIRGOLA: e' misurato tre
+# volte — l'esempio della guida ufficiale (p. 169, `"1,23"`, unico campo
+# numerico valorizzato in 315 pagine), il Bridge che gira in produzione con
+# XTrader italiano, e la conferma del proprietario («noi usiamo IT»). La
+# tabella ha UNA voce oggi: EN → punto ed ES → virgola entreranno con la
+# famiglia Betting Toolkit (#37), e saranno una riga, non un refactor — e' la
+# ragione per cui il confine si costruisce adesso. Gemella di
+# `DECIMAL_SEPARATORS` in `web/engine.js`.
+SEPARATORI_DECIMALI = {'IT': ','}
+LINGUA_FEED = 'IT'
+SEPARATORE_DECIMALE = SEPARATORI_DECIMALI[LINGUA_FEED]
+
+# La forma che un campo numerico NON vuoto deve avere nel feed: la stessa
+# grammatica della guardia (`_NUMERO_ASCII`), col SOLO separatore localizzato.
+# Un punto qui dentro e' una localizzazione mancata, e in contesto italiano
+# `"1.85"` rischia la lettura come migliaia: quota 185, dentro i tetti della
+# #39, invisibile a ogni guardia a valle. DERIVATA dal separatore, non
+# ricopiata: quando Betting Toolkit aggiungera' una lingua, verificatore e
+# confine di scrittura non potranno divergere (suggerito da GPT-5.5 sulla
+# PR #48). Gemella di `FEED_NUMBER` in JS.
+_NUMERO_FEED = re.compile(
+    r'^[+-]?(?:[0-9]+(?:%(s)s[0-9]*)?|%(s)s[0-9]+)$'
+    % {'s': re.escape(SEPARATORE_DECIMALE)})
 
 
 def motivo_valore_numerico(colonna, valore):
@@ -2470,13 +2509,16 @@ def esegui_parser(message, config):
         return not _piatto(str('' if valore is None else valore))
 
     mancanti = [c for c in COLONNE_OBBLIGATORIE if _vuota(row[HEADERS.index(c)])]
+    # Il motivo per colonna serve DUE volte: per gli scarti e per decidere quali
+    # valori localizzare al confine di scrittura (solo quelli accettati).
+    motivi_numerici = {c: motivo_valore_numerico(c, row[HEADERS.index(c)])
+                       for c in INTERVALLI_NUMERICI}
     # Nessuno scarto senza riconoscimento: un parser la cui condizione non e'
     # soddisfatta ma con una costante numerica invalida produrrebbe motivi per
     # QUALUNQUE messaggio della chat, e il dispatch li archivierebbe come
     # «scartato» sotto un parser che non c'entra, conservando testo estraneo.
     # [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #47.
-    scarti = [m for m in (motivo_valore_numerico(c, row[HEADERS.index(c)])
-                          for c in INTERVALLI_NUMERICI) if m] if matched else []
+    scarti = [m for m in motivi_numerici.values() if m] if matched else []
     # Il gate di CONTENUTO (#41): almeno una colonna obbligatoria deve venire da
     # un'estrazione REALE che ha prodotto qualcosa. Un parser con tutte e quattro
     # le obbligatorie costanti produce una riga piazzabile per QUALSIASI messaggio
@@ -2490,6 +2532,21 @@ def esegui_parser(message, config):
             'valori fissi questo parser scriverebbe la stessa scommessa per '
             'qualunque messaggio. Almeno una fra '
             + ', '.join(COLONNE_OBBLIGATORIE) + ' deve leggere dal messaggio.')
+    # Il confine di scrittura (#40): i valori numerici ACCETTATI escono nella
+    # forma localizzata — per XTrader la virgola, misurato tre volte (guida
+    # ufficiale p.169 `"1,23"`, il Bridge in produzione, conferma del
+    # proprietario). Prima il separatore era un incidente: usciva cio' che la
+    # regola produceva, e `"1.85"` in contesto italiano rischia la lettura come
+    # migliaia — quota 185, dentro i tetti della #39, invisibile a ogni
+    # guardia. La localizzazione sta QUI e non in `make_csv` (condiviso col
+    # legacy di PIERO, che non deve cambiare di un byte) ne' nei chiamanti (tre
+    # siti JS, due Python: uno che dimentica = anteprima e feed diversi). I
+    # valori RIFIUTATI restano in forma giudicata: non vengono mai scritti, e
+    # il motivo li cita cosi' come la guardia li ha visti.
+    for colonna, motivo in motivi_numerici.items():
+        indice = HEADERS.index(colonna)
+        if motivo is None and row[indice]:
+            row[indice] = row[indice].replace('.', SEPARATORE_DECIMALE, 1)
     return {'matched': matched, 'row': row, 'missing': mancanti, 'scarti': scarti,
             'complete': matched and not mancanti and not scarti}
 
@@ -2863,6 +2920,9 @@ def health():
     # them, not to look like a real signal.
     sample = [''] * len(HEADERS)
     sample[HEADERS.index('EventName')] = 'Squadra "A", Citta - Altra'
+    # Una quota nella forma localizzata (#40): cosi' /health esercita anche il
+    # controllo del separatore, non solo struttura e quoting.
+    sample[HEADERS.index('Price')] = '1,85'
     try:
         verify_csv(empty_csv())
         verify_csv(make_csv(sample))

@@ -64,6 +64,14 @@ Tre cose dipendono dalla lingua del prodotto che legge il feed, e oggi ne servia
 BACK/LAY e' la nomenclatura Betfair generica che compare nel manuale di XTrader; il
 prodotto italiano scrive PUNTA/BANCA, ed e' cio' che XTrader stesso produce quando
 esporta un CSV.
+Dal PR della #40 il separatore e' imposto dal CONFINE DI SCRITTURA del motore, non
+dalla regola dell'utente: i valori numerici accettati dalla guardia escono nella
+forma localizzata (virgola), qualunque separatore avesse il messaggio o producesse
+una trasformazione. verify_csv respinge un campo numerico col punto e il suggeritore
+non propone piu' comma_to_dot su Price. Le config esistenti NON vanno migrate --
+comma_to_dot resta legale e tutte le config producono lo stesso feed fra loro --
+ma il CONTENUTO del feed cambia rispetto a prima della #40: dove usciva "1.85"
+ora esce "1,85". E' il fix, non un effetto collaterale.
 
 ENDPOINT PUBBLICO CSV
 GET /xtrader.csv?token=TOKEN

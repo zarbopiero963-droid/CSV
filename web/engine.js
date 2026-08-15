@@ -153,6 +153,28 @@ export const NUMERIC_RANGES = {
   Handicap: [-1000, 1000], Points: [0, 1000],
 };
 
+// Il separatore decimale del feed e' una proprieta' del CONTRATTO, non una
+// scelta dell'utente (#40). Per XTrader si scrive la VIRGOLA: misurato tre
+// volte — l'esempio della guida ufficiale (p. 169, `"1,23"`), il Bridge in
+// produzione con XTrader italiano, la conferma del proprietario. Una voce
+// oggi: EN/ES arriveranno con Betting Toolkit (#37) e saranno una riga, non
+// un refactor. Gemella di `SEPARATORI_DECIMALI` in main.py.
+export const DECIMAL_SEPARATORS = { IT: ',' };
+const FEED_LANG = 'IT';
+const DECIMAL_SEPARATOR = DECIMAL_SEPARATORS[FEED_LANG];
+
+// La forma che un campo numerico NON vuoto deve avere nel feed: la grammatica
+// della guardia (`ASCII_NUMBER`) col SOLO separatore localizzato. Un punto qui
+// e' una localizzazione mancata, e in contesto italiano `"1.85"` rischia la
+// lettura come migliaia. DERIVATA dal separatore, non ricopiata: quando
+// Betting Toolkit aggiungera' una lingua, verificatore e confine di scrittura
+// non potranno divergere (suggerito da GPT-5.5, PR #48). Il separatore odierno
+// e' la virgola: nella classe regex non richiede escape, ma si escapa comunque
+// per non lasciare una trappola alla lingua col punto. Gemella di
+// `_NUMERO_FEED` in main.py.
+const SEP_RE = DECIMAL_SEPARATOR.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const FEED_NUMBER = new RegExp('^[+-]?(?:[0-9]+(?:' + SEP_RE + '[0-9]*)?|' + SEP_RE + '[0-9]+)$');
+
 // `[0-9]` e non `\d`: in JavaScript `\d` e' gia' solo ASCII, ma la riga gemella in
 // Python con `\d` accetterebbe le cifre arabo-indiane — scritto per esteso in
 // entrambi, cosi' le due non possono divergere su una sottigliezza che non solleva.
@@ -289,18 +311,35 @@ export function runParser(message, config) {
   // `piatto`, non `trim()`: una obbligatoria di solo BOM era "mancante" in
   // JS e "valorizzata" in Python (classe del [REAL_FINDING] dei gate, PR #47).
   const missing = REQUIRED_COLUMNS.filter(c => !piatto(row[COLUMNS.indexOf(c)] ?? ''));
+  // Il motivo per colonna serve DUE volte: per gli scarti e per decidere
+  // quali valori localizzare al confine di scrittura (solo gli accettati).
+  const numericReasons = {};
+  for (const c of Object.keys(NUMERIC_RANGES)) {
+    numericReasons[c] = numericReason(c, row[COLUMNS.indexOf(c)]);
+  }
   // Nessuno scarto senza riconoscimento: un parser mai riconosciuto ma con
   // una costante numerica invalida produrrebbe motivi per QUALUNQUE
   // messaggio, e il dispatch li archivierebbe sotto un parser che non
   // c'entra. [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #47.
-  const scarti = !matched ? [] : Object.keys(NUMERIC_RANGES)
-    .map(c => numericReason(c, row[COLUMNS.indexOf(c)]))
-    .filter(Boolean);
+  const scarti = !matched ? [] : Object.values(numericReasons).filter(Boolean);
   if (matched && missing.length === 0 && !realExtraction(config.columns, row)) {
     scarti.push("nessuna colonna obbligatoria viene estratta dal messaggio: con soli "
       + 'valori fissi questo parser scriverebbe la stessa scommessa per qualunque '
       + 'messaggio. Almeno una fra ' + REQUIRED_COLUMNS.join(', ')
       + ' deve leggere dal messaggio.');
+  }
+  // Il confine di scrittura (#40): i valori numerici ACCETTATI escono nella
+  // forma localizzata — per XTrader la virgola. Prima il separatore era un
+  // incidente: usciva cio' che la regola produceva, e il suggeritore spingeva
+  // verso il punto — che in contesto italiano rischia la lettura come
+  // migliaia: quota 185, dentro i tetti della #39, invisibile a ogni guardia.
+  // La localizzazione sta QUI e non in `toCsv` ne' nei chiamanti (tre siti):
+  // uno che dimentica = anteprima e feed diversi. Stessa riga in
+  // `esegui_parser`. I valori RIFIUTATI restano in forma giudicata: non
+  // vengono mai scritti, e il motivo li cita come la guardia li ha visti.
+  for (const [c, reason] of Object.entries(numericReasons)) {
+    const i = COLUMNS.indexOf(c);
+    if (reason === null && row[i]) row[i] = row[i].replace('.', DECIMAL_SEPARATOR);
   }
   return { matched, row, missing, scarti,
            complete: matched && missing.length === 0 && scarti.length === 0 };
@@ -363,8 +402,43 @@ export function verifyCsv(text) {
   if (lines.length > 2) return `${lines.length} righe: attesa intestazione piu’ al massimo un segnale`;
   for (let i = 1; i < lines.length; i++) {
     if (!ROW_RE.test(lines[i])) return `la riga ${i + 1} non ha ${COLUMNS.length} campi tutti fra virgolette`;
+    // Il formato dei campi NUMERICI e' parte del contratto (#40): un punto
+    // e' una localizzazione mancata — il caso pericoloso non e' «non
+    // funziona», e' `"1.85"` letto come migliaia. Il parsing regge virgole e
+    // virgolette DENTRO i valori: non devono spostare gli indici.
+    const campi = parseCsvRow(lines[i]);
+    for (const c of Object.keys(NUMERIC_RANGES)) {
+      const v = campi[COLUMNS.indexOf(c)];
+      if (v && !FEED_NUMBER.test(v)) {
+        return `${c} nel feed non e' nella forma localizzata del contratto (virgola decimale): ${v}`;
+      }
+    }
   }
   return null;
+}
+
+// I campi di una riga QUOTE_ALL: ogni campo fra virgolette, `""` = virgoletta
+// letterale. Gemello del `csv.reader` usato da `verify_csv` in main.py.
+function parseCsvRow(line) {
+  const campi = [];
+  let corrente = '';
+  let dentro = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (dentro) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') { corrente += '"'; i++; } else { dentro = false; }
+      } else {
+        corrente += ch;
+      }
+    } else if (ch === '"') {
+      dentro = true;
+    } else if (ch === ',') {
+      campi.push(corrente); corrente = '';
+    }
+  }
+  campi.push(corrente);
+  return campi;
 }
 
 // Suggeritore euristico: è il segnaposto locale del pulsante "suggerisci mappatura".
@@ -388,10 +462,11 @@ export function suggestConfig(message) {
           transforms: [{ op: 'trim' }] };
   }
 
-  // Quota tipo "@1.85" o "quota 1,85".
+  // Quota tipo "@1.85" o "quota 1,85". NIENTE `comma_to_dot`: spingeva verso
+  // il punto, cioe' l'opposto di cio' che XTrader legge (#40) — ora il
+  // separatore lo decide il confine di scrittura del motore, non la regola.
   if (/@\s*\d|quota\s*\d/i.test(message)) {
-    columns.Price = { source: 'regex', pattern: '(?:@|quota)\\s*([0-9]+[.,][0-9]+)', group: 1,
-                      transforms: [{ op: 'comma_to_dot' }] };
+    columns.Price = { source: 'regex', pattern: '(?:@|quota)\\s*([0-9]+[.,][0-9]+)', group: 1 };
   }
 
   columns.BetType = { source: 'constant', value: 'PUNTA' };

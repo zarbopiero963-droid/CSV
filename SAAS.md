@@ -393,15 +393,18 @@ una regola per ciascuna delle 14 colonne XTrader. La specifica eseguibile è in
     "EventName": { "source": "line", "anchor": "🆚", "part": "after", "marker": "🆚",
                    "transforms": [ { "op": "replace_last", "from": " v ", "to": " - " },
                                    { "op": "trim" } ] },
-    "Price":     { "source": "regex", "pattern": "@\\s*([0-9.,]+)", "group": 1,
-                   "transforms": [ { "op": "comma_to_dot" } ] }
+    "Price":     { "source": "regex", "pattern": "@\\s*([0-9.,]+)", "group": 1 }
   }
 }
 ```
 
 Sorgenti supportate: `empty`, `constant`, `message`, `line` (con `part` `whole` o
 `after`), `regex`. Trasformazioni: `trim`, `replace_last`, `replace_all`, `upper`,
-`lower`, `comma_to_dot`, `dot_to_comma`, `digits_only`.
+`lower`, `comma_to_dot`, `dot_to_comma`, `digits_only`. Sul separatore decimale
+le trasformazioni non hanno piu' l'ultima parola: il **confine di scrittura**
+(#40, sotto) localizza comunque i valori numerici accettati, quindi
+`comma_to_dot` resta legale ma superfluo su quelle colonne — il suggeritore ha
+smesso di proporlo su `Price`.
 
 ### Guardie sui valori estratti e sulla config (#39 + #41)
 
@@ -484,6 +487,24 @@ giudicato nell'anteprima (secondo [REAL_FINDING] dello stesso gate). E per le
 uniformi ai bordi tolti: un `Price` con un BOM davanti e' una quota valida — i
 bordi sono perdonati — ma il byte perdonato non deve raggiungere XTrader
 (terzo [REAL_FINDING], stesso gate).
+
+**Il separatore decimale e' una proprieta' del contratto (#40).** Per XTrader
+si scrive la **virgola**: misurato tre volte — l'esempio della guida ufficiale
+(p. 169, `"1,23"`, unico campo numerico valorizzato in 315 pagine), il Bridge
+che gira in produzione con XTrader italiano, la conferma del proprietario.
+Prima il separatore era un incidente: usciva cio' che la regola produceva, e il
+suggeritore spingeva `comma_to_dot` su `Price` — verso il punto, che in
+contesto italiano rischia la lettura come **migliaia**: `"1.85"` → quota 185,
+dentro i tetti della #39, invisibile a ogni guardia, un disastro su una BANCA.
+Adesso: i valori numerici **accettati** escono localizzati dal confine di
+scrittura dei motori (tabella `lingua → separatore`, oggi la sola voce
+`IT → virgola`; EN/ES saranno una riga quando arrivera' Betting Toolkit); le
+trasformazioni dell'utente restano davanti, quindi i parser con `comma_to_dot`
+gia' configurato producono lo stesso feed senza ritocchi; e
+`verify_csv()`/`verifyCsv()` respingono un campo numerico col punto — senza
+test eseguibili questa decisione varrebbe quanto la riga «senza BOM».
+Il percorso legacy di PIERO non passa dal confine e resta byte-identico
+(`Price` vuota, `Handicap` `0`: niente da localizzare).
 
 Il motivo `config non eseguibile` del fail-safe esiste **solo se la condizione
 del parser riconosce il messaggio**: senza quel gate, un parser con la config

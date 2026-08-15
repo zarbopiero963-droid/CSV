@@ -582,6 +582,33 @@ function casiConfronto() {
     MSG, conNumeri('Points', 1e-7));
   aggiungi('guardie: Price = 123.456 (JSON float) -> stessa riga in entrambi',
     MSG, conNumeri('Price', 123.456));
+  // Il confine di scrittura (#40): per XTrader il separatore decimale e' la
+  // VIRGOLA (guida ufficiale p.169, il Bridge in produzione, conferma del
+  // proprietario). I valori numerici accettati escono localizzati in ENTRAMBI
+  // i motori; le trasformazioni dell'utente restano davanti, e chi ha gia'
+  // `comma_to_dot` produce lo stesso feed di chi non ce l'ha.
+  const conQuota = (regola) => ({
+    match: { type: 'contains', value: 'P.Bet.' },
+    columns: { ...soloEmpty,
+      EventName: { source: 'line', contains: 'P.Bet.' },
+      MarketType: { source: 'constant', value: 'OVER_UNDER_15' },
+      SelectionName: { source: 'constant', value: 'Over 1,5 goal' },
+      BetType: { source: 'constant', value: 'PUNTA' },
+      Price: regola },
+  });
+  const REGOLA_QUOTA = { source: 'regex',
+    pattern: 'quota\\s*([0-9]+[.,][0-9]+)', group: 1 };
+  aggiungi('localizzazione: quota col PUNTO nel messaggio -> virgola nella riga',
+    'P.Bet. Juventus - Palermo\nquota 1.85', conQuota(REGOLA_QUOTA));
+  aggiungi('localizzazione: quota con la VIRGOLA resta con la virgola',
+    'P.Bet. Juventus - Palermo\nquota 1,85', conQuota(REGOLA_QUOTA));
+  aggiungi('localizzazione: comma_to_dot preesistente -> stessa riga',
+    'P.Bet. Juventus - Palermo\nquota 1,85',
+    conQuota({ ...REGOLA_QUOTA, transforms: [{ op: 'comma_to_dot' }] }));
+  aggiungi('localizzazione: Handicap e Points seguono la stessa regola',
+    MSG, conNumeri('Handicap', '-1.5'));
+  aggiungi('localizzazione: valore RIFIUTATO resta in forma giudicata',
+    MSG, conNumeri('Price', '1.000.000'));
   aggiungi('guardie: sole costanti sulle obbligatorie → nessuna riga', 'ciao a tutti', {
     match: { type: 'contains', value: 'a' },
     columns: { ...soloEmpty,
@@ -654,6 +681,23 @@ caso('csv: il valore numerico esce nella forma giudicata, senza i bordi', () => 
   eq(csv.slice(1).includes('\ufeff'), false,
     'nessun BOM oltre quello del contratto in testa al file');
   return { config, message, csv };
+});
+
+// Il verificatore vincola la forma localizzata (#40): un punto in un campo
+// numerico e' una localizzazione mancata e va respinto, la virgola passa.
+caso('verifica: il feed col PUNTO nella quota viene respinto', () => {
+  const row = COLUMNS.map(() => '');
+  row[COLUMNS.indexOf('Provider')] = 'XTrader';
+  row[COLUMNS.indexOf('EventName')] = 'Squadra "A", Citta - Altra';
+  row[COLUMNS.indexOf('BetType')] = 'PUNTA';
+  row[COLUMNS.indexOf('Price')] = '1.85';
+  const conPunto = E.verifyCsv(toCsv(row));
+  eq(conPunto === null, false, 'il punto nella quota deve essere respinto');
+  eq(String(conPunto).includes('Price'), true, 'il motivo deve nominare la colonna');
+  row[COLUMNS.indexOf('Price')] = '1,85';
+  eq(E.verifyCsv(toCsv(row)), null,
+    'la forma localizzata deve passare, anche con virgole nel nome squadra');
+  return 'ok';
 });
 
 caso('motore: casi di confronto per il gemello Python', () => casiConfronto());
