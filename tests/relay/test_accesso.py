@@ -40,6 +40,7 @@ sys.path.insert(0, str(RADICE))
 
 import main  # noqa: E402 - dopo l'inserimento del percorso
 from tests.ambiente import CHIAVI_PERICOLOSE, TOKEN_DI_PROVA  # noqa: E402
+from tests.dati import relay_in_processo  # noqa: E402
 from tests.relay.test_csv_contract import RIGA_VALIDA  # noqa: E402
 
 # Importati da `test_login.py` e NON ricopiati: la firma del Login Widget, il bot finto e il
@@ -162,8 +163,7 @@ def test_senza_scadenza_precedente_si_parte_da_OGGI():
 def _cliente(tmp_path, monkeypatch, nome='accesso.db'):
     """Un relay in processo con un cliente registrato, e il suo cookie di sessione."""
     percorso = str(tmp_path / nome)
-    monkeypatch.setattr(main, 'DB_PATH', percorso)
-    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    relay_in_processo(monkeypatch, percorso)
     monkeypatch.setattr(main, 'BOT_TOKEN', BOT_FINTO)
     monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
     monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', '')
@@ -256,8 +256,7 @@ def test_il_feed_di_un_cliente_SCADUTO_torna_SOLA_INTESTAZIONE(tmp_path, monkeyp
       cliente non deve riconfigurare XTrader.
     """
     percorso = str(tmp_path / 'feed_scaduto.db')
-    monkeypatch.setattr(main, 'DB_PATH', percorso)
-    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    relay_in_processo(monkeypatch, percorso)
     monkeypatch.setattr(main, 'TOKEN', TOKEN_DI_PROVA)
     main.db().close()
     _profilo_di_un_cliente(percorso, scadenza=int(time.time()) - GIORNO)
@@ -279,8 +278,7 @@ def test_il_feed_di_un_cliente_SCADUTO_torna_SOLA_INTESTAZIONE(tmp_path, monkeyp
 def test_lo_stesso_feed_ATTIVO_consegna_il_segnale(tmp_path, monkeypatch):
     """Il verso opposto, senza cui il test sopra passerebbe anche con il feed sempre vuoto."""
     percorso = str(tmp_path / 'feed_attivo.db')
-    monkeypatch.setattr(main, 'DB_PATH', percorso)
-    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    relay_in_processo(monkeypatch, percorso)
     monkeypatch.setattr(main, 'TOKEN', TOKEN_DI_PROVA)
     main.db().close()
     _profilo_di_un_cliente(percorso, scadenza=int(time.time()) + 10 * GIORNO)
@@ -298,8 +296,7 @@ def test_il_feed_del_PROPRIETARIO_non_dipende_da_una_scadenza(tmp_path, monkeypa
     sarebbe «XTrader non riceve piu' niente» senza nessun errore da nessuna parte.
     """
     percorso = str(tmp_path / 'feed_admin.db')
-    monkeypatch.setattr(main, 'DB_PATH', percorso)
-    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    relay_in_processo(monkeypatch, percorso)
     monkeypatch.setattr(main, 'TOKEN', TOKEN_DI_PROVA)
     main.db().close()
 
@@ -325,8 +322,7 @@ def test_un_profilo_SENZA_utente_collegato_continua_a_funzionare(tmp_path, monke
     sarebbe una regressione provocata da un'informazione che manca, non da una decisione.
     """
     percorso = str(tmp_path / 'feed_orfano.db')
-    monkeypatch.setattr(main, 'DB_PATH', percorso)
-    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    relay_in_processo(monkeypatch, percorso)
     monkeypatch.setattr(main, 'TOKEN', TOKEN_DI_PROVA)
     main.db().close()
     c = sqlite3.connect(percorso)
@@ -412,8 +408,7 @@ def test_un_messaggio_di_un_cliente_SCADUTO_non_viene_elaborato(tmp_path, monkey
     dall'esterno su un percorso che deve restare fermo.
     """
     percorso = str(tmp_path / 'webhook_scaduto.db')
-    monkeypatch.setattr(main, 'DB_PATH', percorso)
-    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    relay_in_processo(monkeypatch, percorso)
     monkeypatch.setattr(main, 'TOKEN', TOKEN_DI_PROVA)
     monkeypatch.setattr(main, 'SEGRETO_WEBHOOK', main.webhook_secret(BOT_FINTO))
     main.db().close()
@@ -442,8 +437,7 @@ def test_un_messaggio_di_un_cliente_SCADUTO_non_viene_elaborato(tmp_path, monkey
 def test_lo_stesso_messaggio_di_un_cliente_ATTIVO_viene_elaborato(tmp_path, monkeypatch):
     """Il verso opposto: senza, il test sopra passerebbe anche se il webhook fosse rotto."""
     percorso = str(tmp_path / 'webhook_attivo.db')
-    monkeypatch.setattr(main, 'DB_PATH', percorso)
-    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    relay_in_processo(monkeypatch, percorso)
     monkeypatch.setattr(main, 'TOKEN', TOKEN_DI_PROVA)
     monkeypatch.setattr(main, 'SEGRETO_WEBHOOK', main.webhook_secret(BOT_FINTO))
     main.db().close()
@@ -464,8 +458,7 @@ def test_un_cliente_SOSPESO_e_bloccato_come_uno_scaduto(tmp_path, monkeypatch):
     non farebbe niente — che e' proprio il caso in cui si sospende.
     """
     percorso = str(tmp_path / 'sospeso.db')
-    monkeypatch.setattr(main, 'DB_PATH', percorso)
-    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    relay_in_processo(monkeypatch, percorso)
     monkeypatch.setattr(main, 'TOKEN', TOKEN_DI_PROVA)
     monkeypatch.setattr(main, 'SEGRETO_WEBHOOK', main.webhook_secret(BOT_FINTO))
     main.db().close()
@@ -521,8 +514,7 @@ def test_origin_profile_e_UNIQUE_quindi_la_lettura_e_DETERMINISTICA(tmp_path, mo
     togliesse `UNIQUE` da quella colonna, questo diventa rosso e la lettura va irrigidita.
     """
     percorso = str(tmp_path / 'unique.db')
-    monkeypatch.setattr(main, 'DB_PATH', percorso)
-    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    relay_in_processo(monkeypatch, percorso)
     main.db().close()
     c = sqlite3.connect(percorso)
     with pytest.raises(sqlite3.IntegrityError):
@@ -546,8 +538,7 @@ def test_un_segnale_STANTIO_non_riemerge_quando_l_accesso_torna(tmp_path, monkey
     TTL viene servita — qualunque sia il meccanismo.
     """
     percorso = str(tmp_path / 'stantio.db')
-    monkeypatch.setattr(main, 'DB_PATH', percorso)
-    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    relay_in_processo(monkeypatch, percorso)
     monkeypatch.setattr(main, 'TOKEN', TOKEN_DI_PROVA)
     main.db().close()
     _profilo_di_un_cliente(percorso, scadenza=int(time.time()) - GIORNO)
@@ -593,8 +584,7 @@ def test_un_segnale_STANTIO_non_riemerge_quando_l_accesso_torna(tmp_path, monkey
 def _admin(tmp_path, monkeypatch, nome='admin.db'):
     """Il proprietario con una sessione, piu' un cliente registrato. Restituisce i due."""
     percorso = str(tmp_path / nome)
-    monkeypatch.setattr(main, 'DB_PATH', percorso)
-    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    relay_in_processo(monkeypatch, percorso)
     monkeypatch.setattr(main, 'BOT_TOKEN', BOT_FINTO)
     monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
     monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', ADMIN_FINTO)
@@ -1038,8 +1028,10 @@ def test_un_database_della_PR22_riceve_la_colonna_del_promemoria(tmp_path, monke
     c.close()
     assert 'promemoria_per' not in _colonne(percorso, 'users'), 'il test non parte dal vecchio'
 
-    monkeypatch.setattr(main, 'DB_PATH', percorso)
-    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    # `vergine=True`: questo database DEVE restare quello vecchio, con la sola
+    # tabella `users` e senza i dati di produzione. Seminarlo aggiungerebbe
+    # tabelle e righe allo stato che il test dichiara di misurare.
+    relay_in_processo(monkeypatch, percorso, vergine=True)
     main.db().close()
 
     assert 'promemoria_per' in _colonne(percorso, 'users'), (
@@ -1200,8 +1192,7 @@ def test_la_MIGRAZIONE_non_muore_sui_duplicati_che_deve_correggere(tmp_path, mon
     cosi' il proprietario vede cosa e' successo.
     """
     percorso = str(tmp_path / 'duplicati.db')
-    monkeypatch.setattr(main, 'DB_PATH', percorso)
-    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    relay_in_processo(monkeypatch, percorso)
     main.db().close()
 
     c = sqlite3.connect(percorso)

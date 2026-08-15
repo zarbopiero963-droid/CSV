@@ -130,7 +130,17 @@ GET /api/profiles
 POST /api/profiles con Header X-Admin-Token e body JSON:
 {"name":"MARCO","chat_ids":"-1001234567890,-1009876543210","parser":"Parser_LIVE_1"}
 DELETE /api/profiles/NOME con Header X-Admin-Token.
-Il profilo PIERO esiste sempre ed e' quello servito da /xtrader.csv.
+Il profilo PIERO e' quello servito da /xtrader.csv. Esiste come RIGA del database
+(sul volume), non piu' ricreato dal codice a ogni avvio: dalla rimozione del seme
+(#25 lavoro E) cancellare un parser o un profilo e' DUREVOLE, e rinominare un
+parser non lascia piu' il doppione vecchio che il profilo continuava a nominare.
+Un database vergine nasce vuoto: nessun parser, nessun profilo.
+
+Salvare un profilo (POST) e eliminarlo (DELETE) aggiornano anche i collegamenti
+chat -> parser che il dispatch legge: cambiando il parser di un profilo il
+collegamento vecchio sparisce e nasce quello nuovo, ed eliminando il profilo
+spariscono i suoi. I collegamenti degli ALTRI parser sulla stessa chat (dispatch
+multi-parser) non vengono toccati.
 
 PROVA DI UN PARSER
 POST /api/parsers/NOME/test
@@ -514,12 +524,12 @@ TELEGRAM_BOT_TOKEN: token del bot; se presente il webhook viene registrato all'a
 PUBLIC_URL: URL pubblico del servizio, usato per registrare il webhook. Se manca,
   il codice usa un default cablato sull'URL Railway: impostarla sempre, perche' un
   secondo deploy senza questa variabile ripunterebbe il webhook del bot vero.
-TELEGRAM_ALLOWED_CHAT_IDS: chat_id iniziali del profilo PIERO, separati da virgola.
-  TRANSITORIA, e ha una scaletta di pensionamento in SAAS.md. Su un database
-  persistente diventa INERTE: il seed usa INSERT OR IGNORE, quindi la riga PIERO
-  esiste gia' e modificare la variabile non cambia piu' nulla — per cambiare i
-  chat_id si usa POST /api/profiles. Non replicarla per altri utenti: popola solo
-  il profilo PIERO, e una variabile per cliente imporrebbe un rideploy.
+TELEGRAM_ALLOWED_CHAT_IDS: PENSIONATA, non la legge piu' nessuno. La leggeva il
+  seme di migra() per i chat_id iniziali del profilo PIERO; con la rimozione del
+  seme (#25 lavoro E) quel codice non c'e' piu'. Era gia' inerte su un database
+  persistente — la riga PIERO esisteva e INSERT OR IGNORE non la aggiornava — ed
+  e' l'ultimo stadio della scaletta in SAAS.md. Si puo' togliere dalle Variables
+  di Railway; i chat_id si cambiano con POST /api/profiles.
 TELEGRAM_ADMIN_ID: l'ID Telegram numerico del proprietario. Collega il suo login
   all'utente che possiede i suoi parser: quella riga ha origin_profile='PIERO' e
   nessun telegram_id, perche' nessuno lo aveva mai saputo. Si trova scrivendo al bot e

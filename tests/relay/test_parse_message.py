@@ -198,7 +198,6 @@ AMBIENTE_DEL_SERVIZIO = {
     # 403, perche' il segreto non e' derivabile e la #14 e' fail-closed. Misurato:
     # senza, tutti i test HTTP di questo file davano 403 e nessuno arrivava al parser.
     'TELEGRAM_BOT_TOKEN': BOT_FINTO,
-    'TELEGRAM_ALLOWED_CHAT_IDS': CHAT,
     'PUBLIC_URL': 'https://non-esiste.invalid',
     'HTTPS_PROXY': PROXY_MORTO,
     'https_proxy': PROXY_MORTO,
@@ -222,7 +221,10 @@ def servizio(tmp_path):
     Un sottoprocesso per test costa ~1 s: il prezzo giusto per un test che misura
     quello che dice invece di quello che il vicino ha lasciato.
     """
-    with relay_avviato(tmp_path, **AMBIENTE_DEL_SERVIZIO) as base:
+    # La chat del profilo PIERO arriva dalla SEMINA, non piu' da
+    # `TELEGRAM_ALLOWED_CHAT_IDS`: quella variabile la leggeva il seme di
+    # `migra()`, rimosso col lavoro E della #25, e da allora e' inerte.
+    with relay_avviato(tmp_path, chat_ids=CHAT, **AMBIENTE_DEL_SERVIZIO) as base:
         yield base
 
 

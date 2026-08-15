@@ -49,6 +49,7 @@ sys.path.insert(0, str(RADICE))
 
 import main  # noqa: E402 - dopo l'inserimento del percorso
 from tests.ambiente import CHIAVI_PERICOLOSE, TOKEN_DI_PROVA  # noqa: E402
+from tests.dati import relay_in_processo  # noqa: E402
 from tests.relay.test_csv_contract import RIGA_VALIDA  # noqa: E402
 from tests.servizio import relay_avviato  # noqa: E402
 
@@ -77,14 +78,12 @@ def _ambiente_pulito(monkeypatch):
 
 def _relay_in_processo(tmp_path, monkeypatch, nome):
     """Un relay in processo su un database proprio, migrato."""
-    percorso = str(tmp_path / nome)
-    monkeypatch.setattr(main, 'DB_PATH', percorso)
-    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
     monkeypatch.setattr(main, 'BOT_TOKEN', BOT_FINTO)
     monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
     monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', '')
-    main.db().close()
-    return percorso
+    # I dati della produzione esistente li porta la semina: dalla rimozione del
+    # seme (#25 lavoro E) `migra()` non crea piu' ne' il parser ne' il profilo.
+    return relay_in_processo(monkeypatch, tmp_path / nome)
 
 
 def _utente_con_feed(percorso, slug='marco', token='xt_token-di-prova-abcdef',

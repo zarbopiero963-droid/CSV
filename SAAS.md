@@ -106,9 +106,17 @@ webhook_seen
 
 profiles           ← tabella PREESISTENTE, invariata
   name (primary key), chat_ids, parser
-  dal dispatch multi-parser (PR 2 di #2) è la SORGENTE della semina di
-  parser_chats a ogni migrazione, e il fallback del webhook per le chat/profili
-  che i link non rappresentano ancora
+  dal dispatch multi-parser (PR 2 di #2) è la SORGENTE dei link di parser_chats,
+  e il fallback del webhook per le chat/profili che i link non rappresentano.
+  Dalla PR 4 i link si riconciliano a ogni POST/DELETE del profilo, non più a
+  ogni migrazione
+
+migrazioni         ← le conversioni da fare UNA VOLTA SOLA per database
+  nome (primary key), created_at
+  nasce con la rimozione del seme (PR 4): il travaso dei link dai profili
+  legacy vi scrive `link_dai_profili` e non si ripete più. Ripetuta a ogni
+  avvio, una conversione è indistinguibile da un seme — rimette in piedi ciò
+  che il proprietario ha cancellato
 ```
 
 `webhook_seen` e `message_logs` sono **vive dal dispatch multi-parser** (PR 2 di
@@ -449,8 +457,10 @@ in produzione nessun parser ha `config_json` e il dispatcher instrada tutto su
 
 Dalla PR 2 della sequenza (#2, chiude il pericolo 1 di #25) il webhook non prende
 più «il primo profilo in ordine alfabetico che contiene la chat»: legge
-**`parser_chats`**, che la migrazione semina dai profili
-(`_collega_parser_alle_chat`) e che collega ogni chat ai parser che la ascoltano.
+**`parser_chats`**, che collega ogni chat ai parser che la ascoltano. I link
+nascono dal **travaso** dei profili legacy (`_collega_parser_alle_chat`, una
+volta sola per database dalla PR 4) e da lì in avanti li tiene aggiornati
+`_riconcilia_link_del_profilo` a ogni `POST`/`DELETE /api/profiles`.
 
 Le regole, nell'ordine in cui il codice le applica (`_processa_messaggio_canale`):
 
@@ -473,12 +483,56 @@ Le regole, nell'ordine in cui il codice le applica (`_processa_messaggio_canale`
   chat sono due link, due utenti, due feed — nessuno «vince» più la chat.
 
 **Il fallback legacy esiste e ha un solo caso:** una chat senza alcun link in
-`parser_chats` (un profilo creato a caldo via API riceve i link alla prossima
-migrazione) passa dal vecchio percorso per profili. La semina collega solo i
+`parser_chats` passa dal vecchio percorso per profili. Si collegano solo i
 parser che **appartengono all'utente del profilo**: se due profili nominano lo
-stesso parser, quello del non-proprietario resta sul fallback — un link seminato
+stesso parser, quello del non-proprietario resta sul fallback — un link creato
 lì manderebbe i segnali al feed del proprietario del parser, il legame
-cross-tenant che i test della deduplica vietano.
+cross-tenant che i test della deduplica vietano. Un profilo il cui utente non
+esiste ancora (nessuna riga con quel `origin_profile`) resta anch'esso sul
+fallback.
+
+**Il ciclo di vita dei link, dalla PR 4** (chiude il limite dichiarato e rimesso
+al proprietario sulla PR #44, dove la semina era solo-aggiunta):
+
+| evento | cosa succede ai link |
+|---|---|
+| `POST /api/profiles` che **cambia parser** | il link del parser vecchio sparisce, nasce quello nuovo — o la chat continuerebbe a far girare il parser sostituito |
+| `POST /api/profiles` che **aggiunge una chat** | la riga di `chats` nasce se manca (proprietario: l'utente del profilo) e il link è attivo **subito**, senza aspettare un riavvio |
+| `POST /api/profiles` che **toglie una chat** | il link di quella chat sparisce |
+| `DELETE /api/profiles` | spariscono i link del **suo** parser sulle **sue** chat |
+| link cancellato a mano | **non risuscita**: il travaso non si ripete |
+
+Si tocca sempre e solo la coppia (parser del profilo, sue chat): i link degli
+**altri** parser dello stesso utente sulla stessa chat — cioè il multi-parser —
+sopravvivono a qualunque salvataggio di profilo. Una chat già esistente **non
+cambia proprietario**: appartiene a chi l'ha rivendicata per primo.
+
+E il distacco porta lo **stesso filtro sul proprietario** dell'aggancio: due
+profili possono nominare lo stesso parser, e il profilo del non-proprietario —
+che l'aggancio salta per isolamento — non deve poter staccare il link che il
+proprietario ha legittimamente. Il detach disfa esattamente ciò che l'attach
+potrebbe aver fatto, mai di più (bloccante di Claude Fable 5 sulla PR #46).
+
+Il salvataggio del profilo **e la sua eliminazione** aprono `BEGIN IMMEDIATE`
+**prima di leggere** lo stato precedente: una `SELECT` non apre nessuna
+transazione di scrittura, quindi due `POST` concorrenti sullo stesso profilo
+leggerebbero entrambi lo stato di partenza e attaccherebbero ciascuno il proprio
+link — il profilo con un parser, i link con due, e il parser sostituito che
+continua a girare. Sulla `DELETE` la stessa corsa produce un **link orfano**: un
+salvataggio concorrente attacca un link che l'eliminazione non conosce, il
+profilo sparisce e il link resta a elaborare la chat per sempre. È la stessa
+corsa SELECT-poi-scrittura della quota (PR #45) e della richiesta di accesso
+(PR #26), riprodotta da due test che forzano l'interleaving invece di sperarlo.
+
+**Il travaso riconcilia, non aggiunge soltanto.** Fino a questo PR nessuna
+scrittura toglieva i link, quindi un database aggiornato può arrivare con link
+che nessun profilo giustifica più (profilo eliminato, o parser sostituito prima
+dell'upgrade). I detach nuovi conoscono solo la configurazione corrente e il
+travaso non gira mai più: se non pulisse, quei link resterebbero a elaborare chat
+per sempre. Al momento in cui gira, ogni riga di `parser_chats` viene dalla
+vecchia semina e nessuna richiesta è ancora stata servita — tenere ciò che i
+profili giustificano e togliere il resto è la conversione esatta
+(`[REAL_FINDING]` di GPT-5.6 Sol sulla PR #46).
 
 `message_logs` e `webhook_seen` — entrambe tabelle finora **morte** — ricevono le
 prime scritture, e la pulizia oltre i **7 giorni** viaggia con la scrittura
@@ -1129,6 +1183,13 @@ Tre stadi, e oggi siamo al secondo:
 | **oggi** | `POST /api/profiles` col token admin | no | sì |
 | M1 | l'utente lo registra da sé col codice di verifica | no | no |
 
+**Pensionamento completato (PR 4 della sequenza #2).** Con la rimozione del seme
+(#25, lavoro E) `TELEGRAM_ALLOWED_CHAT_IDS` **non viene più letta da nessuna riga
+di codice**: era già inerte su un database persistente, adesso è morta. La
+scaletta qui sotto resta come registro di come ci si è arrivati — i suoi passi 1-3
+erano stati fatti, e il 4 (togliere la variabile dalle Variables di Railway) è
+un'azione facoltativa del proprietario, non più una precondizione di niente.
+
 **Sequenza sicura per rimuoverla**, e l'ordine conta:
 
 1. volume montato e `DB_PATH` che punta al suo interno;
@@ -1338,6 +1399,8 @@ senza doppio ruolo.
 | Fatto | **Un feed per utente** (PR 1 del piano sincronizzato in #2): `GET /feed/{slug}.csv?token=xt_…`, token coniato da `POST /api/me/token` e conservato solo come hash, segnale a chiave `user_id`, 404 uniforme, alias `/xtrader.csv` e `/profiles/{p}.csv` intatti. Test in `tests/relay/test_feed_utente.py` |
 | M1 | Verifica chat. **Postgres differito** e non più urgente: i dati persistono già, `DB_PATH` in produzione è `/data/signals.db` dentro il volume (misurato il 12/08/2026) |
 | Fatto | **Dispatch multi-parser** (PR 2 del piano sincronizzato in #2): chat → N parser via `parser_chats`, `active` e `ordine` finalmente letti, vince l'ultimo con i battuti in `message_logs`, dedup `webhook_seen`, elaborazione fuori dall'event loop (#31 B1). Chiude il pericolo 1 di #25. Il motore Python e l'endpoint di test c'erano già (PR #28-#30). Test in `tests/relay/test_dispatch_multiparser.py` |
+| Fatto | **Quote e tetti per-tenant** (PR 3 del piano sincronizzato in #2, #31 B2): `MAX_PARSER_PER_UTENTE` misurata dentro il write-lock dell'INSERT, tetti su titolo e config su creazione **e** modifica, tetto in byte sul corpo HTTP prima del parsing (`MAX_CORPO_JSON`). Test in `tests/relay/test_quote_parser.py` |
+| Fatto | **Rimozione del seme** (PR 4 del piano sincronizzato in #2, #25 lavoro E): `migra()` non ricrea piu' `Parser_Telegram_XTrader_v1` ne' il profilo `PIERO` a ogni avvio — cancellare e' durevole, rinominare non lascia doppioni, un database vergine nasce vuoto. Il travaso dei link `parser_chats` gira **una volta sola** (tabella `migrazioni`) e da li' in avanti i link seguono le scritture dei profili. `TELEGRAM_ALLOWED_CHAT_IDS` e' pensionata. Test in `tests/relay/test_rimozione_seme.py` |
 | Fatto | **Accesso su approvazione** (PR 7), lato server: `stato_effettivo` / `giorni_rimasti` / `nuova_scadenza` come fonte unica, la richiesta del cliente col deep link del bot, la decisione del proprietario con i giorni liberi e l'errore di invio **non ingoiato**, il promemoria a 5 giorni una volta per scadenza, e gli effetti della scadenza su feed e webhook. Il **token non viene revocato** alla scadenza |
 | M3 | La web app collegata al backend: le schermate di questo flusso (richiesta, giorni rimasti, accesso scaduto) non esistono ancora — il prototipo è sui dati finti |
 | M4 | Log persistenti, sospensione, suggerimento AI lato server, abbonamenti |

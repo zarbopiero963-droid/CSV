@@ -316,6 +316,7 @@ import urllib.error  # noqa: E402
 import urllib.request  # noqa: E402
 
 from tests.ambiente import TOKEN_DI_PROVA  # noqa: E402
+from tests.dati import relay_in_processo  # noqa: E402
 from tests.servizio import relay_avviato  # noqa: E402
 
 # Nessuna uscita verso Internet: con `TELEGRAM_BOT_TOKEN` nell'ambiente lo startup
@@ -1251,7 +1252,7 @@ def test_il_collegamento_dell_admin_RIPARA_un_account_gia_sbagliato(tmp_path, mo
     import sqlite3
 
     percorso = str(tmp_path / 'ripara.db')
-    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    relay_in_processo(monkeypatch, percorso)
     monkeypatch.setattr(main, 'BOT_TOKEN', BOT_FINTO)
     monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
 
@@ -1341,7 +1342,7 @@ def test_la_riparazione_NON_perde_i_dati_dell_account_sbagliato(tmp_path, monkey
     import sqlite3
 
     percorso = str(tmp_path / 'travaso.db')
-    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    relay_in_processo(monkeypatch, percorso)
     monkeypatch.setattr(main, 'BOT_TOKEN', BOT_FINTO)
     monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
 
@@ -1402,7 +1403,7 @@ def test_un_CLIENTE_non_fa_scattare_la_riparazione(tmp_path, monkeypatch):
     `data.id == TELEGRAM_ADMIN_ID`, e questo test lo vincola invece di fidarsi.
     """
     percorso = str(tmp_path / 'cliente.db')
-    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    relay_in_processo(monkeypatch, percorso)
     monkeypatch.setattr(main, 'BOT_TOKEN', BOT_FINTO)
     monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
     monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', ADMIN_FINTO)
@@ -1583,7 +1584,7 @@ def test_le_sessioni_dell_account_SVUOTATO_muoiono_con_la_riparazione(tmp_path, 
     e' esattamente il caso.
     """
     percorso = str(tmp_path / 'sessioni.db')
-    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    relay_in_processo(monkeypatch, percorso)
     monkeypatch.setattr(main, 'BOT_TOKEN', BOT_FINTO)
     monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
 
@@ -1643,7 +1644,7 @@ def test_cambiare_TELEGRAM_ADMIN_ID_REVOCA_le_sessioni_della_vecchia_identita(tm
     morta all'istante.
     """
     percorso = str(tmp_path / 'identita.db')
-    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    relay_in_processo(monkeypatch, percorso)
     monkeypatch.setattr(main, 'BOT_TOKEN', BOT_FINTO)
     monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
 
@@ -1705,7 +1706,7 @@ def test_un_login_RIPETUTO_con_lo_stesso_id_non_butta_fuori_gli_altri_dispositiv
     ha gia' visti tre.
     """
     percorso = str(tmp_path / 'ripetuto.db')
-    monkeypatch.setattr(main, 'DB_PATH', percorso)
+    relay_in_processo(monkeypatch, percorso)
     monkeypatch.setattr(main, 'BOT_TOKEN', BOT_FINTO)
     monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
     monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', ADMIN_FINTO)
@@ -1732,9 +1733,7 @@ def test_un_login_RIPETUTO_con_lo_stesso_id_non_butta_fuori_gli_altri_dispositiv
 
 def _prepara(tmp_path, monkeypatch, nome='iso.db'):
     """Un relay in processo con database proprio, bot e segreto finti."""
-    percorso = str(tmp_path / nome)
-    monkeypatch.setattr(main, 'DB_PATH', percorso)
-    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    percorso = relay_in_processo(monkeypatch, tmp_path / nome)
     monkeypatch.setattr(main, 'BOT_TOKEN', BOT_FINTO)
     monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
     return percorso

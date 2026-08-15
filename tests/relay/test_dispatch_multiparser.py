@@ -35,6 +35,7 @@ sys.path.insert(0, str(RADICE))
 
 import main  # noqa: E402 - dopo l'inserimento del percorso
 from tests.ambiente import CHIAVI_PERICOLOSE, TOKEN_DI_PROVA  # noqa: E402
+from tests.dati import relay_in_processo  # noqa: E402
 
 # Riusati e non ricopiati (regola 3): il bot finto, la chat, il messaggio che il
 # parser di default riconosce, e la Request minima per l'handler in processo.
@@ -65,22 +66,14 @@ def _ambiente_pulito(monkeypatch):
 def _relay(tmp_path, monkeypatch, nome):
     """Relay in processo col segreto del webhook armato; restituisce il percorso DB.
 
-    Il profilo PIERO seminato nasce con `chat_ids` vuoto perche' in test
-    `TELEGRAM_ALLOWED_CHAT_IDS` non c'e' (la whitelist la toglie): la chat di
-    prova va scritta a mano, come farebbe la variabile in produzione. I test che
-    vogliono i LINK in `parser_chats` chiamano `_riavvio` dopo, cosi' la
-    migrazione la vede e semina — lo stesso percorso del primo avvio post-deploy.
+    Il profilo PIERO nasce **con** la chat di prova, seminata PRIMA della
+    migrazione: e' il percorso del primo avvio post-deploy, dove quelle righe
+    stanno gia' sul volume. Non va piu' scritta a mano dopo la migrazione — il
+    travaso dei link gira una volta sola (#25 lavoro E), quindi una chat
+    aggiunta dopo non verrebbe vista da nessun travaso successivo.
     """
-    percorso = str(tmp_path / nome)
-    monkeypatch.setattr(main, 'DB_PATH', percorso)
-    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
     monkeypatch.setattr(main, 'SEGRETO_WEBHOOK', main.webhook_secret(BOT_FINTO))
-    main.db().close()
-    c = sqlite3.connect(percorso)
-    c.execute("UPDATE profiles SET chat_ids=? WHERE name='PIERO'", (CHAT,))
-    c.commit()
-    c.close()
-    return percorso
+    return relay_in_processo(monkeypatch, tmp_path / nome, chat_ids=CHAT)
 
 
 def _riavvio(monkeypatch):
