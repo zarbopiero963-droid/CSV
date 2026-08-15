@@ -417,3 +417,94 @@ def test_il_travaso_NON_tocca_i_link_legittimi_di_un_ALTRO_utente(tmp_path, monk
         f'il travaso ha tolto il link legittimo di un altro utente: {link}')
     assert (main.DEFAULT_PARSER, CHAT) in link, (
         f'il travaso ha tolto il link del proprietario: {link}')
+
+
+def test_una_ELIMINAZIONE_concorrente_a_un_salvataggio_non_lascia_link_ORFANI(
+        tmp_path, monkeypatch):
+    """`delete_profile` legge e cancella: senza transazione e' la stessa corsa.
+
+    `[REAL_FINDING]` di Claude Fable 5 sul gate finale della PR #46, ed e' la
+    regola 2 mancata da me: avevo chiuso la corsa su `save_profile` e non avevo
+    cercato il fratello. Se la lettura di `chat_ids`/`parser` sta fuori da una
+    transazione di scrittura, un salvataggio concorrente puo' attaccare un link
+    NUOVO dopo quella lettura: il profilo sparisce e il link sopravvive: col
+    travaso ormai una-tantum, quel parser elabora la chat per sempre e nessun
+    giro futuro lo toglie.
+
+    La corsa e' forzata, non affidata alla fortuna (e' la tecnica gia' usata in
+    `test_parser_crud.py`): una connessione avvolta esegue il salvataggio
+    concorrente nel momento esatto in cui l'eliminazione legge il profilo. Col
+    `BEGIN IMMEDIATE` quel salvataggio trova il database occupato e non passa —
+    ed e' il punto: l'invariante che si misura non e' «chi vince», ma che alla
+    fine **nessun link resti senza un profilo che lo giustifichi**.
+    """
+    import sqlite3 as _sq
+
+    percorso = _relay(tmp_path, monkeypatch, 'orfani.db', chat_ids=CHAT)
+    _salva_profilo(main.PIERO_PROFILE, CHAT, main.DEFAULT_PARSER)
+    main.save_parser(main.ParserIn(name='Parser_Intruso', header='H-INTRUSO'),
+                     TOKEN_DI_PROVA)
+
+    reale = main.db
+
+    class ConnCorsaSalvataggio:
+        """Esegue UN salvataggio concorrente quando l'eliminazione legge il profilo."""
+
+        def __init__(self, sotto):
+            self._sotto = sotto
+            self.fatta = False
+
+        def execute(self, sql, params=()):
+            # L'innesto sta DOPO la lettura del profilo e PRIMA della prima
+            # scrittura, che e' l'unica finestra vera: iniettando prima della
+            # lettura la SELECT vedrebbe gia' lo stato nuovo e non si
+            # misurerebbe niente; iniettando dopo la prima `DELETE` la
+            # transazione implicita e' gia' aperta e la corsa non esiste piu'.
+            # Qui i dati letti dall'eliminazione diventano obsoleti.
+            if not self.fatta and 'SELECT id FROM chats WHERE telegram_chat_id' in sql:
+                self.fatta = True
+                # Il salvataggio concorrente usa una connessione VERA — se usasse
+                # questa avvolta si inietterebbe da solo, all'infinito — e con un
+                # timeout corto, cosi' quando e' serializzato si arrende in fretta
+                # invece di tenere fermo il test per cinque secondi.
+                main.db = corta
+                try:
+                    _salva_profilo(main.PIERO_PROFILE, CHAT, 'Parser_Intruso')
+                except (main.HTTPException, _sq.OperationalError):
+                    # Serializzato: il salvataggio concorrente non e' passato.
+                    pass
+                finally:
+                    main.db = db_con_corsa
+            return self._sotto.execute(sql, params)
+
+        def __getattr__(self, nome):
+            return getattr(self._sotto, nome)
+
+    def corta():
+        c = reale()
+        c.execute('PRAGMA busy_timeout = 200')
+        return c
+
+    def db_con_corsa():
+        return ConnCorsaSalvataggio(reale())
+
+    monkeypatch.setattr(main, 'db', db_con_corsa)
+    try:
+        main.delete_profile(main.PIERO_PROFILE, TOKEN_DI_PROVA)
+    finally:
+        monkeypatch.setattr(main, 'db', reale)
+
+    c = _sq.connect(percorso)
+    profili = {r[0]: (r[1], r[2]) for r in c.execute(
+        'SELECT name, chat_ids, parser FROM profiles').fetchall()}
+    c.close()
+    orfani = [(parser, chat) for parser, chat in _link(percorso)
+              if not any(parser == p and chat in _righe_chat(ch)
+                         for ch, p in profili.values())]
+    assert not orfani, (
+        f'link senza un profilo che li giustifichi: {orfani}. Profili: {profili}. '
+        f'Col travaso una-tantum quei parser elaborano la chat per sempre')
+
+
+def _righe_chat(chat_ids):
+    return {x.strip() for x in (chat_ids or '').split(',') if x.strip()}

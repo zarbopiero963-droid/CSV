@@ -3782,6 +3782,16 @@ def delete_profile(name: str, x_admin_token: str | None = Header(None)):
     auth(x_admin_token)
     c = db()
     try:
+        # `BEGIN IMMEDIATE` come in `save_profile`, e per la stessa ragione: fra
+        # la lettura del profilo e la sua cancellazione un salvataggio
+        # concorrente puo' attaccare un link NUOVO, che questa eliminazione non
+        # conosce e quindi non toglie. Il profilo sparisce, il link resta — e col
+        # travaso una-tantum quel parser elabora la chat per sempre, senza piu'
+        # nessun giro che lo tolga. `[REAL_FINDING]` di Claude Fable 5 e di
+        # GPT-5.6 Sol, indipendentemente, al gate finale della PR #46: e' la
+        # regola 2 mancata da me, che avevo chiuso la corsa sul fratello
+        # `save_profile` senza cercarla qui.
+        c.execute('BEGIN IMMEDIATE')
         # I link prima della riga: letti dal profilo che sta per sparire, o non
         # ci sarebbe piu' modo di sapere quali erano i suoi. Senza, un profilo
         # eliminato lascerebbe la sua chat a far girare il suo parser — con il

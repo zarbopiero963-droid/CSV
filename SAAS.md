@@ -513,13 +513,16 @@ che l'aggancio salta per isolamento — non deve poter staccare il link che il
 proprietario ha legittimamente. Il detach disfa esattamente ciò che l'attach
 potrebbe aver fatto, mai di più (bloccante di Claude Fable 5 sulla PR #46).
 
-Il salvataggio del profilo apre `BEGIN IMMEDIATE` **prima di leggere** lo stato
-precedente: una `SELECT` non apre nessuna transazione di scrittura, quindi due
-`POST` concorrenti sullo stesso profilo leggerebbero entrambi lo stato di
-partenza e attaccherebbero ciascuno il proprio link — il profilo con un parser,
-i link con due, e il parser sostituito che continua a girare. È la stessa corsa
-SELECT-poi-scrittura della quota (PR #45) e della richiesta di accesso (PR #26),
-riprodotta dal test dei due salvataggi simultanei.
+Il salvataggio del profilo **e la sua eliminazione** aprono `BEGIN IMMEDIATE`
+**prima di leggere** lo stato precedente: una `SELECT` non apre nessuna
+transazione di scrittura, quindi due `POST` concorrenti sullo stesso profilo
+leggerebbero entrambi lo stato di partenza e attaccherebbero ciascuno il proprio
+link — il profilo con un parser, i link con due, e il parser sostituito che
+continua a girare. Sulla `DELETE` la stessa corsa produce un **link orfano**: un
+salvataggio concorrente attacca un link che l'eliminazione non conosce, il
+profilo sparisce e il link resta a elaborare la chat per sempre. È la stessa
+corsa SELECT-poi-scrittura della quota (PR #45) e della richiesta di accesso
+(PR #26), riprodotta da due test che forzano l'interleaving invece di sperarlo.
 
 **Il travaso riconcilia, non aggiunge soltanto.** Fino a questo PR nessuna
 scrittura toglieva i link, quindi un database aggiornato può arrivare con link
