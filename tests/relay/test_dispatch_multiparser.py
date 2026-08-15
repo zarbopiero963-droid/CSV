@@ -49,7 +49,12 @@ CONFIG_STESSO_MESSAGGIO = {
     'columns': {
         'EventName': {'source': 'constant', 'value': 'Evento Del Secondo Parser'},
         'MarketType': {'source': 'constant', 'value': 'OVER_UNDER_25'},
-        'SelectionName': {'source': 'constant', 'value': 'Over 2,5 goal'},
+        # ESTRATTA dal messaggio, non costante: dalla PR 5 (#41) un parser le cui
+        # obbligatorie sono TUTTE fisse non scrive, perche' produrrebbe la stessa
+        # scommessa per qualunque messaggio riconosciuto. Qui serve un parser
+        # realistico — l'oggetto del test e' quale dei due vince, non il gate di
+        # contenuto — e basta che una obbligatoria legga davvero il messaggio.
+        'SelectionName': {'source': 'line', 'contains': '@'},
         'BetType': {'source': 'constant', 'value': 'PUNTA'},
     },
 }

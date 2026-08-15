@@ -1,4 +1,4 @@
-import asyncio, base64, binascii, csv, hashlib, hmac, io, json, logging, os, re, secrets, sqlite3, threading, time
+import asyncio, base64, binascii, csv, decimal, difflib, hashlib, hmac, io, json, logging, math, os, re, secrets, sqlite3, threading, time
 from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -1996,6 +1996,238 @@ def parse_message(message, cfg):
 # browser e feed vuoto in produzione.
 COLONNE_OBBLIGATORIE = ['EventName', 'MarketType', 'SelectionName', 'BetType']
 
+# Le colonne che XTrader legge come NUMERI, con l'intervallo ammesso. Decisi nella
+# Issue #39 e non copiati dal Bridge:
+#
+# - `Price`/`MinPrice`/`MaxPrice` in `1.01–1000` e' la scala reale delle quote
+#   Betfair, non una convenzione nostra: sotto 1.01 non esiste quota, sopra 1000
+#   non esiste mercato, quindi fuori da li' non c'e' informazione da salvare;
+# - `|Handicap| <= 1000` e' un inviluppo volutamente largo: deve coprire ogni linea
+#   reale, comprese quelle grandi dei mercati a punti, e intercettare solo il
+#   patologico;
+# - `Points` in `0–1000`: e' il MOLTIPLICATORE dello stake di XTrader (risposta del
+#   proprietario: «points 2 e su XTrader 1 significa 2 euro»), quindi il tetto non
+#   chiede «e' troppo?» — quanto punta il cliente non ci riguarda — ma «puo' averlo
+#   scritto una persona?». Il `100` del Bridge NON si copia: scarterebbe segnali
+#   veri di chi usa un moltiplicatore alto.
+#
+# `Points` e' anche la piu' pericolosa delle cinque, ed e' il motivo per cui la
+# Issue esiste: un valore storto sulle altre rende la scommessa impossibile
+# (`Price` assurdo non si abbina), qui la moltiplica.
+INTERVALLI_NUMERICI = {
+    'Price': (1.01, 1000.0),
+    'MinPrice': (1.01, 1000.0),
+    'MaxPrice': (1.01, 1000.0),
+    'Handicap': (-1000.0, 1000.0),
+    'Points': (0.0, 1000.0),
+}
+
+# Cifre ASCII, un solo separatore decimale, segno facoltativo. `float()` di Python
+# leggerebbe anche `١٩` (arabo-indiane) e `１９` (fullwidth), ma XTrader legge solo
+# ASCII: un valore cosi' passerebbe i tetti e finirebbe verbatim nel CSV, dove il
+# consumatore non lo capisce — la colonna sembra piena e non lo e'.
+#
+# `[0-9]` scritto per esteso e NON `\d`, che in Python matcha le cifre Unicode: con
+# `\d` questa riga sarebbe stata una guardia che non guarda. Misurato scrivendola
+# sbagliata: `motivo_valore_numerico('Price', '١٩')` restituiva `None`, cioe'
+# «accettabile», ed era esattamente il caso che la regola esiste per fermare.
+# Gli spazi uniformi fra i due motori: classe esplicita, gemella di
+# `SPAZI_CLASSE` in `web/engine.js`. Vedi `motivo_valore_numerico` per la
+# tabella delle divergenze fra i default dei due linguaggi. Non serve solo al
+# valore citato nei motivi: e' la classe su cui corrono il VERDETTO numerico,
+# l'emptiness delle obbligatorie e la trasformazione `trim` — ovunque i default
+# di `strip()`/`trim()` farebbero divergere i due motori.
+_SPAZI_CLASSE = ('[\t\n\v\f\r \x1c-\x1f\x85\u00a0\u1680\u2000-\u200a'
+                 '\u2028\u2029\u202f\u205f\u3000\ufeff]')
+SPAZI_UNIFORMI = re.compile(_SPAZI_CLASSE + '+')
+BORDI_UNIFORMI = re.compile('^' + _SPAZI_CLASSE + '+|' + _SPAZI_CLASSE + '+$')
+
+
+def _piatto(testo):
+    """Spazi uniformi → ' ', bordi tolti. Gemella di `piatto` in engine.js.
+
+    E' la normalizzazione che PRECEDE ogni verdetto dei motori: `strip()` di
+    Python non toglie `\\ufeff`, `trim()` di JS non toglie `\\x1c-\\x1f`/`\\x85`,
+    e un verdetto preso sul testo grezzo diverge fra browser e produzione —
+    anteprima «completa» e feed vuoto. [REAL_FINDING] di Claude Fable 5 e
+    GPT-5.6 Sol al gate finale della PR #47.
+    """
+    return SPAZI_UNIFORMI.sub(' ', testo).strip()
+
+_NUMERO_ASCII = re.compile(r'^[+-]?(?:[0-9]+(?:[.,][0-9]*)?|[.,][0-9]+)$')
+
+
+def motivo_valore_numerico(colonna, valore):
+    """`None` se il valore e' accettabile per quella colonna, altrimenti il MOTIVO.
+
+    Predicato unico (regola 3): lo chiamano il motore, il verificatore e — quando
+    esistera' il multi-riga (#35) — anche le righe di override. Nel Bridge erano
+    due controlli scritti a mano e identici, e aggiungere il tetto a uno solo aveva
+    lasciato aperto l'altro percorso.
+
+    L'ordine dei controlli e' parte della decisione (#39), non un dettaglio:
+
+    - **vuoto → ammesso.** E' il caso normale di `Price`: la quota la mette XTrader
+      dal proprio book. E' anche il test che protegge dall'eccesso di zelo;
+    - **cifre non ASCII → scartato**, prima di `float()`, che le leggerebbe;
+    - **non convertibile → scartato**, e se ci sono PIU' separatori il motivo nomina
+      il separatore delle migliaia: `1.000.000` e' il caso reale da cui nasce la
+      Issue, e mandare l'utente su «controlla la regola» sarebbe la pista sbagliata;
+    - **non finito → scartato**, e prima dei tetti: `float('9'*400)` e' `inf`, e
+      l'infinito supera i confronti nel verso sbagliato — un `Points > 0` senza
+      tetto superiore direbbe «valido» a un moltiplicatore infinito (bug misurato
+      nel Bridge);
+    - **fuori intervallo → scartato**, con il tetto nel messaggio e il separatore
+      decimale come causa probabile.
+
+    Il motivo deve dire **cosa fare**, non solo cosa non va: e' il vincolo della
+    #25, e la ragione per cui nel Bridge «fuori intervallo» annunciato come «non
+    numerico» mandava su due piste entrambe sbagliate.
+    """
+    intervallo = INTERVALLI_NUMERICI.get(colonna)
+    if intervallo is None:
+        return None
+    # Niente `strip()` qui: il verdetto corre sul valore NORMALIZZATO dalla
+    # classe condivisa (`piano`, sotto), non sul testo grezzo. Lo `strip()` di
+    # Python non toglie `\ufeff` e il `trim()` di JS non toglie `\x1c-\x1f`:
+    # `'\ufeff2'` era una quota valida nel browser e «non un numero» in
+    # produzione — anteprima verde, feed vuoto. [REAL_FINDING] di Claude
+    # Fable 5 e GPT-5.6 Sol al gate finale della PR #47.
+    testo = _testo_canonico(valore)
+    # Il valore citato nel motivo si taglia: finisce in `message_logs` e nella
+    # UI, e un'estrazione sbagliata puo' portarsi dietro una riga intera — il
+    # caso dell'infinito ne cita 400 cifre. Il taglio e' identico in JS, o i due
+    # motori tornerebbero a scrivere motivi diversi. Rischio segnalato da GPT-5.5.
+    # Gli a capo e i caratteri di controllo diventano spazi PRIMA del taglio: il
+    # valore estratto puo' contenere una riga intera, e un motivo multilinea
+    # spezzerebbe la riga di log e la tabella della UI. Segnalato da GPT-5.5.
+    #
+    # La classe e' ESPLICITA e non `str.split()`, perche' i default dei due
+    # linguaggi non coincidono — misurato, e le divergenze vanno in DUE versi:
+    #
+    #     carattere        Python `split()`   JS `/\s+/`
+    #     \x1c-\x1f, \x85    normalizza        NO
+    #     \ufeff (BOM)       NO                normalizza
+    #
+    # Il BOM e' il caso che conta di piu' qui dentro: e' un carattere portante
+    # del contratto CSV, e i due motori lo trattavano al contrario. Segnalato da
+    # Claude Fable 5 sulla PR #47, che ne aveva visto due su tre.
+    piano = _piatto(testo)
+    if not piano:
+        return None
+    citato = piano if len(piano) <= 60 else _taglia_codepoint(piano, 60) + '…'
+    if not _NUMERO_ASCII.match(piano):
+        if sum(piano.count(s) for s in '.,') > 1:
+            return (f'{colonna}: «{citato}» non e\' un numero. Probabile causa: il '
+                    'separatore delle migliaia — controlla le trasformazioni della regola.')
+        return (f'{colonna}: «{citato}» non e\' un numero valido. XTrader legge solo '
+                'cifre ASCII: controlla la regola, sta leggendo la parte sbagliata '
+                'del messaggio.')
+    try:
+        numero = float(piano.replace(',', '.'))
+    except ValueError:
+        return f'{colonna}: «{citato}» non e\' un numero.'
+    if not math.isfinite(numero):
+        return (f'{colonna}: «{citato}» non e\' un numero finito. Il valore estratto e\' '
+                'troppo lungo per essere un numero reale: controlla la regola.')
+    minimo, massimo = intervallo
+    if not (minimo <= numero <= massimo):
+        return (f'{colonna}: {citato} e\' fuori dall\'intervallo ammesso '
+                f'({_numero_leggibile(minimo)}–{_numero_leggibile(massimo)}). Probabile '
+                'causa: il separatore delle migliaia letto come decimale — controlla le '
+                'trasformazioni «Virgola decimale → punto» e «Solo cifre e separatori» '
+                'nella regola.')
+    return None
+
+
+def _numero_leggibile(x):
+    """`1.01` resta `1.01`, `1000.0` diventa `1000`: il messaggio lo legge una persona."""
+    return f'{x:g}'
+
+
+def _testo_canonico(valore):
+    """Il valore come TESTO, nella forma JSON — la stessa che scrive JavaScript.
+
+    `str()` di Python e `String()` di JS non concordano sui valori JSON non
+    stringa: `True` contro `true`, `1.0` contro `1`. Il verdetto sarebbe lo stesso
+    (un booleano non e' un numero comunque), ma il MOTIVO mostrato all'utente
+    citerebbe due valori diversi nei due motori — e i motivi sono la cosa che
+    questa PR esiste per rendere affidabile. Segnalato da CodeRabbit sulla PR #47.
+
+    `None` → '' come nel resto del motore (`?? ''` in JS, mai `or ''`: una
+    costante `0` o `False` e' valorizzata, non vuota).
+    """
+    if valore is None:
+        return ''
+    if isinstance(valore, bool):
+        return 'true' if valore else 'false'
+    if isinstance(valore, (int, float)):
+        # TUTTI i numeri passano dalla conversione di JavaScript, non solo i
+        # float interi sotto 1e21 del primo confine (Claude Fable 5): le soglie
+        # dell'esponenziale divergono anche sui float NON interi — `str()` di
+        # Python passa all'esponenziale sotto 1e-4 (`0.000001` → `'1e-06'`,
+        # scartato come non numerico), `String()` di JS solo sotto 1e-6 — e
+        # dove entrambi scrivono l'esponenziale il formato diverge (`'1e-07'`
+        # contro `'1e-7'`). Un `Points` JSON in quella zona era valido nel
+        # browser e scartato in produzione. Gli `int` passano da `float()`
+        # perche' e' cio' che fa JS, che non ha interi: un intero JSON oltre la
+        # precisione double deve perdere le stesse cifre che perde nel browser.
+        # [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #47.
+        try:
+            return _numero_stile_js(float(valore))
+        except OverflowError:
+            # `float()` di un int oltre il massimo double: JS leggerebbe Infinity.
+            return 'Infinity' if valore > 0 else '-Infinity'
+    return str(valore)
+
+
+def _numero_stile_js(valore):
+    """`String(numero)` di JavaScript per un float, cifra per cifra (ECMA-262).
+
+    L'algoritmo e' Number::toString(10): le cifre significative sono quelle
+    della rappresentazione piu' corta che fa round-trip — le stesse che sceglie
+    `repr()` di Python, quindi qui si decide solo la NOTAZIONE. Con `k` cifre
+    `s` e il punto decimale in posizione `n` (valore = 0.s × 10^n):
+
+    - `k <= n <= 21`  → cifre e zeri per esteso (`15000000000000000`);
+    - `0 < n <= 21`   → punto dentro le cifre (`123.456`);
+    - `-6 < n <= 0`   → zeri davanti (`0.000001`);
+    - altrimenti      → esponenziale `d.ddde±E` con `E = n-1` SENZA zeri di
+      riempimento: `1e-7` e `1e+21`, non `1e-07` (il segno c'e' sempre, lo
+      zero di padding mai — e' la differenza con `str()` di Python).
+
+    Ogni caso qui sopra e' vincolato dall'oracolo, che confronta col vero
+    `String()` eseguito in node.
+    """
+    if math.isnan(valore):
+        return 'NaN'
+    if valore == math.inf:
+        return 'Infinity'
+    if valore == -math.inf:
+        return '-Infinity'
+    if valore == 0:
+        return '0'  # anche per -0.0: String(-0) in JS e' '0'
+    segno = '-' if valore < 0 else ''
+    _, cifre, esp = decimal.Decimal(repr(abs(valore))).as_tuple()
+    grezze = ''.join(map(str, cifre))
+    # `repr` puo' portare zeri finali dentro la mantissa (`100.0` → cifre 1000,
+    # esp -1): non sono significativi e vanno tolti PRIMA di contare, tenendo
+    # fermo `n` (togliere uno zero accorcia `s` e alza `esp` di uno: si compensano).
+    s = grezze.rstrip('0')
+    n = esp + len(grezze)
+    k = len(s)
+    if k <= n <= 21:
+        corpo = s + '0' * (n - k)
+    elif 0 < n <= 21:
+        corpo = s[:n] + '.' + s[n:]
+    elif -6 < n <= 0:
+        corpo = '0.' + '0' * -n + s
+    else:
+        e = n - 1
+        mantissa = s if k == 1 else s[0] + '.' + s[1:]
+        corpo = mantissa + 'e' + ('+' if e >= 0 else '-') + str(abs(e))
+    return segno + corpo
+
 
 def _taglia_codepoint(testo, n):
     """Primi `n` CODEPOINT, non le prime `n` unita' UTF-16 (`cutByCodePoint`).
@@ -2023,7 +2255,11 @@ def _sostituisci_ultima(testo, da, a):
 # stringa in JavaScript, e replicarlo con lo `str.replace` di Python — che di
 # default le cambia TUTTE — sarebbe una divergenza silenziosa fra i due motori.
 TRASFORMAZIONI_MOTORE = {
-    'trim': lambda v, t: v.strip(),
+    # `BORDI_UNIFORMI`, non `v.strip()`: il `trim` tocca il VALORE estratto,
+    # cioe' i byte della riga CSV, e i default di `strip()`/`trim()` divergono
+    # su `\ufeff` e `\x1c-\x1f` — la stessa riga usciva diversa fra anteprima
+    # e produzione (classe del [REAL_FINDING] dei gate, PR #47).
+    'trim': lambda v, t: BORDI_UNIFORMI.sub('', v),
     'replace_last': lambda v, t: _sostituisci_ultima(v, t.get('from', ''), t.get('to', '')),
     'replace_all': lambda v, t: (t.get('to', '').join(v.split(t.get('from')))
                                  if t.get('from') else v),
@@ -2212,17 +2448,72 @@ def esegui_parser(message, config):
     colonne = config.get('columns') or {}
     matched = condizione_soddisfatta(message, config.get('match'), scadenza)
     row = [_estrai_valore(message, colonne.get(c), scadenza) for c in HEADERS]
+    # Le colonne NUMERICHE viaggiano nella forma su cui la guardia da' il
+    # verdetto (`_piatto` del testo canonico): un Price BOM+`2` e' una quota
+    # valida — i bordi uniformi sono perdonati — ma il CSV emetteva il valore
+    # grezzo, BOM compreso: XTrader riceveva il byte che la guardia aveva
+    # perdonato solo ai fini del giudizio. Stessa riga in `runParser`, o i due
+    # motori scriverebbero feed diversi. [REAL_FINDING] di GPT-5.6 Sol al gate
+    # finale della PR #47.
+    for colonna in INTERVALLI_NUMERICI:
+        indice = HEADERS.index(colonna)
+        row[indice] = _piatto(_testo_canonico(row[indice]))
     # `None`→'' e basta, NON `or ''`: JS usa `String(v ?? '')`, che sostituisce
     # solo null/undefined. Con `or ''` una costante `0` o `False` (JSON validi)
     # sarebbe letta come vuota qui e valorizzata in JS — i due motori
     # divergerebbero su `missing` e `complete`, cioe' l-utente vedrebbe «completo»
     # nel browser e feed vuoto in produzione. Segnalato da CodeRabbit, PR #28.
+    # `_piatto`, non `strip()`: l'emptiness ha la stessa coppia divergente del
+    # verdetto numerico — una obbligatoria di solo BOM era «mancante» in JS e
+    # «valorizzata» in Python (stessa classe del [REAL_FINDING] dei gate, PR #47).
     def _vuota(valore):
-        return not str('' if valore is None else valore).strip()
+        return not _piatto(str('' if valore is None else valore))
 
     mancanti = [c for c in COLONNE_OBBLIGATORIE if _vuota(row[HEADERS.index(c)])]
-    return {'matched': matched, 'row': row, 'missing': mancanti,
-            'complete': matched and not mancanti}
+    # Nessuno scarto senza riconoscimento: un parser la cui condizione non e'
+    # soddisfatta ma con una costante numerica invalida produrrebbe motivi per
+    # QUALUNQUE messaggio della chat, e il dispatch li archivierebbe come
+    # «scartato» sotto un parser che non c'entra, conservando testo estraneo.
+    # [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #47.
+    scarti = [m for m in (motivo_valore_numerico(c, row[HEADERS.index(c)])
+                          for c in INTERVALLI_NUMERICI) if m] if matched else []
+    # Il gate di CONTENUTO (#41): almeno una colonna obbligatoria deve venire da
+    # un'estrazione REALE che ha prodotto qualcosa. Un parser con tutte e quattro
+    # le obbligatorie costanti produce una riga piazzabile per QUALSIASI messaggio
+    # che soddisfi la condizione — misurato: «ciao a tutti» e «oggi partita»
+    # davano `complete=True`. Oggi va bene per accidente, perche' nell'uso normale
+    # almeno `EventName` si estrae; il caso reale e' chi prova il parser con valori
+    # fissi per vedere il CSV uscire e poi lo lascia attivo.
+    if matched and not mancanti and not _estrazione_reale(colonne, row):
+        scarti.append(
+            'nessuna colonna obbligatoria viene estratta dal messaggio: con soli '
+            'valori fissi questo parser scriverebbe la stessa scommessa per '
+            'qualunque messaggio. Almeno una fra '
+            + ', '.join(COLONNE_OBBLIGATORIE) + ' deve leggere dal messaggio.')
+    return {'matched': matched, 'row': row, 'missing': mancanti, 'scarti': scarti,
+            'complete': matched and not mancanti and not scarti}
+
+
+def _estrazione_reale(colonne, row):
+    """Vero se almeno una colonna OBBLIGATORIA legge dal messaggio e ha prodotto valore.
+
+    Non basta che la regola dichiari una sorgente d'estrazione: deve anche aver
+    estratto qualcosa. Una regola `line` che non trova la riga lascia il campo
+    vuoto, e in quel caso la riga cade gia' per `missing` — ma se l'utente ha messo
+    una costante su quella colonna e l'estrazione su un'altra, il conto va fatto
+    sui valori, non sulle intenzioni.
+    """
+    for colonna in COLONNE_OBBLIGATORIE:
+        regola = (colonne or {}).get(colonna) or {}
+        if not isinstance(regola, dict):
+            continue
+        if regola.get('source') in ('line', 'regex', 'message'):
+            # `_piatto`, non `strip()`: stessa emptiness di `_vuota`, o i due
+            # motori divergerebbero sui caratteri che i default non coprono.
+            if _piatto(str('' if row[HEADERS.index(colonna)] is None
+                           else row[HEADERS.index(colonna)])):
+                return True
+    return False
 
 
 def elabora_messaggio(message, cfg):
@@ -2242,9 +2533,23 @@ def elabora_messaggio(message, cfg):
     `config_json` non decodificabile. None non solleva: e' l'`ignored:
     parser_no_match` dell'handler, non un 500.
     """
+    return esito_messaggio(message, cfg)[0]
+
+
+def esito_messaggio(message, cfg):
+    """`(parsed, motivi)`: il segnale se c'e', e PERCHE' no quando non c'e'.
+
+    `elabora_messaggio` e' questa funzione senza il secondo valore, e i suoi tre
+    chiamanti restano com'erano. Il motivo serve al dispatch, che lo scrive in
+    `message_logs`: prima quella riga diceva soltanto `parser_no_match`, cioe' il
+    sintomo senza la causa — un parser che dalla PR 5 smette di scrivere perche'
+    le sue obbligatorie sono tutte costanti, o perche' una quota e' fuori scala,
+    si sarebbe fermato in silenzio. Segnalato come bloccante da Claude Fable 5 e
+    come rischio da GPT-5.5 sulla PR #47: lo stop e' voluto, l'invisibilita' no.
+    """
     grezzo = cfg.get('config_json')
     if not grezzo:
-        return parse_message(message, cfg)
+        return parse_message(message, cfg), []
     # TUTTO il percorso del motore sta sotto un solo try, e la cattura e' larga di
     # proposito. `config_json` la scrive l'utente (dalla web app): un JSON valido ma
     # malformato per il motore — senza `columns`, con `match` non-dict, un `pattern`
@@ -2258,18 +2563,39 @@ def elabora_messaggio(message, cfg):
         config = json.loads(grezzo)
         risultato = esegui_parser(message, config)
         if not risultato['complete']:
-            return None
+            return None, list(risultato.get('scarti') or [])
         # `esegui_parser` puo' lasciare valori non-stringa nella riga (una costante
-        # JSON `0`/`False`): il feed li serializza via `make_csv`, che quota tutto.
-        # `None` → '' per non scrivere la stringa "None" nel CSV.
-        row = ['' if v is None else v for v in risultato['row']]
+        # JSON `0`/`False`): nel CSV vanno nella forma CANONICA (`_testo_canonico`,
+        # cioe' come li scrive `String()` in `toCsv`), non con `str()` di Python —
+        # una costante `0.000001` usciva `1e-06` nel feed e `0.000001`
+        # nell'anteprima, un booleano `True` contro `true`: XTrader legge il
+        # feed, il cliente giudica l'anteprima, e i byte devono coincidere.
+        # E' anche il testo su cui la guardia numerica ha dato il verdetto.
+        # [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #47.
+        row = [_testo_canonico(v) for v in risultato['row']]
         csv_riga = make_csv(row)
-        evento = str(row[HEADERS.index('EventName')])
+        evento = row[HEADERS.index('EventName')]
     except Exception:  # noqa: BLE001 - fail-safe deliberato, vedi commento sopra
         logging.getLogger('xtrader.relay').warning(
             'config parser non elaborabile: nessun segnale prodotto')
-        return None
-    return {'event': evento, 'csv': csv_riga}
+        # Il motivo esiste solo se il parser RICONOSCE il messaggio: senza
+        # questo gate una config rotta produceva «config non eseguibile» per
+        # QUALUNQUE messaggio della chat, e il dispatch archiviava tutto il
+        # traffico in `message_logs` attribuendolo a quel parser — la stessa
+        # classe chiusa in `esegui_parser` per gli scarti numerici, riaperta
+        # nel ramo d'errore. La condizione si rivaluta in un try a parte:
+        # potrebbe essere proprio lei a non essere eseguibile, e in quel caso
+        # vale il silenzio, come per il JSON illeggibile — la diagnosi resta
+        # sulla rotta di prova, che risponde `errore: config non eseguibile`
+        # comunque. [REAL_FINDING] di Claude Fable 5 al gate finale, PR #47.
+        try:
+            riconosciuto = condizione_soddisfatta(
+                message, json.loads(grezzo).get('match'),
+                time.monotonic() + REGEX_BUDGET_PARSER_S)
+        except Exception:  # noqa: BLE001 - config illeggibile: silenzio
+            riconosciuto = False
+        return None, (['config non eseguibile'] if riconosciuto else [])
+    return {'event': evento, 'csv': csv_riga}, []
 
 
 def auth(token):
@@ -3919,6 +4245,23 @@ def _valida_config_parser(config):
     for nome, regola in (colonne or {}).items():
         if not isinstance(regola, dict):
             raise HTTPException(422, f'la regola della colonna {nome!r} deve essere un oggetto')
+        # Una chiave che non e' una delle 14 colonne veniva ACCETTATA e poi ignorata
+        # in silenzio: `esegui_parser` itera su `HEADERS`, quindi la regola non
+        # esisteva per il motore. Il caso peggiore e' completamente muto — `Prcie`
+        # invece di `Price` lascia la quota vuota per sempre, `missing` non se ne
+        # accorge (non e' obbligatoria) e `complete` resta `True`. Sulle
+        # obbligatorie il difetto e' fail-closed ma la DIAGNOSI e' falsa: il
+        # messaggio dice «manca EventName» e manda a controllare i delimitatori,
+        # mentre la causa e' un refuso di due lettere. Issue #41, gap 1.
+        #
+        # La lista si DERIVA da `HEADERS`, non si ricopia: aggiungere una colonna al
+        # CSV la rende disponibile al parser, e non esiste il caso «colonna che il
+        # parser conosce e il CSV no».
+        if nome not in HEADERS:
+            vicine = difflib.get_close_matches(str(nome), HEADERS, n=1)
+            suggerimento = f' Forse intendevi {vicine[0]!r}?' if vicine else ''
+            raise HTTPException(
+                422, f'{nome!r} non e\' una colonna del CSV.{suggerimento}')
     # Numeri JSON non-finiti (`NaN`, `Infinity`): `request.json()` li accetta e
     # `json.dumps` di default li serializza come JSON NON standard. Verrebbero scritti,
     # ma `JSONResponse` li rifiuta quando riserializza `config` a ogni lista/creazione:
@@ -4203,11 +4546,17 @@ async def prova_parser_mio(slug: str, request: Request):
         return _rispondi_con_sessione(utente['id'], utente['versione'],
                                       {'matched': False, 'missing': [], 'complete': False,
                                        'errore': 'config non eseguibile'})
+    # `scarti` nella risposta, non solo nel log: e' la diagnosi che dice all'utente
+    # PERCHE' il messaggio non produce riga, e senza di essa la prova mostrerebbe
+    # «non completo» con `missing` vuota — cioe' il sintomo senza la causa, che e'
+    # il difetto che la #39 e la #41 esistono per chiudere.
     corpo = {'matched': risultato['matched'], 'missing': risultato['missing'],
-             'complete': risultato['complete']}
+             'scarti': risultato.get('scarti') or [], 'complete': risultato['complete']}
     if risultato['complete']:
-        row = ['' if v is None else v for v in risultato['row']]
-        corpo['event'] = str(row[HEADERS.index('EventName')])
+        # `_testo_canonico` come nel webhook (`esito_messaggio`): l'anteprima
+        # della prova deve mostrare gli STESSI byte che uscirebbero nel feed.
+        row = [_testo_canonico(v) for v in risultato['row']]
+        corpo['event'] = row[HEADERS.index('EventName')]
         corpo['csv'] = make_csv(row)
     return _rispondi_con_sessione(utente['id'], utente['versione'], corpo)
 
@@ -4465,16 +4814,40 @@ def _elabora_per_utente(c, chat_riga_id, utente_id, righe, text):
     if bloccato:
         return f'access_{bloccato}'
     riconosciuti = []
+    motivi = []
     for r in righe:
         cfg = dict(zip(['name', 'header', 'market_name', 'market_type',
                         'selection_name', 'handicap', 'bet_type',
                         'config_json'], (r[1], r[2], r[3], r[4], r[5],
-                                         r[6], r[7], r[8])))
-        parsed = elabora_messaggio(text, cfg)
+                                         r[6], r[7], r[8]), strict=True))
+        parsed, scarti = esito_messaggio(text, cfg)
         if parsed:
             riconosciuti.append((r, parsed))
+        motivi.extend((r, m) for m in scarti)
     if not riconosciuti:
-        return 'parser_no_match'
+        if not motivi:
+            # Nessun parser ha riconosciuto il messaggio: e' il caso normale di
+            # una chat dove passa anche altro traffico, e non si logga — i log
+            # sono una funzione del servizio, non un archivio dei messaggi.
+            return 'parser_no_match'
+        # Riconosciuto e SCARTATO da una guardia: qui il log serve, ed e' l'unico
+        # posto dove l'utente puo' vedere la causa. Senza, un parser che smette di
+        # scrivere perche' una quota e' fuori scala o perche' le sue obbligatorie
+        # sono tutte costanti si fermerebbe in silenzio: nel feed niente, nei log
+        # niente, e la causa visibile solo rilanciando la prova a mano. Bloccante
+        # di Claude Fable 5 e rischio segnalato da GPT-5.5 sulla PR #47.
+        # Il motivo va attribuito al parser CHE L'HA PRODOTTO: `motivi` porta con
+        # se' la riga di origine, perche' scriverlo sotto il primo parser
+        # dell'elenco manderebbe a correggere una regola che non ha nulla che non
+        # va — una diagnosi che punta al posto sbagliato e' peggio di nessuna
+        # diagnosi. Segnalato da GPT-5.5 e Claude Fable 5 sulla PR #47, ed era un
+        # difetto che avevo introdotto correggendo il precedente.
+        riga_origine, primo_motivo = motivi[0]
+        esito = f'scartato: {primo_motivo}'
+        c.execute('INSERT INTO message_logs(user_id, parser_id, chat_id, text,'
+                  ' esito) VALUES (?,?,?,?,?)',
+                  (utente_id, riga_origine[0], chat_riga_id, text, esito))
+        return esito
     # Vince l'ULTIMO nell'ordine dichiarato; i battuti nei log, col nome
     # visibile del vincente (slug, o name per i parser legacy).
     vincente, parsed = riconosciuti[-1]

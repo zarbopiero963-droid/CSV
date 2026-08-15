@@ -191,7 +191,11 @@ def test_i_due_motori_producono_lo_STESSO_runParser(casi):
         except Exception as e:  # noqa: BLE001 - un'eccezione E' una divergenza
             divergenti.append(f'{nome}: Python SOLLEVA {type(e).__name__}: {e}')
             continue
-        for campo in ('matched', 'row', 'missing', 'complete'):
+        # `scarti` sta fra i campi confrontati, e non e' un di piu': e' il MOTIVO
+        # mostrato all'utente. Due motori che scartano lo stesso messaggio per
+        # ragioni diverse manderebbero il cliente su due piste diverse — e' il
+        # difetto del Bridge che la #39 ha deciso di non ereditare.
+        for campo in ('matched', 'row', 'missing', 'scarti', 'complete'):
             if ottenuto[campo] != atteso[campo]:
                 divergenti.append(
                     f'{nome} · {campo}: JS={atteso[campo]!r} Python={ottenuto[campo]!r}')
@@ -200,6 +204,77 @@ def test_i_due_motori_producono_lo_STESSO_runParser(casi):
         'il motore Python diverge da web/engine.js:\n'
         + '\n'.join(f'  - {r}' for r in divergenti)
     )
+
+
+def test_le_due_classi_degli_SPAZI_coincidono(casi):
+    """La classe vive in due file e non si puo' condividere: qui si confronta.
+
+    `SPAZI_UNIFORMI` esiste in `main.py` e in `web/engine.js` perche' i default
+    dei due linguaggi divergono su tre gruppi — `\\x1c-\\x1f` e `\\x85` li
+    normalizza solo Python, `\\ufeff` solo JavaScript — e il BOM e' un carattere
+    portante del contratto CSV. Due copie corrette oggi sono due copie
+    divergenti domani (regola 3): il motore JS esporta, codepoint per codepoint,
+    cosa considera spazio, e qui si pretende che il gemello Python risponda
+    identico. Rischio segnalato da GPT-5.5 sulla PR #47.
+    """
+    import importlib
+    import sys
+    sys.path.insert(0, str(RADICE))
+    main = importlib.import_module('main')
+
+    esportato = next((c for c in casi if 'codepoint sono spazio' in c['nome']), None)
+    assert esportato and esportato['ok'], 'il caso JS sugli spazi non e\' passato'
+    assert len(esportato['dettaglio']) >= 20, 'troppo pochi codepoint per essere una guardia'
+
+    divergenti = []
+    for voce in esportato['dettaglio']:
+        carattere = chr(voce['codepoint'])
+        # Anche il lato Python passa dalla funzione VERA, non dalla costante: e'
+        # il motivo mostrato all'utente che deve coincidere, non due regex che
+        # si somigliano.
+        py = '«a b»' in (main.motivo_valore_numerico('Price', f'a{carattere}b') or '')
+        if py != voce['spazio']:
+            divergenti.append(
+                f'U+{voce["codepoint"]:04X}: JS={voce["spazio"]} Python={py}')
+
+    assert not divergenti, (
+        'le due classi degli spazi non coincidono, e i due motori citerebbero '
+        'valori diversi nello stesso motivo:\n'
+        + '\n'.join(f'  - {r}' for r in divergenti)
+    )
+
+
+def test_l_ORACOLO_non_arriva_troncato(casi):
+    """L'output di node deve arrivare INTERO, e la soglia va superata davvero.
+
+    `engine_cases.mjs` chiudeva con `process.exit()`: su una pipe la scrittura di
+    stdout e' asincrona, e `exit()` scarta cio' che non e' ancora stato
+    scaricato. L'output arrivava troncato a **esattamente 65536 byte** e il
+    wrapper riceveva un JSON tagliato a meta'. Il difetto era latente finche' i
+    casi stavano sotto i 64 KiB: invisibile fino al giro in cui il payload
+    cresce, e allora il sintomo — `JSONDecodeError` su una riga qualunque — non
+    somiglia alla causa.
+
+    Questo test e' il filo teso: pretende che il payload SUPERI la soglia, cosi'
+    il caso resta esercitato. Se un giorno i casi dimagriscono sotto i 64 KiB,
+    questo test diventa rosso e chiede di ripensarlo invece di lasciare la
+    protezione a scadere in silenzio.
+    """
+    proc = subprocess.run(
+        [esigi_node(), str(CASI_JS)],
+        cwd=RADICE, capture_output=True, text=True, timeout=60,
+    )
+    grezzo = proc.stdout
+    # I BYTE VERI che node ha scritto, non il JSON ricompattato: il troncamento
+    # avviene sull'uscita, e misurare una rappresentazione diversa misurerebbe
+    # un'altra cosa. (Prima versione di questo test: `json.dumps(casi)`, che
+    # perde l'indentazione e stava sotto la soglia — il filo non toccava niente.)
+    assert len(grezzo.encode('utf-8')) > 65536, (
+        f'l\'oracolo scrive {len(grezzo.encode("utf-8"))} byte: sotto i 64 KiB la '
+        'protezione contro il troncamento di `process.exit()` non e\' piu\' '
+        'esercitata da nessun test'
+    )
+    json.loads(grezzo)  # e deve essere JSON INTERO, non tagliato a meta'
 
 
 def test_ci_sono_abbastanza_casi_di_confronto(casi):
@@ -230,3 +305,36 @@ def test_le_QUATTRO_obbligatorie_in_Python_sono_verbatim():
     # Provider e Price NON sono obbligatorie: pretenderle bloccherebbe segnali validi.
     assert 'Provider' not in main.COLONNE_OBBLIGATORIE
     assert 'Price' not in main.COLONNE_OBBLIGATORIE
+
+
+def test_le_costanti_JSON_arrivano_nel_CSV_come_in_anteprima(casi):
+    """La riga del feed e quella dell'anteprima devono avere gli STESSI byte.
+
+    La guardia numerica valida il testo canonico (`_testo_canonico`, forma di
+    `String()`), ma `make_csv` serializzava il valore Python originale: una
+    costante JSON `0.000001` passava la guardia e usciva `1e-06` nel feed
+    mentre l'anteprima mostrava `0.000001` — e un booleano usciva `True`
+    contro `true`. XTrader legge il feed, il cliente giudica l'anteprima:
+    devono coincidere byte per byte. [REAL_FINDING] di GPT-5.6 Sol al gate
+    finale della PR #47.
+    """
+    import importlib
+    import json
+    import sys
+    sys.path.insert(0, str(RADICE))
+    main = importlib.import_module('main')
+
+    esportato = next((c for c in casi
+                      if 'costanti JSON non stringa nel CSV' in c['nome']), None)
+    assert esportato and esportato['ok'], (
+        'il caso JS delle costanti non e\' passato: '
+        + str(esportato and esportato.get('errore')))
+    dal_js = esportato['dettaglio']
+
+    parsed, motivi = main.esito_messaggio(
+        dal_js['message'], {'config_json': json.dumps(dal_js['config'])})
+    assert parsed, f'il relay non ha prodotto la riga: {motivi}'
+    assert parsed['csv'] == dal_js['csv'], (
+        'la riga del feed diverge dall\'anteprima:\n'
+        f'  JS     : {dal_js["csv"]!r}\n'
+        f'  Python : {parsed["csv"]!r}')

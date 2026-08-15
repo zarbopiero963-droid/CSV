@@ -142,6 +142,25 @@ collegamento vecchio sparisce e nasce quello nuovo, ed eliminando il profilo
 spariscono i suoi. I collegamenti degli ALTRI parser sulla stessa chat (dispatch
 multi-parser) non vengono toccati.
 
+GUARDIE SUI VALORI ESTRATTI (parser configurabili)
+Le colonne numeriche vengono lette come numeri, non copiate verbatim:
+- Price, MinPrice, MaxPrice ammesse fra 1.01 e 1000 (scala reale delle quote);
+- Handicap fra -1000 e +1000; Points (moltiplicatore dello stake) fra 0 e 1000.
+Vuoto resta legale: Price vuota e' il caso normale, la quota la mette XTrader.
+Un valore storto SCARTA il messaggio intero e non svuota la colonna, perche' una
+colonna svuotata direbbe un'altra cosa (Price vuota = prezzo di mercato, Points
+vuoto = 1x). Il motivo distingue tre casi: cifre non ASCII, non numerico, fuori
+intervallo — e nomina il separatore delle migliaia, che e' la causa piu' comune.
+Un parser le cui colonne obbligatorie sono TUTTE costanti non scrive: produrrebbe
+la stessa scommessa per qualunque messaggio riconosciuto.
+Una chiave di colonna che non e' una delle 14 da' 422 col suggerimento.
+Il verdetto corre sul valore NORMALIZZATO dalla classe condivisa degli spazi
+(identica nei due motori): spazi, BOM e separatori di controllo ai bordi vengono
+perdonati, dentro il numero no. Senza, i default di strip() e trim() divergevano
+e lo stesso valore era valido nel browser e scartato in produzione.
+I motivi di scarto esistono solo per i messaggi RICONOSCIUTI dalla condizione:
+un messaggio estraneo resta parser_no_match e non produce righe di log.
+
 PROVA DI UN PARSER
 POST /api/parsers/NOME/test
 Header: X-Admin-Token: TOKEN

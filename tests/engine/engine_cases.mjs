@@ -10,6 +10,7 @@
 // messaggio utile, invece di far fallire il caricamento del modulo.
 import * as E from '../../web/engine.js';
 
+
 const {
   COLUMNS, runParser, extractValue, matches,
   toCsv, headerOnlyCsv, suggestConfig, describeRule,
@@ -471,10 +472,198 @@ function casiConfronto() {
       SelectionName: { source: 'constant', value: 'Over 1,5' },
       BetType: { source: 'constant', value: 'PUNTA' } },
   });
+  // --- Guardie sui valori estratti (#39) e sulla config (#41), PR 5 ---------
+  //
+  // I casi vivono qui perche' l'output JS e' l'ORACOLO del gemello Python: se le
+  // due implementazioni divergessero su un tetto o su un motivo, l'utente
+  // vedrebbe «completo» nel browser e feed scartato in produzione — o il
+  // contrario, che e' peggio.
+  const conNumeri = (colonna, valore) => ({
+    match: { type: 'contains', value: 'P.Bet.' },
+    columns: { ...soloEmpty,
+      EventName: { source: 'line', contains: 'P.Bet.' },
+      MarketType: { source: 'constant', value: 'OVER_UNDER_15' },
+      SelectionName: { source: 'constant', value: 'Over 1,5 goal' },
+      BetType: { source: 'constant', value: 'PUNTA' },
+      [colonna]: { source: 'constant', value: valore } },
+  });
+  const MSG = 'P.Bet. Juventus - Palermo';
+  aggiungi('guardie: Price vuota → PASSA (la quota la mette XTrader)',
+    MSG, conNumeri('Price', ''));
+  aggiungi('guardie: Price col separatore migliaia → scartato',
+    MSG, conNumeri('Price', '1.000.000'));
+  aggiungi('guardie: Price sotto la scala Betfair → fuori intervallo',
+    MSG, conNumeri('Price', '0.5'));
+  aggiungi('guardie: Price non numerica → motivo distinto',
+    MSG, conNumeri('Price', 'abc'));
+  aggiungi('guardie: Price in cifre arabo-indiane → scartata (solo ASCII)',
+    MSG, conNumeri('Price', '\u0661\u0669'));
+  aggiungi('guardie: Handicap patologico → scartato', MSG, conNumeri('Handicap', '999999'));
+  aggiungi('guardie: Handicap 0 e -1.5 → passano', MSG, conNumeri('Handicap', '-1.5'));
+  aggiungi('guardie: Points moltiplicatore assurdo → scartato',
+    MSG, conNumeri('Points', '1.000.000'));
+  aggiungi('guardie: Points non finito (400 cifre) → caso a se',
+    MSG, conNumeri('Points', '9'.repeat(400)));
+  aggiungi('guardie: Points 2 → passa', MSG, conNumeri('Points', '2'));
+  // Valori JSON NON stringa: `String()` e `str()` non concordano (`true` contro
+  // `True`, `1` contro `1.0`), e il motivo mostrato citerebbe due valori diversi
+  // nei due motori. Il verdetto sarebbe lo stesso, la diagnosi no.
+  aggiungi('guardie: Price = true (JSON) → stesso motivo nei due motori',
+    MSG, conNumeri('Price', true));
+  aggiungi('guardie: Price = 1000000 (JSON numero) → stesso motivo',
+    MSG, conNumeri('Price', 1000000));
+  aggiungi('guardie: Points = 0.5 (JSON numero) → passa in entrambi',
+    MSG, conNumeri('Points', 0.5));
+  // Il confine dell'esponenziale: JS scrive le cifre per esteso fino a 1e21
+  // ESCLUSO e passa a `1e+21` da li'. Python fa il contrario su entrambi i lati
+  // se lasciato a se stesso, quindi i due casi vincolano il confine.
+  aggiungi('guardie: Price = 1e20 (sotto il confine) → cifre per esteso in entrambi',
+    MSG, conNumeri('Price', 1e20));
+  aggiungi('guardie: Price = 1e21 (sopra il confine) → esponenziale in entrambi',
+    MSG, conNumeri('Price', 1e21));
+  aggiungi('guardie: valore lunghissimo → citato TAGLIATO uguale nei due motori',
+    MSG, conNumeri('Points', '9'.repeat(400)));
+  aggiungi('guardie: valore multilinea → citato SENZA a capo, uguale nei due motori',
+    MSG, conNumeri('Price', 'prima riga\nseconda\triga\n\nterza'));
+  // Emoji astrali oltre il 60esimo carattere: `slice` di JS conta unita' UTF-16 e
+  // spezzerebbe la coppia surrogata, lo slice di Python conta codepoint. Il caso
+  // vincola che i due motori citino la STESSA stringa.
+  aggiungi('guardie: emoji astrali al confine del taglio → stesso citato',
+    MSG, conNumeri('Price', 'x'.repeat(55) + '\u{1F19A}\u{1F19A}\u{1F19A}\u{1F19A}\u{1F19A}'));
+  // I tre gruppi di spazi su cui i default dei due linguaggi NON coincidono:
+  // `\x1c-\x1f` e `\x85` li normalizza solo Python, `\ufeff` solo JavaScript.
+  // Con la classe esplicita condivisa i due motori citano la stessa stringa.
+  aggiungi('guardie: separatori di controllo → citato uguale nei due motori',
+    MSG, conNumeri('Price', 'a\u001cb\u001dc\u001ed\u001fe\u0085f'));
+  aggiungi('guardie: BOM dentro il valore → citato uguale nei due motori',
+    MSG, conNumeri('Price', 'a\ufeffb\u00a0c\u2028d'));
+  // I default di `strip()`/`trim()` divergevano anche sul VERDETTO, non solo sul
+  // citato: `'\ufeff2'` passava in JS (il `trim` toglie il BOM) ed era «non
+  // numerico» in Python — anteprima verde nel browser, feed vuoto in
+  // produzione. Con `'\x1c2'` i ruoli si invertono. Il verdetto corre sul
+  // valore normalizzato dalla classe condivisa, in entrambi i motori.
+  // [REAL_FINDING] di Claude Fable 5 e GPT-5.6 Sol al gate finale della PR #47.
+  aggiungi('guardie: BOM ai bordi del valore → stesso verdetto nei due motori',
+    MSG, conNumeri('Price', '\ufeff2'));
+  aggiungi('guardie: separatore di controllo ai bordi → stesso verdetto',
+    MSG, conNumeri('Price', '\u001c2'));
+  aggiungi('guardie: valore di soli spazi uniformi → vuoto in entrambi',
+    MSG, conNumeri('Price', '\ufeff\u00a0'));
+  aggiungi('guardie: spazio uniforme DENTRO il numero → scartato in entrambi',
+    MSG, conNumeri('Price', '1\u00a05'));
+  // L'emptiness delle obbligatorie aveva la stessa coppia divergente: una
+  // SelectionName di solo BOM era «mancante» in JS e «valorizzata» in Python.
+  aggiungi('guardie: obbligatoria di solo BOM → mancante in entrambi i motori',
+    MSG, conNumeri('SelectionName', '\ufeff'));
+  // E la trasformazione `trim` e' la stessa coppia sul VALORE estratto, cioe'
+  // sui byte della riga CSV: i due motori devono produrre la stessa riga.
+  aggiungi('guardie: trasformazione trim con spazi esotici ai bordi → stessa riga',
+    MSG, { ...conNumeri('Price', ''),
+           columns: { ...conNumeri('Price', '').columns,
+                      Price: { source: 'constant', value: '\ufeff1.9\u001c',
+                               transforms: [{ op: 'trim' }] } } });
+  // Condizione NON soddisfatta → NESSUNO scarto, in nessuno dei due motori: o il
+  // dispatch loggherebbe «scartato» un messaggio mai riconosciuto, attribuendolo
+  // a un parser che non c'entra e conservando testo estraneo in `message_logs`.
+  // [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #47.
+  aggiungi('guardie: condizione non soddisfatta → nessuno scarto',
+    'oggi si parla di altro', conNumeri('Points', '999999'));
+  // Le SOGLIE dell'esponenziale divergono anche sui float NON interi, non
+  // solo sugli interi gia' vincolati da 1e20/1e21: `str()` di Python passa
+  // all'esponenziale sotto 1e-4 (`0.000001` -> `1e-06`, scartato come non
+  // numerico), `String()` di JS solo sotto 1e-6 (`0.000001`, accettato) --
+  // e dove entrambi scrivono l'esponenziale, il FORMATO diverge (`1e-07`
+  // contro `1e-7`). [REAL_FINDING] di GPT-5.6 Sol al gate finale, PR #47.
+  aggiungi('guardie: Points = 0.000001 (JSON) -> stesso verdetto nei due motori',
+    MSG, conNumeri('Points', 0.000001));
+  aggiungi('guardie: Points = 0.00001 (JSON) -> stesso verdetto',
+    MSG, conNumeri('Points', 0.00001));
+  aggiungi('guardie: Points = 1e-7 (JSON) -> stesso motivo, stesso formato esponente',
+    MSG, conNumeri('Points', 1e-7));
+  aggiungi('guardie: Price = 123.456 (JSON float) -> stessa riga in entrambi',
+    MSG, conNumeri('Price', 123.456));
+  aggiungi('guardie: sole costanti sulle obbligatorie → nessuna riga', 'ciao a tutti', {
+    match: { type: 'contains', value: 'a' },
+    columns: { ...soloEmpty,
+      EventName: { source: 'constant', value: 'X' },
+      MarketType: { source: 'constant', value: 'OVER_UNDER_15' },
+      SelectionName: { source: 'constant', value: 'Over' },
+      BetType: { source: 'constant', value: 'PUNTA' } },
+  });
   return confronti;
 }
+
+// La classe degli spazi vive in DUE file e non si puo' condividere: qui si
+// esporta, codepoint per codepoint, cosa normalizza il motore JS, e il gemello
+// Python confronta con la propria. Senza, una modifica a una sola delle due
+// copie resterebbe invisibile finche' un cliente non vede due motivi diversi.
+caso('motore: quali codepoint sono spazio per il motore JS', () => {
+  const codici = [0x20, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x1c, 0x1d, 0x1e, 0x1f,
+                  0x85, 0xa0, 0x1680, 0x2000, 0x2009, 0x200a, 0x2028, 0x2029,
+                  0x202f, 0x205f, 0x3000, 0x200b, 0xfeff, 0x41, 0x2d];
+  // Si misura il motore VERO attraverso `numericReason`, non una copia della
+  // classe tenuta qui: una copia misurerebbe se stessa, e la guardia sarebbe
+  // circolare. Il valore non e' numerico, quindi il motivo cita il valore
+  // normalizzato, ed e' li' che si legge se il carattere e' diventato spazio.
+  return codici.map(c => ({
+    codepoint: c,
+    spazio: (E.numericReason('Price', 'a' + String.fromCodePoint(c) + 'b') || '')
+      .includes('«a b»'),
+  }));
+});
+
+// La guardia numerica validava il testo CANONICO, ma il CSV del relay
+// serializzava il valore Python originale: `Points=0.000001` (JSON) passava
+// la guardia e usciva `1e-06` nel feed e `0.000001` nell'anteprima — e un
+// booleano usciva `True` contro `true`. Qui si esporta il CSV che scrive il
+// motore JS e il gemello Python deve produrre gli STESSI byte dalla stessa
+// config. [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #47.
+caso('csv: costanti JSON non stringa nel CSV, come le scrive String()', () => {
+  const columns = {}; for (const c of COLUMNS) columns[c] = { source: 'empty' };
+  columns.EventName = { source: 'line', contains: 'P.Bet.' };
+  columns.MarketType = { source: 'constant', value: 'OVER_UNDER_15' };
+  columns.SelectionName = { source: 'constant', value: 'Over' };
+  columns.BetType = { source: 'constant', value: 'PUNTA' };
+  columns.Points = { source: 'constant', value: 0.000001 };
+  columns.EventId = { source: 'constant', value: true };
+  const config = { match: { type: 'contains', value: 'P.Bet.' }, columns };
+  const message = 'P.Bet. Juventus - Palermo';
+  const r = runParser(message, config);
+  eq(r.complete, true, 'il caso deve produrre una riga');
+  return { config, message, csv: toCsv(r.row) };
+});
+
+// La guardia PERDONA gli spazi uniformi ai bordi ai fini del verdetto, ma il
+// valore emesso nel CSV deve essere il testo GIUDICATO, non quello grezzo:
+// un Price '\ufeff2' passava come numerico e usciva nel feed ancora col BOM
+// davanti — XTrader riceve il byte che la guardia aveva perdonato solo ai
+// fini del giudizio. [REAL_FINDING] di GPT-5.6 Sol al gate finale, PR #47.
+caso('csv: il valore numerico esce nella forma giudicata, senza i bordi', () => {
+  const columns = {}; for (const c of COLUMNS) columns[c] = { source: 'empty' };
+  columns.EventName = { source: 'line', contains: 'P.Bet.' };
+  columns.MarketType = { source: 'constant', value: 'OVER_UNDER_15' };
+  columns.SelectionName = { source: 'constant', value: 'Over' };
+  columns.BetType = { source: 'constant', value: 'PUNTA' };
+  columns.Price = { source: 'constant', value: '\ufeff2\u00a0' };
+  const config = { match: { type: 'contains', value: 'P.Bet.' }, columns };
+  const message = 'P.Bet. Juventus - Palermo';
+  const r = runParser(message, config);
+  eq(r.complete, true, 'il valore perdonato ai bordi deve passare');
+  const csv = toCsv(r.row);
+  eq(csv.includes('"2"'), true, 'il CSV deve contenere il testo giudicato');
+  eq(csv.slice(1).includes('\ufeff'), false,
+    'nessun BOM oltre quello del contratto in testa al file');
+  return { config, message, csv };
+});
 
 caso('motore: casi di confronto per il gemello Python', () => casiConfronto());
 
 process.stdout.write(JSON.stringify(casi, null, 1));
-process.exit(casi.every(c => c.ok) ? 0 : 1);
+// `exitCode`, NON `process.exit()`. Su una pipe la scrittura di stdout e'
+// asincrona e `exit()` scarta cio' che non e' ancora stato scaricato: l'output
+// arrivava TRONCATO a esattamente 65536 byte, e il wrapper pytest riceveva un
+// JSON tagliato a meta'. Il difetto era latente finche' i casi stavano sotto i
+// 64 KiB — cioe' invisibile fino al giro in cui il payload cresce, e allora il
+// sintomo (`JSONDecodeError` su una riga qualunque) non somiglia alla causa.
+// Con `exitCode` node esce da solo quando ha finito di scrivere.
+process.exitCode = casi.every(c => c.ok) ? 0 : 1;
