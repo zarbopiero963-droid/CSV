@@ -770,7 +770,13 @@ def test_una_seconda_migrazione_non_TENTA_di_reinserire_le_chat(tmp_path):
 
 @pytest.fixture
 def servizio(tmp_path, monkeypatch):
-    """Il relay in processo, con un database vuoto solo suo e il token noto."""
+    """Il relay in processo, con un database solo suo e il token noto.
+
+    Il database porta i dati della produzione esistente — il parser storico e il
+    profilo PIERO — seminati da `relay_in_processo`: dalla rimozione del seme
+    (#25 lavoro E) non li mette piu' `migra()`. Chi vuole un deploy vergine
+    passa `vergine=True`.
+    """
     relay_in_processo(monkeypatch, tmp_path / 'api.db')
     monkeypatch.setattr(main, 'TOKEN', 'token-di-prova')
     return 'token-di-prova'

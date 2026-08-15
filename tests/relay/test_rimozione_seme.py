@@ -38,7 +38,7 @@ sys.path.insert(0, str(RADICE))
 
 import main  # noqa: E402 - dopo l'inserimento del percorso
 from tests.ambiente import CHIAVI_PERICOLOSE, TOKEN_DI_PROVA  # noqa: E402
-from tests.dati import semina_produzione  # noqa: E402
+from tests.dati import relay_in_processo  # noqa: E402
 from tests.relay.test_webhook import (  # noqa: E402
     BOT_FINTO, CHAT, MESSAGGIO_VALIDO, RichiestaFinta)
 
@@ -52,15 +52,14 @@ def _ambiente_pulito(monkeypatch):
 
 
 def _relay(tmp_path, monkeypatch, nome, chat_ids='', vergine=False):
-    """Il relay in processo su un database di produzione simulato (o vergine)."""
-    percorso = str(tmp_path / nome)
-    monkeypatch.setattr(main, 'DB_PATH', percorso)
-    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    """Il relay in processo su un database di produzione simulato (o vergine).
+
+    Delega a `relay_in_processo` (fonte unica, `tests/dati.py`): qui resta solo
+    il segreto del webhook, che e' l'unica cosa specifica di questo file.
+    """
     monkeypatch.setattr(main, 'SEGRETO_WEBHOOK', main.webhook_secret(BOT_FINTO))
-    if not vergine:
-        semina_produzione(percorso, chat_ids)
-    main.db().close()
-    return percorso
+    return relay_in_processo(monkeypatch, tmp_path / nome,
+                             chat_ids=chat_ids, vergine=vergine)
 
 
 def _riavvio(monkeypatch):
@@ -167,7 +166,12 @@ def test_il_webhook_ignora_un_profilo_col_parser_mancante(tmp_path, monkeypatch)
     c.close()
     r = _consegna()
     assert r.get('ok') is True, f'la consegna non e\' ok: {r}'
-    assert 'ignored' in r, f'atteso un esito ignorato, arrivato {r}'
+    # Il motivo ESATTO, non un `ignored` qualunque: con `chat_not_allowed` il
+    # test passerebbe senza che la guardia sul parser mancante sia stata
+    # nemmeno raggiunta. Segnalato da CodeRabbit sulla PR #46.
+    assert r.get('ignored') == 'parser_mancante', (
+        f'atteso «parser_mancante», arrivato {r}: con un altro motivo la '
+        f'guardia sul parser cancellato non e\' stata raggiunta')
 
 
 # ----------------------------------------------- i link seguono il profilo

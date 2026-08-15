@@ -66,18 +66,13 @@ def _ambiente_pulito(monkeypatch):
 def _relay(tmp_path, monkeypatch, nome):
     """Relay in processo col segreto del webhook armato; restituisce il percorso DB.
 
-    Il profilo PIERO seminato nasce con `chat_ids` vuoto perche' in test
-    `TELEGRAM_ALLOWED_CHAT_IDS` non c'e' (la whitelist la toglie): la chat di
-    prova va scritta a mano, come farebbe la variabile in produzione. I test che
-    vogliono i LINK in `parser_chats` chiamano `_riavvio` dopo, cosi' la
-    migrazione la vede e semina — lo stesso percorso del primo avvio post-deploy.
+    Il profilo PIERO nasce **con** la chat di prova, seminata PRIMA della
+    migrazione: e' il percorso del primo avvio post-deploy, dove quelle righe
+    stanno gia' sul volume. Non va piu' scritta a mano dopo la migrazione — il
+    travaso dei link gira una volta sola (#25 lavoro E), quindi una chat
+    aggiunta dopo non verrebbe vista da nessun travaso successivo.
     """
     monkeypatch.setattr(main, 'SEGRETO_WEBHOOK', main.webhook_secret(BOT_FINTO))
-    # La chat del profilo PIERO arriva dalla semina, non da un UPDATE dopo la
-    # migrazione: dalla rimozione del seme (#25 lavoro E) il travaso dei link
-    # gira UNA VOLTA SOLA, quindi una chat scritta dopo la prima migrazione non
-    # verrebbe piu' vista. E' anche piu' fedele: in produzione quelle righe
-    # esistono PRIMA che il processo parta.
     return relay_in_processo(monkeypatch, tmp_path / nome, chat_ids=CHAT)
 
 

@@ -1028,7 +1028,10 @@ def test_un_database_della_PR22_riceve_la_colonna_del_promemoria(tmp_path, monke
     c.close()
     assert 'promemoria_per' not in _colonne(percorso, 'users'), 'il test non parte dal vecchio'
 
-    relay_in_processo(monkeypatch, percorso)
+    # `vergine=True`: questo database DEVE restare quello vecchio, con la sola
+    # tabella `users` e senza i dati di produzione. Seminarlo aggiungerebbe
+    # tabelle e righe allo stato che il test dichiara di misurare.
+    relay_in_processo(monkeypatch, percorso, vergine=True)
     main.db().close()
 
     assert 'promemoria_per' in _colonne(percorso, 'users'), (
