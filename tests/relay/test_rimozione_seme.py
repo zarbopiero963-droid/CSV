@@ -508,3 +508,127 @@ def test_una_ELIMINAZIONE_concorrente_a_un_salvataggio_non_lascia_link_ORFANI(
 
 def _righe_chat(chat_ids):
     return {x.strip() for x in (chat_ids or '').split(',') if x.strip()}
+
+
+def test_un_profilo_non_resta_MAI_a_nominare_un_parser_cancellato(tmp_path, monkeypatch):
+    """La validazione del parser deve stare nella stessa transazione del salvataggio.
+
+    `[REAL_FINDING]` di GPT-5.6 Sol al gate finale della PR #46: `get_parser`
+    girava PRIMA di `BEGIN IMMEDIATE`, quindi un `DELETE /api/parsers`
+    concorrente poteva cancellare il parser fra la validazione e la scrittura.
+    Il profilo veniva salvato lo stesso, senza nessun link, e i segnali di
+    quella chat sparivano in silenzio: nessun errore, nessun 4xx, il feed
+    semplicemente fermo.
+
+    L'invariante che si misura: **un profilo salvato nomina sempre un parser che
+    esiste**. La corsa e' forzata sul punto esatto della validazione.
+    """
+    import sqlite3 as _sq
+
+    percorso = _relay(tmp_path, monkeypatch, 'toctou_salva.db', chat_ids=CHAT)
+    main.save_parser(main.ParserIn(name='Parser_Fragile', header='H-FRAGILE'),
+                     TOKEN_DI_PROVA)
+    reale = main.db
+
+    class ConnCorsaCancellazione:
+        """Cancella il parser nel momento in cui il salvataggio lo valida."""
+
+        def __init__(self, sotto):
+            self._sotto = sotto
+            self.fatta = False
+
+        def execute(self, sql, params=()):
+            # L'innesto sta su `BEGIN IMMEDIATE`: a quel punto la validazione e'
+            # gia' passata e la transazione non e' ancora aperta — l'unica
+            # finestra vera. (Iniettando prima della validazione il `SELECT` di
+            # `get_parser` vedrebbe gia' il parser sparito e risponderebbe 404,
+            # che e' l'esito corretto: non si misurerebbe niente.)
+            if not self.fatta and 'BEGIN IMMEDIATE' in sql:
+                self.fatta = True
+                altra = reale()
+                altra.execute('PRAGMA busy_timeout = 200')
+                try:
+                    altra.execute('DELETE FROM parsers WHERE name=?', ('Parser_Fragile',))
+                    altra.commit()
+                except _sq.OperationalError:
+                    pass  # Serializzato: la cancellazione non e' passata.
+                finally:
+                    altra.close()
+            return self._sotto.execute(sql, params)
+
+        def __getattr__(self, nome):
+            return getattr(self._sotto, nome)
+
+    monkeypatch.setattr(main, 'db', lambda: ConnCorsaCancellazione(reale()))
+    try:
+        _salva_profilo(main.PIERO_PROFILE, CHAT, 'Parser_Fragile')
+    except main.HTTPException:
+        pass  # Il 404 e' un esito legittimo: il parser non c'e' piu'.
+    finally:
+        monkeypatch.setattr(main, 'db', reale)
+
+    c = _sq.connect(percorso)
+    fantasmi = c.execute(
+        'SELECT p.name, p.parser FROM profiles p'
+        ' LEFT JOIN parsers x ON x.name = p.parser WHERE x.name IS NULL').fetchall()
+    c.close()
+    assert not fantasmi, (
+        f'profili che nominano un parser inesistente: {fantasmi}. '
+        f'Quella chat non produce piu\' segnali, senza nessun errore')
+
+
+def test_il_webhook_non_solleva_se_il_parser_sparisce_A_META(tmp_path, monkeypatch):
+    """Fra il controllo di esistenza e la lettura non deve esserci una finestra.
+
+    `[REAL_FINDING]` di GPT-5.6 Sol: il controllo `SELECT 1` seguito da
+    `get_parser` e' un TOCTOU — una cancellazione concorrente fra le due query
+    fa sollevare 404 lo stesso, cioe' esattamente il retry-loop di Telegram che
+    la guardia esiste per chiudere. Con una lettura sola la finestra non c'e'.
+
+    Se qualcuno rimettesse la forma a due query, l'innesto qui sotto tornerebbe
+    a scattare e questo test diventerebbe rosso.
+    """
+    import sqlite3 as _sq
+
+    percorso = _relay(tmp_path, monkeypatch, 'toctou_webhook.db', chat_ids=CHAT)
+    c = _sq.connect(percorso)
+    c.execute('DELETE FROM parser_chats')  # solo il percorso legacy, per profilo
+    c.commit()
+    c.close()
+    reale = main.db
+
+    class ConnCorsaMeta:
+        """Cancella il parser fra il controllo di esistenza e la lettura vera."""
+
+        def __init__(self, sotto):
+            self._sotto = sotto
+            self.visto = False
+            self.fatta = False
+
+        def execute(self, sql, params=()):
+            if 'SELECT 1 FROM parsers WHERE name=?' in sql:
+                self.visto = True
+            elif self.visto and not self.fatta and 'SELECT name,header' in sql:
+                self.fatta = True
+                altra = reale()
+                altra.execute('PRAGMA busy_timeout = 200')
+                try:
+                    altra.execute('DELETE FROM parsers WHERE name=?',
+                                  (main.DEFAULT_PARSER,))
+                    altra.commit()
+                except _sq.OperationalError:
+                    pass
+                finally:
+                    altra.close()
+            return self._sotto.execute(sql, params)
+
+        def __getattr__(self, nome):
+            return getattr(self._sotto, nome)
+
+    monkeypatch.setattr(main, 'db', lambda: ConnCorsaMeta(reale()))
+    try:
+        esito = _consegna()
+    finally:
+        monkeypatch.setattr(main, 'db', reale)
+    assert esito.get('ok') is True, (
+        f'il webhook non ha risposto ok: {esito} — Telegram ritenterebbe in ciclo')

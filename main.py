@@ -2318,11 +2318,30 @@ def auth(token):
         raise HTTPException(401, 'Unauthorized')
 
 
+CAMPI_PARSER = ('name', 'header', 'market_name', 'market_type', 'selection_name',
+                'handicap', 'bet_type', 'config_json')
+
+
+def parser_se_esiste(c, name):
+    """La configurazione di un parser, o `None` se non c'e'. Non solleva.
+
+    Fonte unica della lettura (regola 3): `get_parser` ci aggiunge solo il 404, e
+    il percorso di consegna la usa **al posto** di un controllo di esistenza
+    seguito dalla lettura vera. Quelle erano due query, e fra le due c'era una
+    finestra: una cancellazione concorrente le passava in mezzo e la seconda
+    sollevava 404 lo stesso — cioe' il retry-loop di Telegram che la guardia
+    esiste per chiudere. `[REAL_FINDING]` di GPT-5.6 Sol, PR #46.
+    """
+    r = c.execute(f'SELECT {",".join(CAMPI_PARSER)} FROM parsers WHERE name=?',
+                  (name,)).fetchone()
+    return dict(zip(CAMPI_PARSER, r)) if r else None
+
+
 def get_parser(c, name):
-    r = c.execute('SELECT name,header,market_name,market_type,selection_name,handicap,bet_type,config_json FROM parsers WHERE name=?', (name,)).fetchone()
-    if not r:
+    cfg = parser_se_esiste(c, name)
+    if cfg is None:
         raise HTTPException(404, 'Parser non trovato')
-    return dict(zip(['name','header','market_name','market_type','selection_name','handicap','bet_type','config_json'], r))
+    return cfg
 
 
 def get_profile(c, name):
@@ -3749,7 +3768,6 @@ def save_profile(data: ProfileIn, x_admin_token: str | None = Header(None)):
     auth(x_admin_token)
     c = db()
     try:
-        get_parser(c, data.parser)
         # `BEGIN IMMEDIATE` PRIMA della lettura, e non e' pignoleria: in SQLite una
         # `SELECT` non apre nessuna transazione di scrittura, quindi due POST
         # concorrenti sullo stesso profilo leggerebbero entrambi lo stato di
@@ -3763,6 +3781,14 @@ def save_profile(data: ProfileIn, x_admin_token: str | None = Header(None)):
         # Sta DENTRO il `try`: sotto contesa il comando stesso solleva «database is
         # locked», e da fuori la connessione non verrebbe chiusa.
         c.execute('BEGIN IMMEDIATE')
+        # La validazione del parser sta DENTRO la transazione, non prima: fuori
+        # era un TOCTOU: un `DELETE /api/parsers` concorrente poteva cancellare
+        # il parser fra il controllo e la scrittura, e il profilo veniva salvato
+        # lo stesso — a nominare un parser che non esiste, senza nessun link. I
+        # segnali di quella chat sparivano in silenzio: nessun errore, nessun
+        # 4xx, il feed semplicemente fermo. `[REAL_FINDING]` di GPT-5.6 Sol al
+        # gate finale della PR #46.
+        get_parser(c, data.parser)
         # La riga PRIMA della scrittura: serve a togliere i link del parser che il
         # profilo nominava fino a un istante fa. Senza, cambiare parser lascerebbe
         # vivo il vecchio link e quella chat continuerebbe a far girare il parser
@@ -4535,10 +4561,13 @@ def _elabora_profilo(c, profile, text):
     # ritenta in ciclo. Qui la consegna si IGNORA: il segnale non arriva
     # comunque, ma il retry si esaurisce e gli altri profili della chat
     # continuano a essere elaborati.
-    if c.execute('SELECT 1 FROM parsers WHERE name=?',
-                 (profile['parser'],)).fetchone() is None:
+    #
+    # UNA lettura sola, non un controllo di esistenza seguito dalla lettura: fra
+    # due query ci sarebbe una finestra, e una cancellazione concorrente che ci
+    # passa in mezzo farebbe sollevare 404 lo stesso.
+    cfg = parser_se_esiste(c, profile['parser'])
+    if cfg is None:
         return 'parser_mancante'
-    cfg = get_parser(c, profile['parser'])
     parsed = elabora_messaggio(text, cfg)
     if not parsed:
         return 'parser_no_match'
