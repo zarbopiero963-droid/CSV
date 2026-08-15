@@ -343,9 +343,11 @@ caso('suggeritore: ancora tagliata per codepoint, mai mezzo surrogato', () => {
   return ancore;
 });
 
-caso('suggeritore: sul messaggio reale propone Provider e EventName', () => {
+caso('suggeritore: sul messaggio reale propone EventName e Provider vuota', () => {
   const cfg = suggestConfig(MSG_VALIDO);
-  eq(cfg.columns.Provider.value, 'XTrader', 'Provider');
+  // Provider VUOTA dalla #42: il vecchio default 'XTrader' era il valore del
+  // CSV misurato in #5, che vale li' perche' quel file l'ha scritto XTrader.
+  eq(cfg.columns.Provider.source, 'empty', 'Provider');
   eq(cfg.columns.EventName.marker, VS, 'marcatore versus');
   eq(extractValue(MSG_VALIDO, cfg.columns.EventName), 'Manchester City - Aston Villa', 'evento');
   return 'ok';
@@ -609,6 +611,26 @@ function casiConfronto() {
     MSG, conNumeri('Handicap', '-1.5'));
   aggiungi('localizzazione: valore RIFIUTATO resta in forma giudicata',
     MSG, conNumeri('Price', '1.000.000'));
+  // Niente emoji nei VALORI (#42): XTrader marcherebbe il segnale non valido,
+  // senza errore di ritorno. Il caso reale e' la regola 'riga intera' su una
+  // riga che comincia col marcatore: il valore si porta dentro l'emoji e il
+  // feed esce formalmente valido. Si scarta (regola della #39), con parita'
+  // JS/Python sul motivo. I nomi normali (accenti, virgole, ' v ') passano.
+  aggiungi('emoji: riga intera col marcatore dentro -> scartato in entrambi',
+    'P.Bet. LIVE\n\u{1F19A} Juventus - Palermo', {
+      match: { type: 'contains', value: 'P.Bet.' },
+      columns: { ...soloEmpty,
+        EventName: { source: 'line', anchor: '\u{1F19A}' },
+        MarketType: { source: 'constant', value: 'OVER_UNDER_15' },
+        SelectionName: { source: 'constant', value: 'Over' },
+        BetType: { source: 'constant', value: 'PUNTA' } },
+    });
+  aggiungi('emoji: spunta in un valore facoltativo -> scartato in entrambi',
+    MSG, conNumeri('SelectionName', 'Over \u2705 1,5'));
+  aggiungi('emoji: orologio e stella -> stessa classe nei due motori',
+    MSG, conNumeri('MarketName', 'ore \u23F0 20:45 \u2B50'));
+  aggiungi('emoji: nomi con accenti, virgole e v -> NESSUNO scarto',
+    MSG, conNumeri('MarketName', 'Citta\u0300 "A", U\u0308ber v Lo\u0301v'));
   aggiungi('guardie: sole costanti sulle obbligatorie → nessuna riga', 'ciao a tutti', {
     match: { type: 'contains', value: 'a' },
     columns: { ...soloEmpty,
@@ -697,6 +719,30 @@ caso('verifica: il feed col PUNTO nella quota viene respinto', () => {
   row[COLUMNS.indexOf('Price')] = '1,85';
   eq(E.verifyCsv(toCsv(row)), null,
     'la forma localizzata deve passare, anche con virgole nel nome squadra');
+  return 'ok';
+});
+
+// Il suggeritore non deve piu' proporre 'XTrader' come Provider (#42):
+// Provider e' il nome di CHI MANDA, non di chi legge — nel CSV misurato in #5
+// vale 'XTrader' perche' quel file l'ha scritto XTrader. Default: vuota,
+// campo dell'utente (XTrader la usa come filtro e discriminante).
+caso('suggeritore: Provider proposta VUOTA, campo dell-utente', () => {
+  const cfg = suggestConfig('P.Bet. LIVE\n\u{1F19A} Juve v Milan\n@ 1.85');
+  eq(cfg.columns.Provider.source, 'empty', 'Provider suggerita');
+  return 'ok';
+});
+
+// Il verificatore vincola il contratto 'niente emoji in nessuna colonna':
+// un campo con l'emoji va respinto, il nome normale passa.
+caso('verifica: un campo con l-emoji viene respinto', () => {
+  const row = COLUMNS.map(() => '');
+  row[COLUMNS.indexOf('EventName')] = '\u{1F19A} Juventus - Palermo';
+  row[COLUMNS.indexOf('BetType')] = 'PUNTA';
+  const respinto = E.verifyCsv(toCsv(row));
+  eq(respinto === null, false, 'l-emoji nel campo deve essere respinta');
+  eq(String(respinto).includes('EventName'), true, 'il motivo nomina la colonna');
+  row[COLUMNS.indexOf('EventName')] = 'Juventus - Palermo';
+  eq(E.verifyCsv(toCsv(row)), null, 'il nome normale passa');
   return 'ok';
 });
 

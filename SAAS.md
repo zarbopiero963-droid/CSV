@@ -506,6 +506,20 @@ test eseguibili questa decisione varrebbe quanto la riga «senza BOM».
 Il percorso legacy di PIERO non passa dal confine e resta byte-identico
 (`Price` vuota, `Handicap` `0`: niente da localizzare).
 
+**Niente emoji nei valori (#42).** «Solo testo. Emoji non li accetta XTrader,
+lo marcherebbe non valido come segnale» — e senza errore di ritorno, solo
+l'icona rossa. Il caso reale è la regola «riga intera» su una riga che comincia
+col marcatore: il valore si porta dentro l'emoji e il feed esce formalmente
+valido. Un valore (non numerico: lì un'emoji è già «non un numero») che
+contiene un'emoji **scarta il messaggio** col motivo che dice cosa fare —
+estrarre il testo *dopo* il marcatore — e `verify_csv()`/`verifyCsv()`
+respingono un feed con emoji in qualunque colonna. Classe esplicita gemella
+nei due motori (`_EMOJI`/`EMOJI`). E il suggeritore propone **`Provider`
+vuota**: è il nome di chi manda, campo dell'utente (XTrader la usa come filtro
+case-insensitive e come discriminante); il vecchio default `XTrader` era il
+valore del CSV misurato in #5, che vale lì perché quel file l'ha scritto
+XTrader.
+
 Il motivo `config non eseguibile` del fail-safe esiste **solo se la condizione
 del parser riconosce il messaggio**: senza quel gate, un parser con la config
 rotta faceva archiviare in `message_logs` tutto il traffico della chat. Se la

@@ -40,6 +40,12 @@ Regola di contratto, non un'avvertenza: nel CSV servito a XTrader non deve compa
 nessuna emoji, in nessun campo. Un segnale che ne contiene viene marcato NON VALIDO, e --
 come sempre -- senza restituire un errore: solo un'icona rossa accanto al segnale.
 
+Dal PR della #42 la regola e' VINCOLATA, non solo dichiarata: un valore con emoji
+viene SCARTATO dal motore col motivo che dice cosa fare (il messaggio intero non
+produce riga, come per i valori numerici storti della #39), e verify_csv respinge
+un feed che ne contenga in qualunque colonna. E il suggeritore propone Provider
+VUOTA: e' il nome di chi MANDA il segnale, campo dell'utente.
+
 Le emoji stanno IN ENTRATA, non in uscita. I marcatori dei parser (🆚, ⏰, ✅) servono a
 riconoscere il messaggio e a dire DOVE leggere il dato: il valore estratto e' il testo
 DOPO il marcatore, mai il marcatore. E' la ragione per cui il parser di riferimento usa

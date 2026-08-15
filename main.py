@@ -1877,6 +1877,14 @@ def verify_csv(text):
                 raise ValueError(
                     '%s nel feed non e\' nella forma localizzata del contratto '
                     '(virgola decimale): %r' % (colonna, valore))
+        # Niente emoji in NESSUNA colonna (#42): XTrader marcherebbe il
+        # segnale non valido, senza errore di ritorno. Regola di contratto,
+        # vincolata qui perche' «dichiarato sano» significhi qualcosa.
+        for colonna in HEADERS:
+            if _EMOJI.search(campi[HEADERS.index(colonna)]):
+                raise ValueError(
+                    '%s nel feed contiene un\'emoji: XTrader marcherebbe il '
+                    'segnale non valido, senza errore di ritorno' % colonna)
     return text
 
 
@@ -2094,6 +2102,18 @@ SEPARATORE_DECIMALE = SEPARATORI_DECIMALI[LINGUA_FEED]
 _NUMERO_FEED = re.compile(
     r'^[+-]?(?:[0-9]+(?:%(s)s[0-9]*)?|%(s)s[0-9]+)$'
     % {'s': re.escape(SEPARATORE_DECIMALE)})
+
+# Niente emoji nei VALORI del feed (#42): «solo testo. Emoji non li accetta
+# XTrader, lo marcherebbe non valido come segnale» (il proprietario) — e come
+# tutto in XTrader senza errore di ritorno, solo l'icona rossa che l'utente
+# deve notare. Le emoji stanno IN ENTRATA (i marcatori dei parser), mai in
+# uscita. Classe ESPLICITA, gemella di `EMOJI` in web/engine.js: i blocchi dei
+# simboli (misc technical per l'orologio, misc symbols e dingbats per la
+# spunta, frecce e stelle, il piano astrale dei simboli) piu' i caratteri di
+# composizione (ZWJ, variation selector) che da soli tradiscono un'emoji
+# spezzata dal taglio di una regola.
+_EMOJI = re.compile('[\u200d\u2300-\u23ff\u2600-\u27bf'
+                    '\u2b00-\u2bff\ufe0f\U0001F000-\U0001FAFF]')
 
 
 def motivo_valore_numerico(colonna, valore):
@@ -2519,6 +2539,28 @@ def esegui_parser(message, config):
     # «scartato» sotto un parser che non c'entra, conservando testo estraneo.
     # [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #47.
     scarti = [m for m in motivi_numerici.values() if m] if matched else []
+    if matched:
+        # Niente emoji nei valori (#42): il feed uscirebbe formalmente valido
+        # — 14 colonne, virgolette, CRLF, BOM — e XTrader lo scarterebbe in
+        # silenzio, icona rossa e nessun errore. Il caso reale e' la regola
+        # «riga intera» su una riga che comincia col marcatore. Si scarta
+        # (regola della #39: un valore che il consumatore rifiuta non e' un
+        # valore); le colonne numeriche sono escluse perche' li' un'emoji e'
+        # gia' «non un numero», col motivo giusto. Stesso blocco in `runParser`.
+        for colonna in HEADERS:
+            if colonna in INTERVALLI_NUMERICI:
+                continue
+            testo = str('' if row[HEADERS.index(colonna)] is None
+                        else row[HEADERS.index(colonna)])
+            if _EMOJI.search(testo):
+                piano = _piatto(testo)
+                citato = (piano if len(piano) <= 60
+                          else _taglia_codepoint(piano, 60) + '…')
+                scarti.append(
+                    f'{colonna}: il valore contiene un\'emoji («{citato}»). '
+                    'XTrader marcherebbe il segnale non valido, senza nessun '
+                    'errore di ritorno: estrai il testo DOPO il marcatore, '
+                    'non la riga intera.')
     # Il gate di CONTENUTO (#41): almeno una colonna obbligatoria deve venire da
     # un'estrazione REALE che ha prodotto qualcosa. Un parser con tutte e quattro
     # le obbligatorie costanti produce una riga piazzabile per QUALSIASI messaggio
