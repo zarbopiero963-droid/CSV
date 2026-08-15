@@ -568,6 +568,20 @@ function casiConfronto() {
   // [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #47.
   aggiungi('guardie: condizione non soddisfatta → nessuno scarto',
     'oggi si parla di altro', conNumeri('Points', '999999'));
+  // Le SOGLIE dell'esponenziale divergono anche sui float NON interi, non
+  // solo sugli interi gia' vincolati da 1e20/1e21: `str()` di Python passa
+  // all'esponenziale sotto 1e-4 (`0.000001` -> `1e-06`, scartato come non
+  // numerico), `String()` di JS solo sotto 1e-6 (`0.000001`, accettato) --
+  // e dove entrambi scrivono l'esponenziale, il FORMATO diverge (`1e-07`
+  // contro `1e-7`). [REAL_FINDING] di GPT-5.6 Sol al gate finale, PR #47.
+  aggiungi('guardie: Points = 0.000001 (JSON) -> stesso verdetto nei due motori',
+    MSG, conNumeri('Points', 0.000001));
+  aggiungi('guardie: Points = 0.00001 (JSON) -> stesso verdetto',
+    MSG, conNumeri('Points', 0.00001));
+  aggiungi('guardie: Points = 1e-7 (JSON) -> stesso motivo, stesso formato esponente',
+    MSG, conNumeri('Points', 1e-7));
+  aggiungi('guardie: Price = 123.456 (JSON float) -> stessa riga in entrambi',
+    MSG, conNumeri('Price', 123.456));
   aggiungi('guardie: sole costanti sulle obbligatorie → nessuna riga', 'ciao a tutti', {
     match: { type: 'contains', value: 'a' },
     columns: { ...soloEmpty,

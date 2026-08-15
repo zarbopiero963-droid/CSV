@@ -537,3 +537,26 @@ def test_nessun_log_da_un_parser_che_non_riconosce(tmp_path, monkeypatch):
     c.close()
     assert not righe, (
         f'un messaggio mai riconosciuto e\' stato archiviato nei log: {righe}')
+
+
+def test_i_float_piccoli_non_cambiano_notazione():
+    """`str()` e `String()` divergono sulle SOGLIE dell'esponenziale.
+
+    Python passa all'esponenziale sotto 1e-4 (`str(0.000001)` da' `'1e-06'`,
+    che la regex scarta come non numerico), JavaScript solo sotto 1e-6
+    (`'0.000001'`, accettato): un `Points` numerico JSON in quella zona era
+    valido nel browser e scartato in produzione. E dove entrambi scrivono
+    l'esponenziale, il formato diverge (`'1e-07'` contro `'1e-7'`): stesso
+    verdetto, motivo diverso. Il ramo float di `_testo_canonico` segue ora la
+    conversione di ECMAScript, misurata caso per caso dall'oracolo.
+    [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #47.
+    """
+    assert main._testo_canonico(0.000001) == '0.000001'
+    assert main._testo_canonico(0.00001) == '0.00001'
+    assert main._testo_canonico(1e-7) == '1e-7'
+    assert main._testo_canonico(1.5e16) == '15000000000000000'
+    assert main._testo_canonico(1e20) == '100000000000000000000'
+    assert main._testo_canonico(1e21) == '1e+21'
+    assert main._testo_canonico(123.456) == '123.456'
+    assert main.motivo_valore_numerico('Points', 0.000001) is None, (
+        'un moltiplicatore minuscolo ma legale e\' accettato in JS e scartato qui')

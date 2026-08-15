@@ -1,4 +1,4 @@
-import asyncio, base64, binascii, csv, difflib, hashlib, hmac, io, json, logging, math, os, re, secrets, sqlite3, threading, time
+import asyncio, base64, binascii, csv, decimal, difflib, hashlib, hmac, io, json, logging, math, os, re, secrets, sqlite3, threading, time
 from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -2161,16 +2161,72 @@ def _testo_canonico(valore):
         return ''
     if isinstance(valore, bool):
         return 'true' if valore else 'false'
-    if isinstance(valore, float) and valore.is_integer() and abs(valore) < 1e21:
-        # Il confine e' quello di JavaScript, misurato: `String()` scrive le cifre
-        # per esteso fino a 1e21 escluso e passa all'esponenziale da li' in su.
-        # Sotto il confine serve `int()` — `str(1e20)` in Python da' `1e+20`
-        # mentre JS scrive tutte le cifre; sopra, `str()` da' gia' `1e+21` come
-        # JS, e forzare `int()` divergerebbe di nuovo. Senza questo limite la
-        # funzione riaprirebbe, un ordine di grandezza piu' in la', esattamente
-        # la divergenza che esiste per chiudere. Segnalato da Claude Fable 5.
-        return str(int(valore))
+    if isinstance(valore, (int, float)):
+        # TUTTI i numeri passano dalla conversione di JavaScript, non solo i
+        # float interi sotto 1e21 del primo confine (Claude Fable 5): le soglie
+        # dell'esponenziale divergono anche sui float NON interi — `str()` di
+        # Python passa all'esponenziale sotto 1e-4 (`0.000001` → `'1e-06'`,
+        # scartato come non numerico), `String()` di JS solo sotto 1e-6 — e
+        # dove entrambi scrivono l'esponenziale il formato diverge (`'1e-07'`
+        # contro `'1e-7'`). Un `Points` JSON in quella zona era valido nel
+        # browser e scartato in produzione. Gli `int` passano da `float()`
+        # perche' e' cio' che fa JS, che non ha interi: un intero JSON oltre la
+        # precisione double deve perdere le stesse cifre che perde nel browser.
+        # [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #47.
+        try:
+            return _numero_stile_js(float(valore))
+        except OverflowError:
+            # `float()` di un int oltre il massimo double: JS leggerebbe Infinity.
+            return 'Infinity' if valore > 0 else '-Infinity'
     return str(valore)
+
+
+def _numero_stile_js(valore):
+    """`String(numero)` di JavaScript per un float, cifra per cifra (ECMA-262).
+
+    L'algoritmo e' Number::toString(10): le cifre significative sono quelle
+    della rappresentazione piu' corta che fa round-trip — le stesse che sceglie
+    `repr()` di Python, quindi qui si decide solo la NOTAZIONE. Con `k` cifre
+    `s` e il punto decimale in posizione `n` (valore = 0.s × 10^n):
+
+    - `k <= n <= 21`  → cifre e zeri per esteso (`15000000000000000`);
+    - `0 < n <= 21`   → punto dentro le cifre (`123.456`);
+    - `-6 < n <= 0`   → zeri davanti (`0.000001`);
+    - altrimenti      → esponenziale `d.ddde±E` con `E = n-1` SENZA zeri di
+      riempimento: `1e-7` e `1e+21`, non `1e-07` (il segno c'e' sempre, lo
+      zero di padding mai — e' la differenza con `str()` di Python).
+
+    Ogni caso qui sopra e' vincolato dall'oracolo, che confronta col vero
+    `String()` eseguito in node.
+    """
+    if math.isnan(valore):
+        return 'NaN'
+    if valore == math.inf:
+        return 'Infinity'
+    if valore == -math.inf:
+        return '-Infinity'
+    if valore == 0:
+        return '0'  # anche per -0.0: String(-0) in JS e' '0'
+    segno = '-' if valore < 0 else ''
+    _, cifre, esp = decimal.Decimal(repr(abs(valore))).as_tuple()
+    grezze = ''.join(map(str, cifre))
+    # `repr` puo' portare zeri finali dentro la mantissa (`100.0` → cifre 1000,
+    # esp -1): non sono significativi e vanno tolti PRIMA di contare, tenendo
+    # fermo `n` (togliere uno zero accorcia `s` e alza `esp` di uno: si compensano).
+    s = grezze.rstrip('0')
+    n = esp + len(grezze)
+    k = len(s)
+    if k <= n <= 21:
+        corpo = s + '0' * (n - k)
+    elif 0 < n <= 21:
+        corpo = s[:n] + '.' + s[n:]
+    elif -6 < n <= 0:
+        corpo = '0.' + '0' * -n + s
+    else:
+        e = n - 1
+        mantissa = s if k == 1 else s[0] + '.' + s[1:]
+        corpo = mantissa + 'e' + ('+' if e >= 0 else '-') + str(abs(e))
+    return segno + corpo
 
 
 def _taglia_codepoint(testo, n):

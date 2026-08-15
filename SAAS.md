@@ -470,6 +470,14 @@ la causa era il refuso), sulle facoltative non c'era **nessun** sintomo.
 I motivi compaiono in `scarti` e nella risposta di `POST /api/me/parsers/{slug}/test`:
 devono dire **cosa fare**, non solo cosa non va.
 
+**Le costanti JSON non stringa** (booleani, numeri) vengono rese come le rende
+JavaScript (`true`, `0.000001`, `1e-7`, `1e+21`): il ramo numerico di
+`_testo_canonico` in `main.py` implementa la conversione numero→testo di
+ECMAScript, perché `str()` di Python sceglie soglie e formato dell'esponenziale
+diversi e un `Points` numerico piccolo era valido nel browser e scartato in
+produzione. Vincolato dall'oracolo caso per caso. [REAL_FINDING] di GPT-5.6
+Sol, PR #47.
+
 Il confronto della riga e il taglio del marcatore ignorano entrambi maiuscole e
 minuscole. Le ancore vengono tagliate per **codepoint**, non per unità UTF-16:
 un emoji astrale a cavallo del taglio lascerebbe un surrogato spaiato, e
