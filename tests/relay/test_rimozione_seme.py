@@ -379,3 +379,41 @@ def test_il_travaso_PULISCE_i_link_stantii_lasciati_dalla_versione_precedente(
         f'Quel parser continua a elaborare la chat, e nessun giro futuro lo toglie')
     assert (main.DEFAULT_PARSER, CHAT) in link, (
         f'il travaso ha portato via anche il link giusto: {link}')
+
+
+def test_il_travaso_NON_tocca_i_link_legittimi_di_un_ALTRO_utente(tmp_path, monkeypatch):
+    """La pulizia del travaso non deve mangiarsi i link giustificati altrui.
+
+    Suggerito da GPT-5.5 sulla PR #46, ed e' la guardia sul verso opposto della
+    riconciliazione: due utenti con il PROPRIO parser sulla stessa chat sono due
+    link legittimi — e' il modello del dispatch multi-parser, dove nessuno
+    «vince» la chat. Una pulizia che guardasse i profili in modo troppo largo li
+    porterebbe via, e il sintomo sarebbe un cliente che smette di ricevere
+    perche' un altro cliente esiste.
+    """
+    percorso = _relay(tmp_path, monkeypatch, 'travaso_altrui.db', chat_ids=CHAT)
+    # Un secondo utente col SUO parser sulla stessa chat, come lo lascerebbe la
+    # versione precedente: profilo, parser, e il link della vecchia semina.
+    c = sqlite3.connect(percorso)
+    c.execute("INSERT INTO users(origin_profile, slug, first_name, status)"
+              " VALUES ('ALTRO','altro','ALTRO','attivo')")
+    c.execute('INSERT INTO parsers(name, header) VALUES (?,?)',
+              ('Parser_Di_Altro', 'HEADER-ALTRO'))
+    c.execute('UPDATE parsers SET user_id=(SELECT id FROM users WHERE origin_profile=?),'
+              ' id=rowid WHERE name=?', ('ALTRO', 'Parser_Di_Altro'))
+    c.execute('INSERT INTO profiles(name, chat_ids, parser) VALUES (?,?,?)',
+              ('ALTRO', CHAT, 'Parser_Di_Altro'))
+    c.execute('INSERT OR IGNORE INTO parser_chats(parser_id, chat_id)'
+              ' SELECT p.id, ch.id FROM parsers p, chats ch'
+              " WHERE p.name='Parser_Di_Altro' AND ch.telegram_chat_id=?", (CHAT,))
+    c.execute('DELETE FROM migrazioni')
+    c.commit()
+    c.close()
+
+    _riavvio(monkeypatch)
+
+    link = _link(percorso)
+    assert ('Parser_Di_Altro', CHAT) in link, (
+        f'il travaso ha tolto il link legittimo di un altro utente: {link}')
+    assert (main.DEFAULT_PARSER, CHAT) in link, (
+        f'il travaso ha tolto il link del proprietario: {link}')
