@@ -170,23 +170,26 @@ export function numericReason(column, value) {
   // guardie esistono per rendere affidabile. Segnalato da CodeRabbit, PR #47.
   const text = String(value ?? '').trim();
   if (!text) return null;
+  // Il taglio e' identico a quello di main.py: il valore citato finisce nel log
+  // e nella UI, e un'estrazione sbagliata puo' portarsi dietro una riga intera.
+  const citato = text.length <= 60 ? text : text.slice(0, 60) + '…';
   if (!ASCII_NUMBER.test(text)) {
     const separators = (text.match(/[.,]/g) || []).length;
     if (separators > 1) {
-      return `${column}: «${text}» non e' un numero. Probabile causa: il separatore `
+      return `${column}: «${citato}» non e' un numero. Probabile causa: il separatore `
         + 'delle migliaia — controlla le trasformazioni della regola.';
     }
-    return `${column}: «${text}» non e' un numero valido. XTrader legge solo cifre `
+    return `${column}: «${citato}» non e' un numero valido. XTrader legge solo cifre `
       + "ASCII: controlla la regola, sta leggendo la parte sbagliata del messaggio.";
   }
   const n = Number(text.replace(',', '.'));
   if (!Number.isFinite(n)) {
-    return `${column}: «${text}» non e' un numero finito. Il valore estratto e' `
+    return `${column}: «${citato}» non e' un numero finito. Il valore estratto e' `
       + 'troppo lungo per essere un numero reale: controlla la regola.';
   }
   const [min, max] = range;
   if (n < min || n > max) {
-    return `${column}: ${text} e' fuori dall'intervallo ammesso `
+    return `${column}: ${citato} e' fuori dall'intervallo ammesso `
       + `(${readable(min)}–${readable(max)}). Probabile causa: il separatore delle `
       + 'migliaia letto come decimale — controlla le trasformazioni «Virgola '
       + 'decimale → punto» e «Solo cifre e separatori» nella regola.';

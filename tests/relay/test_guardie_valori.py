@@ -367,3 +367,49 @@ def test_la_rotta_di_prova_RESTITUISCE_i_motivi(tmp_path, monkeypatch):
     assert corpo['complete'] is False
     assert corpo.get('scarti'), f'la prova non dice perche\': {corpo}'
     assert 'separatore' in ' '.join(corpo['scarti']).lower(), corpo['scarti']
+
+
+def test_il_log_dello_scarto_punta_al_parser_GIUSTO(tmp_path, monkeypatch):
+    """Il motivo va attribuito a chi l'ha prodotto, non al primo della lista.
+
+    Segnalato da GPT-5.5 sulla PR #47, ed e' un difetto che avevo introdotto io
+    correggendo il precedente: con due parser dello stesso utente sulla stessa
+    chat, il motivo del SECONDO veniva scritto sotto l'id del PRIMO. Una
+    diagnosi che punta al parser sbagliato e' peggio di nessuna diagnosi — manda
+    a correggere una regola che non ha nulla che non va, ed e' esattamente la
+    classe di difetto che #39 e #41 esistono per chiudere.
+    """
+    import asyncio
+    import json
+    import sqlite3
+
+    from tests.dati import relay_in_processo
+    from tests.relay.test_webhook import BOT_FINTO, CHAT, RichiestaFinta
+
+    percorso = relay_in_processo(monkeypatch, tmp_path / 'attribuzione.db', chat_ids=CHAT)
+    monkeypatch.setattr(main, 'SEGRETO_WEBHOOK', main.webhook_secret(BOT_FINTO))
+    c = sqlite3.connect(percorso)
+    # Il parser storico non riconosce questo messaggio (nessuno scarto suo), il
+    # secondo lo riconosce e viene scartato dalla guardia: il log deve nominare
+    # il SECONDO.
+    utente = c.execute('SELECT user_id FROM parsers WHERE name=?',
+                       (main.DEFAULT_PARSER,)).fetchone()[0]
+    c.execute('INSERT INTO parsers(name, header, user_id, slug, ordine, config_json, id)'
+              " VALUES ('u-secondo','H',?,?,5,?,9101)",
+              (utente, 'secondo', json.dumps(_config(Points='1.000.000'))))
+    c.execute('INSERT INTO parser_chats(parser_id, chat_id)'
+              ' SELECT 9101, id FROM chats WHERE telegram_chat_id=?', (CHAT,))
+    c.commit()
+    c.close()
+
+    payload = {'message': {'chat': {'id': int(CHAT)}, 'text': MESSAGGIO}}
+    asyncio.run(main.telegram_webhook(RichiestaFinta(
+        {'X-Telegram-Bot-Api-Secret-Token': main.webhook_secret(BOT_FINTO)}, payload)))
+
+    c = sqlite3.connect(percorso)
+    righe = c.execute('SELECT parser_id, esito FROM message_logs').fetchall()
+    c.close()
+    scarti = [r for r in righe if 'scartato' in (r[1] or '')]
+    assert scarti, f'nessuna riga di scarto: {righe}'
+    assert all(r[0] == 9101 for r in scarti), (
+        f'il motivo e\' attribuito al parser sbagliato: {scarti}')

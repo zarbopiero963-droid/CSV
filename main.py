@@ -2067,23 +2067,28 @@ def motivo_valore_numerico(colonna, valore):
     testo = _testo_canonico(valore).strip()
     if not testo:
         return None
+    # Il valore citato nel motivo si taglia: finisce in `message_logs` e nella
+    # UI, e un'estrazione sbagliata puo' portarsi dietro una riga intera — il
+    # caso dell'infinito ne cita 400 cifre. Il taglio e' identico in JS, o i due
+    # motori tornerebbero a scrivere motivi diversi. Rischio segnalato da GPT-5.5.
+    citato = testo if len(testo) <= 60 else testo[:60] + '…'
     if not _NUMERO_ASCII.match(testo):
         if sum(testo.count(s) for s in '.,') > 1:
-            return (f'{colonna}: «{testo}» non e\' un numero. Probabile causa: il '
+            return (f'{colonna}: «{citato}» non e\' un numero. Probabile causa: il '
                     'separatore delle migliaia — controlla le trasformazioni della regola.')
-        return (f'{colonna}: «{testo}» non e\' un numero valido. XTrader legge solo '
+        return (f'{colonna}: «{citato}» non e\' un numero valido. XTrader legge solo '
                 'cifre ASCII: controlla la regola, sta leggendo la parte sbagliata '
                 'del messaggio.')
     try:
         numero = float(testo.replace(',', '.'))
     except ValueError:
-        return f'{colonna}: «{testo}» non e\' un numero.'
+        return f'{colonna}: «{citato}» non e\' un numero.'
     if not math.isfinite(numero):
-        return (f'{colonna}: «{testo}» non e\' un numero finito. Il valore estratto e\' '
+        return (f'{colonna}: «{citato}» non e\' un numero finito. Il valore estratto e\' '
                 'troppo lungo per essere un numero reale: controlla la regola.')
     minimo, massimo = intervallo
     if not (minimo <= numero <= massimo):
-        return (f'{colonna}: {testo} e\' fuori dall\'intervallo ammesso '
+        return (f'{colonna}: {citato} e\' fuori dall\'intervallo ammesso '
                 f'({_numero_leggibile(minimo)}–{_numero_leggibile(massimo)}). Probabile '
                 'causa: il separatore delle migliaia letto come decimale — controlla le '
                 'trasformazioni «Virgola decimale → punto» e «Solo cifre e separatori» '
@@ -2112,7 +2117,14 @@ def _testo_canonico(valore):
         return ''
     if isinstance(valore, bool):
         return 'true' if valore else 'false'
-    if isinstance(valore, float) and valore.is_integer():
+    if isinstance(valore, float) and valore.is_integer() and abs(valore) < 1e21:
+        # Il confine e' quello di JavaScript, misurato: `String()` scrive le cifre
+        # per esteso fino a 1e21 escluso e passa all'esponenziale da li' in su.
+        # Sotto il confine serve `int()` — `str(1e20)` in Python da' `1e+20`
+        # mentre JS scrive tutte le cifre; sopra, `str()` da' gia' `1e+21` come
+        # JS, e forzare `int()` divergerebbe di nuovo. Senza questo limite la
+        # funzione riaprirebbe, un ordine di grandezza piu' in la', esattamente
+        # la divergenza che esiste per chiudere. Segnalato da Claude Fable 5.
         return str(int(valore))
     return str(valore)
 
@@ -4664,7 +4676,7 @@ def _elabora_per_utente(c, chat_riga_id, utente_id, righe, text):
         parsed, scarti = esito_messaggio(text, cfg)
         if parsed:
             riconosciuti.append((r, parsed))
-        motivi.extend(scarti)
+        motivi.extend((r, m) for m in scarti)
     if not riconosciuti:
         if not motivi:
             # Nessun parser ha riconosciuto il messaggio: e' il caso normale di
@@ -4677,10 +4689,17 @@ def _elabora_per_utente(c, chat_riga_id, utente_id, righe, text):
         # sono tutte costanti si fermerebbe in silenzio: nel feed niente, nei log
         # niente, e la causa visibile solo rilanciando la prova a mano. Bloccante
         # di Claude Fable 5 e rischio segnalato da GPT-5.5 sulla PR #47.
-        esito = f'scartato: {motivi[0]}'
+        # Il motivo va attribuito al parser CHE L'HA PRODOTTO: `motivi` porta con
+        # se' la riga di origine, perche' scriverlo sotto il primo parser
+        # dell'elenco manderebbe a correggere una regola che non ha nulla che non
+        # va — una diagnosi che punta al posto sbagliato e' peggio di nessuna
+        # diagnosi. Segnalato da GPT-5.5 e Claude Fable 5 sulla PR #47, ed era un
+        # difetto che avevo introdotto correggendo il precedente.
+        riga_origine, primo_motivo = motivi[0]
+        esito = f'scartato: {primo_motivo}'
         c.execute('INSERT INTO message_logs(user_id, parser_id, chat_id, text,'
                   ' esito) VALUES (?,?,?,?,?)',
-                  (utente_id, righe[0][0], chat_riga_id, text, esito))
+                  (utente_id, riga_origine[0], chat_riga_id, text, esito))
         return esito
     # Vince l'ULTIMO nell'ordine dichiarato; i battuti nei log, col nome
     # visibile del vincente (slug, o name per i parser legacy).

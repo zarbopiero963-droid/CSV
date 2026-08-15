@@ -513,6 +513,15 @@ function casiConfronto() {
     MSG, conNumeri('Price', 1000000));
   aggiungi('guardie: Points = 0.5 (JSON numero) → passa in entrambi',
     MSG, conNumeri('Points', 0.5));
+  // Il confine dell'esponenziale: JS scrive le cifre per esteso fino a 1e21
+  // ESCLUSO e passa a `1e+21` da li'. Python fa il contrario su entrambi i lati
+  // se lasciato a se stesso, quindi i due casi vincolano il confine.
+  aggiungi('guardie: Price = 1e20 (sotto il confine) → cifre per esteso in entrambi',
+    MSG, conNumeri('Price', 1e20));
+  aggiungi('guardie: Price = 1e21 (sopra il confine) → esponenziale in entrambi',
+    MSG, conNumeri('Price', 1e21));
+  aggiungi('guardie: valore lunghissimo → citato TAGLIATO uguale nei due motori',
+    MSG, conNumeri('Points', '9'.repeat(400)));
   aggiungi('guardie: sole costanti sulle obbligatorie → nessuna riga', 'ciao a tutti', {
     match: { type: 'contains', value: 'a' },
     columns: { ...soloEmpty,
