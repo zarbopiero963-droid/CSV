@@ -634,6 +634,14 @@ function casiConfronto() {
   // Sourcery sulla PR #49, vincolato dal confronto dei motivi fra i motori.
   aggiungi('emoji: dentro una colonna numerica decide la guardia NUMERICA',
     MSG, conNumeri('Handicap', '-1.5\u{1F4A9}'));
+  // Il keycap U+20E3 senza FE0F (forma minimamente qualificata) era il buco
+  // della classe: esiste SOLO per le sequenze emoji. I simboli text-default
+  // ((c), TM, !!) restano testo: la loro forma emoji richiede FE0F, gia'
+  // intercettato. [REAL_FINDING] di GPT-5.6 Sol al gate della PR #49.
+  aggiungi('emoji: keycap minimale U+20E3 -> scartato in entrambi',
+    MSG, conNumeri('MarketName', 'posizione 1\u20e3'));
+  aggiungi('emoji: simboli text-default (c) TM !! -> NESSUNO scarto',
+    MSG, conNumeri('MarketName', 'marchio \u00ae nota\u203c brand \u2122'));
   aggiungi('emoji: nomi con accenti, virgole e v -> NESSUNO scarto',
     MSG, conNumeri('MarketName', 'Citta\u0300 "A", U\u0308ber v Lo\u0301v'));
   aggiungi('guardie: sole costanti sulle obbligatorie → nessuna riga', 'ciao a tutti', {

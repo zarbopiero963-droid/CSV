@@ -161,3 +161,23 @@ def test_l_emoji_in_una_colonna_numerica_e_affare_della_guardia_numerica():
     assert 'Handicap' in motivi and 'numero' in motivi, motivi
     assert 'emoji' not in motivi.lower(), (
         f'la guardia emoji ha parlato al posto di quella numerica: {motivi!r}')
+
+
+def test_il_keycap_minimale_e_vietato_e_i_simboli_testuali_no():
+    """`U+20E3` e' il buco segnalato da GPT-5.6 Sol al gate della PR #49.
+
+    Il keycap combinante esiste SOLO per le sequenze emoji: `'1' + U+20E3`
+    (forma minimamente qualificata, senza `FE0F`) non conteneva nessun
+    codepoint della classe e passava la guardia. I simboli text-default
+    (`(c)`, `TM`, `!!`, la freccia) restano invece testo legittimo: la loro
+    presentazione emoji richiede `FE0F`, che intercettiamo gia' — e' il
+    confine deliberato della classe, e questo test lo tiene su entrambi
+    i lati.
+    """
+    r = main.esegui_parser(MESSAGGIO, _config(MarketName='posizione 1\u20e3'))
+    assert r['complete'] is False, 'il keycap minimale ha raggiunto il feed'
+    assert 'emoji' in ' | '.join(r['scarti']).lower()
+    for testo in ('marchio \u00ae', 'nota\u203c', 'freccia \u2194', 'brand \u2122'):
+        r = main.esegui_parser(MESSAGGIO, _config(MarketName=testo))
+        assert r['complete'] is True, (
+            f'{testo!r} e\' testo legittimo ed e\' stato scartato: {r["scarti"]}')

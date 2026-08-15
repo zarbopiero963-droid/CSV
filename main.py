@@ -2112,7 +2112,14 @@ _NUMERO_FEED = re.compile(
 # spunta, frecce e stelle, il piano astrale dei simboli) piu' i caratteri di
 # composizione (ZWJ, variation selector) che da soli tradiscono un'emoji
 # spezzata dal taglio di una regola.
-_EMOJI = re.compile('[\u200d\u2300-\u23ff\u2600-\u27bf'
+# Dentro c'e' anche il keycap combinante U+20E3: esiste SOLO per le
+# sequenze emoji, e nella forma minimamente qualificata ('1' + U+20E3,
+# senza FE0F) era l'unico modo di portare un'emoji nel feed senza toccare
+# la classe ([REAL_FINDING] di GPT-5.6 Sol, PR #49). Fuori restano
+# DELIBERATAMENTE i simboli text-default ((c), (r), TM, !!, le frecce): da
+# soli sono testo, e la loro presentazione emoji richiede FE0F, che
+# intercettiamo gia'.
+_EMOJI = re.compile('[\u200d\u20e3\u2300-\u23ff\u2600-\u27bf'
                     '\u2b00-\u2bff\ufe0f\U0001F000-\U0001FAFF]')
 
 

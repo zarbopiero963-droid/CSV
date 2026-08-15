@@ -183,7 +183,11 @@ const FEED_NUMBER = new RegExp('^[+-]?(?:[0-9]+(?:' + SEP_RE + '[0-9]*)?|' + SEP
 // misc symbols e dingbats per la spunta, frecce e stelle, il piano astrale dei
 // simboli) piu' ZWJ e variation selector, che da soli tradiscono un'emoji
 // spezzata dal taglio di una regola.
-const EMOJI = /[\u200d\u2300-\u23ff\u2600-\u27bf\u2b00-\u2bff\ufe0f\u{1f000}-\u{1faff}]/u;
+// Dentro c'e' anche il keycap combinante U+20E3 (solo sequenze emoji; la
+// forma minimale '1'+U+20E3 senza FE0F era il buco - GPT-5.6 Sol, PR #49).
+// Fuori restano i simboli text-default ((c), TM, !!): da soli sono testo,
+// la loro forma emoji richiede FE0F, gia' intercettato.
+const EMOJI = /[\u200d\u20e3\u2300-\u23ff\u2600-\u27bf\u2b00-\u2bff\ufe0f\u{1f000}-\u{1faff}]/u;
 
 // `[0-9]` e non `\d`: in JavaScript `\d` e' gia' solo ASCII, ma la riga gemella in
 // Python con `\d` accetterebbe le cifre arabo-indiane — scritto per esteso in
