@@ -59,7 +59,7 @@ def test_una_PUBLIC_URL_vuota_vale_come_assente(monkeypatch):
     inservibile, e il flusso redirect di Telegram si rompeva senza errore.
     Fail-first del finding di CodeRabbit sulla PR #50; la stessa espressione
     viveva anche in `assicura_registrazione` — regola 2, corretta la classe con
-    la fonte unica `public_url()`.
+    la fonte unica `public_url_configurata()`.
     """
     for valore in ('', '   '):
         monkeypatch.setenv('PUBLIC_URL', valore)
