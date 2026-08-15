@@ -25,7 +25,8 @@ Il merge resta sempre manuale del repository owner.
 |---|---|
 | Servizio FastAPI (relay, API, webhook Telegram, feed CSV) | `main.py` |
 | Facciata pubblica del sito, servita sull'apex | `web/sito.html` |
-| Prototipo web app multiutente (moduli ES, nessun build step) | `web/index.html`, `web/app.js`, `web/api.js`, `web/engine.js`, `web/styles.css` |
+| Web app multiutente agganciata al backend (moduli ES, nessun build step) | `web/index.html`, `web/app.js`, `web/api.js` (fetch verso il relay), `web/styles.css` |
+| Gemello a dati finti di `api.js`, usato SOLO dal file unico demo | `web/api_finta.js` (parità vincolata da `tests/web/test_api_parita.py`) |
 | Motore di parsing configurabile — specifica eseguibile | `web/engine.js` |
 | Generatore della copia a file unico del prototipo | `tools/build_single_file.py` |
 | Architettura SaaS, modello dati, contratto API | `SAAS.md` |
@@ -41,7 +42,7 @@ Il merge resta sempre manuale del repository owner.
 | Test del relay: autenticazione, webhook, parser | `tests/relay/test_autenticazione.py`, `tests/relay/test_webhook.py`, `tests/relay/test_parse_message.py` |
 | Schema multiutente e migrazione idempotente | `migra()` in `main.py`, `tests/relay/test_schema.py` |
 | Test del motore e del contratto CSV (casi eseguiti in node) | `tests/engine/engine_cases.mjs`, `tests/engine/test_engine_contract.py` |
-| Test del prototipo in browser (Playwright/Chromium) | `tests/web/prototype_flow.py`, `tests/web/mobile_layout.py`, `tests/web/test_prototype_flow.py` |
+| Test della web app in browser, end-to-end sul relay vero (Playwright/Chromium) | `tests/web/prototype_flow.py`, `tests/web/mobile_layout.py`, `tests/web/test_prototype_flow.py`, `tests/web/test_file_unico.py`, `tests/web/test_api_parita.py` |
 | Test della facciata: HTTP e browser | `tests/relay/test_facciata.py`, `tests/web/sito_flow.py`, `tests/web/test_sito.py` |
 | Ambiente dei sottoprocessi di test (whitelist) + sua guardia | `tests/ambiente.py`, `tests/safety/test_ambiente_dei_test.py` |
 | Dipendenze dei soli test | `requirements-dev.txt` |

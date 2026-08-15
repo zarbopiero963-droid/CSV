@@ -303,6 +303,20 @@ _TENTATIVO_DELL_ESITO = 0
 ATTESA_FRA_TENTATIVI_S = 60
 
 
+def public_url_configurata():
+    """L'URL pubblico del servizio, con il default di produzione.
+
+    `os.getenv(chiave, default)` NON usa il default quando la variabile esiste
+    vuota: una `PUBLIC_URL` presente ma vuota (o di soli spazi) usciva cosi'
+    com'era — una `setWebhook` verso `/telegram/webhook` senza host, e una
+    `base_url` inservibile da `/api/settings`. Trovato da CodeRabbit sulla
+    PR #50 sul secondo sito; il primo e' la stessa classe (regola 2), e la
+    fonte unica e' la regola 3.
+    """
+    return (os.getenv('PUBLIC_URL', '').strip()
+            or 'https://csv-production-b04e.up.railway.app')
+
+
 def _chiama_set_webhook(bot_token, public_url):
     """Registra il webhook col segreto. True solo se Telegram dice `ok`.
 
@@ -435,8 +449,7 @@ def assicura_registrazione(forza=False):
         _ULTIMO_TENTATIVO = adesso
         _TENTATIVI_EMESSI += 1
         mio = _TENTATIVI_EMESSI
-    public_url = os.getenv('PUBLIC_URL', 'https://csv-production-b04e.up.railway.app')
-    esito = _chiama_set_webhook(token, public_url)
+    esito = _chiama_set_webhook(token, public_url_configurata())
     with _WEBHOOK_LOCK:
         # Solo se nessun tentativo piu' recente ha gia' scritto il suo esito: vedi
         # `_TENTATIVI_EMESSI`. Senza questo confronto un tentativo lento e fallito
@@ -3664,6 +3677,27 @@ def chi_sono(request: Request):
         'accesso_scade': utente['access_expires_at'],
         'giorni_rimasti': giorni_rimasti(utente['access_expires_at']),
         'slug': utente['slug'], 'token_prefix': utente['token_prefix']})
+
+
+@app.get('/api/settings')
+def impostazioni_pubbliche():
+    """I valori PUBBLICI che la pagina di login conosce PRIMA della sessione (#32).
+
+    Servono al prototipo reale per costruire il link «Accedi con Telegram» nella
+    modalita' redirect di oauth.telegram.org — l'unica senza script esterni, che
+    CLAUDE.md vieta — la quale vuole il `bot_id` NUMERICO, non lo username. Il
+    `bot_id` e' il prefisso del token prima dei due punti ed e' pubblico per
+    costruzione (compare in ogni embed del widget); il token NO, e da questa
+    rotta non esce niente che non sia gia' visibile a chiunque apra il bot.
+    Nessuna autenticazione, deliberatamente: senza questi valori la pagina di
+    login non puo' nemmeno offrire la porta Telegram.
+    """
+    prefisso = BOT_TOKEN.split(':', 1)[0] if ':' in BOT_TOKEN else ''
+    return {
+        'bot_username': TELEGRAM_BOT_USERNAME,
+        'bot_id': prefisso if prefisso.isdigit() else None,
+        'base_url': public_url_configurata(),
+    }
 
 
 @app.post('/api/me/token')

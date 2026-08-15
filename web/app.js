@@ -1,10 +1,11 @@
-// Prototipo della web app SaaS. Nessun build step: moduli ES nativi.
-// Le viste parlano solo con api.js, quindi sostituire il finto backend con
-// quello reale non richiede modifiche qui.
+// La web app multiutente, agganciata al backend VERO (#32). Le viste parlano
+// solo con api.js: la copia dimostrativa a file unico concatena api_finta.js,
+// che espone la stessa superficie su localStorage, e queste viste non se ne
+// accorgono. Nessun build step: moduli ES nativi.
 
 import * as api from './api.js';
 import { COLUMNS, TRANSFORMS, describeRule, runParser, extractValue, toCsv,
-         headerOnlyCsv, cutByCodePoint, verifyCsv } from './engine.js';
+         headerOnlyCsv, cutByCodePoint } from './engine.js';
 
 const app = document.getElementById('app');
 
@@ -19,7 +20,15 @@ function toast(msg) {
   t.className = 'toast';
   t.textContent = msg;
   document.body.appendChild(t);
-  setTimeout(() => t.remove(), 2200);
+  setTimeout(() => t.remove(), 2600);
+}
+
+// Un errore di API finisce qui. Il 401 non si tostifica: la sessione e' scaduta
+// (venti minuti di inattivita') e l'unica azione sensata e' tornare al login —
+// il reload rifa' il boot, che senza sessione mostra la pagina d'accesso.
+function fallita(e) {
+  if (e && e.status === 401) { location.reload(); return; }
+  toast(e && e.message ? e.message : 'operazione fallita');
 }
 
 async function copy(text, label = 'Copiato') {
@@ -35,13 +44,6 @@ async function copy(text, label = 'Copiato') {
   }
   toast(label);
 }
-
-const fmtDate = iso => {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  return d.toLocaleString('it-IT', { day: '2-digit', month: '2-digit', year: '2-digit',
-                                    hour: '2-digit', minute: '2-digit' });
-};
 
 function copyRow(value, act) {
   return `<div class="copy-row">
@@ -77,7 +79,15 @@ const route = { name: 'overview', id: null, tab: 'config' };
 function parseHash() {
   const parts = (location.hash || '#/').replace(/^#\/?/, '').split('/').filter(Boolean);
   if (!parts.length) return { name: 'overview' };
-  if (parts[0] === 'parsers' && parts[1]) return { name: 'parser', id: parts[1], tab: parts[2] || 'config' };
+  if (parts[0] === 'parsers' && parts[1]) {
+    // `decodeURIComponent` solleva URIError su una sequenza percento storta
+    // (es. `#/parsers/%`): senza la guardia l'errore scappava da render() e la
+    // pagina restava bianca. Un hash storto vale come slug inesistente: la
+    // vista risponde «Parser non trovato». Segnalato da CodeRabbit, PR #50.
+    let id = parts[1];
+    try { id = decodeURIComponent(parts[1]); } catch { /* hash storto: si usa il grezzo */ }
+    return { name: 'parser', id, tab: parts[2] || 'config' };
+  }
   return { name: parts[0] };
 }
 
@@ -87,26 +97,38 @@ window.addEventListener('hashchange', render);
 
 /* ------------------------------------------------------------------ login */
 
+// L'errore del ritorno da oauth.telegram.org (o di boot): la pagina di login
+// deve dirlo, non lasciare l'utente davanti a un login «tornato indietro».
+let erroreLogin = null;
+
 function viewLogin() {
+  const urlTelegram = api.telegramAuthUrl();
   app.innerHTML = `
   <div class="login-wrap"><div class="login">
     <div class="logo">XT</div>
     <h1>XTrader Signal Relay</h1>
     <p class="muted small">Trasforma i segnali dei tuoi canali Telegram in un feed CSV pronto per XTrader.</p>
+    ${erroreLogin ? `<div class="banner warn" style="text-align:left">${esc(erroreLogin)}</div>` : ''}
 
-    <button class="tg-btn" data-act="login-widget">Accedi con Telegram</button>
-    <p class="dim small" style="margin-top:10px">Nessuna password. Non chiediamo mai il token del tuo bot.</p>
+    ${urlTelegram ? `
+      <a class="tg-btn" href="${esc(urlTelegram)}">Accedi con Telegram</a>
+      <p class="dim small" style="margin-top:10px">Nessuna password. Non chiediamo mai il token del tuo bot.</p>
+      <div class="sep">oppure</div>` : ''}
 
-    <div class="sep">oppure</div>
     <div class="stack" style="text-align:left">
       <div>
-        <label>Codice dal bot</label>
-        <input id="login-code" placeholder="123456" inputmode="numeric" maxlength="6">
+        <label>Utente</label>
+        <input id="login-user" placeholder="administrator" autocomplete="username">
       </div>
-      <button data-act="login-code">Entra con il codice</button>
+      <div>
+        <label>Password</label>
+        <input id="login-pass" type="password" autocomplete="current-password">
+      </div>
+      <button class="primary" data-act="login-password">Entra</button>
+      <div id="login-err" class="small" style="color:var(--err)"></div>
       <p class="dim small" style="margin:0">
-        Apri <span class="mono">${esc(api.settings().bot_url)}</span>, invia <span class="mono">/login</span>
-        e incolla qui il codice che ricevi. Utile da mobile.
+        L'accesso con password è la porta di riserva dell'amministratore.
+        I clienti entrano con Telegram.
       </p>
     </div>
   </div></div>`;
@@ -125,13 +147,16 @@ function shell(inner) {
       <nav>
         ${item('#/', '◱', 'Dashboard', route.name === 'overview')}
         ${item('#/parsers', '⌗', 'Parser', route.name === 'parsers' || route.name === 'parser')}
+        ${item('#/feed', '⇩', 'Feed CSV', route.name === 'feed')}
         ${item('#/chats', '✆', 'Chat Telegram', route.name === 'chats')}
         ${item('#/logs', '☰', 'Log messaggi', route.name === 'logs')}
         ${item('#/settings', '⚙', 'Impostazioni', route.name === 'settings')}
       </nav>
       <div class="me">
-        <div>${esc(u.first_name)} <span class="dim">@${esc(u.username)}</span></div>
-        <div class="dim small" style="margin:2px 0 10px">Profilo <span class="mono">${esc(u.slug)}</span></div>
+        <div>${esc(u.nome || 'Utente')}</div>
+        <div class="dim small" style="margin:2px 0 10px">
+          ${u.slug ? `Profilo <span class="mono">${esc(u.slug)}</span>` : 'Profilo non ancora creato'}
+        </div>
         <button class="ghost small" data-act="logout">Esci</button>
       </div>
     </aside>
@@ -139,26 +164,38 @@ function shell(inner) {
   </div>`;
 }
 
+// La pillola dello stato dell'accesso, unica per dashboard e impostazioni.
+function pillStato(u) {
+  if (u.admin) return '<span class="pill on">amministratore</span>';
+  if (u.stato === 'attivo') {
+    const giorni = u.giorni_rimasti;
+    return `<span class="pill on">attivo${giorni == null ? '' : `, ${giorni} giorni rimasti`}</span>`;
+  }
+  return `<span class="pill off">${esc(u.stato)}</span>`;
+}
+
 /* --------------------------------------------------------------- overview */
 
 async function viewOverview() {
   shell('<div class="dim">Caricamento…</div>');
-  const [parsers, chats, logs] = await Promise.all([api.listParsers(), api.listChats(), api.listLogs()]);
-  const live = parsers.filter(p => api.signalState(p.id).live).length;
+  let parsers;
+  try { parsers = await api.listParsers(); } catch (e) { fallita(e); return; }
+  const u = api.me();
   const stat = (n, l) => `<div class="card"><div style="font-size:26px">${n}</div>
     <div class="muted small">${l}</div></div>`;
 
   shell(`
     <div class="head"><div>
       <h1>Dashboard</h1>
+      <p>${pillStato(u)}</p>
     </div><div class="spacer"></div>
     <button class="primary" data-act="new-parser">Crea nuovo parser</button></div>
 
     <div class="stats">
       ${stat(parsers.length, 'Parser')}
-      ${stat(chats.length, 'Chat verificate')}
-      ${stat(live, 'Segnali attivi ora')}
-      ${stat(logs.filter(l => l.matched).length, 'Messaggi riconosciuti')}
+      ${stat(parsers.filter(p => p.active).length, 'Parser attivi')}
+      ${stat(u.token_prefix ? 'sì' : 'no', 'Token del feed generato')}
+      ${stat(u.giorni_rimasti == null ? '—' : u.giorni_rimasti, 'Giorni di accesso rimasti')}
     </div>
 
     <div class="card stack">
@@ -170,17 +207,14 @@ async function viewOverview() {
 }
 
 function parserRow(p) {
-  const done = COLUMNS.filter(c => p.config.columns[c] && p.config.columns[c].source !== 'empty').length;
-  const s = api.signalState(p.id);
+  const done = COLUMNS.filter(c => p.config.columns && p.config.columns[c]
+                                   && p.config.columns[c].source !== 'empty').length;
   return `<div class="list-item">
     <div class="grow">
-      <a class="name" href="#/parsers/${p.id}">${esc(p.name)}</a>
+      <a class="name" href="#/parsers/${encodeURIComponent(p.slug)}">${esc(p.titolo)}</a>
       <div class="dim small mono">${esc(p.slug)}</div>
     </div>
     <span class="pill">${done}/14 colonne</span>
-    <span class="pill">${p.chat_ids.length} chat</span>
-    <span class="pill ${p.has_token ? 'on' : 'no'}">${p.has_token ? 'token attivo' : 'senza token'}</span>
-    <span class="pill ${s.live ? 'on' : 'off'}">${s.live ? `segnale ${s.seconds_left}s` : 'feed vuoto'}</span>
     <span class="pill ${p.active ? 'on' : 'off'}">${p.active ? 'attivo' : 'sospeso'}</span>
   </div>`;
 }
@@ -189,7 +223,8 @@ function parserRow(p) {
 
 async function viewParsers() {
   shell('<div class="dim">Caricamento…</div>');
-  const parsers = await api.listParsers();
+  let parsers;
+  try { parsers = await api.listParsers(); } catch (e) { fallita(e); return; }
   shell(`
     <div class="head"><div>
       <h1>Parser</h1>
@@ -221,23 +256,30 @@ function modalNewParser() {
 let wiz = null;
 
 function initWiz(p) {
-  if (wiz && wiz.parserId === p.id) return;
-  const configured = COLUMNS.some(c => p.config.columns[c].source !== 'empty');
+  if (wiz && wiz.parserId === p.slug) return;
+  const colonne = p.config.columns || {};
+  const configured = COLUMNS.some(c => colonne[c] && colonne[c].source !== 'empty');
+  const campione = api.sampleMessage(p.slug);
+  // Una config appena nata non ha né condizione né colonne: il draft parte
+  // dalla forma piena, così ogni passo del wizard trova la sua regola.
+  const draft = {
+    match: p.config.match || { type: 'contains', value: '' },
+    columns: Object.fromEntries(COLUMNS.map(c => [c, colonne[c] || { source: 'empty' }])),
+  };
   wiz = {
-    parserId: p.id,
-    step: p.sample_message ? (configured ? 15 : 0) : 0,
-    started: !!p.sample_message,
-    draft: JSON.parse(JSON.stringify(p.config)),
-    message: p.sample_message || '',
+    parserId: p.slug,
+    step: campione ? (configured ? 15 : 0) : 0,
+    started: !!campione,
+    draft: JSON.parse(JSON.stringify(draft)),
+    message: campione,
     mode: 'message',
     pick: null,
     test: null,
-    busy: false,
   };
 }
 
 const HINTS = {
-  Provider: 'Chi fornisce il segnale. Di norma è un valore fisso: XTrader.',
+  Provider: 'Chi manda il segnale. Di norma resta vuota: la scrive chi legge, non chi invia.',
   EventId: 'Id evento su XTrader. Se non è nel messaggio, lascialo vuoto.',
   EventName: 'Il nome dell\'evento, come "Squadra A - Squadra B".',
   MarketId: 'Id mercato. Di solito vuoto.',
@@ -445,7 +487,7 @@ function stepColumn(idx) {
   } else if (mode === 'constant') {
     body = `<div class="card"><label>Valore fisso, uguale in ogni segnale</label>
       <input id="rule-const" value="${esc(rule.source === 'constant' ? rule.value : '')}"
-             placeholder="es. XTrader"></div>`;
+             placeholder="es. OVER_UNDER_15"></div>`;
   } else if (mode === 'regex') {
     const err = rule.source === 'regex' ? regexError(rule.pattern) : null;
     body = `<div class="card stack">
@@ -489,7 +531,7 @@ function stepColumn(idx) {
     </div>`;
 }
 
-function stepReview(p) {
+function stepReview() {
   const rows = COLUMNS.map(c => {
     const r = wiz.draft.columns[c];
     const v = extractValue(wiz.message, r);
@@ -505,6 +547,8 @@ function stepReview(p) {
   return `
     <div class="bubble ai"><div class="who">Assistente</div>
       Mappatura completa. Controlla la tabella, prova un messaggio reale e salva.
+      La prova gira <strong>sul server</strong>, con lo stesso motore del webhook,
+      e non scrive nulla nel feed.
     </div>
     <div class="card">
       <div class="row" style="margin-bottom:10px">
@@ -530,11 +574,15 @@ function stepReview(p) {
       </div>
       ${t ? `<div class="stack" style="gap:10px" id="test-result">
         <div class="row"><span class="pill ${t.complete ? 'on' : 'no'}">${
-          t.complete ? 'Riconosciuto'
+          t.errore ? esc(t.errore)
+          : t.complete ? 'Riconosciuto'
           : !t.matched ? 'Ignorato: la condizione non corrisponde'
           : `Riconosciuto ma incompleto: manca ${(t.missing || []).join(', ')}`
         }</span></div>
-        ${t.matched && !t.complete ? `<div class="banner warn">
+        ${(t.scarti || []).length ? `<div class="banner warn" id="test-scarti">
+          ${t.scarti.map(esc).join('<br>')}
+        </div>` : ''}
+        ${t.matched && !t.complete && (t.missing || []).length ? `<div class="banner warn">
           Nessuna riga scritta nel feed: senza
           <span class="mono">${esc((t.missing || []).join(', '))}</span>
           la riga sarebbe formalmente valida e priva di senso per XTrader.
@@ -557,8 +605,7 @@ function stepPaste() {
         <textarea id="paste-msg" rows="8" placeholder="P.Bet. PREMACHT 0,5HT&#10;🆚 Manchester City v Aston Villa&#10;⏰ 20:45&#10;@ 1.42">${esc(wiz.message)}</textarea></div>
       <div class="row">
         <button class="primary" data-act="start-wizard">Avvia configurazione</button>
-        <button data-act="ai-suggest" ${wiz.busy ? 'disabled' : ''}>
-          ${wiz.busy ? '<span class="spin"></span> Analizzo…' : 'Suggerisci mappatura'}</button>
+        <button data-act="ai-suggest">Suggerisci mappatura</button>
         <div class="spacer"></div>
       </div>
       <p class="dim small" style="margin:0">
@@ -568,19 +615,19 @@ function stepPaste() {
     </div>`;
 }
 
-function wizardPane(p) {
+function wizardPane() {
   if (!wiz.started) return stepPaste();
   if (wiz.step === 0) return stepMatch();
-  if (wiz.step === 15) return stepReview(p);
+  if (wiz.step === 15) return stepReview();
   return stepColumn(wiz.step - 1);
 }
 
-async function viewParser() {
+function viewParser() {
   const p = api.getParser(route.id);
   if (!p) { shell('<div class="empty">Parser non trovato.</div>'); return; }
   initWiz(p);
 
-  const tab = (t, l) => `<a href="#/parsers/${p.id}/${t}"
+  const tab = (t, l) => `<a href="#/parsers/${encodeURIComponent(p.slug)}/${t}"
     class="small" style="padding:6px 12px;border-radius:8px;text-decoration:none;
     background:${route.tab === t ? 'var(--bg-3)' : 'transparent'};
     color:${route.tab === t ? 'var(--txt)' : 'var(--txt-2)'}">${l}</a>`;
@@ -592,7 +639,7 @@ async function viewParser() {
     body = `
       <div class="progress"><i style="width:${pct}%"></i></div>
       <div class="wizard-grid">
-        <div class="chat">${wizardPane(p)}</div>
+        <div class="chat">${wizardPane()}</div>
         <div class="stack sticky-pane">
           <div class="card">
             <div class="row" style="margin-bottom:10px">
@@ -603,6 +650,7 @@ async function viewParser() {
             ${previewTable(focus)}
             <p class="dim small" style="margin:10px 0 0">
               Così apparirà la riga nel CSV. Le colonne vuote restano vuote, non vengono omesse.
+              L'anteprima è indicativa: fa fede la prova sul server, nel riepilogo.
             </p>
           </div>
           <div class="card">
@@ -612,229 +660,96 @@ async function viewParser() {
         </div>
       </div>`;
   } else if (route.tab === 'chats') {
-    body = await paneChats(p);
-  } else if (route.tab === 'feed') {
-    body = paneFeed(p);
+    body = paneProssimamente('Le chat Telegram si assegnano ai parser da qui',
+      'L\'associazione chat → parser arriva con uno dei prossimi aggiornamenti. '
+      + 'Oggi i messaggi delle chat autorizzate vengono valutati da tutti i tuoi parser attivi.');
   } else {
-    body = await paneLogs(p);
+    body = paneProssimamente('Il registro dei messaggi di questo parser',
+      'Qui vedrai ogni messaggio ricevuto e il motivo per cui ha prodotto — o non ha '
+      + 'prodotto — una riga nel feed.');
   }
 
   shell(`
-    <div class="crumb"><a href="#/parsers">Parser</a> / ${esc(p.name)}</div>
+    <div class="crumb"><a href="#/parsers">Parser</a> / ${esc(p.titolo)}</div>
     <div class="head"><div>
-      <h1>${esc(p.name)}</h1>
-      <p class="mono">${esc(p.slug)} · creato il ${fmtDate(p.created_at)}</p>
+      <h1>${esc(p.titolo)}</h1>
+      <p class="mono">${esc(p.slug)}</p>
     </div><div class="spacer"></div>
       <span class="pill ${p.active ? 'on' : 'off'}">${p.active ? 'attivo' : 'sospeso'}</span>
-      <button class="small" data-act="toggle-active" data-id="${p.id}">
+      <button class="small" data-act="toggle-active" data-id="${esc(p.slug)}">
         ${p.active ? 'Sospendi' : 'Riattiva'}</button>
-      <button class="small danger" data-act="del-parser" data-id="${p.id}">Elimina</button>
+      <button class="small danger" data-act="del-parser" data-id="${esc(p.slug)}">Elimina</button>
     </div>
     <div class="row" style="gap:4px;margin-bottom:18px;border-bottom:1px solid var(--line);padding-bottom:12px">
-      ${tab('config', 'Configurazione')}${tab('chats', 'Chat assegnate')}
-      ${tab('feed', 'Feed CSV')}${tab('logs', 'Log')}
+      ${tab('config', 'Configurazione')}${tab('chats', 'Chat assegnate')}${tab('logs', 'Log')}
     </div>
     ${body}`);
 }
 
-async function paneChats(p) {
-  const chats = await api.listChats();
-  const items = chats.map(c => `
-    <div class="list-item">
-      <label class="grow" style="margin:0;display:flex;gap:11px;align-items:center;color:var(--txt)">
-        <input type="checkbox" style="width:auto" data-act="toggle-chat" data-cid="${c.id}"
-               ${p.chat_ids.includes(c.id) ? 'checked' : ''}>
-        <span><span class="name">${esc(c.title)}</span>
-          <span class="dim small mono" style="display:block">${esc(c.telegram_chat_id)}</span></span>
-      </label>
-      <span class="pill on">verificata</span>
-    </div>`).join('');
-
-  return `
-    <div class="banner" style="margin-bottom:16px">
-      Una chat può alimentare più parser. Lo stesso messaggio viene valutato da ognuno
-      in modo indipendente: chi lo riconosce scrive nel proprio CSV, gli altri lo ignorano.
-      Nessun parser può sovrascrivere il feed di un altro.
-    </div>
-    ${chats.length ? items : `<div class="empty"><p>Nessuna chat verificata.</p>
-      <button class="primary" data-act="verify-chat">Collega una chat Telegram</button></div>`}
-    ${chats.length ? `<div class="row" style="margin-top:16px">
-      <button data-act="verify-chat">Collega un'altra chat</button></div>` : ''}`;
+function paneProssimamente(titolo, testo) {
+  return `<div class="empty"><p><strong>${esc(titolo)}</strong></p>
+    <p class="muted small">${esc(testo)}</p>
+    <span class="pill">prossimamente</span></div>`;
 }
 
-function paneFeed(p) {
-  const url = api.feedUrl(p);
-  const s = api.signalState(p.id);
-  return `
+/* ------------------------------------------------------------------- feed */
+
+// Il feed e il suo token sono DELL'UTENTE, non del singolo parser: un solo URL
+// da incollare in XTrader, e ogni parser attivo scrive la propria riga lì.
+function viewFeed() {
+  const u = api.me();
+  shell(`
+    <div class="head"><div><h1>Feed CSV</h1></div></div>
     <div class="stack">
       <div class="card stack">
-        <div class="row"><strong class="small">URL del feed CSV</strong><div class="spacer"></div>
-          <span class="pill ${s.live ? 'on' : 'off'}">${s.live ? `segnale vivo, ${s.seconds_left}s` : 'nessun segnale'}</span></div>
-        ${p.has_token ? `
-          ${copyRow(url, 'copy')}
+        <strong class="small">URL del feed per XTrader</strong>
+        ${api.hasToken() ? `
+          <div class="mono small" style="word-break:break-all">${esc(api.feedUrl() || '')}</div>
           <p class="dim small" style="margin:0">
             Il token completo è visibile solo al momento della generazione: qui vedi soltanto
-            il prefisso <span class="mono">${esc(p.token_prefix)}</span>. Incolla questo URL in XTrader.
+            il prefisso <span class="mono">${esc(u.token_prefix)}</span>. L'URL vero è quello
+            copiato quando hai generato il token.
           </p>
           <div class="row">
-            <button data-act="rotate-token" data-id="${p.id}">Rigenera token</button>
-            <button class="danger" data-act="revoke-token" data-id="${p.id}">Revoca</button>
-          </div>` : `
-          <p class="muted small" style="margin:0">Questo parser non ha ancora un token: il feed non è raggiungibile.</p>
-          <div class="row"><button class="primary" data-act="rotate-token" data-id="${p.id}">Genera token</button></div>`}
+            <button data-act="ask-token">Rigenera token</button>
+          </div>
+          <p class="dim small" style="margin:0">
+            Rigenerare revoca il token precedente: XTrader smette di leggere finché non
+            incolli l'URL nuovo.
+          </p>` : `
+          <p class="muted small" style="margin:0">
+            Non hai ancora un token: il feed non è raggiungibile. Generane uno e incolla
+            l'URL completo in XTrader.
+          </p>
+          <div class="row"><button class="primary" data-act="ask-token">Genera token</button></div>`}
       </div>
-      ${(() => {
-        // Terzo punto di aggancio del verificatore, e il piu- importante: quello
-        // che il cliente vede. Nel Bridge il controllo esisteva nel codice ma
-        // nessun semaforo lo consultava, e un CSV inservibile e- rimasto tale
-        // per mesi.
-        //
-        // Calcolato UNA volta e riusato da pillola e banner: due chiamate sulla
-        // stessa cosa sono due risposte che possono divergere, ed e- esattamente
-        // il difetto che questo PR sta correggendo altrove.
-        const csvMostrato = s.live ? s.csv : headerOnlyCsv();
-        const motivo = verifyCsv(csvMostrato);
-        return `<div class="card">
-        <div class="row"><strong class="small">Contenuto attuale del feed</strong><div class="spacer"></div>
-          ${motivo
-            ? `<span class="pill no" id="csv-format">formato non valido</span>`
-            : `<span class="pill on" id="csv-format">formato valido per XTrader</span>`}
-        </div>
-        <pre class="csv-out" style="margin-top:10px">${esc(csvMostrato)}</pre>
-        ${motivo ? `<div class="banner warn" style="margin-top:10px">
-          XTrader non riuscirebbe a leggere questo feed: ${esc(motivo)}</div>` : ''}
+      <div class="card">
+        <strong class="small">Come funziona</strong>
         <p class="dim small" style="margin:10px 0 0">
-          Un segnale resta nel feed 90 secondi, poi il CSV torna alla sola intestazione.
-          Il timer di questo parser è indipendente da tutti gli altri.
+          Ogni segnale resta nel feed 90 secondi, poi il CSV torna alla sola intestazione.
+          Ogni parser ha la propria riga e il proprio timer, indipendente dagli altri.
           Il feed è UTF-8 con BOM, come XTrader lo pretende.
         </p>
-      </div>`;
-      })()}
-    </div>`;
-}
-
-async function paneLogs(p) {
-  const logs = await api.listLogs(p.id);
-  if (!logs.length) return '<div class="empty">Nessun messaggio ricevuto da questo parser.</div>';
-  return `<div class="card"><div class="tbl-scroll"><table>
-    <thead><tr><th>Quando</th><th>Chat</th><th>Esito</th><th>Messaggio</th></tr></thead>
-    <tbody>${logs.map(l => {
-      const c = l.chat_id ? api.getChat(l.chat_id) : null;
-      return `<tr>
-        <td class="mono dim">${fmtDate(l.at)}</td>
-        <td>${c ? esc(c.title) : '<span class="dim">prova manuale</span>'}</td>
-        <td><span class="pill ${l.matched ? 'on' : 'off'}">${l.matched ? 'riconosciuto' : 'ignorato'}</span></td>
-        <td class="mono" style="white-space:pre-wrap">${esc(cutByCodePoint(l.text, 160))}</td>
-      </tr>`;
-    }).join('')}</tbody></table></div></div>`;
-}
-
-/* ------------------------------------------------------------------ chats */
-
-async function viewChats() {
-  shell('<div class="dim">Caricamento…</div>');
-  const [chats, parsers] = await Promise.all([api.listChats(), api.listParsers()]);
-  const s = api.settings();
-
-  const items = chats.map(c => {
-    const used = parsers.filter(p => p.chat_ids.includes(c.id));
-    return `<div class="list-item">
-      <div class="grow">
-        <div class="name">${esc(c.title)}</div>
-        <div class="dim small mono">${esc(c.telegram_chat_id)} · ${esc(c.type)}</div>
       </div>
-      <span class="pill">${used.length ? used.map(p => esc(p.name)).join(', ') : 'nessun parser'}</span>
-      <span class="pill on">verificata</span>
-      <button class="small danger" data-act="del-chat" data-id="${c.id}">Rimuovi</button>
-    </div>`;
-  }).join('');
-
-  shell(`
-    <div class="head"><div>
-      <h1>Chat Telegram</h1>
-    </div><div class="spacer"></div>
-    <button class="primary" data-act="verify-chat">Collega una chat</button></div>
-
-    <div class="card stack" style="margin-bottom:18px">
-      <strong class="small">Il bot da aggiungere</strong>
-      ${copyRow(s.bot_url, 'copy')}
-      <p class="dim small" style="margin:0">
-        Aggiungi questo bot al gruppo o al canale, poi verifica la chat qui sotto.
-        Nei canali il bot deve essere amministratore.
-      </p>
-    </div>
-
-    ${chats.length ? items : `<div class="empty"><p>Nessuna chat collegata.</p>
-      <button class="primary" data-act="verify-chat">Collega la prima chat</button></div>`}`);
+    </div>`);
 }
 
-// Verifica chat: codice usa-e-getta da incollare nel gruppo, così la chat
-// risulta rivendicata da questo account e non può esserlo da un altro.
-async function modalVerify(step = 'intro') {
-  const s = api.settings();
-  if (step === 'intro') {
-    openModal(`
-      <h2>Collega una chat Telegram</h2>
-      <div class="stack" style="margin-top:14px">
-        <div class="banner">Passo 1 — aggiungi il bot al gruppo o al canale.</div>
-        ${copyRow(s.bot_url, 'copy')}
-        <div class="row"><a href="${esc(s.bot_add_to_group_url)}" target="_blank" rel="noopener"
-          class="small">Apri Telegram e aggiungilo a un gruppo</a></div>
-        <div class="banner warn">
-          Nei gruppi il bot deve poter leggere i messaggi: la privacy mode va disattivata,
-          oppure il bot va reso amministratore. Nei canali serve comunque l'amministrazione.
-        </div>
-      </div>
-      <div class="foot">
-        <button data-act="close">Annulla</button>
-        <button class="primary" data-act="verify-step2">Ho aggiunto il bot</button>
-      </div>`, { wide: true, sticky: true });
-    return;
-  }
+/* --------------------------------------------------- chat e log (globali) */
 
-  const pv = await api.startVerification();
-  openModal(`
-    <h2>Verifica la chat</h2>
-    <p class="muted small">Passo 2 — copia questo codice e scrivilo nella chat. Il bot lo leggerà e collegherà la chat al tuo account.</p>
-    <div class="code-big" style="margin:16px 0">${esc(pv.code)}</div>
-    <div class="row"><button data-act="copy" data-val="${esc(pv.code)}">Copia codice</button>
-      <div class="spacer"></div>
-      <span class="small muted"><span class="spin"></span> In attesa del messaggio…</span></div>
-    <div class="stack" style="margin-top:18px">
-      <div><label>Nome della chat, solo per il prototipo</label>
-        <input id="vf-title" placeholder="Segnali Calcio PRO"></div>
-      <button data-act="simulate-verify">Simula: il bot ha letto il codice</button>
-      <p class="dim small" style="margin:0">
-        In produzione questo passaggio è automatico: il codice arriva su
-        <span class="mono">/telegram/webhook</span> e la chat viene collegata da sola.
-      </p>
-    </div>
-    <div class="foot"><button data-act="close">Chiudi</button></div>`, { wide: true, sticky: true });
+function viewChats() {
+  shell(`
+    <div class="head"><div><h1>Chat Telegram</h1></div></div>
+    ${paneProssimamente('Collega qui i tuoi gruppi e canali',
+      'La verifica delle chat con il codice usa-e-getta arriva con uno dei prossimi '
+      + 'aggiornamenti. Oggi le chat autorizzate le collega l\'amministratore.')}`);
 }
 
-/* ------------------------------------------------------------------- logs */
-
-async function viewLogs() {
-  shell('<div class="dim">Caricamento…</div>');
-  const [logs, parsers] = await Promise.all([api.listLogs(), api.listParsers()]);
-  const byId = Object.fromEntries(parsers.map(p => [p.id, p]));
+function viewLogs() {
   shell(`
-    <div class="head"><div>
-      <h1>Log messaggi</h1>
-    </div></div>
-    ${logs.length ? `<div class="card"><div class="tbl-scroll"><table>
-      <thead><tr><th>Quando</th><th>Parser</th><th>Chat</th><th>Esito</th><th>Messaggio</th></tr></thead>
-      <tbody>${logs.map(l => {
-        const c = l.chat_id ? api.getChat(l.chat_id) : null;
-        const p = byId[l.parser_id];
-        return `<tr>
-          <td class="mono dim">${fmtDate(l.at)}</td>
-          <td>${p ? `<a href="#/parsers/${p.id}">${esc(p.name)}</a>` : '<span class="dim">eliminato</span>'}</td>
-          <td>${c ? esc(c.title) : '<span class="dim">prova manuale</span>'}</td>
-          <td><span class="pill ${l.matched ? 'on' : 'off'}">${l.matched ? 'riconosciuto' : 'ignorato'}</span></td>
-          <td class="mono" style="white-space:pre-wrap">${esc(cutByCodePoint(l.text, 140))}</td>
-        </tr>`;
-      }).join('')}</tbody></table></div></div>` : '<div class="empty">Nessun messaggio ricevuto.</div>'}`);
+    <div class="head"><div><h1>Log messaggi</h1></div></div>
+    ${paneProssimamente('Il registro dei messaggi ricevuti',
+      'Qui vedrai ogni messaggio arrivato dalle tue chat, con l\'esito: riconosciuto, '
+      + 'ignorato, o scartato con il motivo.')}`);
 }
 
 /* -------------------------------------------------------------- settings */
@@ -842,32 +757,27 @@ async function viewLogs() {
 function viewSettings() {
   const u = api.me();
   const s = api.settings();
+  const bot = s && s.bot_username ? `https://t.me/${s.bot_username}` : null;
   shell(`
     <div class="head"><div><h1>Impostazioni</h1></div></div>
     <div class="stack">
       <div class="card stack">
-        <strong class="small">Account Telegram</strong>
+        <strong class="small">Account</strong>
         <table><tbody>
-          <tr><td class="muted">Nome</td><td>${esc(u.first_name)}</td></tr>
-          <tr><td class="muted">Username</td><td class="mono">@${esc(u.username)}</td></tr>
-          <tr><td class="muted">Telegram ID</td><td class="mono">${esc(u.telegram_id)}</td></tr>
-          <tr><td class="muted">Profilo negli URL</td><td class="mono">${esc(u.slug)}</td></tr>
+          <tr><td class="muted">Nome</td><td>${esc(u.nome || '—')}</td></tr>
+          <tr><td class="muted">Stato</td><td>${pillStato(u)}</td></tr>
+          <tr><td class="muted">Profilo negli URL</td><td class="mono">${esc(u.slug || 'non ancora creato')}</td></tr>
+          <tr><td class="muted">Token del feed</td><td class="mono">${
+            u.token_prefix ? esc(u.token_prefix) + '… (attivo)' : 'non generato'}</td></tr>
         </tbody></table>
       </div>
       <div class="card stack">
         <strong class="small">Bot del servizio</strong>
-        ${copyRow(s.bot_url, 'copy')}
+        ${bot ? copyRow(bot, 'copy') : '<p class="muted small" style="margin:0">Nessun bot configurato.</p>'}
         <p class="dim small" style="margin:0">
           Impostato dall'amministratore e uguale per tutti gli utenti.
           Il token del bot resta sul server: la web app non lo riceve e non lo conserva.
         </p>
-      </div>
-      <div class="card stack">
-        <strong class="small">Prototipo</strong>
-        <p class="muted small" style="margin:0">
-          I dati di questa demo vivono nel browser. Azzerando torni allo stato iniziale.
-        </p>
-        <div class="row"><button class="danger" data-act="reset-proto">Azzera i dati della demo</button></div>
       </div>
     </div>`);
 }
@@ -875,67 +785,74 @@ function viewSettings() {
 /* ------------------------------------------------------------- azioni UI */
 
 const actions = {
-  async 'login-widget'() { await api.loginWidget(); go('#/'); render(); },
-  async 'login-code'() {
-    try { await api.loginCode(document.getElementById('login-code').value); go('#/'); render(); }
-    catch (e) { toast(e.message); }
+  async 'login-password'() {
+    const errBox = document.getElementById('login-err');
+    errBox.textContent = '';
+    try {
+      await api.loginPassword(document.getElementById('login-user').value.trim(),
+                              document.getElementById('login-pass').value);
+      erroreLogin = null;
+      go('#/');
+      render();
+    } catch (e) { errBox.textContent = e.message; }
   },
-  async logout() { await api.logout(); wiz = null; render(); },
+  async logout() {
+    try { await api.logout(); } catch { /* il cookie muore comunque col reload */ }
+    wiz = null;
+    go('#/');
+    render();
+  },
 
   copy(el) { copy(el.dataset.val); },
   close() { closeModal(); },
 
   'new-parser'() { modalNewParser(); },
   async 'create-parser'() {
-    const name = document.getElementById('np-name').value;
+    const titolo = document.getElementById('np-name').value;
     try {
-      const p = await api.createParser(name);
+      const p = await api.createParser(titolo);
       closeModal();
       wiz = null;
-      go(`#/parsers/${p.id}/config`);
+      go(`#/parsers/${encodeURIComponent(p.slug)}/config`);
       render();
     } catch (e) { document.getElementById('np-err').textContent = e.message; }
   },
   async 'toggle-active'(el) {
     const p = api.getParser(el.dataset.id);
-    await api.updateParser(p.id, { active: !p.active });
+    try { await api.updateParser(p.slug, { active: !p.active }); } catch (e) { fallita(e); return; }
     render();
   },
   async 'del-parser'(el) {
     const p = api.getParser(el.dataset.id);
-    openModal(`<h2>Eliminare "${esc(p.name)}"?</h2>
-      <p class="muted small">Spariscono configurazione, token, feed e log. L'operazione non è reversibile.</p>
+    openModal(`<h2>Eliminare "${esc(p.titolo)}"?</h2>
+      <p class="muted small">La configurazione sparisce dal server. L'operazione non è reversibile.</p>
       <div class="foot"><button data-act="close">Annulla</button>
-        <button class="danger" data-act="del-parser-ok" data-id="${p.id}">Elimina</button></div>`);
+        <button class="danger" data-act="del-parser-ok" data-id="${esc(p.slug)}">Elimina</button></div>`);
   },
   async 'del-parser-ok'(el) {
-    await api.deleteParser(el.dataset.id);
+    try { await api.deleteParser(el.dataset.id); } catch (e) { fallita(e); return; }
     closeModal(); wiz = null; go('#/parsers'); render();
   },
 
   // ------- wizard
-  async 'start-wizard'() {
+  'start-wizard'() {
     const msg = document.getElementById('paste-msg').value;
     if (!msg.trim()) { toast('Incolla prima un messaggio.'); return; }
     wiz.message = msg;
     wiz.started = true;
     wiz.step = 0;
-    await api.updateParser(wiz.parserId, { sample_message: msg });
+    api.saveSampleMessage(wiz.parserId, msg);
     render();
   },
-  async 'ai-suggest'() {
+  'ai-suggest'() {
     const box = document.getElementById('paste-msg');
     const msg = box ? box.value : wiz.message;
     if (!msg.trim()) { toast('Incolla prima un messaggio.'); return; }
     wiz.message = msg;
-    wiz.busy = true;
-    render();
-    const cfg = await api.suggest(wiz.parserId, msg);
-    wiz.draft = cfg;
-    wiz.busy = false;
+    wiz.draft = api.suggest(msg);
     wiz.started = true;
     wiz.step = 15;
-    await api.updateParser(wiz.parserId, { sample_message: msg });
+    api.saveSampleMessage(wiz.parserId, msg);
     toast('Mappatura proposta: controlla ogni colonna.');
     render();
   },
@@ -1004,67 +921,50 @@ const actions = {
     render();
   },
   async 'wiz-save'() {
-    await api.updateParser(wiz.parserId, {
-      config: wiz.draft,
-      sample_message: document.getElementById('test-msg')?.value ?? wiz.message,
-    });
-    toast('Configurazione salvata.');
+    const msg = document.getElementById('test-msg')?.value ?? wiz.message;
+    api.saveSampleMessage(wiz.parserId, msg);
+    try { await api.updateParser(wiz.parserId, { config: wiz.draft }); }
+    catch (e) { fallita(e); return; }
+    toast('Configurazione salvata sul server.');
     render();
   },
   async 'run-test'() {
     const msg = document.getElementById('test-msg').value;
     wiz.message = msg;
-    await api.updateParser(wiz.parserId, { config: wiz.draft, sample_message: msg });
-    wiz.test = await api.testParser(wiz.parserId, msg);
+    api.saveSampleMessage(wiz.parserId, msg);
+    // Prima si salva la config, poi si prova: la prova gira sul server, che
+    // conosce solo cio' che e' stato salvato — provare un draft non salvato
+    // mostrerebbe l'esito di un'altra configurazione.
+    try {
+      await api.updateParser(wiz.parserId, { config: wiz.draft });
+      wiz.test = await api.testParser(wiz.parserId, msg);
+    } catch (e) { fallita(e); return; }
     render();
   },
 
-  // ------- chat
-  'verify-chat'() { modalVerify('intro'); },
-  'verify-step2'() { modalVerify('code'); },
-  async 'simulate-verify'() {
-    const title = document.getElementById('vf-title').value;
-    const chat = await api.simulateVerificationMessage(title);
-    await api.finishVerification();
-    openModal(`<h2>Chat collegata</h2>
-      <p class="muted small">Il bot ha riconosciuto il codice in <strong>${esc(chat.title)}</strong>
-      (<span class="mono">${esc(chat.telegram_chat_id)}</span>). La chat è ora rivendicata dal tuo account:
-      nessun altro utente può collegarla.</p>
-      <div class="foot"><button class="primary" data-act="after-verify">Continua</button></div>`);
+  // ------- token del feed (dell'utente)
+  'ask-token'() {
+    if (!api.hasToken()) { actions['generate-token'](); return; }
+    openModal(`<h2>Rigenerare il token?</h2>
+      <p class="muted small">Il token attuale smette subito di funzionare: XTrader non
+      leggerà più il feed finché non incolli l'URL nuovo.</p>
+      <div class="foot"><button data-act="close">Annulla</button>
+        <button class="primary" data-act="generate-token">Rigenera</button></div>`);
   },
-  'after-verify'() { closeModal(); render(); },
-  async 'del-chat'(el) { await api.deleteChat(el.dataset.id); render(); },
-  async 'toggle-chat'(el) {
-    const p = api.getParser(route.id);
-    const cid = el.dataset.cid;
-    const next = p.chat_ids.includes(cid) ? p.chat_ids.filter(x => x !== cid) : [...p.chat_ids, cid];
-    await api.setParserChats(p.id, next);
-    toast(next.includes(cid) ? 'Chat assegnata al parser.' : 'Chat rimossa dal parser.');
-    render();
-  },
-
-  // ------- token
-  async 'rotate-token'(el) {
-    const { token, url } = await api.rotateToken(el.dataset.id);
+  async 'generate-token'() {
+    let r;
+    try { r = await api.generateToken(); } catch (e) { fallita(e); return; }
     openModal(`<h2>Token generato</h2>
       <p class="muted small">Copialo ora: per sicurezza non sarà più mostrato.
       Sul server conserviamo solo il suo hash.</p>
       <div class="stack" style="margin-top:14px">
-        <div><label>Token</label>${copyRow(token, 'copy')}</div>
-        <div><label>URL completo del feed, da incollare in XTrader</label>${copyRow(url, 'copy')}</div>
+        <div><label>Token</label>${copyRow(r.token, 'copy')}</div>
+        <div><label>URL completo del feed, da incollare in XTrader</label>${copyRow(r.url, 'copy')}</div>
       </div>
       <div class="foot"><button class="primary" data-act="after-token">Ho copiato</button></div>`,
       { wide: true, sticky: true });
   },
   'after-token'() { closeModal(); render(); },
-  async 'revoke-token'(el) { await api.revokeToken(el.dataset.id); toast('Token revocato.'); render(); },
-
-  'reset-proto'() {
-    api.resetAll();
-    wiz = null;
-    go('#/');
-    render();
-  },
 };
 
 function modeOf(rule) {
@@ -1165,25 +1065,26 @@ document.addEventListener('keydown', e => {
 
 /* ----------------------------------------------------------------- render */
 
-async function render() {
+function render() {
   Object.assign(route, { id: null, tab: 'config' }, parseHash());
   if (!api.me()) { viewLogin(); return; }
   if (route.name === 'parsers') return viewParsers();
   if (route.name === 'parser') return viewParser();
+  if (route.name === 'feed') return viewFeed();
   if (route.name === 'chats') return viewChats();
   if (route.name === 'logs') return viewLogs();
   if (route.name === 'settings') return viewSettings();
   return viewOverview();
 }
 
-// Il contatore dei 90 secondi va aggiornato da solo nella pagina del feed.
-// Il contatore dei 90 secondi si aggiorna da solo, ma solo mentre c'e' davvero un
-// segnale vivo: senza questa guardia la shell veniva ridisegnata ogni secondo per
-// sempre, anche a feed vuoto.
-setInterval(() => {
-  if (route.name !== 'parser' || route.tab !== 'feed') return;
-  if (!api.signalState(route.id).live) return;
+// Il primo render aspetta il boot: prima la cache (settings, sessione, parser),
+// poi le viste. Un errore di boot — il server non risponde, il ritorno da
+// Telegram non valido — finisce sulla pagina di login, non in console.
+(async () => {
+  try {
+    erroreLogin = await api.boot();
+  } catch (e) {
+    erroreLogin = e.message;
+  }
   render();
-}, 1000);
-
-render();
+})();
