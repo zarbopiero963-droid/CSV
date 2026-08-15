@@ -175,6 +175,20 @@ const DECIMAL_SEPARATOR = DECIMAL_SEPARATORS[FEED_LANG];
 const SEP_RE = DECIMAL_SEPARATOR.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const FEED_NUMBER = new RegExp('^[+-]?(?:[0-9]+(?:' + SEP_RE + '[0-9]*)?|' + SEP_RE + '[0-9]+)$');
 
+// Niente emoji nei VALORI del feed (#42): «solo testo. Emoji non li accetta
+// XTrader, lo marcherebbe non valido come segnale» — e come tutto in
+// XTrader senza errore di ritorno, solo l'icona rossa. Le emoji stanno IN
+// ENTRATA (i marcatori dei parser), mai in uscita. Classe ESPLICITA, gemella
+// di `_EMOJI` in main.py: blocchi dei simboli (misc technical per l'orologio,
+// misc symbols e dingbats per la spunta, frecce e stelle, il piano astrale dei
+// simboli) piu' ZWJ e variation selector, che da soli tradiscono un'emoji
+// spezzata dal taglio di una regola.
+// Dentro c'e' anche il keycap combinante U+20E3 (solo sequenze emoji; la
+// forma minimale '1'+U+20E3 senza FE0F era il buco - GPT-5.6 Sol, PR #49).
+// Fuori restano i simboli text-default ((c), TM, !!): da soli sono testo,
+// la loro forma emoji richiede FE0F, gia' intercettato.
+const EMOJI = /[\u200d\u20e3\u2300-\u23ff\u2600-\u27bf\u2b00-\u2bff\ufe0f\u{1f000}-\u{1faff}]/u;
+
 // `[0-9]` e non `\d`: in JavaScript `\d` e' gia' solo ASCII, ma la riga gemella in
 // Python con `\d` accetterebbe le cifre arabo-indiane — scritto per esteso in
 // entrambi, cosi' le due non possono divergere su una sottigliezza che non solleva.
@@ -322,6 +336,24 @@ export function runParser(message, config) {
   // messaggio, e il dispatch li archivierebbe sotto un parser che non
   // c'entra. [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #47.
   const scarti = !matched ? [] : Object.values(numericReasons).filter(Boolean);
+  if (matched) {
+    // Niente emoji nei valori (#42): il feed uscirebbe formalmente valido e
+    // XTrader lo scarterebbe in silenzio. Il caso reale e' la regola «riga
+    // intera» su una riga che comincia col marcatore. Si scarta (regola della
+    // #39); le colonne numeriche sono escluse perche' li' un'emoji e' gia'
+    // «non un numero», col motivo giusto. Stesso blocco in `esegui_parser`.
+    for (const c of COLUMNS) {
+      if (NUMERIC_RANGES[c]) continue;
+      const testo = String(row[COLUMNS.indexOf(c)] ?? '');
+      if (EMOJI.test(testo)) {
+        const piano = piatto(testo);
+        const citato = [...piano].length <= 60 ? piano : cutByCodePoint(piano, 60) + '…';
+        scarti.push(`${c}: il valore contiene un'emoji («${citato}»). XTrader `
+          + 'marcherebbe il segnale non valido, senza nessun errore di ritorno: '
+          + 'estrai il testo DOPO il marcatore, non la riga intera.');
+      }
+    }
+  }
   if (matched && missing.length === 0 && !realExtraction(config.columns, row)) {
     scarti.push("nessuna colonna obbligatoria viene estratta dal messaggio: con soli "
       + 'valori fissi questo parser scriverebbe la stessa scommessa per qualunque '
@@ -413,6 +445,13 @@ export function verifyCsv(text) {
         return `${c} nel feed non e' nella forma localizzata del contratto (virgola decimale): ${v}`;
       }
     }
+    // Niente emoji in NESSUNA colonna (#42): XTrader marcherebbe il segnale
+    // non valido, senza errore di ritorno. Regola di contratto.
+    for (const c of COLUMNS) {
+      if (EMOJI.test(campi[COLUMNS.indexOf(c)])) {
+        return `${c} nel feed contiene un'emoji: XTrader marcherebbe il segnale non valido, senza errore di ritorno`;
+      }
+    }
   }
   return null;
 }
@@ -449,7 +488,11 @@ export function suggestConfig(message) {
   const columns = {};
   for (const c of COLUMNS) columns[c] = emptyRule();
 
-  columns.Provider = { source: 'constant', value: 'XTrader' };
+  // Provider VUOTA da contratto (#42): e' il nome di CHI MANDA, non di chi
+  // legge. Nel CSV misurato in #5 vale 'XTrader' perche' quel file l'ha
+  // scritto XTrader — un'osservazione corretta letta nel verso sbagliato,
+  // come il BOM. Il campo resta dell'utente: XTrader lo usa come filtro e
+  // come discriminante fra segnali altrimenti identici.
 
   // Riga con 🆚 (o "vs"): è l'evento. L'ultimo " v " separa le due squadre.
   const vsLine = lines.find(l => l.includes('🆚')) || lines.find(l => /\bvs?\b/i.test(l));

@@ -506,6 +506,20 @@ test eseguibili questa decisione varrebbe quanto la riga «senza BOM».
 Il percorso legacy di PIERO non passa dal confine e resta byte-identico
 (`Price` vuota, `Handicap` `0`: niente da localizzare).
 
+**Niente emoji nei valori (#42).** «Solo testo. Emoji non li accetta XTrader,
+lo marcherebbe non valido come segnale» — e senza errore di ritorno, solo
+l'icona rossa. Il caso reale è la regola «riga intera» su una riga che comincia
+col marcatore: il valore si porta dentro l'emoji e il feed esce formalmente
+valido. Un valore (non numerico: lì un'emoji è già «non un numero») che
+contiene un'emoji **scarta il messaggio** col motivo che dice cosa fare —
+estrarre il testo *dopo* il marcatore — e `verify_csv()`/`verifyCsv()`
+respingono un feed con emoji in qualunque colonna. Classe esplicita gemella
+nei due motori (`_EMOJI`/`EMOJI`). E il suggeritore propone **`Provider`
+vuota**: è il nome di chi manda, campo dell'utente (XTrader la usa come filtro
+case-insensitive e come discriminante); il vecchio default `XTrader` era il
+valore del CSV misurato in #5, che vale lì perché quel file l'ha scritto
+XTrader.
+
 Il motivo `config non eseguibile` del fail-safe esiste **solo se la condizione
 del parser riconosce il messaggio**: senza quel gate, un parser con la config
 rotta faceva archiviare in `message_logs` tutto il traffico della chat. Se la
@@ -527,8 +541,8 @@ di senso per XTrader. Le colonne obbligatorie sono in `REQUIRED_COLUMNS` e dal
 13/08/2026 (Issue #2, riconfermate su #25) sono **quattro**: `EventName`,
 `MarketType`, `SelectionName`, `BetType` — l'evento, il tipo di mercato su cui
 XTrader decide, la selezione, e se puntare o bancare. **`Provider` non è
-obbligatoria:** è sempre la costante `"XTrader"` e pretenderla non protegge da
-nulla. **`Price` non è obbligatoria:** il parser in produzione (`main.py`) la
+obbligatoria:** è il nome di chi *manda* il segnale, campo dell'utente (il
+suggeritore la propone vuota dalla #42), e pretenderla non protegge da nulla. **`Price` non è obbligatoria:** il parser in produzione (`main.py`) la
 lascia vuota perché la quota la mette XTrader dal proprio book, quindi pretenderla
 bloccherebbe i segnali reali. **`MarketName` non è obbligatoria:** è l'etichetta
 leggibile, mentre `MarketType` è il codice su cui XTrader agisce. La lista è
@@ -745,9 +759,11 @@ Telegram. Il valore che finisce nel CSV è il testo **dopo** il marcatore, mai i
 
 Il punto delicato è `EventName`: i messaggi cominciano quasi sempre col marcatore, e una
 regola che prende la **riga intera** invece del testo **dopo** se lo porta dentro. Allora
-succede la cosa peggiore — il feed esce **formalmente valido** (14 colonne, virgolette,
-CRLF, BOM), `verify_csv()` lo accetta perché controlla la forma e non il contenuto, e
-XTrader lo scarta **in silenzio**. Il parser di riferimento usa `part: 'after'` con
+succedeva la cosa peggiore — il feed usciva **formalmente valido** (14 colonne,
+virgolette, CRLF, BOM), `verify_csv()` lo accettava perché controllava la sola forma, e
+XTrader lo scartava **in silenzio**. Dalla PR della #42 non può più accadere: il motore
+scarta il messaggio col motivo per colonna e `verify_csv()`/`verifyCsv()` respingono un
+feed con un'emoji in qualunque campo. Il parser di riferimento usa `part: 'after'` con
 `marker: '🆚'` esattamente per questo, ma un utente può configurarlo altrimenti.
 
 Ne segue dove va il controllo, e sono due punti come per il resto del contratto: **nel
