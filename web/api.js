@@ -64,7 +64,12 @@ async function consumaRitornoTelegram() {
   let campi;
   try {
     const base64 = pezzo.replace(/-/g, '+').replace(/_/g, '/');
-    campi = JSON.parse(atob(base64));
+    // `atob` restituisce una stringa di BYTE (un carattere per byte): passarla
+    // a JSON.parse trasforma «Pièro» in mojibake, il server ricalcola l'HMAC
+    // su valori alterati e OGNI login con un nome non ASCII fallisce. I byte
+    // vanno decodificati come UTF-8. [REAL_FINDING] di GPT-5.6 Sol, PR #50.
+    const byte = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+    campi = JSON.parse(new TextDecoder().decode(byte));
   } catch {
     return 'risposta di Telegram non leggibile: riprova';
   }

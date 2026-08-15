@@ -108,6 +108,26 @@ with sync_playwright() as pw:
             f'resto {resto}: il decoder si e\' fermato prima del server')
         assert 'tgAuthResult' not in pg.url, 'il frammento firmato e\' rimasto nell\'URL'
 
+    # UTF-8 dentro il payload: `atob` restituisce una stringa di BYTE (un
+    # carattere per byte, latin-1), e passarla a JSON.parse trasforma «Pièro»
+    # in mojibake. Il server ricalcolerebbe l'HMAC su valori alterati e OGNI
+    # login con un nome non ASCII fallirebbe. [REAL_FINDING] di GPT-5.6 Sol al
+    # gate della PR #50: qui si intercetta la POST vera e si pretende che i
+    # byte arrivino al server intatti. `ensure_ascii=False` e' la sostanza del
+    # test: con gli escape \\uXXXX il payload sarebbe ASCII puro e il difetto
+    # non si vedrebbe.
+    campi_utf8 = {'id': 1, 'auth_date': 1, 'first_name': 'Pièro', 'hash': 'x' * 8}
+    grezzo = json.dumps(campi_utf8, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
+    pg.goto('about:blank')
+    with pg.expect_request('**/api/login/telegram') as attesa:
+        pg.goto(BASE + '#tgAuthResult='
+                + base64.urlsafe_b64encode(grezzo).rstrip(b'=').decode())
+    inviato = json.loads(attesa.value.post_data)
+    assert inviato['first_name'] == 'Pièro', (
+        f'i byte UTF-8 del payload Telegram sono stati alterati dal decoder: '
+        f'{inviato["first_name"]!r}')
+    pg.wait_for_selector('#login-pass')
+
     # Password sbagliata: l'errore del server compare nella pagina, non in console.
     pg.fill('#login-user', UTENTE_PROVA)
     pg.fill('#login-pass', 'password-sbagliata')
