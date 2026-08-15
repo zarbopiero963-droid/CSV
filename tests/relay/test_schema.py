@@ -1137,17 +1137,32 @@ def test_la_deduplica_regge_un_parser_associato_a_ENTRAMBE_le_duplicate(tmp_path
     c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id) VALUES (?,?)', (CHAT_A, 2))
     vincente, perdente = [r[0] for r in c.execute(
         'SELECT id FROM chats WHERE telegram_chat_id=? ORDER BY id', (CHAT_A,)).fetchall()]
-    c.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (7,?)', (vincente,))
-    c.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (7,?)', (perdente,))
+    # Il parser e- quello VERO del profilo PIERO, non un id sintetico: dal PR sulla
+    # rimozione del seme il travaso riconcilia — tiene i link che i profili
+    # giustificano e toglie gli altri — quindi un id inventato verrebbe tolto come
+    # stantio e il risultato della fusione non sarebbe piu- osservabile. Con l-id
+    # vero la collisione da- misurare e- la stessa e il link sopravvive.
+    # La colonna `id` la aggiunge la migrazione multiutente: qui la si mette a mano
+    # perche- questo database ne e- gia- passato una (ha `parser_chats` popolata),
+    # che e- lo scenario di upgrade che il test descrive.
+    c.execute('ALTER TABLE parsers ADD COLUMN id INTEGER')
+    c.execute('UPDATE parsers SET id=rowid WHERE id IS NULL')
+    sotto_esame = c.execute('SELECT id FROM parsers WHERE name=?',
+                            (main.DEFAULT_PARSER,)).fetchone()[0]
+    c.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (?,?)',
+              (sotto_esame, vincente))
+    c.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (?,?)',
+              (sotto_esame, perdente))
 
     main.migra(c)  # non deve sollevare
 
-    # Solo le righe del parser 7, quello sotto esame: la semina dai profili
-    # (dispatch multi-parser) aggiunge i link legittimi del parser di PIERO.
+    # Solo le righe che riguardano la chat DUPLICATA: il travaso crea anche il link
+    # legittimo dell-altra chat del profilo (`CHAT_B`), che con questo test non
+    # c-entra.
     righe = [r for r in c.execute('SELECT parser_id, chat_id FROM parser_chats').fetchall()
-             if r[0] == 7]
-    assert righe == [(7, vincente)], (
-        f'atteso la sola associazione (7, {vincente}): {righe}')
+             if r[0] == sotto_esame and r[1] in (vincente, perdente)]
+    assert righe == [(sotto_esame, vincente)], (
+        f'attesa la sola associazione ({sotto_esame}, {vincente}): {righe}')
     superstiti = c.execute('SELECT COUNT(*) FROM chats WHERE telegram_chat_id=?',
                            (CHAT_A,)).fetchone()[0]
     assert superstiti == 1, superstiti

@@ -284,3 +284,98 @@ def test_salvare_un_profilo_non_stacca_il_link_di_un_ALTRO_utente(tmp_path, monk
     assert (main.DEFAULT_PARSER, CHAT) in _link(percorso), (
         'eliminare il profilo di un ALTRO utente ha portato via il link del '
         'proprietario')
+
+
+def test_due_salvataggi_SIMULTANEI_non_lasciano_vivo_il_parser_sostituito(
+        tmp_path, monkeypatch):
+    """La corsa read-modify-write su `save_profile`: la SELECT non apre la transazione.
+
+    Bloccante di Claude Fable 5 sul gate finale della PR #46, ed e' la stessa
+    classe della corsa sulla quota chiusa nella PR #45: in SQLite una `SELECT`
+    non apre nessuna transazione di scrittura, quindi due POST concorrenti sullo
+    stesso profilo leggono ENTRAMBI lo stato di partenza, staccano il link del
+    parser vecchio (uno dei due lo trova gia' tolto) e attaccano ciascuno il
+    proprio. Il profilo finisce con UN parser e i link con DUE: quello
+    sostituito continua a girare su quella chat, che e' esattamente la
+    regressione silenziosa che questo PR esiste per chiudere.
+
+    Atteso: i link della chat sono ESATTAMENTE quelli del parser che il profilo
+    nomina alla fine, qualunque delle due richieste abbia vinto.
+    """
+    import threading
+
+    percorso = _relay(tmp_path, monkeypatch, 'corsa_profilo.db', chat_ids=CHAT)
+    _salva_profilo(main.PIERO_PROFILE, CHAT, main.DEFAULT_PARSER)
+    for nuovo in ('Parser_Uno', 'Parser_Due'):
+        main.save_parser(main.ParserIn(name=nuovo, header=f'H-{nuovo}'), TOKEN_DI_PROVA)
+
+    via = threading.Barrier(2)
+    errori = []
+
+    def concorrente(parser):
+        via.wait()
+        try:
+            _salva_profilo(main.PIERO_PROFILE, CHAT, parser)
+        except Exception as e:  # noqa: BLE001 - l'esito lo giudicano gli assert
+            errori.append(e)
+
+    fili = [threading.Thread(target=concorrente, args=(p,))
+            for p in ('Parser_Uno', 'Parser_Due')]
+    for f in fili:
+        f.start()
+    for f in fili:
+        f.join()
+
+    c = sqlite3.connect(percorso)
+    vincente = c.execute('SELECT parser FROM profiles WHERE name=?',
+                         (main.PIERO_PROFILE,)).fetchone()[0]
+    c.close()
+    collegati = sorted(nome for nome, chat in _link(percorso) if chat == CHAT)
+    assert collegati == [vincente], (
+        f'il profilo nomina {vincente!r} ma la chat e\' collegata a {collegati}: '
+        f'un parser sostituito continua a girare. Errori: {errori}')
+
+
+def test_il_travaso_PULISCE_i_link_stantii_lasciati_dalla_versione_precedente(
+        tmp_path, monkeypatch):
+    """L'upgrade non deve ereditare link che nessun profilo giustifica piu'.
+
+    `[REAL_FINDING]` di GPT-5.6 Sol sul gate finale della PR #46. Prima di
+    questo PR la semina era **solo-aggiunta** e girava a ogni avvio: un profilo
+    eliminato, o un parser sostituito, lasciava il link vecchio vivo per sempre
+    (era il limite dichiarato sulla PR #44). Da qui in avanti i detach lo
+    impediscono — ma conoscono solo la configurazione corrente, e il travaso
+    gira UNA VOLTA SOLA: se non pulisse, quei link resterebbero a elaborare
+    chat e ad alimentare feed per sempre, senza piu' nessun giro che li tolga.
+
+    Al momento del travaso ogni link a database viene dalla vecchia semina —
+    e' l'unico codice che li scriveva — quindi riconciliare qui e' esatto:
+    tiene cio' che i profili giustificano, toglie il resto.
+    """
+    percorso = _relay(tmp_path, monkeypatch, 'stantii.db', chat_ids=CHAT)
+    # Lo stato che l'upgrade trova: un link della vecchia semina il cui parser
+    # NON e' piu' quello del profilo (sostituito via API prima dell'upgrade).
+    c = sqlite3.connect(percorso)
+    c.execute('INSERT OR IGNORE INTO parsers(name, header) VALUES (?,?)',
+              ('Parser_Sostituito', 'VECCHIO-HEADER'))
+    c.execute('UPDATE parsers SET user_id=(SELECT id FROM users WHERE origin_profile=?)'
+              ' WHERE name=?', (main.PIERO_PROFILE, 'Parser_Sostituito'))
+    c.execute('UPDATE parsers SET id=rowid WHERE id IS NULL')
+    c.execute('INSERT OR IGNORE INTO parser_chats(parser_id, chat_id)'
+              ' SELECT p.id, ch.id FROM parsers p, chats ch'
+              " WHERE p.name='Parser_Sostituito' AND ch.telegram_chat_id=?", (CHAT,))
+    # E il marcatore del travaso NON c'e': e' il database che arriva dalla
+    # versione precedente, dove quella tabella non esisteva.
+    c.execute('DELETE FROM migrazioni')
+    c.commit()
+    c.close()
+    assert ('Parser_Sostituito', CHAT) in _link(percorso), 'lo stato di partenza non c\'e\''
+
+    _riavvio(monkeypatch)
+
+    link = _link(percorso)
+    assert ('Parser_Sostituito', CHAT) not in link, (
+        f'il travaso ha ereditato un link che nessun profilo giustifica: {link}. '
+        f'Quel parser continua a elaborare la chat, e nessun giro futuro lo toglie')
+    assert (main.DEFAULT_PARSER, CHAT) in link, (
+        f'il travaso ha portato via anche il link giusto: {link}')

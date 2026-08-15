@@ -1010,9 +1010,39 @@ def _collega_parser_alle_chat(c):
     ogni link che il proprietario ha cancellato. Da qui in avanti i link li
     tiene aggiornati `_riconcilia_link_del_profilo`, chiamata dalle scritture
     dei profili. Il chiamante gestisce il marcatore in `migrazioni`.
+
+    **E riconcilia invece di aggiungere soltanto**, che e' la differenza fra un
+    upgrade sano e un difetto ereditato: la vecchia semina era solo-aggiunta, e
+    fino a questo PR nessuna scrittura toglieva i link: un profilo eliminato, o
+    un parser sostituito via API, lasciava vivo il link vecchio. Quel link
+    continuerebbe a elaborare la chat **per sempre** — i detach nuovi conoscono
+    solo la configurazione corrente, e questo travaso non gira mai piu'. Al
+    momento in cui gira, ogni riga di `parser_chats` viene dalla vecchia semina
+    (era l'unico codice che le scrivesse) e nessuna richiesta e' ancora stata
+    servita: tenere cio' che i profili giustificano e togliere il resto e'
+    esattamente la conversione giusta. `[REAL_FINDING]` di GPT-5.6 Sol, gate
+    finale della PR #46.
     """
-    for nome, chat_ids, parser_nome in c.execute(
-            'SELECT name, chat_ids, parser FROM profiles ORDER BY name').fetchall():
+    profili = c.execute(
+        'SELECT name, chat_ids, parser FROM profiles ORDER BY name').fetchall()
+    giustificati = set()
+    for nome, chat_ids, parser_nome in profili:
+        pid = c.execute(
+            'SELECT p.id FROM parsers p JOIN users u ON u.id = p.user_id'
+            ' WHERE p.name=? AND p.id IS NOT NULL AND u.origin_profile=?',
+            (parser_nome, nome)).fetchone()
+        if not pid:
+            continue
+        for chat in _chat_della_stringa(chat_ids):
+            cid = _riga_chat(c, chat)
+            if cid is not None:
+                giustificati.add((pid[0], cid))
+    for parser_id, chat_id in c.execute(
+            'SELECT parser_id, chat_id FROM parser_chats').fetchall():
+        if (parser_id, chat_id) not in giustificati:
+            c.execute('DELETE FROM parser_chats WHERE parser_id=? AND chat_id=?',
+                      (parser_id, chat_id))
+    for nome, chat_ids, parser_nome in profili:
         _attacca_link_del_profilo(c, nome, chat_ids, parser_nome)
 
 
@@ -3720,6 +3750,19 @@ def save_profile(data: ProfileIn, x_admin_token: str | None = Header(None)):
     c = db()
     try:
         get_parser(c, data.parser)
+        # `BEGIN IMMEDIATE` PRIMA della lettura, e non e' pignoleria: in SQLite una
+        # `SELECT` non apre nessuna transazione di scrittura, quindi due POST
+        # concorrenti sullo stesso profilo leggerebbero entrambi lo stato di
+        # partenza, staccherebbero lo stesso link vecchio e attaccherebbero
+        # ciascuno il proprio — il profilo finisce con UN parser e i link con DUE,
+        # cioe' il parser sostituito continua a girare su quella chat. E' la stessa
+        # corsa SELECT-poi-scrittura della quota (PR #45) e della richiesta di
+        # accesso (PR #26). Bloccante di Claude Fable 5 sul gate finale della #46,
+        # riprodotto dal test dei due salvataggi simultanei.
+        #
+        # Sta DENTRO il `try`: sotto contesa il comando stesso solleva «database is
+        # locked», e da fuori la connessione non verrebbe chiusa.
+        c.execute('BEGIN IMMEDIATE')
         # La riga PRIMA della scrittura: serve a togliere i link del parser che il
         # profilo nominava fino a un istante fa. Senza, cambiare parser lascerebbe
         # vivo il vecchio link e quella chat continuerebbe a far girare il parser

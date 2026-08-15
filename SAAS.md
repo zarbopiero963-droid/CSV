@@ -513,6 +513,24 @@ che l'aggancio salta per isolamento — non deve poter staccare il link che il
 proprietario ha legittimamente. Il detach disfa esattamente ciò che l'attach
 potrebbe aver fatto, mai di più (bloccante di Claude Fable 5 sulla PR #46).
 
+Il salvataggio del profilo apre `BEGIN IMMEDIATE` **prima di leggere** lo stato
+precedente: una `SELECT` non apre nessuna transazione di scrittura, quindi due
+`POST` concorrenti sullo stesso profilo leggerebbero entrambi lo stato di
+partenza e attaccherebbero ciascuno il proprio link — il profilo con un parser,
+i link con due, e il parser sostituito che continua a girare. È la stessa corsa
+SELECT-poi-scrittura della quota (PR #45) e della richiesta di accesso (PR #26),
+riprodotta dal test dei due salvataggi simultanei.
+
+**Il travaso riconcilia, non aggiunge soltanto.** Fino a questo PR nessuna
+scrittura toglieva i link, quindi un database aggiornato può arrivare con link
+che nessun profilo giustifica più (profilo eliminato, o parser sostituito prima
+dell'upgrade). I detach nuovi conoscono solo la configurazione corrente e il
+travaso non gira mai più: se non pulisse, quei link resterebbero a elaborare chat
+per sempre. Al momento in cui gira, ogni riga di `parser_chats` viene dalla
+vecchia semina e nessuna richiesta è ancora stata servita — tenere ciò che i
+profili giustificano e togliere il resto è la conversione esatta
+(`[REAL_FINDING]` di GPT-5.6 Sol sulla PR #46).
+
 `message_logs` e `webhook_seen` — entrambe tabelle finora **morte** — ricevono le
 prime scritture, e la pulizia oltre i **7 giorni** viaggia con la scrittura
 stessa, non con un timer.
