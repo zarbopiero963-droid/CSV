@@ -2064,7 +2064,7 @@ def motivo_valore_numerico(colonna, valore):
     intervallo = INTERVALLI_NUMERICI.get(colonna)
     if intervallo is None:
         return None
-    testo = str('' if valore is None else valore).strip()
+    testo = _testo_canonico(valore).strip()
     if not testo:
         return None
     if not _NUMERO_ASCII.match(testo):
@@ -2094,6 +2094,27 @@ def motivo_valore_numerico(colonna, valore):
 def _numero_leggibile(x):
     """`1.01` resta `1.01`, `1000.0` diventa `1000`: il messaggio lo legge una persona."""
     return f'{x:g}'
+
+
+def _testo_canonico(valore):
+    """Il valore come TESTO, nella forma JSON — la stessa che scrive JavaScript.
+
+    `str()` di Python e `String()` di JS non concordano sui valori JSON non
+    stringa: `True` contro `true`, `1.0` contro `1`. Il verdetto sarebbe lo stesso
+    (un booleano non e' un numero comunque), ma il MOTIVO mostrato all'utente
+    citerebbe due valori diversi nei due motori — e i motivi sono la cosa che
+    questa PR esiste per rendere affidabile. Segnalato da CodeRabbit sulla PR #47.
+
+    `None` → '' come nel resto del motore (`?? ''` in JS, mai `or ''`: una
+    costante `0` o `False` e' valorizzata, non vuota).
+    """
+    if valore is None:
+        return ''
+    if isinstance(valore, bool):
+        return 'true' if valore else 'false'
+    if isinstance(valore, float) and valore.is_integer():
+        return str(int(valore))
+    return str(valore)
 
 
 def _taglia_codepoint(testo, n):
@@ -2376,9 +2397,23 @@ def elabora_messaggio(message, cfg):
     `config_json` non decodificabile. None non solleva: e' l'`ignored:
     parser_no_match` dell'handler, non un 500.
     """
+    return esito_messaggio(message, cfg)[0]
+
+
+def esito_messaggio(message, cfg):
+    """`(parsed, motivi)`: il segnale se c'e', e PERCHE' no quando non c'e'.
+
+    `elabora_messaggio` e' questa funzione senza il secondo valore, e i suoi tre
+    chiamanti restano com'erano. Il motivo serve al dispatch, che lo scrive in
+    `message_logs`: prima quella riga diceva soltanto `parser_no_match`, cioe' il
+    sintomo senza la causa — un parser che dalla PR 5 smette di scrivere perche'
+    le sue obbligatorie sono tutte costanti, o perche' una quota e' fuori scala,
+    si sarebbe fermato in silenzio. Segnalato come bloccante da Claude Fable 5 e
+    come rischio da GPT-5.5 sulla PR #47: lo stop e' voluto, l'invisibilita' no.
+    """
     grezzo = cfg.get('config_json')
     if not grezzo:
-        return parse_message(message, cfg)
+        return parse_message(message, cfg), []
     # TUTTO il percorso del motore sta sotto un solo try, e la cattura e' larga di
     # proposito. `config_json` la scrive l'utente (dalla web app): un JSON valido ma
     # malformato per il motore — senza `columns`, con `match` non-dict, un `pattern`
@@ -2392,7 +2427,7 @@ def elabora_messaggio(message, cfg):
         config = json.loads(grezzo)
         risultato = esegui_parser(message, config)
         if not risultato['complete']:
-            return None
+            return None, list(risultato.get('scarti') or [])
         # `esegui_parser` puo' lasciare valori non-stringa nella riga (una costante
         # JSON `0`/`False`): il feed li serializza via `make_csv`, che quota tutto.
         # `None` → '' per non scrivere la stringa "None" nel CSV.
@@ -2402,8 +2437,8 @@ def elabora_messaggio(message, cfg):
     except Exception:  # noqa: BLE001 - fail-safe deliberato, vedi commento sopra
         logging.getLogger('xtrader.relay').warning(
             'config parser non elaborabile: nessun segnale prodotto')
-        return None
-    return {'event': evento, 'csv': csv_riga}
+        return None, ['config non eseguibile']
+    return {'event': evento, 'csv': csv_riga}, []
 
 
 def auth(token):
@@ -4620,16 +4655,33 @@ def _elabora_per_utente(c, chat_riga_id, utente_id, righe, text):
     if bloccato:
         return f'access_{bloccato}'
     riconosciuti = []
+    motivi = []
     for r in righe:
         cfg = dict(zip(['name', 'header', 'market_name', 'market_type',
                         'selection_name', 'handicap', 'bet_type',
                         'config_json'], (r[1], r[2], r[3], r[4], r[5],
                                          r[6], r[7], r[8])))
-        parsed = elabora_messaggio(text, cfg)
+        parsed, scarti = esito_messaggio(text, cfg)
         if parsed:
             riconosciuti.append((r, parsed))
+        motivi.extend(scarti)
     if not riconosciuti:
-        return 'parser_no_match'
+        if not motivi:
+            # Nessun parser ha riconosciuto il messaggio: e' il caso normale di
+            # una chat dove passa anche altro traffico, e non si logga — i log
+            # sono una funzione del servizio, non un archivio dei messaggi.
+            return 'parser_no_match'
+        # Riconosciuto e SCARTATO da una guardia: qui il log serve, ed e' l'unico
+        # posto dove l'utente puo' vedere la causa. Senza, un parser che smette di
+        # scrivere perche' una quota e' fuori scala o perche' le sue obbligatorie
+        # sono tutte costanti si fermerebbe in silenzio: nel feed niente, nei log
+        # niente, e la causa visibile solo rilanciando la prova a mano. Bloccante
+        # di Claude Fable 5 e rischio segnalato da GPT-5.5 sulla PR #47.
+        esito = f'scartato: {motivi[0]}'
+        c.execute('INSERT INTO message_logs(user_id, parser_id, chat_id, text,'
+                  ' esito) VALUES (?,?,?,?,?)',
+                  (utente_id, righe[0][0], chat_riga_id, text, esito))
+        return esito
     # Vince l'ULTIMO nell'ordine dichiarato; i battuti nei log, col nome
     # visibile del vincente (slug, o name per i parser legacy).
     vincente, parsed = riconosciuti[-1]

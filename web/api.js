@@ -3,7 +3,8 @@
 // per passare al backend reale si sostituisce il corpo di ogni funzione con una
 // fetch verso l'endpoint indicato nel commento, senza toccare le viste.
 
-import { COLUMNS, emptyRule, runParser, toCsv, suggestConfig } from './engine.js';
+import { COLUMNS, emptyRule, runParser, toCsv, suggestConfig,
+         unknownColumns } from './engine.js';
 
 const KEY = 'xtrader-proto-v1';
 const LAG = 220; // finta latenza, per vedere gli stati di caricamento
@@ -166,6 +167,19 @@ export async function updateParser(id, patch) {
   await wait(80);
   const p = db.parsers.find(x => x.id === id);
   if (!p) throw new Error('Parser non trovato.');
+  // Una chiave che non e' una colonna del CSV verrebbe IGNORATA dal motore, che
+  // itera su COLUMNS: nessun errore, la regola semplicemente non esiste. Il
+  // wizard non puo' inventarne — costruisce dalla lista canonica — ma una config
+  // puo' arrivare da fuori, e il server la respinge con 422: qui si rifiuta con
+  // lo stesso criterio, o il prototipo direbbe «salvato» per qualcosa che il
+  // backend vero rifiuta. Segnalato da CodeRabbit sulla PR #47.
+  if (patch && patch.config) {
+    const sconosciute = unknownColumns(patch.config);
+    if (sconosciute.length) {
+      throw new Error(`Colonna sconosciuta: ${sconosciute.join(', ')}. `
+        + 'Le colonne sono quelle del CSV.');
+    }
+  }
   for (const k of PARSER_PATCHABLE) {
     if (patch && Object.hasOwn(patch, k)) p[k] = patch[k];
   }

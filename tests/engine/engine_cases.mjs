@@ -504,6 +504,15 @@ function casiConfronto() {
   aggiungi('guardie: Points non finito (400 cifre) → caso a se',
     MSG, conNumeri('Points', '9'.repeat(400)));
   aggiungi('guardie: Points 2 → passa', MSG, conNumeri('Points', '2'));
+  // Valori JSON NON stringa: `String()` e `str()` non concordano (`true` contro
+  // `True`, `1` contro `1.0`), e il motivo mostrato citerebbe due valori diversi
+  // nei due motori. Il verdetto sarebbe lo stesso, la diagnosi no.
+  aggiungi('guardie: Price = true (JSON) → stesso motivo nei due motori',
+    MSG, conNumeri('Price', true));
+  aggiungi('guardie: Price = 1000000 (JSON numero) → stesso motivo',
+    MSG, conNumeri('Price', 1000000));
+  aggiungi('guardie: Points = 0.5 (JSON numero) → passa in entrambi',
+    MSG, conNumeri('Points', 0.5));
   aggiungi('guardie: sole costanti sulle obbligatorie → nessuna riga', 'ciao a tutti', {
     match: { type: 'contains', value: 'a' },
     columns: { ...soloEmpty,

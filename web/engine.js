@@ -164,6 +164,10 @@ const readable = x => String(x);
 export function numericReason(column, value) {
   const range = NUMERIC_RANGES[column];
   if (!range) return null;
+  // `String()` qui e `_testo_canonico` in main.py devono dare lo STESSO testo: il
+  // verdetto coinciderebbe comunque, ma il MOTIVO citerebbe due valori diversi
+  // (`true` contro `True`, `1` contro `1.0`) e i motivi sono la cosa che queste
+  // guardie esistono per rendere affidabile. Segnalato da CodeRabbit, PR #47.
   const text = String(value ?? '').trim();
   if (!text) return null;
   if (!ASCII_NUMBER.test(text)) {

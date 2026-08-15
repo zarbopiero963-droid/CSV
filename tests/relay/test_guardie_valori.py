@@ -279,3 +279,91 @@ def test_il_webhook_non_scrive_il_segnale_scartato(tmp_path, monkeypatch):
     buono = {'config_json': json.dumps(_config(Points='2'))}
     assert main.elabora_messaggio(MESSAGGIO, buono) is not None, (
         'un moltiplicatore legittimo e\' stato scartato dal percorso del webhook')
+
+
+def test_il_log_dice_PERCHE_il_messaggio_e_stato_scartato(tmp_path, monkeypatch):
+    """Lo stop e' voluto; l'invisibilita' no.
+
+    Segnalato come bloccante da Claude Fable 5 e come rischio da GPT-5.5 sulla PR
+    #47: una config gia' salvata con le obbligatorie tutte costanti — o con un
+    valore fuori scala — smette di scrivere, e nel log l'utente vedeva soltanto
+    `parser_no_match`, cioe' il sintomo senza la causa. E' esattamente il difetto
+    che queste due Issue esistono per chiudere: il motivo deve dire COSA FARE.
+
+    Il gate resta a runtime e resta fail-closed: qui si misura che il motivo
+    arrivi fino alla riga di `message_logs` che il cliente legge.
+    """
+    import json
+    import sqlite3
+
+    from tests.dati import relay_in_processo
+    from tests.relay.test_webhook import BOT_FINTO, CHAT
+
+    percorso = relay_in_processo(monkeypatch, tmp_path / 'motivi.db', chat_ids=CHAT)
+    monkeypatch.setattr(main, 'SEGRETO_WEBHOOK', main.webhook_secret(BOT_FINTO))
+    c = sqlite3.connect(percorso)
+    c.execute('UPDATE parsers SET config_json=? WHERE name=?',
+              (json.dumps(_config(Points='1.000.000')), main.DEFAULT_PARSER))
+    c.commit()
+    c.close()
+
+    import asyncio
+
+    from tests.relay.test_webhook import RichiestaFinta
+    payload = {'message': {'chat': {'id': int(CHAT)}, 'text': MESSAGGIO}}
+    asyncio.run(main.telegram_webhook(RichiestaFinta(
+        {'X-Telegram-Bot-Api-Secret-Token': main.webhook_secret(BOT_FINTO)}, payload)))
+
+    c = sqlite3.connect(percorso)
+    esiti = [r[0] for r in c.execute('SELECT esito FROM message_logs').fetchall()]
+    c.close()
+    assert esiti, 'nessuna riga di log: il messaggio non e\' stato elaborato'
+    assert any('separatore' in e.lower() or 'Points' in e for e in esiti), (
+        f'il log non dice PERCHE\' il messaggio e\' stato scartato: {esiti}')
+
+
+def test_la_rotta_di_prova_RESTITUISCE_i_motivi(tmp_path, monkeypatch):
+    """`POST /api/me/parsers/{slug}/test` deve dire PERCHE', non solo «non completo».
+
+    Chiesto da CodeRabbit sulla PR #47, ed e' il punto in cui il cliente scopre
+    la causa: senza `scarti` la prova mostrerebbe `complete: false` con `missing`
+    vuota — il sintomo senza la causa, che e' esattamente il difetto che queste
+    due Issue chiudono.
+    """
+    import asyncio
+    import json
+    import sqlite3
+
+    from tests.dati import relay_in_processo
+    from tests.relay.test_login import BOT_FINTO, SEGRETO_ATTESO, _dati_login
+
+    percorso = relay_in_processo(monkeypatch, tmp_path / 'prova.db')
+    monkeypatch.setattr(main, 'BOT_TOKEN', BOT_FINTO)
+    monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', '')
+    risposta = main.login_telegram(main.LoginTelegramIn(**_dati_login(id='909000909')))
+    cookie = None
+    for pezzo in (risposta.headers.get('set-cookie') or '').split(';'):
+        chiave, _, valore = pezzo.strip().partition('=')
+        if chiave == main.NOME_COOKIE:
+            cookie = valore
+    c = sqlite3.connect(percorso)
+    utente = c.execute("SELECT id FROM users WHERE telegram_id='909000909'").fetchone()[0]
+    c.execute('INSERT INTO parsers(name, header, user_id, slug, config_json, id)'
+              " VALUES ('u-prova','H',?,?,?,9001)",
+              (utente, 'prova', json.dumps(_config(Price='1.000.000'))))
+    c.commit()
+    c.close()
+
+    class Richiesta:
+        cookies = {main.NOME_COOKIE: cookie}
+        headers = {'content-length': '0'}
+
+        async def stream(self):
+            yield json.dumps({'message': MESSAGGIO}).encode()
+
+    corpo = json.loads(bytes(asyncio.run(
+        main.prova_parser_mio('prova', Richiesta())).body).decode())
+    assert corpo['complete'] is False
+    assert corpo.get('scarti'), f'la prova non dice perche\': {corpo}'
+    assert 'separatore' in ' '.join(corpo['scarti']).lower(), corpo['scarti']
