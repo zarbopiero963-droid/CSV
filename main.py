@@ -28,9 +28,11 @@ def webhook_secret(bot_token):
     puo' consegnare attraverso una registrazione fatta da un deploy precedente, e
     la distinzione l'ha segnalata CodeRabbit — ma un'istanza che non sa
     riconoscerle non ha niente da guadagnare ad accettarle. La prima
-    versione accettava — riaprendo il difetto in un ramo, perche'
-    `TELEGRAM_ALLOWED_CHAT_IDS` popola il profilo indipendentemente dal bot e
-    un'istanza senza bot ma coi chat_id era iniettabile. Segnalato da CodeRabbit.
+    versione accettava — riaprendo il difetto in un ramo, perche' un'istanza senza
+    bot ma con le chat gia' a database era iniettabile da chiunque. Segnalato da
+    CodeRabbit. (Le chat allora ce le metteva `TELEGRAM_ALLOWED_CHAT_IDS` tramite
+    il seme; da quando il seme non c'e' piu' — #25 lavoro E — ce le mette l'API,
+    ma la conclusione non cambia: le chat esistono comunque, il bot no.)
     """
     if not bot_token:
         return ''
@@ -780,6 +782,15 @@ SCHEMA_MULTIUTENTE = (
     # senza questa tabella una riconsegna riscrive il segnale e fa ripartire il TTL.
     'CREATE TABLE IF NOT EXISTS webhook_seen (update_id TEXT PRIMARY KEY,'
     ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP)',
+    # Le migrazioni che vanno fatte UNA VOLTA SOLA per database, non a ogni avvio.
+    # Nasce con la rimozione del seme (#25 lavoro E): il travaso dei link
+    # `parser_chats` dai profili legacy e' una conversione di dati, e una
+    # conversione ripetuta a ogni riavvio e' indistinguibile da un seme — rimette
+    # in piedi cio' che il proprietario ha cancellato. Il marcatore si scrive
+    # nella STESSA transazione del lavoro: se la migrazione muore a meta', non
+    # viene committato niente e il prossimo avvio riprova.
+    'CREATE TABLE IF NOT EXISTS migrazioni (nome TEXT PRIMARY KEY,'
+    ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP)',
 )
 
 # «Nessun topic» si scrive NULL, e in SQL `NULL != NULL`: ogni confronto fra chat
@@ -885,42 +896,124 @@ _PERCORSI_MIGRATI: set = set()
 _LOCK_MIGRAZIONE = threading.Lock()
 
 
+def _chat_della_stringa(chat_ids):
+    """`'-100,  -200 , '` → `{'-100', '-200'}`. La forma legacy in UNA funzione."""
+    return {x.strip() for x in (chat_ids or '').split(',') if x.strip()}
+
+
+def _riga_chat(c, chat):
+    """L'`id` della riga di `chats` per questo `telegram_chat_id`, o `None`."""
+    riga = c.execute(f'SELECT id FROM chats WHERE telegram_chat_id=?'
+                     f' AND {TOPIC_CHAT}=?', (chat, '')).fetchone()
+    return riga[0] if riga else None
+
+
+def _stacca_link_del_profilo(c, chat_ids, parser_nome):
+    """Toglie i link fra il parser NOMINATO da un profilo e le chat elencate.
+
+    Toglie **solo** quella coppia, mai «tutti i link di quelle chat»: sulla
+    stessa chat vivono anche i link degli altri parser dello stesso utente
+    (dispatch multi-parser, PR #44) e quelli degli altri profili. Una pulizia
+    per chat li porterebbe via tutti, e il sintomo sarebbe un parser che smette
+    di girare perche' qualcun altro ha salvato il proprio profilo.
+    """
+    for chat in _chat_della_stringa(chat_ids):
+        cid = _riga_chat(c, chat)
+        if cid is None:
+            continue
+        c.execute('DELETE FROM parser_chats WHERE chat_id=? AND parser_id IN'
+                  ' (SELECT id FROM parsers WHERE name=?)', (cid, parser_nome))
+
+
+def _attacca_link_del_profilo(c, nome, chat_ids, parser_nome):
+    """Crea le chat mancanti e i link fra il parser del profilo e le sue chat.
+
+    Il link nasce solo se il parser appartiene all'UTENTE di questo profilo.
+    Due profili possono nominare lo stesso parser, ma il parser ha UN
+    proprietario: un link creato dall'altro profilo manderebbe i segnali della
+    sua chat al feed del proprietario del parser — il legame fra utenti diversi
+    che il test cross-tenant della deduplica vieta. Il profilo il cui parser e'
+    altrui resta sul percorso legacy (fallback), che scrive per profilo e
+    quindi nel feed giusto.
+
+    La riga di `chats` si crea qui se manca, con proprietario l'utente del
+    profilo: prima la creava solo il travaso, quindi una chat AGGIUNTA via API
+    non aveva riga e il link non poteva nascere fino al riavvio successivo. Una
+    chat gia' esistente **non cambia proprietario**: appartiene a chi l'ha
+    rivendicata per primo, e riassegnarla su un salvataggio sposterebbe i
+    messaggi di un utente nel feed di un altro.
+    """
+    riga = c.execute('SELECT id FROM users WHERE origin_profile=?', (nome,)).fetchone()
+    if not riga:
+        return
+    utente = riga[0]
+    pid = c.execute(
+        'SELECT p.id FROM parsers p JOIN users u ON u.id = p.user_id'
+        ' WHERE p.name=? AND p.id IS NOT NULL AND u.origin_profile=?',
+        (parser_nome, nome)).fetchone()
+    if not pid:
+        return
+    for chat in _chat_della_stringa(chat_ids):
+        cid = _riga_chat(c, chat)
+        if cid is None:
+            c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id)'
+                      ' VALUES (?,?)', (chat, utente))
+            cid = _riga_chat(c, chat)
+        if cid is not None:
+            c.execute('INSERT OR IGNORE INTO parser_chats(parser_id, chat_id)'
+                      ' VALUES (?,?)', (pid[0], cid))
+
+
+def _riconcilia_link_del_profilo(c, nome, chat_ids, parser_nome, prima=None):
+    """I link di UN profilo allineati a com'e' adesso. Fonte unica (regola 3).
+
+    `prima` e' la riga `(chat_ids, parser)` del profilo **prima** della scrittura,
+    o `None` per un profilo nuovo: senza, cambiare il parser di un profilo
+    lascerebbe vivo il link del parser vecchio e quella chat continuerebbe a far
+    girare un parser che il proprietario ha appena sostituito — il limite
+    dichiarato e rimesso al proprietario sulla PR #44, che qui si chiude.
+
+    Non committa: la decide il chiamante, cosi' la riconciliazione e la
+    scrittura del profilo stanno nella stessa transazione.
+    """
+    if prima is not None:
+        _stacca_link_del_profilo(c, prima[0], prima[1])
+    _attacca_link_del_profilo(c, nome, chat_ids, parser_nome)
+
+
 def _collega_parser_alle_chat(c):
-    """Semina `parser_chats` dai profili: il parser di ogni profilo si collega alle sue chat.
+    """Il TRAVASO dei link dai profili legacy — una volta sola per database.
 
     E' il ponte fra il mondo legacy (profili con `chat_ids` a virgole) e il
-    dispatch per-utente: ogni riga qui dice «questo parser elabora i messaggi di
-    questa chat», e il webhook la legge al posto del primo-profilo-alfabetico.
-    Due profili sulla stessa chat producono DUE link — ognuno al proprio parser,
-    ognuno verso il feed del proprio utente — ed e' cosi' che il pericolo 1
-    della #25 si chiude: nessuno «vince» la chat, ognuno riceve il suo.
+    dispatch per-utente: ogni riga di `parser_chats` dice «questo parser elabora
+    i messaggi di questa chat», e il webhook la legge al posto del
+    primo-profilo-alfabetico. Due profili sulla stessa chat producono DUE link —
+    ognuno al proprio parser, ognuno verso il feed del proprio utente — ed e'
+    cosi' che il pericolo 1 della #25 si chiude: nessuno «vince» la chat,
+    ognuno riceve il suo.
 
-    Idempotente per il PRIMARY KEY della tabella. Come il seme dei profili,
-    risemina a ogni avvio anche un link cancellato a mano: oggi nessuna API
-    cancella i link (arriva con la verifica chat), e questa riga muore insieme
-    al seme quando la rimozione del seme (#25 lavoro E) tocchera' anche lei.
+    **Girava a ogni avvio, adesso no**, ed e' la sostanza di questo PR: una
+    conversione ripetuta e' indistinguibile da un seme, perche' rimette in piedi
+    ogni link che il proprietario ha cancellato. Da qui in avanti i link li
+    tiene aggiornati `_riconcilia_link_del_profilo`, chiamata dalle scritture
+    dei profili. Il chiamante gestisce il marcatore in `migrazioni`.
     """
     for nome, chat_ids, parser_nome in c.execute(
             'SELECT name, chat_ids, parser FROM profiles ORDER BY name').fetchall():
-        # Il link nasce solo se il parser appartiene all'UTENTE di questo profilo.
-        # Due profili possono nominare lo stesso parser, ma il parser ha UN
-        # proprietario: un link seminato dall'altro profilo manderebbe i segnali
-        # della sua chat al feed del proprietario del parser — il legame fra
-        # utenti diversi che il test cross-tenant della deduplica vieta. Il
-        # profilo il cui parser e' altrui resta sul percorso legacy (fallback),
-        # che scrive per profilo e quindi nel feed giusto.
-        pid = c.execute(
-            'SELECT p.id FROM parsers p JOIN users u ON u.id = p.user_id'
-            ' WHERE p.name=? AND p.id IS NOT NULL AND u.origin_profile=?',
-            (parser_nome, nome)).fetchone()
-        if not pid:
-            continue
-        for chat in {x.strip() for x in (chat_ids or '').split(',') if x.strip()}:
-            cid = c.execute(f'SELECT id FROM chats WHERE telegram_chat_id=?'
-                            f' AND {TOPIC_CHAT}=?', (chat, '')).fetchone()
-            if cid:
-                c.execute('INSERT OR IGNORE INTO parser_chats(parser_id, chat_id)'
-                          ' VALUES (?,?)', (pid[0], cid[0]))
+        _attacca_link_del_profilo(c, nome, chat_ids, parser_nome)
+
+
+def _una_tantum(c, nome):
+    """Vero la PRIMA volta che questa migrazione gira su questo database.
+
+    Il marcatore si inserisce subito e viene committato dal chiamante insieme al
+    lavoro: una migrazione che muore a meta' non lascia il marcatore, quindi il
+    prossimo avvio riprova invece di saltarla credendola fatta.
+    """
+    if c.execute('SELECT 1 FROM migrazioni WHERE nome=?', (nome,)).fetchone():
+        return False
+    c.execute('INSERT INTO migrazioni(nome) VALUES (?)', (nome,))
+    return True
 
 
 def migra(c):
@@ -961,13 +1054,15 @@ def migra(c):
             # avrebbe ingoiato anche «no such table», cioe' uno schema mancante.
             if 'duplicate column name' not in str(e).lower():
                 raise
-    c.execute('INSERT OR IGNORE INTO parsers(name,header,market_name,market_type,'
-              'selection_name,handicap,bet_type) VALUES (?,?,?,?,?,?,?)',
-              (DEFAULT_PARSER, 'P.Bet. PREMACHT 0,5HT', 'Over/Under 1,5 gol',
-               'OVER_UNDER_15', 'Over 1,5 goal', '0', 'PUNTA'))
-    # Preserve the existing Telegram setup as the default PIERO feed.
-    c.execute('INSERT OR IGNORE INTO profiles(name,chat_ids,parser) VALUES (?,?,?)',
-              (PIERO_PROFILE, os.getenv('TELEGRAM_ALLOWED_CHAT_IDS', ''), DEFAULT_PARSER))
+    # Il SEME non c'e' piu' (#25 lavoro E, PR 4 della sequenza #2). Qui due
+    # `INSERT OR IGNORE` reinserivano a ogni avvio `DEFAULT_PARSER` e il profilo
+    # PIERO: `OR IGNORE` protegge dal duplicato, NON dalla resurrezione — su riga
+    # assente inserisce. Conseguenze misurate nella #25: cancellare non era
+    # durevole, e rinominare produceva un doppione garantito col profilo che
+    # continuava a nominare il vecchio. In produzione quelle righe esistono gia'
+    # sul volume (`/data`): sono DATI, e la migrazione li trova senza doverli
+    # ricreare. Un database vergine resta vergine: il primo parser lo crea chi
+    # fa login, non il codice.
     c.execute('UPDATE signals SET profile=? WHERE profile IS NULL', (PIERO_PROFILE,))
     _travasa_nel_multiutente(c)
     c.commit()
@@ -1559,9 +1654,12 @@ def _travasa_nel_multiutente(c):
     c.execute('CREATE UNIQUE INDEX IF NOT EXISTS parsers_utente_slug'
               ' ON parsers (user_id, slug)')
     c.execute('CREATE UNIQUE INDEX IF NOT EXISTS parsers_id ON parsers (id)')
-    # I link chat→parser, seminati dai profili. Sta DOPO `_completa_colonne_nuove`
-    # perche' ha bisogno di `parsers.id`, che e' quella funzione a riempire.
-    _collega_parser_alle_chat(c)
+    # I link chat→parser, travasati dai profili UNA VOLTA SOLA. Sta DOPO
+    # `_completa_colonne_nuove` perche' ha bisogno di `parsers.id`, che e' quella
+    # funzione a riempire. Il marcatore evita che il travaso diventi un seme: da
+    # qui in avanti i link seguono le scritture dei profili.
+    if _una_tantum(c, 'link_dai_profili'):
+        _collega_parser_alle_chat(c)
     # `users.origin_profile` e' UNIQUE nel CREATE TABLE, ma un database che riceve la
     # colonna dall'ALTER non ha il vincolo: SQLite non sa aggiungerne con ADD COLUMN.
     # I due percorsi finivano quindi con garanzie diverse, e quello senza garanzia era
@@ -3607,20 +3705,40 @@ def list_profiles(x_admin_token: str | None = Header(None)):
 def save_profile(data: ProfileIn, x_admin_token: str | None = Header(None)):
     auth(x_admin_token)
     c = db()
-    get_parser(c, data.parser)
-    c.execute('INSERT OR REPLACE INTO profiles(name,chat_ids,parser) VALUES (?,?,?)', (data.name, data.chat_ids, data.parser))
-    c.commit()
-    c.close()
+    try:
+        get_parser(c, data.parser)
+        # La riga PRIMA della scrittura: serve a togliere i link del parser che il
+        # profilo nominava fino a un istante fa. Senza, cambiare parser lascerebbe
+        # vivo il vecchio link e quella chat continuerebbe a far girare il parser
+        # sostituito — il limite dichiarato sulla PR #44.
+        prima = c.execute('SELECT chat_ids, parser FROM profiles WHERE name=?',
+                          (data.name,)).fetchone()
+        c.execute('INSERT OR REPLACE INTO profiles(name,chat_ids,parser) VALUES (?,?,?)',
+                  (data.name, data.chat_ids, data.parser))
+        _riconcilia_link_del_profilo(c, data.name, data.chat_ids, data.parser, prima)
+        c.commit()
+    finally:
+        c.close()
     return {'ok': True, 'profile': data.name}
 
 @app.delete('/api/profiles/{name}')
 def delete_profile(name: str, x_admin_token: str | None = Header(None)):
     auth(x_admin_token)
     c = db()
-    c.execute('DELETE FROM profiles WHERE name=?', (name,))
-    c.execute('DELETE FROM signals WHERE profile=?', (name,))
-    c.commit()
-    c.close()
+    try:
+        # I link prima della riga: letti dal profilo che sta per sparire, o non
+        # ci sarebbe piu' modo di sapere quali erano i suoi. Senza, un profilo
+        # eliminato lascerebbe la sua chat a far girare il suo parser — con il
+        # travaso non piu' ripetuto, per sempre.
+        riga = c.execute('SELECT chat_ids, parser FROM profiles WHERE name=?',
+                         (name,)).fetchone()
+        if riga:
+            _stacca_link_del_profilo(c, riga[0], riga[1])
+        c.execute('DELETE FROM profiles WHERE name=?', (name,))
+        c.execute('DELETE FROM signals WHERE profile=?', (name,))
+        c.commit()
+    finally:
+        c.close()
     return {'ok': True}
 
 @app.post('/api/parsers/{name}/test')
@@ -4025,9 +4143,9 @@ async def telegram_webhook(request: Request):
         # Nessun bot configurato: non esiste una registrazione presso Telegram,
         # quindi NESSUNA consegna legittima puo' arrivare qui e rifiutare non
         # costa niente. La prima versione accettava, e quello riapriva il difetto
-        # in un ramo: `TELEGRAM_ALLOWED_CHAT_IDS` popola il profilo PIERO
-        # indipendentemente dal bot, quindi un'istanza senza bot ma con i chat_id
-        # configurati era iniettabile da chiunque. Segnalato da CodeRabbit.
+        # in un ramo: le chat autorizzate esistono a database indipendentemente
+        # dal bot, quindi un'istanza senza bot ma con le chat configurate era
+        # iniettabile da chiunque. Segnalato da CodeRabbit.
         #
         # Niente variabile di override per lo sviluppo locale: sarebbe una
         # scorciatoia che un domani finisce impostata in produzione. Chi prova in
@@ -4127,8 +4245,9 @@ _LOCK_ELABORAZIONE = threading.Lock()
 def _processa_messaggio_canale(chat_id, text, update_id=None):
     """Il dispatch: chat → i parser collegati, ognuno verso il feed del SUO utente.
 
-    Modello della Issue #2: la chat si collega ai PARSER (`parser_chats`, seminata
-    dai profili in `_collega_parser_alle_chat`); ogni parser attivo elabora in
+    Modello della Issue #2: la chat si collega ai PARSER (`parser_chats`, travasata
+    dai profili una volta sola e poi tenuta aggiornata dalle scritture dei profili,
+    `_riconcilia_link_del_profilo`); ogni parser attivo elabora in
     modo indipendente e scrive nel feed del proprio utente. Fra i parser dello
     STESSO utente che riconoscono lo stesso messaggio vince l'ULTIMO nell'ordine
     dichiarato (`parsers.ordine`), e i battuti restano in `message_logs` come
@@ -4343,6 +4462,16 @@ def _elabora_profilo(c, profile, text):
     bloccato = accesso_bloccato_del_profilo(c, profile['name'])
     if bloccato:
         return f'access_{bloccato}'
+    # Il parser che il profilo nomina puo' NON esistere: `DELETE /api/parsers`
+    # non guarda i profili, ed e' il pericolo 2 della #25. Finche' il seme lo
+    # ricreava a ogni avvio il buco durava fino al riavvio; senza seme durerebbe
+    # per sempre — `get_parser` solleva 404, il webhook risponde 404 e Telegram
+    # ritenta in ciclo. Qui la consegna si IGNORA: il segnale non arriva
+    # comunque, ma il retry si esaurisce e gli altri profili della chat
+    # continuano a essere elaborati.
+    if c.execute('SELECT 1 FROM parsers WHERE name=?',
+                 (profile['parser'],)).fetchone() is None:
+        return 'parser_mancante'
     cfg = get_parser(c, profile['parser'])
     parsed = elabora_messaggio(text, cfg)
     if not parsed:

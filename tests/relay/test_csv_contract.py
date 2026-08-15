@@ -34,6 +34,7 @@ sys.path.insert(0, str(RADICE))
 
 import main  # noqa: E402 - dopo l'inserimento del percorso
 from tests.ambiente import CHIAVI_PERICOLOSE, TOKEN_DI_PROVA  # noqa: E402
+from tests.dati import relay_in_processo  # noqa: E402
 from tests.servizio import relay_avviato  # noqa: E402
 
 
@@ -169,7 +170,7 @@ def test_store_signal_rifiuta_un_csv_malformato(tmp_path, monkeypatch):
 
     Cosi- una riga malformata non esiste nemmeno per i 90 secondi del TTL.
     """
-    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'test.db'))
+    relay_in_processo(monkeypatch, tmp_path / 'test.db')
     c = main.db()
     try:
         # Prima un segnale VALIDO: senza questo il test proverebbe solo che nulla
@@ -190,7 +191,7 @@ def test_store_signal_rifiuta_un_csv_malformato(tmp_path, monkeypatch):
 
 
 def test_store_signal_accetta_un_csv_valido(tmp_path, monkeypatch):
-    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'test.db'))
+    relay_in_processo(monkeypatch, tmp_path / 'test.db')
     c = main.db()
     try:
         main.store_signal(c, main.make_csv(RIGA_VALIDA), 'parser-finto', 'PIERO')
@@ -208,7 +209,7 @@ def test_una_riga_vecchia_senza_bom_non_viene_servita(tmp_path, monkeypatch):
     CodeRabbit: la finestra e- breve (90 secondi di TTL) ma esiste, e cade
     esattamente subito dopo un deploy.
     """
-    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'test.db'))
+    relay_in_processo(monkeypatch, tmp_path / 'test.db')
     c = main.db()
     try:
         # Una riga nel formato PRECEDENTE: valida in tutto tranne il BOM.
@@ -239,7 +240,7 @@ def test_il_feed_degradato_lascia_una_traccia(tmp_path, monkeypatch):
     partite. Il contatore e- la differenza fra un guasto visibile e un guasto
     che si scopre dal cliente che non punta piu-.
     """
-    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'test.db'))
+    relay_in_processo(monkeypatch, tmp_path / 'test.db')
     monkeypatch.setattr(main, '_SCARTI_CONSEGNA', main._scarti_azzerati())
     c = main.db()
     try:
@@ -302,7 +303,7 @@ def test_la_stessa_riga_guasta_conta_UNO_non_uno_per_richiesta(tmp_path, monkeyp
     criterio indica un guasto dove non c-e-. Il contatore conta quindi le RIGHE
     guaste distinte, non le richieste che le incontrano.
     """
-    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'test.db'))
+    relay_in_processo(monkeypatch, tmp_path / 'test.db')
     monkeypatch.setattr(main, '_SCARTI_CONSEGNA', main._scarti_azzerati())
     c = main.db()
     try:
@@ -354,7 +355,7 @@ def test_due_profili_guasti_non_fanno_salire_il_contatore_a_raffica(tmp_path, mo
     La chiave e- quindi la coppia profilo+riga: due profili guasti valgono due, e
     restano due per quante volte li si interroghi.
     """
-    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'test.db'))
+    relay_in_processo(monkeypatch, tmp_path / 'test.db')
     monkeypatch.setattr(main, '_SCARTI_CONSEGNA', main._scarti_azzerati())
     vecchia = main.make_csv(RIGA_VALIDA)[len(main.CSV_BOM):]
 
@@ -390,7 +391,7 @@ def test_due_profili_con_righe_guaste_DIVERSE_non_salgono_a_raffica(tmp_path, mo
     contatore saliva a raffica. Due difetti opposti — sottostima con righe uguali,
     sovrastima con righe diverse — dalla stessa causa: la chiave senza il profilo.
     """
-    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'test.db'))
+    relay_in_processo(monkeypatch, tmp_path / 'test.db')
     monkeypatch.setattr(main, '_SCARTI_CONSEGNA', main._scarti_azzerati())
 
     c = main.db()
@@ -438,7 +439,7 @@ def test_richieste_CONCORRENTI_sullo_stesso_feed_contano_una_volta(tmp_path, mon
     """
     import threading
 
-    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'test.db'))
+    relay_in_processo(monkeypatch, tmp_path / 'test.db')
     monkeypatch.setattr(main, '_SCARTI_CONSEGNA', main._scarti_azzerati())
     c = main.db()
     try:
@@ -561,7 +562,7 @@ def test_l_impronta_non_conserva_il_contenuto_del_segnale(tmp_path, monkeypatch)
     memoria non si risale al segnale. Conservare il CSV per confronto avrebbe
     messo il contenuto di un cliente in una variabile globale del processo.
     """
-    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'test.db'))
+    relay_in_processo(monkeypatch, tmp_path / 'test.db')
     monkeypatch.setattr(main, '_SCARTI_CONSEGNA', main._scarti_azzerati())
     c = main.db()
     try:
@@ -586,7 +587,7 @@ def test_il_motivo_dello_scarto_non_contiene_il_segnale(tmp_path, monkeypatch):
     proprieta-: chi domani aggiungesse il valore del campo al messaggio d-errore
     esporrebbe il segnale di un cliente su un endpoint senza token.
     """
-    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'test.db'))
+    relay_in_processo(monkeypatch, tmp_path / 'test.db')
     monkeypatch.setattr(main, '_SCARTI_CONSEGNA', main._scarti_azzerati())
     c = main.db()
     try:

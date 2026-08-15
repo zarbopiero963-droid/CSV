@@ -45,6 +45,7 @@ sys.path.insert(0, str(RADICE))
 
 import main  # noqa: E402 - dopo l'inserimento del percorso
 from tests.ambiente import CHIAVI_PERICOLOSE  # noqa: E402
+from tests.dati import relay_in_processo  # noqa: E402
 
 # Il formato con cui il servizio e' nato, scritto a mano invece di importato: e' il
 # database che sta in produzione ADESSO, e un test che lo costruisse chiamando il
@@ -460,11 +461,12 @@ def test_parsers_ha_una_colonna_id_a_cui_parser_chats_puo_puntare(tmp_path):
     ids = [r[0] for r in c.execute('SELECT id FROM parsers').fetchall()]
     assert all(i is not None for i in ids), f'id non riempiti: {ids}'
     assert len(set(ids)) == len(ids), f'id non univoci: {ids}'
-    # E il collegamento non e' solo POSSIBILE: dal PR sul dispatch multi-parser la
-    # migrazione lo semina dai profili (`_collega_parser_alle_chat`), quindi qui
-    # si misura che i link esistano e riferiscano id veri di entrambe le tabelle.
+    # E il collegamento non e' solo POSSIBILE: dal PR sul dispatch multi-parser il
+    # travaso lo crea dai profili (`_collega_parser_alle_chat`, una volta sola per
+    # database dalla PR 4), quindi qui si misura che i link esistano e riferiscano
+    # id veri di entrambe le tabelle.
     link = c.execute('SELECT parser_id, chat_id FROM parser_chats').fetchall()
-    assert link, 'la semina non ha creato nessun link chat-parser dai profili'
+    assert link, 'il travaso non ha creato nessun link chat-parser dai profili'
     for pid, cid in link:
         assert c.execute('SELECT 1 FROM parsers WHERE id=?', (pid,)).fetchone(), pid
         assert c.execute('SELECT 1 FROM chats WHERE id=?', (cid,)).fetchone(), cid
@@ -769,8 +771,7 @@ def test_una_seconda_migrazione_non_TENTA_di_reinserire_le_chat(tmp_path):
 @pytest.fixture
 def servizio(tmp_path, monkeypatch):
     """Il relay in processo, con un database vuoto solo suo e il token noto."""
-    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'api.db'))
-    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    relay_in_processo(monkeypatch, tmp_path / 'api.db')
     monkeypatch.setattr(main, 'TOKEN', 'token-di-prova')
     return 'token-di-prova'
 
@@ -1352,6 +1353,11 @@ def test_con_origin_profile_duplicato_chat_e_segnali_vanno_al_SUPERSTITE(tmp_pat
     _crea_users(c, con_origin_profile=True)  # colonna presente, vincolo assente
     c.execute("INSERT INTO users(origin_profile, first_name, slug) VALUES ('PIERO','PIERO','piero')")
     c.execute("INSERT INTO users(origin_profile, first_name, slug) VALUES ('PIERO','PIERO','piero-2')")
+    # Il parser lo mette il test, non piu' il seme di `migra()` (rimosso col lavoro
+    # E della #25): in produzione quella riga esiste sul volume, ed e' il dato di
+    # cui questo test misura l'attribuzione.
+    c.execute('INSERT INTO parsers(name, header) VALUES (?,?)',
+              (main.DEFAULT_PARSER, 'P.Bet. PREMACHT 0,5HT'))
     c.execute('INSERT INTO profiles VALUES (?,?,?)', ('PIERO', CHAT_A, main.DEFAULT_PARSER))
     c.execute('INSERT INTO signals(csv, parser, profile, expires_at) VALUES (?,?,?,?)',
               ('"x"', main.DEFAULT_PARSER, 'PIERO', 9_999_999_999))

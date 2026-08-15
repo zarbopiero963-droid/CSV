@@ -35,6 +35,7 @@ sys.path.insert(0, str(RADICE))
 
 import main  # noqa: E402 - dopo l'inserimento del percorso
 from tests.ambiente import CHIAVI_PERICOLOSE, TOKEN_DI_PROVA  # noqa: E402
+from tests.dati import relay_in_processo  # noqa: E402
 
 # Riusati e non ricopiati (regola 3): il bot finto, la chat, il messaggio che il
 # parser di default riconosce, e la Request minima per l'handler in processo.
@@ -71,16 +72,13 @@ def _relay(tmp_path, monkeypatch, nome):
     vogliono i LINK in `parser_chats` chiamano `_riavvio` dopo, cosi' la
     migrazione la vede e semina — lo stesso percorso del primo avvio post-deploy.
     """
-    percorso = str(tmp_path / nome)
-    monkeypatch.setattr(main, 'DB_PATH', percorso)
-    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
     monkeypatch.setattr(main, 'SEGRETO_WEBHOOK', main.webhook_secret(BOT_FINTO))
-    main.db().close()
-    c = sqlite3.connect(percorso)
-    c.execute("UPDATE profiles SET chat_ids=? WHERE name='PIERO'", (CHAT,))
-    c.commit()
-    c.close()
-    return percorso
+    # La chat del profilo PIERO arriva dalla semina, non da un UPDATE dopo la
+    # migrazione: dalla rimozione del seme (#25 lavoro E) il travaso dei link
+    # gira UNA VOLTA SOLA, quindi una chat scritta dopo la prima migrazione non
+    # verrebbe piu' vista. E' anche piu' fedele: in produzione quelle righe
+    # esistono PRIMA che il processo parta.
+    return relay_in_processo(monkeypatch, tmp_path / nome, chat_ids=CHAT)
 
 
 def _riavvio(monkeypatch):

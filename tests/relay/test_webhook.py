@@ -167,9 +167,9 @@ def servizio_con_bot(tmp_path_factory):
     derivabile, che e- la condizione che governa l'enforcement.
     """
     with relay_avviato(tmp_path_factory.mktemp('webhook'),
+                       chat_ids=CHAT,
                        CSV_ACCESS_TOKEN=TOKEN_DI_PROVA,
                        TELEGRAM_BOT_TOKEN=BOT_FINTO,
-                       TELEGRAM_ALLOWED_CHAT_IDS=CHAT,
                        PUBLIC_URL='https://non-esiste.invalid') as base:
         yield base
 
@@ -247,9 +247,8 @@ def servizio_senza_bot(tmp_path_factory):
 
     E- lo stato di ogni sviluppo locale e di ogni test che non passa da qui.
     """
-    with relay_avviato(tmp_path_factory.mktemp('webhook-senza'),
-                       CSV_ACCESS_TOKEN=TOKEN_DI_PROVA,
-                       TELEGRAM_ALLOWED_CHAT_IDS=CHAT) as base:
+    with relay_avviato(tmp_path_factory.mktemp('webhook-senza'), chat_ids=CHAT,
+                       CSV_ACCESS_TOKEN=TOKEN_DI_PROVA) as base:
         yield base
 
 

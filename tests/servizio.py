@@ -33,6 +33,7 @@ RADICE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RADICE))
 
 from tests.ambiente import ambiente_di_servizio  # noqa: E402
+from tests.dati import semina_produzione  # noqa: E402
 
 # Quanto aspettare che il servizio risponda, e ogni quanto richiedere.
 ATTESA_AVVIO_S = 30
@@ -55,7 +56,7 @@ def porta_libera() -> int:
 
 
 @contextmanager
-def relay_avviato(cartella: Path, **extra):
+def relay_avviato(cartella: Path, chat_ids='', vergine=False, **extra):
     """Avvia `main:app` su una porta libera; restituisce l'URL di base.
 
     `cartella` e' una directory di lavoro (tipicamente da `tmp_path_factory`):
@@ -66,11 +67,21 @@ def relay_avviato(cartella: Path, **extra):
     default, e i test si lascerebbero segnali dietro. Le altre variabili
     pericolose non arrivano per eredita': le toglie `ambiente_di_servizio`, e
     passarne una di proposito resta possibile ma va scritto dal chiamante.
+
+    Il database nasce con i **dati della produzione esistente** — il parser
+    storico e il profilo PIERO — scritti da `tests.dati.semina_produzione`
+    PRIMA dell'avvio. Prima ce li metteva il seme di `migra()`, rimosso col
+    lavoro E della #25: da allora quelle righe sono dati, e un test che modella
+    il servizio reale deve portarseli come se li porta il volume di Railway.
+    `vergine=True` per chi invece vuole misurare un deploy nuovo, dove non deve
+    esserci niente.
     """
     porta = porta_libera()
     db = cartella / 'signals.db'
     log = cartella / 'uvicorn.log'
     extra.setdefault('DB_PATH', str(db))
+    if not vergine:
+        semina_produzione(extra['DB_PATH'], chat_ids)
     with log.open('w', encoding='utf-8') as uscita:
         proc = subprocess.Popen(  # noqa: S603 - comando fisso, nessun input esterno
             [sys.executable, '-m', 'uvicorn', 'main:app', '--host', '127.0.0.1',
