@@ -479,7 +479,17 @@ produzione. Vincolato dall'oracolo caso per caso. [REAL_FINDING] di GPT-5.6
 Sol, PR #47. La stessa forma canonica finisce nella **riga CSV** — del feed
 (`esito_messaggio`) e dell'anteprima della prova: la guardia da' il verdetto su
 quel testo, e i byte che XTrader legge devono essere quelli che il cliente ha
-giudicato nell'anteprima (secondo [REAL_FINDING] dello stesso gate).
+giudicato nell'anteprima (secondo [REAL_FINDING] dello stesso gate). E per le
+**cinque colonne numeriche** la riga contiene proprio il testo giudicato, spazi
+uniformi ai bordi tolti: un `Price` con un BOM davanti e' una quota valida — i
+bordi sono perdonati — ma il byte perdonato non deve raggiungere XTrader
+(terzo [REAL_FINDING], stesso gate).
+
+Il motivo `config non eseguibile` del fail-safe esiste **solo se la condizione
+del parser riconosce il messaggio**: senza quel gate, un parser con la config
+rotta faceva archiviare in `message_logs` tutto il traffico della chat. Se la
+condizione stessa non e' valutabile vale il silenzio (`parser_no_match`); la
+diagnosi resta sulla rotta di prova. [REAL_FINDING] di Claude Fable 5.
 
 Il confronto della riga e il taglio del marcatore ignorano entrambi maiuscole e
 minuscole. Le ancore vengono tagliate per **codepoint**, non per unità UTF-16:

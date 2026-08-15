@@ -2448,6 +2448,16 @@ def esegui_parser(message, config):
     colonne = config.get('columns') or {}
     matched = condizione_soddisfatta(message, config.get('match'), scadenza)
     row = [_estrai_valore(message, colonne.get(c), scadenza) for c in HEADERS]
+    # Le colonne NUMERICHE viaggiano nella forma su cui la guardia da' il
+    # verdetto (`_piatto` del testo canonico): un Price BOM+`2` e' una quota
+    # valida — i bordi uniformi sono perdonati — ma il CSV emetteva il valore
+    # grezzo, BOM compreso: XTrader riceveva il byte che la guardia aveva
+    # perdonato solo ai fini del giudizio. Stessa riga in `runParser`, o i due
+    # motori scriverebbero feed diversi. [REAL_FINDING] di GPT-5.6 Sol al gate
+    # finale della PR #47.
+    for colonna in INTERVALLI_NUMERICI:
+        indice = HEADERS.index(colonna)
+        row[indice] = _piatto(_testo_canonico(row[indice]))
     # `None`→'' e basta, NON `or ''`: JS usa `String(v ?? '')`, che sostituisce
     # solo null/undefined. Con `or ''` una costante `0` o `False` (JSON validi)
     # sarebbe letta come vuota qui e valorizzata in JS — i due motori
@@ -2568,7 +2578,23 @@ def esito_messaggio(message, cfg):
     except Exception:  # noqa: BLE001 - fail-safe deliberato, vedi commento sopra
         logging.getLogger('xtrader.relay').warning(
             'config parser non elaborabile: nessun segnale prodotto')
-        return None, ['config non eseguibile']
+        # Il motivo esiste solo se il parser RICONOSCE il messaggio: senza
+        # questo gate una config rotta produceva «config non eseguibile» per
+        # QUALUNQUE messaggio della chat, e il dispatch archiviava tutto il
+        # traffico in `message_logs` attribuendolo a quel parser — la stessa
+        # classe chiusa in `esegui_parser` per gli scarti numerici, riaperta
+        # nel ramo d'errore. La condizione si rivaluta in un try a parte:
+        # potrebbe essere proprio lei a non essere eseguibile, e in quel caso
+        # vale il silenzio, come per il JSON illeggibile — la diagnosi resta
+        # sulla rotta di prova, che risponde `errore: config non eseguibile`
+        # comunque. [REAL_FINDING] di Claude Fable 5 al gate finale, PR #47.
+        try:
+            riconosciuto = condizione_soddisfatta(
+                message, json.loads(grezzo).get('match'),
+                time.monotonic() + REGEX_BUDGET_PARSER_S)
+        except Exception:  # noqa: BLE001 - config illeggibile: silenzio
+            riconosciuto = False
+        return None, (['config non eseguibile'] if riconosciuto else [])
     return {'event': evento, 'csv': csv_riga}, []
 
 

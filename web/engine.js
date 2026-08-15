@@ -268,6 +268,18 @@ function realExtraction(columns, row) {
 export function runParser(message, config) {
   const matched = matches(message, config.match);
   const row = COLUMNS.map(c => extractValue(message, (config.columns || {})[c]));
+  // Le colonne NUMERICHE viaggiano nella forma su cui la guardia da' il
+  // verdetto (`piatto`): un Price BOM+`2` e' una quota valida — i bordi
+  // uniformi sono perdonati — ma il CSV emetteva il valore grezzo, BOM
+  // compreso: XTrader riceveva il byte che la guardia aveva perdonato solo
+  // ai fini del giudizio. Stessa riga in `esegui_parser`, o i due motori
+  // scriverebbero feed diversi. `String()` qui e `_testo_canonico` in
+  // main.py danno lo stesso testo per ogni valore JSON (e' il contratto di
+  // `_numero_stile_js`). [REAL_FINDING] di GPT-5.6 Sol al gate finale, PR #47.
+  for (const c of Object.keys(NUMERIC_RANGES)) {
+    const i = COLUMNS.indexOf(c);
+    row[i] = piatto(String(row[i] ?? ''));
+  }
   // Il valore va normalizzato prima del confronto: " " e' truthy, quindi senza
   // trim una colonna obbligatoria fatta di soli spazi passerebbe per valorizzata
   // e il feed riceverebbe una riga quotata e priva di senso. Non basta il `trim`

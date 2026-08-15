@@ -587,3 +587,42 @@ def test_un_intero_JSON_oltre_il_double_diventa_Infinity():
     assert main._testo_canonico(10 ** 400) == 'Infinity'
     assert main._testo_canonico(-(10 ** 400)) == '-Infinity'
     assert main.motivo_valore_numerico('Points', 10 ** 400) is not None
+
+
+def test_il_feed_contiene_il_testo_GIUDICATO_non_quello_grezzo():
+    """Il byte perdonato ai fini del verdetto non deve raggiungere XTrader.
+
+    La guardia giudica la forma normalizzata (`_piatto`), quindi un Price
+    `'\\ufeff2'` e' una quota valida — ma il CSV emetteva il valore grezzo,
+    BOM compreso: XTrader riceveva il byte che la guardia aveva perdonato solo
+    per giudicare. Le colonne numeriche viaggiano ora nella forma giudicata,
+    in entrambi i motori. [REAL_FINDING] di GPT-5.6 Sol al gate finale, PR #47.
+    """
+    import json
+    cfg = {'config_json': json.dumps(_config(Price='\ufeff2\xa0'))}
+    parsed, motivi = main.esito_messaggio(MESSAGGIO, cfg)
+    assert parsed, f'il valore perdonato ai bordi e\' stato scartato: {motivi}'
+    assert '\ufeff2' not in parsed['csv'], 'il BOM perdonato e\' arrivato nel feed'
+    assert '"2"' in parsed['csv'], parsed['csv']
+    assert parsed['csv'].count('\ufeff') == 1, 'un solo BOM: quello del contratto'
+
+
+def test_una_config_ROTTA_non_archivia_i_messaggi_estranei():
+    """`config non eseguibile` esiste solo se il parser RICONOSCE il messaggio.
+
+    Il fail-safe di `esito_messaggio` restituiva il motivo per QUALUNQUE
+    messaggio: un parser con config rotta faceva archiviare in `message_logs`
+    tutto il traffico della chat, attribuito a lui — la stessa classe chiusa
+    in `esegui_parser` per gli scarti numerici, riaperta nel ramo d'errore.
+    [REAL_FINDING] di Claude Fable 5 al gate finale della PR #47.
+    """
+    import json
+    rotta = {'config_json': json.dumps({
+        'match': {'type': 'contains', 'value': 'P.Bet.'},
+        'columns': {'EventName': {'source': 'regex', 'pattern': 123}}})}
+    parsed, motivi = main.esito_messaggio('chiacchiere qualunque', rotta)
+    assert parsed is None and motivi == [], (
+        f'una config rotta ha prodotto motivi per un messaggio estraneo: {motivi}')
+    parsed, motivi = main.esito_messaggio(MESSAGGIO, rotta)
+    assert parsed is None and motivi == ['config non eseguibile'], (
+        'il messaggio RICONOSCIUTO deve conservare la diagnosi: ' + repr(motivi))

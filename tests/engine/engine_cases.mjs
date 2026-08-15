@@ -633,6 +633,29 @@ caso('csv: costanti JSON non stringa nel CSV, come le scrive String()', () => {
   return { config, message, csv: toCsv(r.row) };
 });
 
+// La guardia PERDONA gli spazi uniformi ai bordi ai fini del verdetto, ma il
+// valore emesso nel CSV deve essere il testo GIUDICATO, non quello grezzo:
+// un Price '\ufeff2' passava come numerico e usciva nel feed ancora col BOM
+// davanti — XTrader riceve il byte che la guardia aveva perdonato solo ai
+// fini del giudizio. [REAL_FINDING] di GPT-5.6 Sol al gate finale, PR #47.
+caso('csv: il valore numerico esce nella forma giudicata, senza i bordi', () => {
+  const columns = {}; for (const c of COLUMNS) columns[c] = { source: 'empty' };
+  columns.EventName = { source: 'line', contains: 'P.Bet.' };
+  columns.MarketType = { source: 'constant', value: 'OVER_UNDER_15' };
+  columns.SelectionName = { source: 'constant', value: 'Over' };
+  columns.BetType = { source: 'constant', value: 'PUNTA' };
+  columns.Price = { source: 'constant', value: '\ufeff2\u00a0' };
+  const config = { match: { type: 'contains', value: 'P.Bet.' }, columns };
+  const message = 'P.Bet. Juventus - Palermo';
+  const r = runParser(message, config);
+  eq(r.complete, true, 'il valore perdonato ai bordi deve passare');
+  const csv = toCsv(r.row);
+  eq(csv.includes('"2"'), true, 'il CSV deve contenere il testo giudicato');
+  eq(csv.slice(1).includes('\ufeff'), false,
+    'nessun BOM oltre quello del contratto in testa al file');
+  return { config, message, csv };
+});
+
 caso('motore: casi di confronto per il gemello Python', () => casiConfronto());
 
 process.stdout.write(JSON.stringify(casi, null, 1));
