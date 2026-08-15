@@ -185,17 +185,32 @@ export function suggest(message) {
 
 /* ------------------------------------------------- messaggio di esempio */
 
-// Il messaggio di esempio del wizard vive nel browser, per slug: il server
-// non lo conserva (non e' un dato del contratto, e' un appunto di lavoro).
+// Il messaggio di esempio del wizard vive nel browser: il server non lo
+// conserva (non e' un dato del contratto, e' un appunto di lavoro).
 const CHIAVE_CAMPIONE = 'xtrelay:campione:';
 
+// La chiave porta l'UTENTE della sessione oltre allo slug. Lo slug dei parser
+// e' unico PER UTENTE (`UNIQUE (user_id, slug)` nello schema): su un browser
+// condiviso due account possono avere lo stesso slug, e una chiave per solo
+// slug faceva leggere al secondo il messaggio Telegram del primo.
+// [REAL_FINDING] di GPT-5.6 Sol sulla PR #50. Senza sessione non si legge e
+// non si scrive niente: l'appunto appartiene a qualcuno, o non esiste.
+function chiaveCampione(slug) {
+  if (!stato.me) return null;
+  return CHIAVE_CAMPIONE + stato.me.utente + ':' + slug;
+}
+
 export function sampleMessage(slug) {
-  try { return localStorage.getItem(CHIAVE_CAMPIONE + slug) || ''; }
+  const chiave = chiaveCampione(slug);
+  if (!chiave) return '';
+  try { return localStorage.getItem(chiave) || ''; }
   catch { return ''; }
 }
 
 export function saveSampleMessage(slug, testo) {
-  try { localStorage.setItem(CHIAVE_CAMPIONE + slug, testo); }
+  const chiave = chiaveCampione(slug);
+  if (!chiave) return;
+  try { localStorage.setItem(chiave, testo); }
   catch { /* modalita' privata: il wizard funziona, l'appunto non sopravvive */ }
 }
 

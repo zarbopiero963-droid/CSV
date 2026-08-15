@@ -16,7 +16,7 @@ Lo avvia `test_prototype_flow.py`, che tira su il relay con
     python tests/web/prototype_flow.py http://127.0.0.1:8099/app/ /tmp/shots
 """
 
-import base64, csv, io, json, sys, pathlib, tempfile, urllib.error, urllib.request
+import base64, csv, io, json, re, sys, pathlib, tempfile, urllib.error, urllib.request
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 from playwright.sync_api import sync_playwright
 
@@ -137,6 +137,20 @@ with sync_playwright() as pw:
     pg.click('[data-act="ai-suggest"]')
     pg.wait_for_selector('.map-table', timeout=8000)
     shot(pg, '05-suggerimento')
+
+    # Il messaggio campione appena salvato deve stare sotto una chiave che porta
+    # l'UTENTE della sessione, non il solo slug: lo slug dei parser e' unico PER
+    # UTENTE (`UNIQUE (user_id, slug)` nello schema), quindi su un browser
+    # condiviso due account possono avere lo stesso slug e una chiave per solo
+    # slug fa leggere al secondo il messaggio Telegram del primo.
+    # [REAL_FINDING] di GPT-5.6 Sol al gate della PR #50.
+    chiavi_campione = pg.evaluate(
+        "Object.keys(localStorage).filter(k => k.startsWith('xtrelay:campione:'))")
+    assert chiavi_campione, 'nessun messaggio campione in localStorage dopo il wizard'
+    for chiave in chiavi_campione:
+        assert re.match(r'xtrelay:campione:\d+:', chiave), (
+            f'chiave del campione senza utente: {chiave!r} — su un browser '
+            'condiviso un altro account con lo stesso slug la leggerebbe')
 
     # riparti dal messaggio e vai a mano: condizione
     pg.click('[data-act="wiz-restart"]')
