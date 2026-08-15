@@ -529,6 +529,13 @@ function casiConfronto() {
   // vincola che i due motori citino la STESSA stringa.
   aggiungi('guardie: emoji astrali al confine del taglio → stesso citato',
     MSG, conNumeri('Price', 'x'.repeat(55) + '\u{1F19A}\u{1F19A}\u{1F19A}\u{1F19A}\u{1F19A}'));
+  // I tre gruppi di spazi su cui i default dei due linguaggi NON coincidono:
+  // `\x1c-\x1f` e `\x85` li normalizza solo Python, `\ufeff` solo JavaScript.
+  // Con la classe esplicita condivisa i due motori citano la stessa stringa.
+  aggiungi('guardie: separatori di controllo → citato uguale nei due motori',
+    MSG, conNumeri('Price', 'a\u001cb\u001dc\u001ed\u001fe\u0085f'));
+  aggiungi('guardie: BOM dentro il valore → citato uguale nei due motori',
+    MSG, conNumeri('Price', 'a\ufeffb\u00a0c\u2028d'));
   aggiungi('guardie: sole costanti sulle obbligatorie → nessuna riga', 'ciao a tutti', {
     match: { type: 'contains', value: 'a' },
     columns: { ...soloEmpty,
@@ -543,4 +550,11 @@ function casiConfronto() {
 caso('motore: casi di confronto per il gemello Python', () => casiConfronto());
 
 process.stdout.write(JSON.stringify(casi, null, 1));
-process.exit(casi.every(c => c.ok) ? 0 : 1);
+// `exitCode`, NON `process.exit()`. Su una pipe la scrittura di stdout e'
+// asincrona e `exit()` scarta cio' che non e' ancora stato scaricato: l'output
+// arrivava TRONCATO a esattamente 65536 byte, e il wrapper pytest riceveva un
+// JSON tagliato a meta'. Il difetto era latente finche' i casi stavano sotto i
+// 64 KiB — cioe' invisibile fino al giro in cui il payload cresce, e allora il
+// sintomo (`JSONDecodeError` su una riga qualunque) non somiglia alla causa.
+// Con `exitCode` node esce da solo quando ha finito di scrivere.
+process.exitCode = casi.every(c => c.ok) ? 0 : 1;

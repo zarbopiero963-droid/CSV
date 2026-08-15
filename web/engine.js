@@ -153,6 +153,15 @@ export const NUMERIC_RANGES = {
 // entrambi, cosi' le due non possono divergere su una sottigliezza che non solleva.
 const ASCII_NUMBER = /^[+-]?(?:[0-9]+(?:[.,][0-9]*)?|[.,][0-9]+)$/;
 
+// Gli spazi da normalizzare nel valore citato: classe ESPLICITA, gemella di
+// `SPAZI_UNIFORMI` in main.py. I default dei due linguaggi non coincidono, e le
+// divergenze vanno in due versi: `\x1c-\x1f` e `\x85` li normalizza solo
+// Python, `\ufeff` solo JavaScript — e il BOM e' un carattere portante del
+// contratto CSV. Segnalato da Claude Fable 5, PR #47.
+const SPAZI_UNIFORMI = /[\t\n\v\f\r \u001c-\u001f\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+/g;
+
+const piatto = t => String(t).replace(SPAZI_UNIFORMI, ' ').trim();
+
 const readable = x => String(x);
 
 // `null` se il valore e' accettabile per quella colonna, altrimenti il MOTIVO.
@@ -174,7 +183,7 @@ export function numericReason(column, value) {
   // e nella UI, e un'estrazione sbagliata puo' portarsi dietro una riga intera.
   // Gli a capo e i caratteri di controllo diventano spazi PRIMA del taglio, come
   // in main.py: un motivo multilinea spezzerebbe la riga di log e la tabella.
-  const piano = text.split(/\s+/).filter(Boolean).join(' ');
+  const piano = piatto(text);
   // `cutByCodePoint`, non `slice`: `slice` conta unita' UTF-16 e spezzerebbe un
   // emoji a meta' lasciando un surrogato spaiato, mentre lo slice di Python
   // conta codepoint — i due motori citerebbero stringhe diverse, cioe' la

@@ -2031,6 +2031,13 @@ INTERVALLI_NUMERICI = {
 # `\d` questa riga sarebbe stata una guardia che non guarda. Misurato scrivendola
 # sbagliata: `motivo_valore_numerico('Price', '١٩')` restituiva `None`, cioe'
 # «accettabile», ed era esattamente il caso che la regola esiste per fermare.
+# Gli spazi da normalizzare nel valore citato: classe esplicita, gemella di
+# `SPAZI_UNIFORMI` in `web/engine.js`. Vedi `motivo_valore_numerico` per la
+# tabella delle divergenze fra i default dei due linguaggi.
+SPAZI_UNIFORMI = re.compile(
+    '[\t\n\v\f\r \x1c-\x1f\x85\u00a0\u1680\u2000-\u200a'
+    '\u2028\u2029\u202f\u205f\u3000\ufeff]+')
+
 _NUMERO_ASCII = re.compile(r'^[+-]?(?:[0-9]+(?:[.,][0-9]*)?|[.,][0-9]+)$')
 
 
@@ -2074,7 +2081,18 @@ def motivo_valore_numerico(colonna, valore):
     # Gli a capo e i caratteri di controllo diventano spazi PRIMA del taglio: il
     # valore estratto puo' contenere una riga intera, e un motivo multilinea
     # spezzerebbe la riga di log e la tabella della UI. Segnalato da GPT-5.5.
-    piano = ' '.join(testo.split())
+    #
+    # La classe e' ESPLICITA e non `str.split()`, perche' i default dei due
+    # linguaggi non coincidono — misurato, e le divergenze vanno in DUE versi:
+    #
+    #     carattere        Python `split()`   JS `/\s+/`
+    #     \x1c-\x1f, \x85    normalizza        NO
+    #     \ufeff (BOM)       NO                normalizza
+    #
+    # Il BOM e' il caso che conta di piu' qui dentro: e' un carattere portante
+    # del contratto CSV, e i due motori lo trattavano al contrario. Segnalato da
+    # Claude Fable 5 sulla PR #47, che ne aveva visto due su tre.
+    piano = SPAZI_UNIFORMI.sub(' ', testo).strip()
     citato = piano if len(piano) <= 60 else piano[:60] + '…'
     if not _NUMERO_ASCII.match(testo):
         if sum(testo.count(s) for s in '.,') > 1:

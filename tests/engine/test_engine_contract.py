@@ -206,6 +206,39 @@ def test_i_due_motori_producono_lo_STESSO_runParser(casi):
     )
 
 
+def test_l_ORACOLO_non_arriva_troncato(casi):
+    """L'output di node deve arrivare INTERO, e la soglia va superata davvero.
+
+    `engine_cases.mjs` chiudeva con `process.exit()`: su una pipe la scrittura di
+    stdout e' asincrona, e `exit()` scarta cio' che non e' ancora stato
+    scaricato. L'output arrivava troncato a **esattamente 65536 byte** e il
+    wrapper riceveva un JSON tagliato a meta'. Il difetto era latente finche' i
+    casi stavano sotto i 64 KiB: invisibile fino al giro in cui il payload
+    cresce, e allora il sintomo — `JSONDecodeError` su una riga qualunque — non
+    somiglia alla causa.
+
+    Questo test e' il filo teso: pretende che il payload SUPERI la soglia, cosi'
+    il caso resta esercitato. Se un giorno i casi dimagriscono sotto i 64 KiB,
+    questo test diventa rosso e chiede di ripensarlo invece di lasciare la
+    protezione a scadere in silenzio.
+    """
+    proc = subprocess.run(
+        [esigi_node(), str(CASI_JS)],
+        cwd=RADICE, capture_output=True, text=True, timeout=60,
+    )
+    grezzo = proc.stdout
+    # I BYTE VERI che node ha scritto, non il JSON ricompattato: il troncamento
+    # avviene sull'uscita, e misurare una rappresentazione diversa misurerebbe
+    # un'altra cosa. (Prima versione di questo test: `json.dumps(casi)`, che
+    # perde l'indentazione e stava sotto la soglia — il filo non toccava niente.)
+    assert len(grezzo.encode('utf-8')) > 65536, (
+        f'l\'oracolo scrive {len(grezzo.encode("utf-8"))} byte: sotto i 64 KiB la '
+        'protezione contro il troncamento di `process.exit()` non e\' piu\' '
+        'esercitata da nessun test'
+    )
+    json.loads(grezzo)  # e deve essere JSON INTERO, non tagliato a meta'
+
+
 def test_ci_sono_abbastanza_casi_di_confronto(casi):
     """Il guardiano non deve svuotarsi: se i casi di confronto sparissero, il test
     sopra passerebbe a vuoto. Qui si pretende che ce ne siano abbastanza."""
