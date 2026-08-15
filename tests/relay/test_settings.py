@@ -50,3 +50,46 @@ def test_senza_bot_configurato_niente_500(monkeypatch):
     corpo = main.impostazioni_pubbliche()
     assert corpo['bot_id'] is None
     assert corpo['bot_username'] == ''
+
+
+def test_una_PUBLIC_URL_vuota_vale_come_assente(monkeypatch):
+    """`os.getenv(chiave, default)` NON usa il default se la variabile esiste vuota.
+
+    Una `PUBLIC_URL` presente ma vuota (o di soli spazi) usciva come `base_url`
+    inservibile, e il flusso redirect di Telegram si rompeva senza errore.
+    Fail-first del finding di CodeRabbit sulla PR #50; la stessa espressione
+    viveva anche in `assicura_registrazione` — regola 2, corretta la classe con
+    la fonte unica `public_url()`.
+    """
+    for valore in ('', '   '):
+        monkeypatch.setenv('PUBLIC_URL', valore)
+        corpo = main.impostazioni_pubbliche()
+        assert corpo['base_url'].startswith('https://'), (
+            f'PUBLIC_URL={valore!r} e\' uscita come base_url {corpo["base_url"]!r}')
+    monkeypatch.setenv('PUBLIC_URL', 'https://esempio.invalid')
+    assert main.impostazioni_pubbliche()['base_url'] == 'https://esempio.invalid'
+
+
+def test_la_rotta_risponde_davvero_via_http(tmp_path):
+    """La rotta VERA, senza autenticazione: registrazione, serializzazione, 200.
+
+    I test qui sopra chiamano la funzione in processo — veloci, ma ciechi su
+    rotta e serializzazione (segnalato da CodeRabbit sulla PR #50). Questo
+    passa dal servizio in sottoprocesso e asserisce i byte della risposta.
+    """
+    import json as _json
+    import urllib.request
+
+    from tests.relay.test_login import AMBIENTE_DEL_SERVIZIO
+    from tests.relay.test_login import BOT_FINTO as BOT_DEL_SERVIZIO
+    from tests.servizio import relay_avviato
+
+    with relay_avviato(tmp_path, **AMBIENTE_DEL_SERVIZIO) as base:
+        with urllib.request.urlopen(f'{base}/api/settings', timeout=10) as r:  # noqa: S310
+            assert r.status == 200
+            grezzo = r.read().decode('utf-8')
+    corpo = _json.loads(grezzo)
+    assert corpo['bot_id'] == BOT_DEL_SERVIZIO.split(':', 1)[0]
+    assert BOT_DEL_SERVIZIO.split(':', 1)[1] not in grezzo, (
+        'il token del bot e\' uscito dalla rotta HTTP')
+    assert corpo['base_url'].startswith('http')

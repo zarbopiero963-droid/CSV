@@ -55,7 +55,10 @@ async function http(metodo, percorso, corpo) {
 // vada: un hash firmato che resta nella barra finirebbe nella cronologia e
 // in ogni copia-incolla dell'indirizzo.
 async function consumaRitornoTelegram() {
-  const pezzo = (location.hash.match(/tgAuthResult=([A-Za-z0-9_-]+)/) || [])[1];
+  // Il `=` nella classe: Telegram manda il valore senza padding, ma un valore
+  // paddato troncato al primo `=` diventerebbe «non leggibile» su un login
+  // valido. La catena replace+atob gestisce entrambe le forme (CodeRabbit, #50).
+  const pezzo = (location.hash.match(/tgAuthResult=([A-Za-z0-9_=-]+)/) || [])[1];
   if (!pezzo) return null;
   history.replaceState(null, '', location.pathname + location.search);
   let campi;
@@ -203,10 +206,12 @@ export function saveSampleMessage(slug, testo) {
 // questa risposta: si passa al chiamante e non si conserva.
 export async function generateToken() {
   const r = await http('POST', '/api/me/token');
-  if (stato.me) {
-    stato.me.token_prefix = r.token_prefix;
-    stato.me.slug = r.feed.replace(/^\/feed\//, '').replace(/\.csv$/, '');
-  }
+  // Lo stato nuovo (slug appena creato, prefisso) si RILEGGE da /api/me: e' il
+  // server la fonte, non un parsing del path `feed` — che accoppierebbe questo
+  // layer alla forma dell'URL e si romperebbe in silenzio al primo cambio
+  // (bloccante di Claude Fable 5 sulla PR #50). Se la rilettura fallisce, la
+  // cache resta com'era: il token appena coniato viene comunque consegnato.
+  try { stato.me = await http('GET', '/api/me'); } catch { /* cache invariata */ }
   return {
     token: r.token,
     url: location.origin + r.feed + '?token=' + encodeURIComponent(r.token),

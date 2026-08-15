@@ -51,12 +51,22 @@ def _sonda_di_sessione(testo):
     return '401' in testo and '/api/me' in testo
 
 
+def _errore_console(m):
+    if m.type != 'error':
+        return
+    # Stesso criterio del canale risorse, via `_sonda_di_sessione`: il testo di
+    # Chromium non porta l'URL, che sta in `location`. Un 401 su qualunque
+    # rotta che non sia la sonda resta un errore (CodeRabbit, PR #50).
+    if 'Failed to load resource' in m.text and '401' in m.text:
+        url = (m.location or {}).get('url', '')
+        if _sonda_di_sessione(f'401 {url}'):
+            return
+    errori.append(f'console.{m.type}: {m.text}')
+
+
 def _ascolta(pagina):
     pagina.on('pageerror', lambda e: errori.append(f'pageerror: {e}'))
-    pagina.on('console', lambda m: errori.append(f'console.{m.type}: {m.text}')
-              if m.type == 'error'
-              and not ('Failed to load resource' in m.text and '401' in m.text)
-              else None)
+    pagina.on('console', _errore_console)
     # Una risorsa mancante non e' un errore di console: si vede solo qui.
     pagina.on('response', lambda r: risorse.append(f'{r.status} {r.url}')
               if r.status >= 400 and not _sonda_di_sessione(f'{r.status} {r.url}')

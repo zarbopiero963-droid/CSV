@@ -80,7 +80,13 @@ function parseHash() {
   const parts = (location.hash || '#/').replace(/^#\/?/, '').split('/').filter(Boolean);
   if (!parts.length) return { name: 'overview' };
   if (parts[0] === 'parsers' && parts[1]) {
-    return { name: 'parser', id: decodeURIComponent(parts[1]), tab: parts[2] || 'config' };
+    // `decodeURIComponent` solleva URIError su una sequenza percento storta
+    // (es. `#/parsers/%`): senza la guardia l'errore scappava da render() e la
+    // pagina restava bianca. Un hash storto vale come slug inesistente: la
+    // vista risponde «Parser non trovato». Segnalato da CodeRabbit, PR #50.
+    let id = parts[1];
+    try { id = decodeURIComponent(parts[1]); } catch { /* hash storto: si usa il grezzo */ }
+    return { name: 'parser', id, tab: parts[2] || 'config' };
   }
   return { name: parts[0] };
 }
@@ -698,7 +704,7 @@ function viewFeed() {
       <div class="card stack">
         <strong class="small">URL del feed per XTrader</strong>
         ${api.hasToken() ? `
-          ${copyRow(api.feedUrl(), 'copy')}
+          <div class="mono small" style="word-break:break-all">${esc(api.feedUrl() || '')}</div>
           <p class="dim small" style="margin:0">
             Il token completo è visibile solo al momento della generazione: qui vedi soltanto
             il prefisso <span class="mono">${esc(u.token_prefix)}</span>. L'URL vero è quello

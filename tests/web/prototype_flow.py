@@ -16,7 +16,7 @@ Lo avvia `test_prototype_flow.py`, che tira su il relay con
     python tests/web/prototype_flow.py http://127.0.0.1:8099/app/ /tmp/shots
 """
 
-import csv, io, json, sys, pathlib, tempfile, urllib.error, urllib.request
+import base64, csv, io, json, sys, pathlib, tempfile, urllib.error, urllib.request
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 from playwright.sync_api import sync_playwright
 
@@ -36,16 +36,21 @@ def shot(page, name):
     page.screenshot(path=str(OUT / f'{name}.png'), full_page=True)
     print('shot', name)
 
+# Le SOLE rotte su cui un 401 e' atteso in questo flusso: la sonda di sessione
+# del boot senza cookie e i login volutamente sbagliati (password e Telegram).
+# Chromium li logga da se' come «Failed to load resource»: non sono errori
+# della pagina. Un 401 su QUALUNQUE altra rotta — e ogni altro codice — resta
+# un fallimento del test: un filtro sul solo codice l'avrebbe nascosto
+# (segnalato da CodeRabbit sulla PR #50).
+ROTTE_401_ATTESE = ('/api/me', '/api/login/password', '/api/login/telegram')
+
 def _console(m):
     if m.type != 'error':
         return
-    # I 401 sono ATTESI tre volte in questo flusso — la sonda di sessione del
-    # boot senza cookie, il login volutamente sbagliato, la verifica post-logout
-    # — e Chromium li logga da se' come «Failed to load resource». Non sono
-    # errori della pagina. Ogni ALTRO codice (404 di un asset, 500 del server)
-    # resta un fallimento del test.
     if 'Failed to load resource' in m.text and '401' in m.text:
-        return
+        url = (m.location or {}).get('url', '')
+        if any(url.split('?')[0].endswith(rotta) for rotta in ROTTE_401_ATTESE):
+            return
     errors.append(f'console.{m.type}: {m.text}')
 
 with sync_playwright() as pw:
@@ -54,6 +59,14 @@ with sync_playwright() as pw:
     pg.on('console', _console)
     pg.on('pageerror', lambda e: errors.append(f'pageerror: {e}'))
 
+    # Un hash storto (`%` non seguito da due esadecimali) non deve lasciare la
+    # pagina bianca: `decodeURIComponent` solleva URIError e, senza la guardia
+    # in parseHash, l'errore scappava da render(). Segnalato da CodeRabbit
+    # sulla PR #50: qui si pretende che la pagina si disegni comunque.
+    pg.goto(BASE + '#/parsers/%')
+    pg.wait_for_selector('#login-pass')
+
+    pg.goto('about:blank')
     pg.goto(BASE)
     pg.wait_for_selector('#login-pass')
     shot(pg, '01-login')
@@ -64,6 +77,36 @@ with sync_playwright() as pw:
     href = pg.get_attribute('a.tg-btn', 'href')
     assert href and href.startswith('https://oauth.telegram.org/auth?bot_id=123456789'), href
     assert 'AAFinto' not in href, 'il token del bot e\' finito nel link di login'
+
+    # Il ritorno da oauth.telegram.org e' base64url SENZA padding, e la lunghezza
+    # puo' avere resto 2 o resto 3 (il resto 1 non esiste in un base64 valido).
+    # Il decoder deve arrivare fino al SERVER — che rifiuta la firma finta con
+    # «login non valido» — e non fermarsi prima con «risposta di Telegram non
+    # leggibile». E' la misura chiesta da GPT-5.5 sulla PR #50: atob in Chromium
+    # e' un forgiving-base64 e accetta l'input non paddato, questo test lo
+    # inchioda contro una futura riscrittura del decoder.
+    def _tg_auth_result(resto):
+        campi = {'id': 1, 'auth_date': 1, 'hash': 'x'}
+        while True:
+            grezzo = json.dumps(campi, separators=(',', ':')).encode()
+            testo = base64.urlsafe_b64encode(grezzo).rstrip(b'=').decode()
+            if len(testo) % 4 == resto:
+                return testo
+            campi['hash'] += 'x'
+
+    for resto in (2, 3):
+        # Passaggio da about:blank: un goto che cambia solo il frammento e' una
+        # navigazione nello STESSO documento, il modulo non si ricarica e il
+        # boot — che e' cio' che si sta misurando — non girerebbe affatto.
+        pg.goto('about:blank')
+        pg.goto(BASE + '#tgAuthResult=' + _tg_auth_result(resto))
+        pg.wait_for_selector('#login-pass')
+        banner = pg.inner_text('.login')
+        assert 'login non valido' in banner, (
+            f'resto {resto}: atteso il rifiuto del SERVER, pagina: {banner[:200]!r}')
+        assert 'non leggibile' not in banner, (
+            f'resto {resto}: il decoder si e\' fermato prima del server')
+        assert 'tgAuthResult' not in pg.url, 'il frammento firmato e\' rimasto nell\'URL'
 
     # Password sbagliata: l'errore del server compare nella pagina, non in console.
     pg.fill('#login-user', UTENTE_PROVA)
@@ -248,11 +291,15 @@ with sync_playwright() as pw:
     assert url_feed.endswith('?token=' + token) and '/feed/' in url_feed, url_feed
     shot(pg, '14-token')
     pg.click('[data-act="after-token"]')
-    pg.wait_for_selector('.copy-row')
-    # la pagina ora mostra solo il PREFISSO, mai il token intero
+    pg.wait_for_selector('[data-act="ask-token"]')
+    # la pagina ora mostra solo il PREFISSO, mai il token intero — e l'URL
+    # mascherato NON ha un bottone Copia: copiato in XTrader darebbe 404 con
+    # la faccia di un guasto del servizio (CodeRabbit, PR #50)
     visibile = pg.inner_text('.main')
     assert token not in visibile, 'il token intero e\' rimasto visibile dopo il modale'
     assert token[:9] in visibile, 'il prefisso del token non compare'
+    assert pg.locator('.main .copy-row').count() == 0, (
+        'l\'URL mascherato offre un bottone Copia: incollato in XTrader da\' 404')
 
     # IL FEED VERO: l'URL appena coniato risponde 200 con la sola intestazione,
     # UTF-8 con BOM — sono i byte che leggera' XTrader.
