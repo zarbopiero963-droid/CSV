@@ -10,6 +10,7 @@
 // messaggio utile, invece di far fallire il caricamento del modulo.
 import * as E from '../../web/engine.js';
 
+
 const {
   COLUMNS, runParser, extractValue, matches,
   toCsv, headerOnlyCsv, suggestConfig, describeRule,
@@ -546,6 +547,25 @@ function casiConfronto() {
   });
   return confronti;
 }
+
+// La classe degli spazi vive in DUE file e non si puo' condividere: qui si
+// esporta, codepoint per codepoint, cosa normalizza il motore JS, e il gemello
+// Python confronta con la propria. Senza, una modifica a una sola delle due
+// copie resterebbe invisibile finche' un cliente non vede due motivi diversi.
+caso('motore: quali codepoint sono spazio per il motore JS', () => {
+  const codici = [0x20, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x1c, 0x1d, 0x1e, 0x1f,
+                  0x85, 0xa0, 0x1680, 0x2000, 0x2009, 0x200a, 0x2028, 0x2029,
+                  0x202f, 0x205f, 0x3000, 0x200b, 0xfeff, 0x41, 0x2d];
+  // Si misura il motore VERO attraverso `numericReason`, non una copia della
+  // classe tenuta qui: una copia misurerebbe se stessa, e la guardia sarebbe
+  // circolare. Il valore non e' numerico, quindi il motivo cita il valore
+  // normalizzato, ed e' li' che si legge se il carattere e' diventato spazio.
+  return codici.map(c => ({
+    codepoint: c,
+    spazio: (E.numericReason('Price', 'a' + String.fromCodePoint(c) + 'b') || '')
+      .includes('«a b»'),
+  }));
+});
 
 caso('motore: casi di confronto per il gemello Python', () => casiConfronto());
 

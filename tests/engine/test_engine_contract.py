@@ -206,6 +206,44 @@ def test_i_due_motori_producono_lo_STESSO_runParser(casi):
     )
 
 
+def test_le_due_classi_degli_SPAZI_coincidono(casi):
+    """La classe vive in due file e non si puo' condividere: qui si confronta.
+
+    `SPAZI_UNIFORMI` esiste in `main.py` e in `web/engine.js` perche' i default
+    dei due linguaggi divergono su tre gruppi — `\\x1c-\\x1f` e `\\x85` li
+    normalizza solo Python, `\\ufeff` solo JavaScript — e il BOM e' un carattere
+    portante del contratto CSV. Due copie corrette oggi sono due copie
+    divergenti domani (regola 3): il motore JS esporta, codepoint per codepoint,
+    cosa considera spazio, e qui si pretende che il gemello Python risponda
+    identico. Rischio segnalato da GPT-5.5 sulla PR #47.
+    """
+    import importlib
+    import sys
+    sys.path.insert(0, str(RADICE))
+    main = importlib.import_module('main')
+
+    esportato = next((c for c in casi if 'codepoint sono spazio' in c['nome']), None)
+    assert esportato and esportato['ok'], 'il caso JS sugli spazi non e\' passato'
+    assert len(esportato['dettaglio']) >= 20, 'troppo pochi codepoint per essere una guardia'
+
+    divergenti = []
+    for voce in esportato['dettaglio']:
+        carattere = chr(voce['codepoint'])
+        # Anche il lato Python passa dalla funzione VERA, non dalla costante: e'
+        # il motivo mostrato all'utente che deve coincidere, non due regex che
+        # si somigliano.
+        py = '«a b»' in (main.motivo_valore_numerico('Price', f'a{carattere}b') or '')
+        if py != voce['spazio']:
+            divergenti.append(
+                f'U+{voce["codepoint"]:04X}: JS={voce["spazio"]} Python={py}')
+
+    assert not divergenti, (
+        'le due classi degli spazi non coincidono, e i due motori citerebbero '
+        'valori diversi nello stesso motivo:\n'
+        + '\n'.join(f'  - {r}' for r in divergenti)
+    )
+
+
 def test_l_ORACOLO_non_arriva_troncato(casi):
     """L'output di node deve arrivare INTERO, e la soglia va superata davvero.
 
