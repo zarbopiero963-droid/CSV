@@ -413,3 +413,49 @@ def test_il_log_dello_scarto_punta_al_parser_GIUSTO(tmp_path, monkeypatch):
     assert scarti, f'nessuna riga di scarto: {righe}'
     assert all(r[0] == 9101 for r in scarti), (
         f'il motivo e\' attribuito al parser sbagliato: {scarti}')
+
+
+def test_lo_scarto_del_PRIMO_parser_resta_attribuito_a_lui(tmp_path, monkeypatch):
+    """L'ordine inverso del test precedente: il motivo viene dal PRIMO parser.
+
+    Suggerito da GPT-5.5 sulla PR #47, ed e' la guardia che impedisce alla
+    correzione dell'attribuzione di degenerare in «punta sempre all'ultimo».
+    """
+    import asyncio
+    import json
+    import sqlite3
+
+    from tests.dati import relay_in_processo
+    from tests.relay.test_webhook import BOT_FINTO, CHAT, RichiestaFinta
+
+    percorso = relay_in_processo(monkeypatch, tmp_path / 'primo.db', chat_ids=CHAT)
+    monkeypatch.setattr(main, 'SEGRETO_WEBHOOK', main.webhook_secret(BOT_FINTO))
+    c = sqlite3.connect(percorso)
+    riga = c.execute('SELECT id, user_id FROM parsers WHERE name=?',
+                     (main.DEFAULT_PARSER,)).fetchone()
+    storico, utente = riga[0], riga[1]
+    # Il parser storico riconosce e viene scartato; il secondo non riconosce
+    # nemmeno il messaggio (condizione che non combacia), quindi non ha motivi.
+    c.execute('UPDATE parsers SET config_json=? WHERE name=?',
+              (json.dumps(_config(Points='1.000.000')), main.DEFAULT_PARSER))
+    c.execute('INSERT INTO parsers(name, header, user_id, slug, ordine, config_json, id)'
+              " VALUES ('u-muto','H',?,?,9,?,9201)",
+              (utente, 'muto', json.dumps({
+                  'match': {'type': 'contains', 'value': 'NON-COMBACIA-MAI'},
+                  'columns': {}})))
+    c.execute('INSERT INTO parser_chats(parser_id, chat_id)'
+              ' SELECT 9201, id FROM chats WHERE telegram_chat_id=?', (CHAT,))
+    c.commit()
+    c.close()
+
+    payload = {'message': {'chat': {'id': int(CHAT)}, 'text': MESSAGGIO}}
+    asyncio.run(main.telegram_webhook(RichiestaFinta(
+        {'X-Telegram-Bot-Api-Secret-Token': main.webhook_secret(BOT_FINTO)}, payload)))
+
+    c = sqlite3.connect(percorso)
+    scarti = [r for r in c.execute('SELECT parser_id, esito FROM message_logs').fetchall()
+              if 'scartato' in (r[1] or '')]
+    c.close()
+    assert scarti, 'nessuna riga di scarto'
+    assert all(r[0] == storico for r in scarti), (
+        f'il motivo del primo parser e\' attribuito a un altro: {scarti}')

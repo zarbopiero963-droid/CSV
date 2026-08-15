@@ -2071,7 +2071,11 @@ def motivo_valore_numerico(colonna, valore):
     # UI, e un'estrazione sbagliata puo' portarsi dietro una riga intera — il
     # caso dell'infinito ne cita 400 cifre. Il taglio e' identico in JS, o i due
     # motori tornerebbero a scrivere motivi diversi. Rischio segnalato da GPT-5.5.
-    citato = testo if len(testo) <= 60 else testo[:60] + '…'
+    # Gli a capo e i caratteri di controllo diventano spazi PRIMA del taglio: il
+    # valore estratto puo' contenere una riga intera, e un motivo multilinea
+    # spezzerebbe la riga di log e la tabella della UI. Segnalato da GPT-5.5.
+    piano = ' '.join(testo.split())
+    citato = piano if len(piano) <= 60 else piano[:60] + '…'
     if not _NUMERO_ASCII.match(testo):
         if sum(testo.count(s) for s in '.,') > 1:
             return (f'{colonna}: «{citato}» non e\' un numero. Probabile causa: il '

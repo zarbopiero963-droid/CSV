@@ -522,6 +522,13 @@ function casiConfronto() {
     MSG, conNumeri('Price', 1e21));
   aggiungi('guardie: valore lunghissimo → citato TAGLIATO uguale nei due motori',
     MSG, conNumeri('Points', '9'.repeat(400)));
+  aggiungi('guardie: valore multilinea → citato SENZA a capo, uguale nei due motori',
+    MSG, conNumeri('Price', 'prima riga\nseconda\triga\n\nterza'));
+  // Emoji astrali oltre il 60esimo carattere: `slice` di JS conta unita' UTF-16 e
+  // spezzerebbe la coppia surrogata, lo slice di Python conta codepoint. Il caso
+  // vincola che i due motori citino la STESSA stringa.
+  aggiungi('guardie: emoji astrali al confine del taglio → stesso citato',
+    MSG, conNumeri('Price', 'x'.repeat(55) + '\u{1F19A}\u{1F19A}\u{1F19A}\u{1F19A}\u{1F19A}'));
   aggiungi('guardie: sole costanti sulle obbligatorie → nessuna riga', 'ciao a tutti', {
     match: { type: 'contains', value: 'a' },
     columns: { ...soloEmpty,

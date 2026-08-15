@@ -172,7 +172,16 @@ export function numericReason(column, value) {
   if (!text) return null;
   // Il taglio e' identico a quello di main.py: il valore citato finisce nel log
   // e nella UI, e un'estrazione sbagliata puo' portarsi dietro una riga intera.
-  const citato = text.length <= 60 ? text : text.slice(0, 60) + '…';
+  // Gli a capo e i caratteri di controllo diventano spazi PRIMA del taglio, come
+  // in main.py: un motivo multilinea spezzerebbe la riga di log e la tabella.
+  const piano = text.split(/\s+/).filter(Boolean).join(' ');
+  // `cutByCodePoint`, non `slice`: `slice` conta unita' UTF-16 e spezzerebbe un
+  // emoji a meta' lasciando un surrogato spaiato, mentre lo slice di Python
+  // conta codepoint — i due motori citerebbero stringhe diverse, cioe' la
+  // divergenza che queste guardie esistono per chiudere. E' la stessa ragione
+  // per cui questa funzione esiste per le ancore delle regole: la classe era
+  // gia' nota, il sito no. Segnalato da Claude Fable 5 sulla PR #47.
+  const citato = [...piano].length <= 60 ? piano : cutByCodePoint(piano, 60) + '…';
   if (!ASCII_NUMBER.test(text)) {
     const separators = (text.match(/[.,]/g) || []).length;
     if (separators > 1) {
