@@ -166,8 +166,14 @@ const DECIMAL_SEPARATOR = DECIMAL_SEPARATORS[FEED_LANG];
 // La forma che un campo numerico NON vuoto deve avere nel feed: la grammatica
 // della guardia (`ASCII_NUMBER`) col SOLO separatore localizzato. Un punto qui
 // e' una localizzazione mancata, e in contesto italiano `"1.85"` rischia la
-// lettura come migliaia. Gemella di `_NUMERO_FEED` in main.py.
-const FEED_NUMBER = /^[+-]?(?:[0-9]+(?:,[0-9]*)?|,[0-9]+)$/;
+// lettura come migliaia. DERIVATA dal separatore, non ricopiata: quando
+// Betting Toolkit aggiungera' una lingua, verificatore e confine di scrittura
+// non potranno divergere (suggerito da GPT-5.5, PR #48). Il separatore odierno
+// e' la virgola: nella classe regex non richiede escape, ma si escapa comunque
+// per non lasciare una trappola alla lingua col punto. Gemella di
+// `_NUMERO_FEED` in main.py.
+const SEP_RE = DECIMAL_SEPARATOR.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const FEED_NUMBER = new RegExp('^[+-]?(?:[0-9]+(?:' + SEP_RE + '[0-9]*)?|' + SEP_RE + '[0-9]+)$');
 
 // `[0-9]` e non `\d`: in JavaScript `\d` e' gia' solo ASCII, ma la riga gemella in
 // Python con `\d` accetterebbe le cifre arabo-indiane — scritto per esteso in

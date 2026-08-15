@@ -2087,8 +2087,13 @@ SEPARATORE_DECIMALE = SEPARATORI_DECIMALI[LINGUA_FEED]
 # grammatica della guardia (`_NUMERO_ASCII`), col SOLO separatore localizzato.
 # Un punto qui dentro e' una localizzazione mancata, e in contesto italiano
 # `"1.85"` rischia la lettura come migliaia: quota 185, dentro i tetti della
-# #39, invisibile a ogni guardia a valle. Gemella di `FEED_NUMBER` in JS.
-_NUMERO_FEED = re.compile(r'^[+-]?(?:[0-9]+(?:,[0-9]*)?|,[0-9]+)$')
+# #39, invisibile a ogni guardia a valle. DERIVATA dal separatore, non
+# ricopiata: quando Betting Toolkit aggiungera' una lingua, verificatore e
+# confine di scrittura non potranno divergere (suggerito da GPT-5.5 sulla
+# PR #48). Gemella di `FEED_NUMBER` in JS.
+_NUMERO_FEED = re.compile(
+    r'^[+-]?(?:[0-9]+(?:%(s)s[0-9]*)?|%(s)s[0-9]+)$'
+    % {'s': re.escape(SEPARATORE_DECIMALE)})
 
 
 def motivo_valore_numerico(colonna, valore):
