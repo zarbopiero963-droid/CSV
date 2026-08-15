@@ -242,3 +242,41 @@ def test_la_riconciliazione_non_tocca_i_link_che_il_profilo_non_ha_creato(
     assert ('Parser_Extra', CHAT) in link, (
         f'il salvataggio del profilo ha distrutto un link non suo: {link}')
     assert (main.DEFAULT_PARSER, CHAT) in link
+
+
+def test_salvare_un_profilo_non_stacca_il_link_di_un_ALTRO_utente(tmp_path, monkeypatch):
+    """L'attach filtra per proprietario, il detach deve filtrare uguale.
+
+    Segnalato da Claude Fable 5 sulla PR #46 come asimmetria fra
+    `_attacca_link_del_profilo` (che collega solo se il parser e' dell'utente del
+    profilo) e `_stacca_link_del_profilo` (che cancellava per NOME). Il
+    meccanismo che la review nominava — due parser omonimi di utenti diversi —
+    non e' possibile, perche' `parsers.name` e' PRIMARY KEY **globale** (test
+    `test_parsers_name_e_ancora_una_chiave_GLOBALE`). La conclusione pero' vale
+    per un'altra via, ed e' questa: due profili possono NOMINARE lo stesso
+    parser, e il non-proprietario, salvando il proprio profilo, staccava il link
+    che il proprietario aveva legittimamente — il parser altrui smetteva di
+    girare su quella chat, in silenzio.
+    """
+    percorso = _relay(tmp_path, monkeypatch, 'altrui.db', chat_ids=CHAT)
+    # Il profilo PIERO possiede il parser e lo collega alla chat.
+    _salva_profilo(main.PIERO_PROFILE, CHAT, main.DEFAULT_PARSER)
+    assert (main.DEFAULT_PARSER, CHAT) in _link(percorso)
+
+    # Un SECONDO profilo, di un altro utente, che nomina lo STESSO parser (che
+    # non e' suo) sulla stessa chat: l'attach lo salta, e il fallback lo serve.
+    c = sqlite3.connect(percorso)
+    c.execute("INSERT INTO users(origin_profile, slug, first_name, status)"
+              " VALUES ('ALTRO','altro','ALTRO','attivo')")
+    c.commit()
+    c.close()
+    _salva_profilo('ALTRO', CHAT, main.DEFAULT_PARSER)
+    assert (main.DEFAULT_PARSER, CHAT) in _link(percorso), (
+        'il salvataggio del profilo di un ALTRO utente ha staccato il link del '
+        'proprietario: il suo parser non gira piu\' su quella chat')
+
+    # E nemmeno eliminando quel profilo: non erano suoi da togliere.
+    main.delete_profile('ALTRO', TOKEN_DI_PROVA)
+    assert (main.DEFAULT_PARSER, CHAT) in _link(percorso), (
+        'eliminare il profilo di un ALTRO utente ha portato via il link del '
+        'proprietario')

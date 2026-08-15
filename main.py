@@ -908,7 +908,7 @@ def _riga_chat(c, chat):
     return riga[0] if riga else None
 
 
-def _stacca_link_del_profilo(c, chat_ids, parser_nome):
+def _stacca_link_del_profilo(c, nome, chat_ids, parser_nome):
     """Toglie i link fra il parser NOMINATO da un profilo e le chat elencate.
 
     Toglie **solo** quella coppia, mai «tutti i link di quelle chat»: sulla
@@ -916,13 +916,26 @@ def _stacca_link_del_profilo(c, chat_ids, parser_nome):
     (dispatch multi-parser, PR #44) e quelli degli altri profili. Una pulizia
     per chat li porterebbe via tutti, e il sintomo sarebbe un parser che smette
     di girare perche' qualcun altro ha salvato il proprio profilo.
+
+    **Il filtro sul proprietario e' lo stesso di `_attacca_link_del_profilo`**,
+    e l'asimmetria era un difetto: due profili possono NOMINARE lo stesso
+    parser, l'attach salta quello del non-proprietario (isolamento), ma il
+    detach cancellava per nome e portava via il link che il proprietario aveva
+    legittimamente — il suo parser smetteva di girare su quella chat, in
+    silenzio. Segnalato da Claude Fable 5 sulla PR #46. (Il meccanismo che la
+    review nominava — parser omonimi di utenti diversi — non esiste:
+    `parsers.name` e' PRIMARY KEY globale. La conclusione valeva lo stesso.)
+
+    Si disfa quindi **esattamente** cio' che l'attach potrebbe aver fatto.
     """
     for chat in _chat_della_stringa(chat_ids):
         cid = _riga_chat(c, chat)
         if cid is None:
             continue
         c.execute('DELETE FROM parser_chats WHERE chat_id=? AND parser_id IN'
-                  ' (SELECT id FROM parsers WHERE name=?)', (cid, parser_nome))
+                  ' (SELECT p.id FROM parsers p JOIN users u ON u.id = p.user_id'
+                  '  WHERE p.name=? AND u.origin_profile=?)',
+                  (cid, parser_nome, nome))
 
 
 def _attacca_link_del_profilo(c, nome, chat_ids, parser_nome):
@@ -977,7 +990,7 @@ def _riconcilia_link_del_profilo(c, nome, chat_ids, parser_nome, prima=None):
     scrittura del profilo stanno nella stessa transazione.
     """
     if prima is not None:
-        _stacca_link_del_profilo(c, prima[0], prima[1])
+        _stacca_link_del_profilo(c, nome, prima[0], prima[1])
     _attacca_link_del_profilo(c, nome, chat_ids, parser_nome)
 
 
@@ -3733,7 +3746,7 @@ def delete_profile(name: str, x_admin_token: str | None = Header(None)):
         riga = c.execute('SELECT chat_ids, parser FROM profiles WHERE name=?',
                          (name,)).fetchone()
         if riga:
-            _stacca_link_del_profilo(c, riga[0], riga[1])
+            _stacca_link_del_profilo(c, name, riga[0], riga[1])
         c.execute('DELETE FROM profiles WHERE name=?', (name,))
         c.execute('DELETE FROM signals WHERE profile=?', (name,))
         c.commit()

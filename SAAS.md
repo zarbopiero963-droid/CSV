@@ -507,6 +507,12 @@ Si tocca sempre e solo la coppia (parser del profilo, sue chat): i link degli
 sopravvivono a qualunque salvataggio di profilo. Una chat già esistente **non
 cambia proprietario**: appartiene a chi l'ha rivendicata per primo.
 
+E il distacco porta lo **stesso filtro sul proprietario** dell'aggancio: due
+profili possono nominare lo stesso parser, e il profilo del non-proprietario —
+che l'aggancio salta per isolamento — non deve poter staccare il link che il
+proprietario ha legittimamente. Il detach disfa esattamente ciò che l'attach
+potrebbe aver fatto, mai di più (bloccante di Claude Fable 5 sulla PR #46).
+
 `message_logs` e `webhook_seen` — entrambe tabelle finora **morte** — ricevono le
 prime scritture, e la pulizia oltre i **7 giorni** viaggia con la scrittura
 stessa, non con un timer.
