@@ -305,3 +305,36 @@ def test_le_QUATTRO_obbligatorie_in_Python_sono_verbatim():
     # Provider e Price NON sono obbligatorie: pretenderle bloccherebbe segnali validi.
     assert 'Provider' not in main.COLONNE_OBBLIGATORIE
     assert 'Price' not in main.COLONNE_OBBLIGATORIE
+
+
+def test_le_costanti_JSON_arrivano_nel_CSV_come_in_anteprima(casi):
+    """La riga del feed e quella dell'anteprima devono avere gli STESSI byte.
+
+    La guardia numerica valida il testo canonico (`_testo_canonico`, forma di
+    `String()`), ma `make_csv` serializzava il valore Python originale: una
+    costante JSON `0.000001` passava la guardia e usciva `1e-06` nel feed
+    mentre l'anteprima mostrava `0.000001` — e un booleano usciva `True`
+    contro `true`. XTrader legge il feed, il cliente giudica l'anteprima:
+    devono coincidere byte per byte. [REAL_FINDING] di GPT-5.6 Sol al gate
+    finale della PR #47.
+    """
+    import importlib
+    import json
+    import sys
+    sys.path.insert(0, str(RADICE))
+    main = importlib.import_module('main')
+
+    esportato = next((c for c in casi
+                      if 'costanti JSON non stringa nel CSV' in c['nome']), None)
+    assert esportato and esportato['ok'], (
+        'il caso JS delle costanti non e\' passato: '
+        + str(esportato and esportato.get('errore')))
+    dal_js = esportato['dettaglio']
+
+    parsed, motivi = main.esito_messaggio(
+        dal_js['message'], {'config_json': json.dumps(dal_js['config'])})
+    assert parsed, f'il relay non ha prodotto la riga: {motivi}'
+    assert parsed['csv'] == dal_js['csv'], (
+        'la riga del feed diverge dall\'anteprima:\n'
+        f'  JS     : {dal_js["csv"]!r}\n'
+        f'  Python : {parsed["csv"]!r}')

@@ -612,6 +612,27 @@ caso('motore: quali codepoint sono spazio per il motore JS', () => {
   }));
 });
 
+// La guardia numerica validava il testo CANONICO, ma il CSV del relay
+// serializzava il valore Python originale: `Points=0.000001` (JSON) passava
+// la guardia e usciva `1e-06` nel feed e `0.000001` nell'anteprima — e un
+// booleano usciva `True` contro `true`. Qui si esporta il CSV che scrive il
+// motore JS e il gemello Python deve produrre gli STESSI byte dalla stessa
+// config. [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #47.
+caso('csv: costanti JSON non stringa nel CSV, come le scrive String()', () => {
+  const columns = {}; for (const c of COLUMNS) columns[c] = { source: 'empty' };
+  columns.EventName = { source: 'line', contains: 'P.Bet.' };
+  columns.MarketType = { source: 'constant', value: 'OVER_UNDER_15' };
+  columns.SelectionName = { source: 'constant', value: 'Over' };
+  columns.BetType = { source: 'constant', value: 'PUNTA' };
+  columns.Points = { source: 'constant', value: 0.000001 };
+  columns.EventId = { source: 'constant', value: true };
+  const config = { match: { type: 'contains', value: 'P.Bet.' }, columns };
+  const message = 'P.Bet. Juventus - Palermo';
+  const r = runParser(message, config);
+  eq(r.complete, true, 'il caso deve produrre una riga');
+  return { config, message, csv: toCsv(r.row) };
+});
+
 caso('motore: casi di confronto per il gemello Python', () => casiConfronto());
 
 process.stdout.write(JSON.stringify(casi, null, 1));

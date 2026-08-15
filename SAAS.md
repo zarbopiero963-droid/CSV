@@ -476,7 +476,10 @@ JavaScript (`true`, `0.000001`, `1e-7`, `1e+21`): il ramo numerico di
 ECMAScript, perché `str()` di Python sceglie soglie e formato dell'esponenziale
 diversi e un `Points` numerico piccolo era valido nel browser e scartato in
 produzione. Vincolato dall'oracolo caso per caso. [REAL_FINDING] di GPT-5.6
-Sol, PR #47.
+Sol, PR #47. La stessa forma canonica finisce nella **riga CSV** — del feed
+(`esito_messaggio`) e dell'anteprima della prova: la guardia da' il verdetto su
+quel testo, e i byte che XTrader legge devono essere quelli che il cliente ha
+giudicato nell'anteprima (secondo [REAL_FINDING] dello stesso gate).
 
 Il confronto della riga e il taglio del marcatore ignorano entrambi maiuscole e
 minuscole. Le ancore vengono tagliate per **codepoint**, non per unità UTF-16:
@@ -485,8 +488,8 @@ un'ancora così non combacerebbe più con nessuna riga, in silenzio.
 
 `runParser` restituisce cinque campi: `matched` (la condizione combacia), `row`
 (le 14 colonne), `missing` (le colonne obbligatorie risultate vuote), `scarti` (i
-motivi per cui il messaggio non deve produrre riga, vedi «Guardie sui valori»
-sotto) e `complete`.
+motivi per cui il messaggio non deve produrre riga, vedi «Guardie sui valori
+estratti e sulla config» sopra) e `complete`.
 **Chi scrive il feed deve guardare `complete`, non `matched`:** un messaggio
 riconosciuto ma privo dell'evento produrrebbe una riga formalmente valida e priva
 di senso per XTrader. Le colonne obbligatorie sono in `REQUIRED_COLUMNS` e dal

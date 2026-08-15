@@ -560,3 +560,30 @@ def test_i_float_piccoli_non_cambiano_notazione():
     assert main._testo_canonico(123.456) == '123.456'
     assert main.motivo_valore_numerico('Points', 0.000001) is None, (
         'un moltiplicatore minuscolo ma legale e\' accettato in JS e scartato qui')
+
+
+def test_i_valori_non_finiti_seguono_la_conversione_di_JavaScript():
+    """`NaN`, `Infinity` e `-0.0`: il testo citato e' quello di `String()`.
+
+    Chiesto da CodeRabbit sulla PR #47: questi rami decidono il testo che
+    finisce nei motivi, cioe' la diagnosi che il cliente legge. `json.loads`
+    di Python accetta `NaN`/`Infinity` per default, quindi non sono
+    irraggiungibili da una config.
+    """
+    import math
+    assert main._numero_stile_js(float('nan')) == 'NaN'
+    assert main._numero_stile_js(math.inf) == 'Infinity'
+    assert main._numero_stile_js(-math.inf) == '-Infinity'
+    assert main._numero_stile_js(-0.0) == '0'
+
+
+def test_un_intero_JSON_oltre_il_double_diventa_Infinity():
+    """`float()` di un intero enorme solleva `OverflowError`; JS legge Infinity.
+
+    JavaScript non ha interi: un numero JSON oltre il massimo double diventa
+    `Infinity` gia' nel parse, e `_testo_canonico` deve arrivare allo stesso
+    testo — che poi la guardia scarta come non finito, in entrambi i motori.
+    """
+    assert main._testo_canonico(10 ** 400) == 'Infinity'
+    assert main._testo_canonico(-(10 ** 400)) == '-Infinity'
+    assert main.motivo_valore_numerico('Points', 10 ** 400) is not None

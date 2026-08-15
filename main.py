@@ -2115,7 +2115,7 @@ def motivo_valore_numerico(colonna, valore):
     piano = _piatto(testo)
     if not piano:
         return None
-    citato = piano if len(piano) <= 60 else piano[:60] + '…'
+    citato = piano if len(piano) <= 60 else _taglia_codepoint(piano, 60) + '…'
     if not _NUMERO_ASCII.match(piano):
         if sum(piano.count(s) for s in '.,') > 1:
             return (f'{colonna}: «{citato}» non e\' un numero. Probabile causa: il '
@@ -2555,11 +2555,16 @@ def esito_messaggio(message, cfg):
         if not risultato['complete']:
             return None, list(risultato.get('scarti') or [])
         # `esegui_parser` puo' lasciare valori non-stringa nella riga (una costante
-        # JSON `0`/`False`): il feed li serializza via `make_csv`, che quota tutto.
-        # `None` → '' per non scrivere la stringa "None" nel CSV.
-        row = ['' if v is None else v for v in risultato['row']]
+        # JSON `0`/`False`): nel CSV vanno nella forma CANONICA (`_testo_canonico`,
+        # cioe' come li scrive `String()` in `toCsv`), non con `str()` di Python —
+        # una costante `0.000001` usciva `1e-06` nel feed e `0.000001`
+        # nell'anteprima, un booleano `True` contro `true`: XTrader legge il
+        # feed, il cliente giudica l'anteprima, e i byte devono coincidere.
+        # E' anche il testo su cui la guardia numerica ha dato il verdetto.
+        # [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #47.
+        row = [_testo_canonico(v) for v in risultato['row']]
         csv_riga = make_csv(row)
-        evento = str(row[HEADERS.index('EventName')])
+        evento = row[HEADERS.index('EventName')]
     except Exception:  # noqa: BLE001 - fail-safe deliberato, vedi commento sopra
         logging.getLogger('xtrader.relay').warning(
             'config parser non elaborabile: nessun segnale prodotto')
@@ -4522,8 +4527,10 @@ async def prova_parser_mio(slug: str, request: Request):
     corpo = {'matched': risultato['matched'], 'missing': risultato['missing'],
              'scarti': risultato.get('scarti') or [], 'complete': risultato['complete']}
     if risultato['complete']:
-        row = ['' if v is None else v for v in risultato['row']]
-        corpo['event'] = str(row[HEADERS.index('EventName')])
+        # `_testo_canonico` come nel webhook (`esito_messaggio`): l'anteprima
+        # della prova deve mostrare gli STESSI byte che uscirebbero nel feed.
+        row = [_testo_canonico(v) for v in risultato['row']]
+        corpo['event'] = row[HEADERS.index('EventName')]
         corpo['csv'] = make_csv(row)
     return _rispondi_con_sessione(utente['id'], utente['versione'], corpo)
 
@@ -4786,7 +4793,7 @@ def _elabora_per_utente(c, chat_riga_id, utente_id, righe, text):
         cfg = dict(zip(['name', 'header', 'market_name', 'market_type',
                         'selection_name', 'handicap', 'bet_type',
                         'config_json'], (r[1], r[2], r[3], r[4], r[5],
-                                         r[6], r[7], r[8])))
+                                         r[6], r[7], r[8]), strict=True))
         parsed, scarti = esito_messaggio(text, cfg)
         if parsed:
             riconosciuti.append((r, parsed))
