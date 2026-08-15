@@ -50,8 +50,9 @@ Le emoji stanno IN ENTRATA, non in uscita. I marcatori dei parser (🆚, ⏰, �
 riconoscere il messaggio e a dire DOVE leggere il dato: il valore estratto e' il testo
 DOPO il marcatore, mai il marcatore. E' la ragione per cui il parser di riferimento usa
 "testo dopo 🆚" e non "riga intera": una regola che prende la riga intera si porta
-l'emoji dentro EventName, il feed esce formalmente valido -- 14 colonne, virgolette,
-CRLF, BOM -- e XTrader lo scarta in silenzio.
+l'emoji dentro EventName. Prima della #42 quel feed usciva formalmente valido -- 14
+colonne, virgolette, CRLF, BOM -- e XTrader lo scartava in silenzio; oggi la guardia
+lo ferma a monte, col motivo che dice di estrarre il testo dopo il marcatore.
 
 INTERVALLO DI RICARICA DELLA FONTE
 XTrader consente di impostare l'intervallo da 1 secondo in su. Il TTL del feed e' 90

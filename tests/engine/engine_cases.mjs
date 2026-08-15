@@ -629,6 +629,11 @@ function casiConfronto() {
     MSG, conNumeri('SelectionName', 'Over \u2705 1,5'));
   aggiungi('emoji: orologio e stella -> stessa classe nei due motori',
     MSG, conNumeri('MarketName', 'ore \u23F0 20:45 \u2B50'));
+  // Emoji in una colonna NUMERICA: scatta la guardia numerica («non un
+  // numero»), NON quella emoji — il contratto della delega, chiesto da
+  // Sourcery sulla PR #49, vincolato dal confronto dei motivi fra i motori.
+  aggiungi('emoji: dentro una colonna numerica decide la guardia NUMERICA',
+    MSG, conNumeri('Handicap', '-1.5\u{1F4A9}'));
   aggiungi('emoji: nomi con accenti, virgole e v -> NESSUNO scarto',
     MSG, conNumeri('MarketName', 'Citta\u0300 "A", U\u0308ber v Lo\u0301v'));
   aggiungi('guardie: sole costanti sulle obbligatorie → nessuna riga', 'ciao a tutti', {

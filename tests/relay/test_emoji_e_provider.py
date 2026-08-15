@@ -146,3 +146,18 @@ def test_il_feed_legacy_di_PIERO_resta_scrivibile():
         'P.Bet. PREMACHT 0,5HT\n\U0001F19A Juve v Milan\n@ 1.85', cfg)
     assert parsed is not None
     main.verify_csv(parsed['csv'])
+
+
+def test_l_emoji_in_una_colonna_numerica_e_affare_della_guardia_numerica():
+    """Il contratto della delega (chiesto da Sourcery sulla PR #49).
+
+    Le colonne numeriche sono ESCLUSE dalla guardia emoji perche' li' un'emoji
+    e' gia' «non un numero», col motivo giusto per la diagnosi. Questo test
+    inchioda la delega: se un refactor la rompesse, il motivo cambierebbe.
+    """
+    r = main.esegui_parser(MESSAGGIO, _config(Handicap='-1.5\U0001F4A9'))
+    assert r['complete'] is False
+    motivi = ' | '.join(r['scarti'])
+    assert 'Handicap' in motivi and 'numero' in motivi, motivi
+    assert 'emoji' not in motivi.lower(), (
+        f'la guardia emoji ha parlato al posto di quella numerica: {motivi!r}')
