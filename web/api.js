@@ -156,6 +156,36 @@ export function botAccessoUrl() {
   return 'https://t.me/' + s.bot_username + '?start=accesso';
 }
 
+/* ----------------------------------------------------------- pannello admin */
+
+// Le rotte del pannello (#7, PR 10). Rispondono 404 — non 403 — a chi non e'
+// l'amministratore: dall'esterno il pannello non esiste. Le viste le chiamano
+// solo quando `me().admin` e' vero, quindi un 404 qui e' un guasto, non un
+// percorso previsto.
+
+export async function adminRequests() {
+  const r = await http('GET', '/api/admin/requests');
+  return r.richieste;
+}
+
+// L'approvazione porta i giorni scritti dall'amministratore (campo libero) e
+// la risposta dice ANCHE se l'avviso Telegram e' partito: `notificato: false`
+// col motivo non va mai ingoiato — e' la trappola 1 della Issue #7.
+export function adminApprove(richiesta, giorni) {
+  return http('POST', `/api/admin/requests/${encodeURIComponent(richiesta)}/approva`,
+              { giorni });
+}
+
+export function adminReject(richiesta) {
+  return http('POST', `/api/admin/requests/${encodeURIComponent(richiesta)}/rifiuta`);
+}
+
+// Il giro dei promemoria di scadenza: non c'e' uno scheduler, il giro parte
+// quando l'amministratore lo chiama. Risposta: {avvisati: [...], falliti: [...]}.
+export function adminReminder() {
+  return http('POST', '/api/admin/promemoria');
+}
+
 /* ----------------------------------------------------------------- parser */
 
 // La lista va sempre al server: e' il modo in cui un secondo dispositivo
