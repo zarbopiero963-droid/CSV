@@ -1535,7 +1535,7 @@ senza doppio ruolo.
 | Fatto | **Rimozione del seme** (PR 4 del piano sincronizzato in #2, #25 lavoro E): `migra()` non ricrea piu' `Parser_Telegram_XTrader_v1` ne' il profilo `PIERO` a ogni avvio — cancellare e' durevole, rinominare non lascia doppioni, un database vergine nasce vuoto. Il travaso dei link `parser_chats` gira **una volta sola** (tabella `migrazioni`) e da li' in avanti i link seguono le scritture dei profili. `TELEGRAM_ALLOWED_CHAT_IDS` e' pensionata. Test in `tests/relay/test_rimozione_seme.py` |
 | Fatto | **Accesso su approvazione** (PR 7), lato server: `stato_effettivo` / `giorni_rimasti` / `nuova_scadenza` come fonte unica, la richiesta del cliente col deep link del bot, la decisione del proprietario con i giorni liberi e l'errore di invio **non ingoiato**, il promemoria a 5 giorni una volta per scadenza, e gli effetti della scadenza su feed e webhook. Il **token non viene revocato** alla scadenza |
 | Fatto | **Aggancio web app → backend** (PR 8 del piano sincronizzato in #2, #32 · 3.3a): `web/api.js` parla col relay via `fetch` (login a password, login Telegram in modalità redirect di oauth.telegram.org costruito col `bot_id` di `GET /api/settings`, CRUD parser, prova sul server con gli `scarti`, token del feed a livello utente), il vecchio layer a `localStorage` vive in `web/api_finta.js` per la sola copia dimostrativa a file unico. Test browser end-to-end in `tests/web/` |
-| Fatto | **Schermate dell'accesso su approvazione** (PR 9, #7 lato cliente): il gate sugli stati in `render()`, le quattro schermate (registrato/in_attesa/scaduto/sospeso) con «Richiedi accesso» sul `POST` vero e il deep link del bot, la pillola gialla sotto i 5 giorni. Test browser con utenti seminati e cookie firmati in `tests/web/test_schermate_accesso.py` |
+| Fatto | **Schermate dell'accesso su approvazione** (PR 9, #7 lato cliente): il gate sugli stati in `render()`, le quattro schermate (registrato/in_attesa/scaduto/sospeso) con «Richiedi accesso» sul `POST` vero e il deep link del bot, la pillola gialla con 5 giorni o meno. Test browser con utenti seminati e cookie firmati in `tests/web/test_schermate_accesso.py` |
 | M3 | Il pannello admin (`Richieste`, giorni liberi, «Attiva», «Entra come»): backend già in PR 7, viste con la PR 10 |
 | M4 | Log persistenti, sospensione, suggerimento AI lato server, abbonamenti |
 
@@ -1630,9 +1630,10 @@ Senza bot configurato il link non compare e resta la frase d'attesa.
 Un 409 su «Richiedi» (doppio clic, richiesta già in corso) non è un errore da
 mostrare: la pagina si ricarica e la vista giusta si disegna da sola.
 
-Nella **dashboard** di un attivo, sotto i **5 giorni** rimasti la pillola dello
-stato diventa **gialla**: «attivo, N giorni rimasti — pensa al rinnovo». È la
-soglia del promemoria Telegram, e i due avvisi devono raccontare la stessa storia.
+Nella **dashboard** di un attivo, quando restano **5 giorni o meno** la pillola
+dello stato diventa **gialla**: «attivo, N giorni rimasti — pensa al rinnovo».
+La soglia è inclusiva (`giorni_rimasti <= 5`), la stessa del promemoria
+Telegram: i due avvisi devono raccontare la stessa storia.
 
 ### Struttura
 

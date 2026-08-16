@@ -79,7 +79,10 @@ def test_le_schermate_degli_stati_di_accesso(tmp_path, monkeypatch):
                 ('InAttesa', 'in_attesa', None, 'in_attesa'),
                 ('Scaduto', 'attivo', adesso - GIORNO, 'scaduto'),
                 ('Sospeso', 'sospeso', None, 'sospeso'),
-                ('QuasiScaduto', 'attivo', adesso + 3 * GIORNO, 'dashboard_gialla')):
+                ('QuasiScaduto', 'attivo', adesso + 3 * GIORNO, 'dashboard_gialla'),
+                # il bordo ESATTO della soglia: 5 giorni sono inclusi
+                # (giorni_rimasti <= 5), chiesto da CodeRabbit sulla PR #52
+                ('CinqueGiorni', 'attivo', adesso + 5 * GIORNO, 'dashboard_gialla')):
             utente = _semina_utente(percorso_db, nome, status, scadenza)
             casi.append({'nome': nome.lower(),
                          'cookie': main.firma_sessione(utente, 1),

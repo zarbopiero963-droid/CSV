@@ -110,12 +110,36 @@ with sync_playwright() as pw:
 
         elif caso['atteso'] == 'dashboard_gialla':
             # attivo con la scadenza vicina: la dashboard NORMALE, con la
-            # pillola gialla dei giorni rimasti (soglia 5 della Issue #7)
+            # pillola gialla dei giorni rimasti (soglia 5 della Issue #7,
+            # INCLUSIVA: il caso a 5 giorni esatti passa di qui)
             pg.wait_for_selector('.stats')
             pg.wait_for_selector('.pill.warn')
             testo = pg.inner_text('.pill.warn')
             assert 'giorn' in testo.lower(), f'{caso["nome"]}: pillola {testo!r}'
             pg.screenshot(path=str(OUT / f'{caso["nome"]}.png'), full_page=True)
+            # E il feed di un attivo quasi scaduto FUNZIONA ancora: token
+            # coniato dalla sessione vera, feed letto via HTTP, byte del
+            # contratto (BOM + sola intestazione: nessun segnale seminato).
+            # Chiesto da CodeRabbit sulla PR #52 (output CSV atteso).
+            # `arrayBuffer`, non `text()`: la decodifica UTF-8 del browser
+            # TOGLIE il BOM dalla stringa (spec Encoding), e il contratto va
+            # asserito sui BYTE \u2014 e' la lezione della regola 5 di CLAUDE.md.
+            esito = pg.evaluate("""async () => {
+              const r = await fetch('/api/me/token', {method: 'POST'});
+              if (!r.ok) return {errore: 'token: ' + r.status};
+              const {token, feed} = await r.json();
+              const f = await fetch(feed + '?token=' + encodeURIComponent(token));
+              const byte = new Uint8Array(await f.arrayBuffer());
+              return {stato: f.status, primi: Array.from(byte.slice(0, 3)),
+                      corpo: new TextDecoder().decode(byte)};
+            }""")
+            assert esito.get('stato') == 200, f'{caso["nome"]}: feed {esito!r}'
+            assert esito['primi'] == [0xEF, 0xBB, 0xBF], (
+                f'{caso["nome"]}: il feed non comincia col BOM: {esito["primi"]}')
+            assert esito['corpo'].startswith('"Provider"'), (
+                f'{caso["nome"]}: intestazione inattesa: {esito["corpo"][:40]!r}')
+            assert esito['corpo'].strip().count('\n') == 0, (
+                f'{caso["nome"]}: atteso feed a sola intestazione')
 
         else:
             raise AssertionError(f'atteso sconosciuto: {caso["atteso"]!r}')
