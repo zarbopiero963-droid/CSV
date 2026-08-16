@@ -104,6 +104,11 @@ with sync_playwright() as pw:
     # e il pannello Richieste per lui NON esiste: ne' la voce nel menu...
     assert pg.locator('nav a[href="#/richieste"]').count() == 0, (
         'un cliente vede la voce Richieste nel menu')
+    # ...ne' le ROTTE, che e' la parte che conta: il 404 e' del server, la UI
+    # e' solo il riflesso (chiesto da GPT-5.5 sulla PR #53)
+    stato_admin = pg.evaluate("fetch('/api/admin/requests').then(r => r.status)")
+    assert stato_admin == 404, (
+        f'le rotte admin rispondono {stato_admin} a un cliente: atteso 404')
     # ...ne' la vista, nemmeno digitando l'hash a mano
     pg.goto(BASE + '#/richieste')
     pg.wait_for_selector('.stats')

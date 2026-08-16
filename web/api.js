@@ -165,7 +165,9 @@ export function botAccessoUrl() {
 
 export async function adminRequests() {
   const r = await http('GET', '/api/admin/requests');
-  return r.richieste;
+  // `|| []`: durante un deploy parziale una risposta 200 senza il campo non
+  // deve rompere la vista su `.map` (rilievo di GPT-5.5 sulla PR #53).
+  return r.richieste || [];
 }
 
 // L'approvazione porta i giorni scritti dall'amministratore (campo libero) e

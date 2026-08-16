@@ -1115,7 +1115,16 @@ const actions = {
     try {
       const r = await api.adminReminder();
       if (dove) {
-        dove.textContent = `avvisati: ${r.avvisati.length} · falliti: ${r.falliti.length}`;
+        // I motivi dei falliti si mostrano, non solo il conteggio: un giro
+        // con 3 falliti senza il perche' obbligherebbe ad andare nei log
+        // (nota di Claude Fable 5 sulla PR #53). Il motivo e' il TIPO
+        // dell'errore, mai il token: e' il contratto di invia_messaggio.
+        const falliti = r.falliti || [];
+        dove.textContent = 'avvisati: ' + (r.avvisati || []).length
+          + ' · falliti: ' + falliti.length
+          + (falliti.length
+             ? ' — ' + falliti.map(f => f.motivo || 'motivo ignoto').join('; ')
+             : '');
       }
     } catch (e) { fallita(e); }
   },
