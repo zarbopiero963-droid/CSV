@@ -143,11 +143,18 @@ with sync_playwright() as pw:
     modalita['fai'] = 'vuota'
     pg.click('nav a[href="#/richieste"]')          # ...e si RIENTRA: fresca, vuota
     pg.wait_for_selector('.empty:has-text("Nessuna richiesta")')
-    trattenute.pop(0).fulfill(json={'richieste': [{
-        'richiesta': 999, 'utente': 999, 'chiesto_il': '2026-08-16 00:00',
-        'nome': 'FantasmaStantio', 'username': None, 'stato': 'in_attesa',
-        'giorni_rimasti': None, 'raggiungibile': False}]})
-    pg.wait_for_timeout(400)                       # il tempo di sbagliare, se deve
+    # Barriera CAUSALE, non a orologio (CodeRabbit): prima si aspetta che la
+    # risposta liberata sia ARRIVATA alla pagina, poi due requestAnimationFrame
+    # — quando parte il secondo frame la coda dei microtask della fetch e' gia'
+    # consumata. Un'attesa fissa su un runner lento poteva scadere PRIMA del
+    # render stantio: verde senza potere di rilevazione.
+    with pg.expect_response('**/api/admin/requests'):
+        trattenute.pop(0).fulfill(json={'richieste': [{
+            'richiesta': 999, 'utente': 999, 'chiesto_il': '2026-08-16 00:00',
+            'nome': 'FantasmaStantio', 'username': None, 'stato': 'in_attesa',
+            'giorni_rimasti': None, 'raggiungibile': False}]})
+    pg.evaluate(
+        '() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
     assert 'FantasmaStantio' not in pg.content(), (
         'la risposta stantia della visita precedente ha ridisegnato la vista (ABA)')
     assert pg.locator('.empty').count() == 1, 'la vista fresca e\' sparita'
@@ -170,9 +177,11 @@ with sync_playwright() as pw:
     # solleva comunque (stesso ramo d'errore della vista), ma un 500 farebbe
     # scrivere a Chromium il SUO «Failed to load resource» in console — e il
     # collettore qui e' volutamente senza filtri (bloccante di Fable, sopra).
-    trattenute.pop(0).fulfill(status=200, content_type='application/json',
-                              body='GuastoStantio: non-JSON di proposito')
-    pg.wait_for_timeout(400)
+    with pg.expect_response('**/api/admin/requests'):
+        trattenute.pop(0).fulfill(status=200, content_type='application/json',
+                                  body='GuastoStantio: non-JSON di proposito')
+    pg.evaluate(
+        '() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
     assert pg.locator('.toast').count() == 0, (
         'l\'errore di una vista abbandonata e\' arrivato a toast sulla vista attiva')
     ctx.close()
