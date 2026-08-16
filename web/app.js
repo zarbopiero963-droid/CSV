@@ -165,13 +165,77 @@ function shell(inner) {
 }
 
 // La pillola dello stato dell'accesso, unica per dashboard e impostazioni.
+// Sotto i 5 giorni diventa GIALLA (soglia della Issue #7): l'accesso e' vivo,
+// il messaggio e' «rinnova», e deve distinguersi sia dal verde sia dal rosso.
 function pillStato(u) {
   if (u.admin) return '<span class="pill on">amministratore</span>';
   if (u.stato === 'attivo') {
     const giorni = u.giorni_rimasti;
+    if (giorni != null && giorni <= 5) {
+      return `<span class="pill warn">attivo, ${giorni} giorni rimasti — pensa al rinnovo</span>`;
+    }
     return `<span class="pill on">attivo${giorni == null ? '' : `, ${giorni} giorni rimasti`}</span>`;
   }
   return `<span class="pill off">${esc(u.stato)}</span>`;
+}
+
+/* -------------------------------------------------- accesso su approvazione */
+
+// Il deep link mostrato nella schermata d'attesa: appena chiesto l'accesso e'
+// quello della risposta del server; a una visita successiva si ricostruisce
+// dai settings pubblici. Nullo solo se il servizio non ha un bot configurato.
+let botAccesso = null;
+
+// Le schermate degli stati (#7): chi non e' `attivo` non vede l'app, vede a
+// che punto e' il suo accesso e cosa puo' fare. L'amministratore non passa
+// mai di qui: entra sempre, e' lui che approva.
+function viewAccesso(u) {
+  const bot = botAccesso || api.botAccessoUrl();
+  const linkBot = bot
+    ? `<a class="tg-btn" data-ruolo="bot-link" href="${esc(bot)}" target="_blank" rel="noopener">
+         Apri il bot e premi Start</a>
+       <p class="dim small" style="margin-top:10px">
+         Serve davvero: il bot non può scriverti per primo. Se non apri la chat,
+         il messaggio di approvazione non potrà raggiungerti.
+       </p>`
+    : `<p class="muted small">Quando l'amministratore approva, lo vedrai qui al prossimo accesso.</p>`;
+
+  let corpo = '';
+  if (u.stato === 'in_attesa') {
+    corpo = `
+      <h1>Richiesta inviata</h1>
+      <p class="muted small">L'amministratore la vede già. Riceverai un messaggio
+      Telegram all'approvazione, con la durata del tuo accesso.</p>
+      ${linkBot}`;
+  } else if (u.stato === 'scaduto') {
+    corpo = `
+      <h1>Accesso scaduto</h1>
+      <p class="muted small">Il tuo feed risponde con la sola intestazione e i
+      messaggi delle tue chat non vengono più elaborati. La configurazione dei
+      parser è ancora qui: si riparte con un rinnovo.</p>
+      <button class="primary" data-act="request-access" style="width:100%">Richiedi il rinnovo</button>`;
+  } else if (u.stato === 'sospeso') {
+    corpo = `
+      <h1>Accesso sospeso</h1>
+      <p class="muted small">La sospensione è una decisione dell'amministratore:
+      per chiarirla, contattalo. Da qui non si può richiedere l'accesso.</p>`;
+  } else {
+    corpo = `
+      <h1>Ti manca solo l'accesso</h1>
+      <p class="muted small">Il tuo account esiste ma il servizio è su
+      approvazione: premi il pulsante e l'amministratore vedrà la tua richiesta.
+      Nessun modulo da compilare.</p>
+      <button class="primary" data-act="request-access" style="width:100%">Richiedi accesso</button>`;
+  }
+
+  app.innerHTML = `
+  <div class="login-wrap"><div class="login accesso">
+    <div class="logo">XT</div>
+    ${corpo}
+    <div id="accesso-err" class="small" style="color:var(--err);margin-top:10px"></div>
+    <div class="sep"></div>
+    <button class="ghost small" data-act="logout">Esci</button>
+  </div></div>`;
 }
 
 /* --------------------------------------------------------------- overview */
@@ -799,8 +863,24 @@ const actions = {
   async logout() {
     try { await api.logout(); } catch { /* il cookie muore comunque col reload */ }
     wiz = null;
+    botAccesso = null;
     go('#/');
     render();
+  },
+
+  async 'request-access'() {
+    const errBox = document.getElementById('accesso-err');
+    try {
+      const r = await api.requestAccess();
+      botAccesso = r.bot;
+      render();
+    } catch (e) {
+      // Il 409 («richiesta gia' in corso» / «gia' attivo») non e' un guasto:
+      // lo stato vero si rilegge e la vista giusta si disegna da sola.
+      if (e.status === 409) { location.reload(); return; }
+      if (errBox) errBox.textContent = e.message;
+      else fallita(e);
+    }
   },
 
   copy(el) { copy(el.dataset.val); },
@@ -1068,6 +1148,11 @@ document.addEventListener('keydown', e => {
 function render() {
   Object.assign(route, { id: null, tab: 'config' }, parseHash());
   if (!api.me()) { viewLogin(); return; }
+  // Il cancello degli stati (#7): chi non e' attivo vede a che punto e' il suo
+  // accesso, non un'app vuota. L'amministratore entra sempre — e' lui che
+  // approva — e il suo caso sta PRIMA del controllo sullo stato.
+  const u = api.me();
+  if (!u.admin && u.stato !== 'attivo') { viewAccesso(u); return; }
   if (route.name === 'parsers') return viewParsers();
   if (route.name === 'parser') return viewParser();
   if (route.name === 'feed') return viewFeed();
