@@ -249,8 +249,16 @@ let esitoRichieste = null;
 
 async function viewRichieste() {
   shell('<div class="dim">Caricamento…</div>');
+  // Lo snapshot dell'hash PRIMA dell'await: se la navigazione cambia pagina
+  // mentre la risposta viaggia, la vista vecchia non deve ridisegnarsi sopra
+  // quella nuova (CodeRabbit, PR #53). Si confronta l'HASH, non il nome della
+  // rotta: viewOverview fa anche da fallback per rotte altrui, e un confronto
+  // sul nome bloccava il render legittimo lasciando la pagina al
+  // "Caricamento..." per sempre - misurato nel test del pannello.
+  const invocazione = location.hash;
   let richieste;
   try { richieste = await api.adminRequests(); } catch (e) { fallita(e); return; }
+  if (location.hash !== invocazione) return;
 
   const righe = richieste.map(r => `
     <div class="list-item">
@@ -292,8 +300,10 @@ async function viewRichieste() {
 
 async function viewOverview() {
   shell('<div class="dim">Caricamento…</div>');
+  const invocazione = location.hash;
   let parsers;
   try { parsers = await api.listParsers(); } catch (e) { fallita(e); return; }
+  if (location.hash !== invocazione) return;
   const u = api.me();
   const stat = (n, l) => `<div class="card"><div style="font-size:26px">${n}</div>
     <div class="muted small">${l}</div></div>`;
@@ -337,8 +347,10 @@ function parserRow(p) {
 
 async function viewParsers() {
   shell('<div class="dim">Caricamento…</div>');
+  const invocazione = location.hash;
   let parsers;
   try { parsers = await api.listParsers(); } catch (e) { fallita(e); return; }
+  if (location.hash !== invocazione) return;
   shell(`
     <div class="head"><div>
       <h1>Parser</h1>

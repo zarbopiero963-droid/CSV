@@ -12,7 +12,7 @@ Argomenti: base_url, cartella screenshot, JSON con
 `{admin_cookie, cliente_cookie, nome_uno, nome_due, giorni}`.
 """
 
-import json, sys, pathlib, tempfile
+import json, sys, pathlib, tempfile, urllib.error, urllib.request
 from urllib.parse import urlsplit
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 from playwright.sync_api import sync_playwright
@@ -28,17 +28,13 @@ errors = []
 
 
 def _console(m):
-    if m.type != 'error':
-        return
-    # L'unico fallimento ATTESO e' il 404 della sonda sulle rotte admin fatta
-    # col cookie del CLIENTE (e' l'asserzione stessa del test): Chromium lo
-    # logga da se' come «Failed to load resource». Qualunque altro errore —
-    # altri codici, altre rotte — resta un fallimento del test.
-    if 'Failed to load resource' in m.text and '404' in m.text:
-        url = (m.location or {}).get('url', '')
-        if '/api/admin/' in url:
-            return
-    errors.append(f'console.{m.type}: {m.text}')
+    # Nessun filtro, deliberatamente: la sonda del 404 admin sta FUORI dalla
+    # pagina (urllib col cookie del cliente, in fondo al flusso), quindi la
+    # console deve restare pulita in entrambi i contesti. Il filtro precedente
+    # ignorava i 404 su /api/admin/* anche col cookie ADMIN — una regressione
+    # di routing sarebbe passata in silenzio (bloccante di Claude Fable 5).
+    if m.type == 'error':
+        errors.append(f'console.{m.type}: {m.text}')
 
 
 def _contesto(browser, cookie):
@@ -60,10 +56,12 @@ with sync_playwright() as pw:
     pg.goto(BASE)
     pg.wait_for_selector('nav a[href="#/richieste"]')
     pg.click('nav a[href="#/richieste"]')
-    pg.wait_for_selector('.list-item')
-    elenco = pg.inner_text('.main')
-    assert DATI['nome_uno'] in elenco and DATI['nome_due'] in elenco, (
-        f'richieste mancanti dall\'elenco: {elenco[:300]!r}')
+    # L'attesa e' sui NOMI, non su un generico `.list-item`: la dashboard
+    # appena lasciata ha le sue righe `.list-item`, e su un runner lento il
+    # selettore generico combaciava con quelle mentre «Richieste» era ancora
+    # al «Caricamento…» — misurato rosso in CI, verde in locale.
+    pg.wait_for_selector(f'.list-item:has-text("{DATI["nome_uno"]}")')
+    pg.wait_for_selector(f'.list-item:has-text("{DATI["nome_due"]}")')
     pg.screenshot(path=str(OUT / '01-richieste.png'), full_page=True)
 
     # Attiva senza giorni: il campo e' obbligatorio, niente POST alla cieca
@@ -113,19 +111,48 @@ with sync_playwright() as pw:
     # e il pannello Richieste per lui NON esiste: ne' la voce nel menu...
     assert pg.locator('nav a[href="#/richieste"]').count() == 0, (
         'un cliente vede la voce Richieste nel menu')
-    # ...ne' le ROTTE, che e' la parte che conta: il 404 e' del server, la UI
-    # e' solo il riflesso (chiesto da GPT-5.5 sulla PR #53)
-    stato_admin = pg.evaluate("fetch('/api/admin/requests').then(r => r.status)")
-    assert stato_admin == 404, (
-        f'le rotte admin rispondono {stato_admin} a un cliente: atteso 404')
     # ...ne' la vista, nemmeno digitando l'hash a mano
     pg.goto(BASE + '#/richieste')
     pg.wait_for_selector('.stats')
     assert 'Richieste' not in pg.inner_text('h1'), 'un cliente ha aperto il pannello'
+    # E il CSV del cliente APPENA APPROVATO funziona: token coniato dalla
+    # sessione, feed letto e asserito sui BYTE (arrayBuffer, non text(): la
+    # decodifica del browser toglie il BOM). Chiesto da CodeRabbit sulla PR #53.
+    esito = pg.evaluate("""async () => {
+      const r = await fetch('/api/me/token', {method: 'POST'});
+      if (!r.ok) return {errore: 'token: ' + r.status};
+      const {token, feed} = await r.json();
+      const f = await fetch(feed + '?token=' + encodeURIComponent(token));
+      const byte = new Uint8Array(await f.arrayBuffer());
+      return {stato: f.status, primi: Array.from(byte.slice(0, 3)),
+              corpo: new TextDecoder().decode(byte)};
+    }""")
+    assert esito.get('stato') == 200, f'feed del cliente approvato: {esito!r}'
+    assert esito['primi'] == [0xEF, 0xBB, 0xBF], (
+        f'il feed non comincia col BOM: {esito["primi"]}')
+    assert esito['corpo'].startswith('"Provider"'), (
+        f'intestazione inattesa: {esito["corpo"][:40]!r}')
+    assert esito['corpo'].strip().count('\n') == 0, 'atteso feed a sola intestazione'
     pg.screenshot(path=str(OUT / '05-cliente-attivo.png'), full_page=True)
     ctx.close()
 
     b.close()
+
+# La sonda del 404 sulle rotte admin sta FUORI dalla pagina: urllib col cookie
+# del CLIENTE. Cosi' la console del browser resta pulita in ENTRAMBI i contesti
+# e non serve nessun filtro — il filtro precedente ignorava i 404 admin anche
+# col cookie dell'amministratore, e una regressione di routing sarebbe passata
+# in silenzio (bloccante di Claude Fable 5). Il 404 e' del server: la UI e'
+# solo il riflesso (chiesto da GPT-5.5).
+pezzi = urlsplit(BASE)
+richiesta = urllib.request.Request(
+    f'{pezzi.scheme}://{pezzi.netloc}/api/admin/requests',
+    headers={'Cookie': 'betrelay_sessione=' + DATI['cliente_cookie']})
+try:
+    urllib.request.urlopen(richiesta, timeout=10)  # noqa: S310 - loopback del test
+    raise AssertionError('le rotte admin rispondono 200 a un cliente')
+except urllib.error.HTTPError as e:
+    assert e.code == 404, f'rotte admin a un cliente: atteso 404, avuto {e.code}'
 
 print('\nERRORI JS:', len(errors))
 for e in errors:
