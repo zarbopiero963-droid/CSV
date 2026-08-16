@@ -5,8 +5,12 @@ coi dati del cliente, il campo giorni libero + «Attiva», il «Rifiuta» con
 conferma, il giro dei promemoria — e SOPRATTUTTO che un avviso Telegram fallito
 sia visibile e mai ingoiato (trappola 1 della Issue #7: in questo ambiente
 l'invio fallisce per costruzione — bot finto e proxy morto — quindi l'esito
-`notificato: false` e' deterministico). Chiude il giro il punto di vista del
-cliente approvato: dashboard attiva coi giorni concessi.
+`notificato: false` e' deterministico). Seguono le due race della guardia
+anti-stantio (bloccante di GPT-5.6 Sol, PR #53), rese deterministiche
+trattenendo la risposta con una route Playwright: la risposta di una visita
+PRECEDENTE allo stesso hash non deve ridisegnare la vista (ABA), e l'errore di
+una vista abbandonata non deve tostificare sopra quella attiva. Chiude il giro
+il punto di vista del cliente approvato: dashboard attiva coi giorni concessi.
 
 Argomenti: base_url, cartella screenshot, JSON con
 `{admin_cookie, cliente_cookie, nome_uno, nome_due, giorni}`.
@@ -102,6 +106,75 @@ with sync_playwright() as pw:
     promemoria = pg.inner_text('#esito-promemoria')
     assert 'avvisati: 0' in promemoria and 'falliti: 0' in promemoria, promemoria
     pg.screenshot(path=str(OUT / '04-promemoria.png'), full_page=True)
+
+    # ---- la race ABA della guardia anti-stantio (bloccante GPT-5.6 Sol, #53):
+    # uscire e RIENTRARE nello stesso hash lascia l'hash identico, quindi un
+    # confronto sull'hash non basta — una risposta della visita PRECEDENTE,
+    # arrivata fuori ordine, ridisegnerebbe sopra quella fresca. Qui la race
+    # e' deterministica: si TRATTIENE la risposta della prima visita, si esce,
+    # si rientra (la seconda risponde subito, vuota), e solo allora si libera
+    # la prima, piena. La vista deve restare vuota.
+    # Un SOLO handler con stato: un unroute mentre una route e' in sospeso la
+    # cancella e la fa proseguire («Route is already handled», misurato qui),
+    # quindi la modalita' si cambia senza mai smontare l'handler.
+    trattenute = []
+    modalita = {'fai': 'trattieni'}
+
+    def gestore(route):
+        if modalita['fai'] == 'trattieni':
+            trattenute.append(route)          # in sospeso, si libera dopo
+        else:
+            route.fulfill(json={'richieste': []})
+
+    def attendi_trattenuta():
+        for _ in range(200):
+            if trattenute:
+                return
+            pg.wait_for_timeout(25)
+        raise AssertionError('la richiesta da trattenere non e\' mai partita')
+
+    pg.route('**/api/admin/requests', gestore)
+    pg.click('nav a[href="#/parsers"]')
+    pg.wait_for_selector('[data-act="new-parser"]')
+    pg.click('nav a[href="#/richieste"]')          # visita 1: trattenuta
+    attendi_trattenuta()
+    pg.click('nav a[href="#/parsers"]')            # si esce...
+    pg.wait_for_selector('[data-act="new-parser"]')
+    modalita['fai'] = 'vuota'
+    pg.click('nav a[href="#/richieste"]')          # ...e si RIENTRA: fresca, vuota
+    pg.wait_for_selector('.empty:has-text("Nessuna richiesta")')
+    trattenute.pop(0).fulfill(json={'richieste': [{
+        'richiesta': 999, 'utente': 999, 'chiesto_il': '2026-08-16 00:00',
+        'nome': 'FantasmaStantio', 'username': None, 'stato': 'in_attesa',
+        'giorni_rimasti': None, 'raggiungibile': False}]})
+    pg.wait_for_timeout(400)                       # il tempo di sbagliare, se deve
+    assert 'FantasmaStantio' not in pg.content(), (
+        'la risposta stantia della visita precedente ha ridisegnato la vista (ABA)')
+    assert pg.locator('.empty').count() == 1, 'la vista fresca e\' sparita'
+
+    # ---- e l'ERRORE di una vista abbandonata non tostifica sopra quella
+    # attiva: si trattiene la risposta, si cambia pagina, e solo allora la si
+    # fa fallire. Niente toast: il fallimento appartiene a una vista morta.
+    modalita['fai'] = 'trattieni'
+    pg.click('nav a[href="#/parsers"]')
+    pg.wait_for_selector('[data-act="new-parser"]')
+    pg.click('nav a[href="#/richieste"]')          # trattenuta di nuovo
+    attendi_trattenuta()
+    pg.click('nav a[href="#/parsers"]')            # abbandono della vista
+    pg.wait_for_selector('[data-act="new-parser"]')
+    # I toast di inizio flusso («Scrivi i giorni…») vivono 2,6 s e su questa
+    # macchina il flusso corre piu' veloce: si aspetta il DOM pulito, o
+    # l'asserzione a zero toast conterebbe un residuo, non il nostro errore.
+    pg.wait_for_function("document.querySelectorAll('.toast').length === 0")
+    # Il guasto e' un 200 col corpo non-JSON, non un 500: `risposta.json()`
+    # solleva comunque (stesso ramo d'errore della vista), ma un 500 farebbe
+    # scrivere a Chromium il SUO «Failed to load resource» in console — e il
+    # collettore qui e' volutamente senza filtri (bloccante di Fable, sopra).
+    trattenute.pop(0).fulfill(status=200, content_type='application/json',
+                              body='GuastoStantio: non-JSON di proposito')
+    pg.wait_for_timeout(400)
+    assert pg.locator('.toast').count() == 0, (
+        'l\'errore di una vista abbandonata e\' arrivato a toast sulla vista attiva')
     ctx.close()
 
     # ---- il cliente approvato: dashboard attiva coi giorni concessi

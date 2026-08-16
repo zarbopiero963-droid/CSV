@@ -93,6 +93,17 @@ function parseHash() {
 
 function go(hash) { location.hash = hash; }
 
+// La generazione delle viste: render() la incrementa a ogni passaggio, le
+// viste async la fotografano prima dell'await e scartano risposta ED errore
+// se nel frattempo un altro render e' partito. Il confronto sull'HASH non
+// bastava: uscire e RIENTRARE nella stessa pagina lascia l'hash identico, e
+// una risposta della prima visita arrivata fuori ordine ridisegnava sopra
+// quella fresca — race ABA, bloccante di GPT-5.6 Sol sulla PR #53. (Il
+// confronto sul NOME della rotta era stato scartato prima: viewOverview fa da
+// fallback per rotte altrui e il nome non combaciava mai, lasciando la pagina
+// al «Caricamento» — misurato nel test del pannello.)
+let generazione = 0;
+
 window.addEventListener('hashchange', render);
 
 /* ------------------------------------------------------------------ login */
@@ -249,16 +260,12 @@ let esitoRichieste = null;
 
 async function viewRichieste() {
   shell('<div class="dim">Caricamento…</div>');
-  // Lo snapshot dell'hash PRIMA dell'await: se la navigazione cambia pagina
-  // mentre la risposta viaggia, la vista vecchia non deve ridisegnarsi sopra
-  // quella nuova (CodeRabbit, PR #53). Si confronta l'HASH, non il nome della
-  // rotta: viewOverview fa anche da fallback per rotte altrui, e un confronto
-  // sul nome bloccava il render legittimo lasciando la pagina al
-  // "Caricamento..." per sempre - misurato nel test del pannello.
-  const invocazione = location.hash;
+  // La guardia anti-stantio: vedi `generazione` accanto al router.
+  const invocazione = generazione;
   let richieste;
-  try { richieste = await api.adminRequests(); } catch (e) { fallita(e); return; }
-  if (location.hash !== invocazione) return;
+  try { richieste = await api.adminRequests(); }
+  catch (e) { if (invocazione === generazione) fallita(e); return; }
+  if (invocazione !== generazione) return;
 
   const righe = richieste.map(r => `
     <div class="list-item">
@@ -300,10 +307,11 @@ async function viewRichieste() {
 
 async function viewOverview() {
   shell('<div class="dim">Caricamento…</div>');
-  const invocazione = location.hash;
+  const invocazione = generazione;  // guardia anti-stantio: vedi il router
   let parsers;
-  try { parsers = await api.listParsers(); } catch (e) { fallita(e); return; }
-  if (location.hash !== invocazione) return;
+  try { parsers = await api.listParsers(); }
+  catch (e) { if (invocazione === generazione) fallita(e); return; }
+  if (invocazione !== generazione) return;
   const u = api.me();
   const stat = (n, l) => `<div class="card"><div style="font-size:26px">${n}</div>
     <div class="muted small">${l}</div></div>`;
@@ -347,10 +355,11 @@ function parserRow(p) {
 
 async function viewParsers() {
   shell('<div class="dim">Caricamento…</div>');
-  const invocazione = location.hash;
+  const invocazione = generazione;  // guardia anti-stantio: vedi il router
   let parsers;
-  try { parsers = await api.listParsers(); } catch (e) { fallita(e); return; }
-  if (location.hash !== invocazione) return;
+  try { parsers = await api.listParsers(); }
+  catch (e) { if (invocazione === generazione) fallita(e); return; }
+  if (invocazione !== generazione) return;
   shell(`
     <div class="head"><div>
       <h1>Parser</h1>
@@ -1264,6 +1273,7 @@ document.addEventListener('keydown', e => {
 /* ----------------------------------------------------------------- render */
 
 function render() {
+  generazione += 1;
   Object.assign(route, { id: null, tab: 'config' }, parseHash());
   if (!api.me()) { viewLogin(); return; }
   // Il cancello degli stati (#7): chi non e' attivo vede a che punto e' il suo
