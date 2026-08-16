@@ -67,7 +67,8 @@ def test_il_pannello_richieste_decide_davvero(tmp_path, monkeypatch):
         c.commit()
         c.close()
 
-        dati = {'admin_cookie': main.firma_sessione(admin, 1),
+        dati = {'nome_cookie': main.NOME_COOKIE,
+                'admin_cookie': main.firma_sessione(admin, 1),
                 'cliente_cookie': main.firma_sessione(clienti['ClienteUno'], 1),
                 'nome_uno': 'ClienteUno', 'nome_due': 'ClienteDue',
                 'giorni': GIORNI_CONCESSI}

@@ -40,7 +40,10 @@ def _console(m):
 def _contesto(browser, cookie):
     ctx = browser.new_context(viewport={'width': 1360, 'height': 950})
     pezzi = urlsplit(BASE)
-    ctx.add_cookies([{'name': 'betrelay_sessione', 'value': cookie,
+    # Il nome viene da main.NOME_COOKIE via JSON (fonte unica, regola 3): con
+    # un letterale, un rinomino lato server avrebbe fatto passare la sonda 404
+    # per «cookie assente» invece che per isolamento (bloccante di Fable, #53).
+    ctx.add_cookies([{'name': DATI['nome_cookie'], 'value': cookie,
                       'url': f'{pezzi.scheme}://{pezzi.netloc}/'}])
     pg = ctx.new_page()
     pg.on('console', _console)
@@ -147,7 +150,7 @@ with sync_playwright() as pw:
 pezzi = urlsplit(BASE)
 richiesta = urllib.request.Request(
     f'{pezzi.scheme}://{pezzi.netloc}/api/admin/requests',
-    headers={'Cookie': 'betrelay_sessione=' + DATI['cliente_cookie']})
+    headers={'Cookie': DATI['nome_cookie'] + '=' + DATI['cliente_cookie']})
 try:
     urllib.request.urlopen(richiesta, timeout=10)  # noqa: S310 - loopback del test
     raise AssertionError('le rotte admin rispondono 200 a un cliente')
