@@ -134,6 +134,28 @@ export async function logout() {
   stato.parsers = [];
 }
 
+/* --------------------------------------------------- accesso su approvazione */
+
+// «Richiedi accesso» (#7): nessun modulo, il server sa gia' chi sei dalla
+// sessione. La risposta porta il DEEP LINK del bot (`t.me/<bot>?start=...`),
+// che non e' un abbellimento: il bot non puo' scrivere per primo, e aprirlo
+// e' cio' che rende il cliente raggiungibile per il messaggio di approvazione
+// (trappola 1 della Issue #7). Dopo il POST lo stato si rilegge dal server.
+export async function requestAccess() {
+  const r = await http('POST', '/api/access/request');
+  try { stato.me = await http('GET', '/api/me'); } catch { /* cache invariata */ }
+  return r;
+}
+
+// Il deep link del bot ricostruito dai settings pubblici, per chi torna sulla
+// pagina quando la risposta del POST non c'e' piu'. Il payload `accesso` e' lo
+// stesso che il server mette in `link_del_bot('accesso')`.
+export function botAccessoUrl() {
+  const s = stato.settings;
+  if (!s || !s.bot_username) return null;
+  return 'https://t.me/' + s.bot_username + '?start=accesso';
+}
+
 /* ----------------------------------------------------------------- parser */
 
 // La lista va sempre al server: e' il modo in cui un secondo dispositivo

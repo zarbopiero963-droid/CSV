@@ -84,6 +84,21 @@ export async function logout() {
   salva();
 }
 
+/* --------------------------------------------------- accesso su approvazione */
+
+// La demo e' sempre attiva: la richiesta risponde come farebbe il server a un
+// account gia' dentro (409, ANCHE nello status: app.js decide su quello),
+// cosi' la superficie resta identica a api.js.
+export async function requestAccess() {
+  const errore = new Error("accesso gia' attivo");
+  errore.status = 409;
+  throw errore;
+}
+
+export function botAccessoUrl() {
+  return null;
+}
+
 /* ----------------------------------------------------------------- parser */
 
 export async function listParsers() {

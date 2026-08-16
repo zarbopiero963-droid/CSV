@@ -87,6 +87,9 @@ code, .mono { font-family: var(--mono); font-size: 13px; }
 .pill.on { color: var(--ok); border-color: #1d3d24; background: #102315; }
 .pill.off { color: var(--txt-3); }
 .pill.no { color: var(--err); border-color: #4a2320; background: #24100f; }
+/* La scadenza vicina (soglia 5 giorni, Issue #7): giallo, non rosso -
+   l'accesso e' ancora vivo, il messaggio e' "rinnova", non "guasto". */
+.pill.warn { color: var(--warn); border-color: #4a3a1a; background: #241d0c; }
 
 .banner {
   border: 1px solid var(--line);
