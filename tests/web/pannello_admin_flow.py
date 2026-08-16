@@ -28,8 +28,17 @@ errors = []
 
 
 def _console(m):
-    if m.type == 'error':
-        errors.append(f'console.{m.type}: {m.text}')
+    if m.type != 'error':
+        return
+    # L'unico fallimento ATTESO e' il 404 della sonda sulle rotte admin fatta
+    # col cookie del CLIENTE (e' l'asserzione stessa del test): Chromium lo
+    # logga da se' come «Failed to load resource». Qualunque altro errore —
+    # altri codici, altre rotte — resta un fallimento del test.
+    if 'Failed to load resource' in m.text and '404' in m.text:
+        url = (m.location or {}).get('url', '')
+        if '/api/admin/' in url:
+            return
+    errors.append(f'console.{m.type}: {m.text}')
 
 
 def _contesto(browser, cookie):
