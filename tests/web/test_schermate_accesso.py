@@ -76,7 +76,9 @@ def test_le_schermate_degli_stati_di_accesso(tmp_path, monkeypatch):
         casi = []
         for nome, status, scadenza, atteso in (
                 ('Registrato', 'registrato', None, 'richiedi'),
+                ('InAttesa', 'in_attesa', None, 'in_attesa'),
                 ('Scaduto', 'attivo', adesso - GIORNO, 'scaduto'),
+                ('Sospeso', 'sospeso', None, 'sospeso'),
                 ('QuasiScaduto', 'attivo', adesso + 3 * GIORNO, 'dashboard_gialla')):
             utente = _semina_utente(percorso_db, nome, status, scadenza)
             casi.append({'nome': nome.lower(),

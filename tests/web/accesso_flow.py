@@ -77,11 +77,24 @@ with sync_playwright() as pw:
             pg.screenshot(path=str(OUT / f'{caso["nome"]}-2.png'), full_page=True)
 
         elif caso['atteso'] == 'in_attesa':
+            # il ritorno a login FRESCO: la risposta del POST non c'e' piu' e
+            # il deep link deve venire dai settings pubblici (boot li carica
+            # PRIMA del gate) - caso chiesto da GPT-5.5 sulla PR #52
             titolo = _titolo_accesso(pg)
             assert 'inviata' in titolo.lower(), f'{caso["nome"]}: titolo {titolo!r}'
             href = pg.get_attribute('.accesso a[data-ruolo="bot-link"]', 'href')
             assert href and 't.me/BetRelayBot?start=' in href, (
                 f'{caso["nome"]}: deep link assente al ritorno: {href!r}')
+            pg.screenshot(path=str(OUT / f'{caso["nome"]}.png'), full_page=True)
+
+        elif caso['atteso'] == 'sospeso':
+            # la sospensione la scioglie l'amministratore: NESSUN pulsante di
+            # richiesta, o la schermata inviterebbe a un gesto che il server
+            # rifiuta con 403 - caso chiesto da GPT-5.5 sulla PR #52
+            titolo = _titolo_accesso(pg)
+            assert 'sospeso' in titolo.lower(), f'{caso["nome"]}: titolo {titolo!r}'
+            assert pg.locator('[data-act="request-access"]').count() == 0, (
+                f'{caso["nome"]}: un sospeso vede il pulsante di richiesta')
             pg.screenshot(path=str(OUT / f'{caso["nome"]}.png'), full_page=True)
 
         elif caso['atteso'] == 'scaduto':

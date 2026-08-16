@@ -172,9 +172,9 @@ function pillStato(u) {
   if (u.stato === 'attivo') {
     const giorni = u.giorni_rimasti;
     if (giorni != null && giorni <= 5) {
-      return `<span class="pill warn">attivo, ${giorni} giorni rimasti — pensa al rinnovo</span>`;
+      return `<span class="pill warn">attivo, ${esc(giorni)} giorni rimasti — pensa al rinnovo</span>`;
     }
-    return `<span class="pill on">attivo${giorni == null ? '' : `, ${giorni} giorni rimasti`}</span>`;
+    return `<span class="pill on">attivo${giorni == null ? '' : `, ${esc(giorni)} giorni rimasti`}</span>`;
   }
   return `<span class="pill off">${esc(u.stato)}</span>`;
 }
