@@ -48,6 +48,12 @@ def test_il_file_unico_esegue_il_flusso_demo_da_file(tmp_path):
 
         # login demo: la porta a password accetta qualunque coppia non vuota
         pg.wait_for_selector('#login-pass')
+        # Il logo relay nel bundle e' INCORPORATO come data URI dal generatore:
+        # da file:// un percorso relativo sarebbe un'icona rotta senza nessun
+        # errore in console — la classe di guasto silenzioso della REGOLA
+        # CODIFICA, versione immagine (#59).
+        assert pg.eval_on_selector('.login img.logo', 'e => e.naturalWidth > 0'), \
+            'il logo relay non e\' incorporato nel file unico'
         pg.fill('#login-user', 'demo')
         pg.fill('#login-pass', 'demo')
         pg.click('[data-act="login-password"]')

@@ -128,6 +128,18 @@ with sync_playwright() as pw:
         f'{inviato["first_name"]!r}')
     pg.wait_for_selector('#login-pass')
 
+    # Il marchio dell'app e' BetRelay (#59): il logo relay e' un'immagine
+    # CARICATA (naturalWidth misurato, non un src qualunque) e il nome e' quello
+    # del servizio. E il campo utente non suggerisce piu' «administrator» (#58):
+    # quel segnaposto regalava a chiunque il probabile nome dell'amministratore.
+    assert 'BetRelay' in pg.text_content('.login h1'), pg.text_content('.login h1')
+    assert pg.eval_on_selector('.login img.logo', 'e => e.naturalWidth > 0'), \
+        'il logo relay della pagina di login non si e\' caricato'
+    assert pg.text_content('.login label') == 'Username', \
+        f'etichetta inattesa: {pg.text_content(".login label")!r}'
+    segnaposto = pg.get_attribute('#login-user', 'placeholder')
+    assert not segnaposto, f'il campo utente suggerisce ancora {segnaposto!r}'
+
     # Password sbagliata: l'errore del server compare nella pagina, non in console.
     pg.fill('#login-user', UTENTE_PROVA)
     pg.fill('#login-pass', 'password-sbagliata')
@@ -143,6 +155,11 @@ with sync_playwright() as pw:
     pg.click('[data-act="login-password"]')
     pg.wait_for_selector('.stats')
     assert 'amministratore' in pg.inner_text('.head'), 'la pillola admin non compare'
+    # Anche la sidebar porta il marchio BetRelay col logo relay (#59).
+    assert 'BetRelay' in pg.text_content('.side .brand'), \
+        f'la sidebar dice ancora {pg.text_content(".side .brand")!r}'
+    assert pg.eval_on_selector('.side .brand img', 'e => e.naturalWidth > 0'), \
+        'il logo relay della sidebar non si e\' caricato'
     shot(pg, '03-dashboard')
 
     # nuovo parser: viene creato SUL SERVER (POST /api/me/parsers)

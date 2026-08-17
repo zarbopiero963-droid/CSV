@@ -249,6 +249,30 @@ def test_la_facciata_ha_la_card_di_flusso(servizio):
         assert nodo in card, f'manca il nodo {nodo!r} nella card di flusso'
 
 
+def test_la_scorciatoia_admin_e_solo_un_redirect_al_pannello(servizio):
+    """`/admin` (#57): la porta di servizio del proprietario, senza serratura propria.
+
+    E' un REDIRECT e basta: la protezione resta il login piu' il 404 server-side
+    di `/api/admin/*` per chi non e' amministratore. Il test NON segue il
+    redirect: seguirlo verificherebbe la pagina di destinazione, non il
+    comportamento della rotta — e un redirect sbagliato verso una pagina
+    comunque valida passerebbe.
+    """
+    class _SenzaRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    opener = urllib.request.build_opener(_SenzaRedirect)
+    try:
+        with opener.open(f'{servizio}/admin', timeout=10) as r:  # noqa: S310 - loopback
+            stato, intestazioni = r.status, r.headers
+    except urllib.error.HTTPError as e:
+        stato, intestazioni = e.code, e.headers
+    assert stato in (302, 307), f'/admin risponde {stato} invece di un redirect'
+    assert intestazioni.get('Location') == '/app/#/richieste', \
+        f'/admin manda a {intestazioni.get("Location")!r}'
+
+
 # ------------------------------------------------- e adesso: niente catch-all
 
 def test_il_feed_di_XTrader_NON_e_intercettato_dalla_facciata(servizio):

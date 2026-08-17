@@ -559,6 +559,12 @@ Il percorso di Chromium e la decisione salta/fallisce vivono in un punto solo,
 tests/runtime.py. Le due guardie sono tests/safety/test_ci.py (legge il workflow) e
 tests/safety/test_runtime_severo.py (esercita il meccanismo).
 
+SCORCIATOIA /admin
+GET /admin reindirizza a /app/#/richieste: la porta di servizio del proprietario.
+Solo un redirect, nessuna autenticazione propria — la serratura resta il login e
+il 404 delle rotte /api/admin/* per chi non e' amministratore. Chi non e' admin
+ci atterra sul login o sulla propria dashboard e non vede nulla.
+
 FACCIATA DEL SITO
 GET / restituisce la pagina pubblica di BetRelay (web/sito.html), non piu' l'oggetto
 JSON {"service","status","csv"}. Chi sonda il servizio in automatico usa /health, che

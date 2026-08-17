@@ -50,6 +50,10 @@ from tests.servizio import relay_avviato  # noqa: E402
 # silenzio tutto cio' che nasce sotto quel prefisso.
 ROTTE_PUBBLICHE = {
     ('GET', '/'),                    # pagina di cortesia
+    # La scorciatoia del proprietario (#57): un REDIRECT verso /app/#/richieste,
+    # senza autenticazione propria — la serratura e' il login, piu' il 404
+    # server-side di /api/admin/* per chi non e' amministratore.
+    ('GET', '/admin'),
     ('GET', '/health'),              # deve rispondere anche a servizio guasto
     # La chiama Telegram, quindi non puo' pretendere `CSV_ACCESS_TOKEN`. Ma
     # «pubblica» qui vuol dire NON AUTENTICATA, non «protetta da altro»: il filtro

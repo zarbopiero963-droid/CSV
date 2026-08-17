@@ -124,8 +124,8 @@ function viewLogin() {
   const urlTelegram = api.telegramAuthUrl();
   app.innerHTML = `
   <div class="login-wrap"><div class="login">
-    <div class="logo">XT</div>
-    <h1>XTrader Signal Relay</h1>
+    <img class="logo" src="betrelay-icona-256.png" alt="">
+    <h1>BetRelay</h1>
     <p class="muted small">Trasforma i segnali dei tuoi canali Telegram in un feed CSV pronto per XTrader.</p>
     ${erroreLogin ? `<div class="banner warn" style="text-align:left">${esc(erroreLogin)}</div>` : ''}
 
@@ -136,8 +136,8 @@ function viewLogin() {
 
     <div class="stack" style="text-align:left">
       <div>
-        <label>Utente</label>
-        <input id="login-user" placeholder="administrator" autocomplete="username">
+        <label>Username</label>
+        <input id="login-user" autocomplete="username">
       </div>
       <div>
         <label>Password</label>
@@ -162,7 +162,7 @@ function shell(inner) {
   app.innerHTML = `
   <div class="shell">
     <aside class="side">
-      <div class="brand"><i>XT</i> Signal Relay</div>
+      <div class="brand"><img src="betrelay-icona-256.png" alt=""> BetRelay</div>
       <nav>
         ${item('#/', '◱', 'Dashboard', route.name === 'overview')}
         ${u.admin ? item('#/richieste', '▤', 'Richieste', route.name === 'richieste') : ''}
@@ -251,7 +251,7 @@ function viewAccesso(u) {
 
   app.innerHTML = `
   <div class="login-wrap"><div class="login accesso">
-    <div class="logo">XT</div>
+    <img class="logo" src="betrelay-icona-256.png" alt="">
     ${corpo}
     <div id="accesso-err" class="small" style="color:var(--err);margin-top:10px"></div>
     <div class="sep"></div>

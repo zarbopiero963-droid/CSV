@@ -1,7 +1,7 @@
 import asyncio, base64, binascii, csv, decimal, difflib, hashlib, hmac, io, json, logging, math, os, re, secrets, sqlite3, threading, time
 from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 import regex as _regex  # come `re`, ma con `timeout=` sui match: vedi _cerca_regex_utente
@@ -3018,6 +3018,24 @@ def root():
                             headers={'Cache-Control': 'no-store'})
     return JSONResponse({'service': 'xtrader-signal-relay', 'status': 'online',
                          'csv': '/xtrader.csv'})
+
+
+@app.get('/admin')
+def scorciatoia_admin():
+    """La porta di servizio del proprietario (#57): betrelay.net/admin → il pannello.
+
+    SOLO un redirect, senza serratura propria: la protezione resta il login piu'
+    il **404 server-side** di `/api/admin/*` per chi non e' amministratore — un
+    estraneo che segue il link atterra sul login o sulla propria dashboard e non
+    vede nulla. Trade-off dichiarato al proprietario e accettato: `/admin` e' il
+    primo percorso che i bot tentano, e la sua esistenza conferma che un'area
+    admin c'e'; la sicurezza non dipende dal segreto dell'URL.
+
+    Rotta esplicita come la facciata, mai un catch-all (stessa guardia:
+    `tests/relay/test_facciata.py`).
+    """
+    return RedirectResponse('/app/#/richieste')
+
 
 @app.get('/health')
 def health():
