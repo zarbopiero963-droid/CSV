@@ -5282,6 +5282,28 @@ def _inserisci_squadra(c, competizione_id, nome):
     return c.execute('SELECT last_insert_rowid()').fetchone()[0]
 
 
+def _scrivi_alias(c, sorgente_id, squadra_id, alias):
+    """Upsert dell'alias CONDIZIONATO all'esistenza della squadra, in UNO statement.
+
+    Il TERZO sito della classe TOCTOU della PR #55, mancato al primo giro di
+    questa PR e trovato da Claude Fable 5 ([REAL_FINDING], PR #64): fra la
+    lettura delle squadre valide nella rotta e questa scrittura, una DELETE
+    concorrente della squadra (o dello sport, con la sua cascata) puo'
+    committare — l'upsert diretto scriveva un alias orfano, invisibile alle
+    letture (che joinano `squadre_betfair`) e rimovibile solo eliminando la
+    sorgente. Il `WHERE EXISTS` gira dentro il write-lock dell'INSERT e vede lo
+    stato vero. La sovrascrittura passa dall'`ON CONFLICT`, quindi conta
+    comunque come cambiamento: None SOLO se la squadra non esiste piu'.
+    """
+    c.execute('INSERT INTO alias_squadre(sorgente_id, squadra_id, alias)'
+              ' SELECT ?,?,? WHERE EXISTS (SELECT 1 FROM squadre_betfair WHERE id=?)'
+              ' ON CONFLICT(sorgente_id, squadra_id) DO UPDATE SET alias=excluded.alias',
+              (sorgente_id, squadra_id, alias, squadra_id))
+    if not c.execute('SELECT changes()').fetchone()[0]:
+        return None
+    return True
+
+
 @app.get('/api/me/sorgenti-squadre')
 def sorgenti_mie(request: Request):
     """Le sorgenti squadre dell'utente. Al primo login: VUOTO, per progetto."""
@@ -5570,10 +5592,10 @@ async def scrivi_alias_miei(cid: str, sid: str, request: Request):
                 if len(valore) > MAX_CAMPO_MERCATO:
                     raise HTTPException(
                         422, f'alias troppo lungo: massimo {MAX_CAMPO_MERCATO} caratteri')
-                c.execute('INSERT INTO alias_squadre(sorgente_id, squadra_id, alias)'
-                          ' VALUES (?,?,?) ON CONFLICT(sorgente_id, squadra_id)'
-                          ' DO UPDATE SET alias=excluded.alias',
-                          (sorgente[0], squadra, valore))
+                if _scrivi_alias(c, sorgente[0], squadra, valore) is None:
+                    # La squadra e' morta fra la lettura di `valide` e la
+                    # scrittura: 404 come se la DELETE fosse arrivata prima.
+                    raise HTTPException(404, 'squadra non trovata')
             scritte += 1
         c.commit()
     finally:

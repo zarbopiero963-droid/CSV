@@ -449,6 +449,28 @@ def test_l_inserimento_non_lascia_orfani_se_il_padre_sparisce(tmp_path, monkeypa
     competizione_sparita = 4242
     assert main._inserisci_squadra(c, competizione_sparita, 'Juventus') is None
     assert c.execute('SELECT COUNT(*) FROM squadre_betfair').fetchone()[0] == 0
+
+    # E il TERZO sito della stessa classe, quello mancato al primo giro:
+    # l'upsert dell'alias ([REAL_FINDING] di Claude Fable 5 sulla PR #64). Fra
+    # la lettura delle squadre valide e la scrittura, una DELETE concorrente
+    # della squadra puo' committare: senza la guardia EXISTS l'alias orfano
+    # veniva scritto — invisibile (le letture joinano squadre_betfair) e
+    # rimovibile solo eliminando la sorgente.
+    c.execute('INSERT INTO sorgenti_squadre(user_id, nome) VALUES (?, ?)',
+              (utente, 'sorgente di prova'))
+    sorgente = c.execute('SELECT id FROM sorgenti_squadre').fetchone()[0]
+    cid = main._inserisci_competizione(c, utente, sport, 'Serie A')
+    squadra = main._inserisci_squadra(c, cid, 'Juventus')
+
+    assert main._scrivi_alias(c, sorgente, squadra, 'Juve') is True
+    assert main._scrivi_alias(c, sorgente, squadra, 'JUV') is True, 'sovrascrittura'
+    assert c.execute('SELECT alias FROM alias_squadre WHERE sorgente_id=?'
+                     ' AND squadra_id=?', (sorgente, squadra)).fetchone()[0] == 'JUV'
+
+    squadra_sparita = squadra + 1000
+    assert main._scrivi_alias(c, sorgente, squadra_sparita, 'Orfano') is None
+    assert c.execute('SELECT COUNT(*) FROM alias_squadre WHERE squadra_id=?',
+                     (squadra_sparita,)).fetchone()[0] == 0, 'alias orfano scritto'
     c.close()
 
 
