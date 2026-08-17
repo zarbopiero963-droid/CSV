@@ -585,6 +585,24 @@ export async function saveAlias(cid, sorgenteId, coppie) {
     }
     pulite.push([squadra, pulito]);
   }
+  // Alias ambiguo vietato (#34 pezzo 3, come il server): il controllo e'
+  // sullo STATO FINALE della sorgente col corpo sovrapposto, cosi' spostare
+  // un alias fra due squadre in un solo salvataggio resta lecito.
+  const finale = {};
+  for (const [chiave, testo] of Object.entries(_aliasDemo())) {
+    if (chiave.startsWith(`${sorgente.id}:`)) finale[chiave.split(':')[1]] = testo;
+  }
+  for (const [squadra, pulito] of pulite) {
+    if (pulito === '') delete finale[squadra];
+    else finale[squadra] = pulito;
+  }
+  const occupanti = {};
+  for (const [squadra, testo] of Object.entries(finale)) {
+    if (testo in occupanti && occupanti[testo] !== squadra) {
+      throw new Error(`alias «${testo}» gia' usato per un'altra squadra in questa sorgente`);
+    }
+    occupanti[testo] = squadra;
+  }
   for (const [squadra, pulito] of pulite) {
     if (pulito === '') delete _aliasDemo()[`${sorgente.id}:${squadra}`];
     else _aliasDemo()[`${sorgente.id}:${squadra}`] = pulito;

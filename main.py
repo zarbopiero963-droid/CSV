@@ -5687,7 +5687,9 @@ async def scrivi_alias_miei(cid: str, sid: str, request: Request):
         valide = {r[0] for r in c.execute(
             'SELECT id FROM squadre_betfair WHERE competizione_id=?',
             (competizione[0],)).fetchall()}
-        scritte = 0
+        # PRIMA tutta la validazione, POI le scritture: il 422 non deve
+        # lasciare coppie gia' scritte (stessa forma della demo).
+        pulite = []
         for chiave, valore in coppie.items():
             try:
                 squadra = int(chiave)
@@ -5698,12 +5700,36 @@ async def scrivi_alias_miei(cid: str, sid: str, request: Request):
             if not isinstance(valore, str):
                 raise HTTPException(422, 'ogni alias deve essere una stringa')
             valore = valore.strip()
+            if len(valore) > MAX_CAMPO_MERCATO:
+                raise HTTPException(
+                    422, f'alias troppo lungo: massimo {MAX_CAMPO_MERCATO} caratteri')
+            pulite.append((squadra, valore))
+        # Alias ambiguo vietato (#34 pezzo 3, deciso dal proprietario il
+        # 17/08/2026): a parse-time la ricerca corre su TUTTA la sorgente,
+        # quindi lo stesso testo su due squadre non deve poter essere salvato.
+        # Il controllo e' sullo STATO FINALE — la mappa della sorgente con il
+        # corpo sovrapposto — cosi' spostare un alias da una squadra all'altra
+        # in un solo PUT resta lecito in qualunque ordine arrivino le coppie.
+        finale = {r[0]: r[1] for r in c.execute(
+            'SELECT squadra_id, alias FROM alias_squadre WHERE sorgente_id=?',
+            (sorgente[0],)).fetchall()}
+        for squadra, valore in pulite:
+            if valore == '':
+                finale.pop(squadra, None)
+            else:
+                finale[squadra] = valore
+        occupanti = {}
+        for squadra, valore in finale.items():
+            if valore in occupanti and occupanti[valore] != squadra:
+                raise HTTPException(
+                    422, f"alias «{valore}» gia' usato per un'altra squadra "
+                         'in questa sorgente')
+            occupanti[valore] = squadra
+        scritte = 0
+        for squadra, valore in pulite:
             if valore == '':
                 _cancella_alias(c, utente['id'], sorgente[0], squadra)
             else:
-                if len(valore) > MAX_CAMPO_MERCATO:
-                    raise HTTPException(
-                        422, f'alias troppo lungo: massimo {MAX_CAMPO_MERCATO} caratteri')
                 if _scrivi_alias(c, utente['id'], sorgente[0], squadra,
                                  competizione[0], valore) is None:
                     # Un padre e' morto fra la lettura e la scrittura: 404

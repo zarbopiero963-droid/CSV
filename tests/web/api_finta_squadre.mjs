@@ -169,6 +169,21 @@ await caso('saveAlias() conta i 120 caratteri in code point, non code unit', asy
     `attesi 121 caratteri rifiutati, ho ${errore && errore.message}`);
 });
 
+await caso('saveAlias() rifiuta lo stesso alias su due squadre della sorgente', async () => {
+  const seconda = await api.createSquadra(2, 'Seconda');
+  await api.saveAlias(2, 1, { 1: 'Doppione' });
+  let errore = null;
+  try { await api.saveAlias(2, 1, { [seconda.id]: 'Doppione' }); } catch (e) { errore = e; }
+  esigi(errore && errore.message.includes("gia' usato per un'altra squadra"),
+    `atteso il 422 del server, ho ${errore && errore.message}`);
+  // Lo SPOSTAMENTO in un solo salvataggio resta lecito, in qualunque ordine.
+  await api.saveAlias(2, 1, { [seconda.id]: 'Doppione', 1: '' });
+  esigi(api.aliasOf(2, 1).find(r => r.squadra_id === seconda.id).alias === 'Doppione',
+    'lo spostamento del testo fra due squadre deve passare');
+  await api.saveAlias(2, 1, { [seconda.id]: '', 1: '' });
+  await api.deleteSquadra(2, seconda.id);
+});
+
 await caso('createSorgente() accetta le emoji come il server (etichetta UI)', async () => {
   const creata = await api.createSorgente('canale \u{1f525}');
   esigi(creata.nome === 'canale \u{1f525}', 'il server accetta le emoji nelle sorgenti');

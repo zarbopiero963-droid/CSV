@@ -653,3 +653,50 @@ def test_il_travaso_porta_sorgenti_e_competizioni_senza_collisioni(tmp_path,
     assert len(nomi) == 2 and nomi[0] == 'test 1' and nomi[1] != 'test 1', (
         f'attesa la rinomina di chi arriva, trovato {nomi}')
     c.close()
+
+
+# --------------------------------------- alias ambiguo vietato (#34 pezzo 3)
+
+def test_lo_stesso_alias_su_due_squadre_della_stessa_sorgente_e_un_422(servizio, cookie_a):
+    """Deciso dal proprietario (17/08/2026), regola del pezzo 3: a parse-time la
+    ricerca alias->Betfair corre su TUTTA la sorgente, quindi lo stesso testo su
+    due squadre sarebbe ambiguo. L'ambiguita' non deve poter nascere: il PUT la
+    rifiuta al salvataggio, anche fra competizioni diverse, e il corpo che la
+    contiene non scrive niente (il no-commit del 422). Ribadire lo stesso alias
+    sulla stessa squadra resta l'upsert di sempre, e in un'ALTRA sorgente lo
+    stesso testo e' libero: la colonna di alias e' della sorgente.
+    """
+    sport = _sport(servizio, cookie_a, 'Dup')
+    cid = _competizione(servizio, cookie_a, sport, 'Serie Dup')
+    cid2 = _competizione(servizio, cookie_a, sport, 'Coppa Dup')
+    ju = _squadra(servizio, cookie_a, cid, 'Juventus')
+    mi = _squadra(servizio, cookie_a, cid, 'Milan')
+    inter = _squadra(servizio, cookie_a, cid2, 'Inter')
+    sid = _sorgente(servizio, cookie_a, 'dup 1')
+    sid2 = _sorgente(servizio, cookie_a, 'dup 2')
+    try:
+        _metti_alias(servizio, cookie_a, cid, sid, {str(ju): 'Juve'})
+        # Upsert sulla STESSA squadra: lecito, ieri come oggi.
+        _metti_alias(servizio, cookie_a, cid, sid, {str(ju): 'Juve'})
+        # Stessa sorgente, altra squadra: 422 col motivo, mappa intatta.
+        corpo = _metti_alias(servizio, cookie_a, cid, sid, {str(mi): 'Juve'},
+                             atteso=422)
+        motivo = corpo.decode('utf-8')
+        assert 'Juve' in motivo and 'altra squadra' in motivo, motivo
+        assert _leggi_alias(servizio, cookie_a, cid, sid)['Milan'] == ''
+        # Stessa sorgente, altra COMPETIZIONE: la ricerca e' su tutta la
+        # sorgente, quindi vietato anche qui.
+        _metti_alias(servizio, cookie_a, cid2, sid, {str(inter): 'Juve'},
+                     atteso=422)
+        # Un'ALTRA sorgente e' un'altra colonna: lo stesso testo e' libero.
+        _metti_alias(servizio, cookie_a, cid, sid2, {str(mi): 'Juve'})
+        # Duplicato DENTRO lo stesso corpo: 422 e nessuna coppia scritta,
+        # nemmeno la prima (senza commit non resta niente).
+        _metti_alias(servizio, cookie_a, cid, sid,
+                     {str(ju): 'Zebra', str(mi): 'Zebra'}, atteso=422)
+        assert _leggi_alias(servizio, cookie_a, cid, sid)['Juventus'] == 'Juve'
+    finally:
+        for s in (sid, sid2):
+            _chiama(servizio, 'DELETE', f'/api/me/sorgenti-squadre/{s}',
+                    cookie=cookie_a)
+        _chiama(servizio, 'DELETE', f'/api/me/sports/{sport}', cookie=cookie_a)
