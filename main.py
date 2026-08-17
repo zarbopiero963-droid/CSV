@@ -2634,7 +2634,7 @@ def condizione_soddisfatta(message, cond, scadenza=None):
     return cond['value'].lower() in message.lower()
 
 
-def esegui_parser(message, config):
+def esegui_parser(message, config, mappa_alias=None):
     """Esegue la config sul messaggio (`runParser`).
 
     Restituisce `matched` (soddisfa la condizione), `row` (le 14 colonne, sempre
@@ -2673,6 +2673,40 @@ def esegui_parser(message, config):
     # `_piatto`, non `strip()`: l'emptiness ha la stessa coppia divergente del
     # verdetto numerico — una obbligatoria di solo BOM era «mancante» in JS e
     # «valorizzata» in Python (stessa classe del [REAL_FINDING] dei gate, PR #47).
+    # La sorgente squadre (#34 pezzo 3): con una mappa alias→Betfair l'evento
+    # si traduce QUI, sul valore finale di EventName — spezzato sull'ULTIMO
+    # ' - ' (il separatore che il transform del wizard produce), ogni meta'
+    # normalizzata con `_piatto` (la classe di spazi gemellata, PR #47) e
+    # cercata per confronto ESATTO. Squadra sconosciuta = verbatim + AVVISO
+    # non bloccante (deciso dal proprietario il 17/08/2026): la mappa porta
+    # anche le identita' Betfair→Betfair, quindi l'avviso scatta solo sui nomi
+    # davvero estranei. Senza mappa (nessuna sorgente nel parser) non si tocca
+    # niente. Stesso blocco in `runParser`, vincolato dai casi di parita'.
+    avvisi = []
+    # `is not None`, NON la verita' del dict: una mappa VUOTA e' una sorgente
+    # selezionata senza alias compilati, e deve tradurre (cioe' avvisare) come
+    # in JS, dove `{}` e' truthy. Con `and mappa_alias` i due motori
+    # divergevano esattamente li' — misurato dal caso di parita'.
+    if matched and mappa_alias is not None:
+        i_evento = HEADERS.index('EventName')
+        evento = str('' if row[i_evento] is None else row[i_evento])
+        if _piatto(evento):
+            sep = evento.rfind(' - ')
+            parti = [evento] if sep < 0 else [evento[:sep], evento[sep + 3:]]
+            tradotte = []
+            for parte in parti:
+                nome = _piatto(parte)
+                if nome and nome in mappa_alias:
+                    tradotte.append(mappa_alias[nome])
+                    continue
+                if nome:
+                    avvisi.append(
+                        f'EventName: «{nome}» non ha un alias in questa sorgente '
+                        "squadre: nel feed esce verbatim, e XTrader lo trovera' "
+                        'solo se coincide col nome Betfair.')
+                tradotte.append(nome)
+            row[i_evento] = ' - '.join(tradotte)
+
     def _vuota(valore):
         return not _piatto(str('' if valore is None else valore))
 
@@ -2738,6 +2772,7 @@ def esegui_parser(message, config):
         if motivo is None and row[indice]:
             row[indice] = row[indice].replace('.', SEPARATORE_DECIMALE, 1)
     return {'matched': matched, 'row': row, 'missing': mancanti, 'scarti': scarti,
+            'avvisi': avvisi,
             'complete': matched and not mancanti and not scarti}
 
 

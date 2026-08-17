@@ -304,9 +304,36 @@ function realExtraction(columns, row) {
 //
 // Chi scrive il feed deve guardare `complete`, non `matched`: un messaggio
 // riconosciuto ma senza evento produrrebbe una riga quotata e priva di senso.
-export function runParser(message, config) {
+export function runParser(message, config, aliasMap) {
   const matched = matches(message, config.match);
   const row = COLUMNS.map(c => extractValue(message, (config.columns || {})[c]));
+  // La sorgente squadre (#34 pezzo 3): con una mappa alias→Betfair l'evento
+  // si traduce QUI, sul valore finale di EventName — spezzato sull'ULTIMO
+  // ' - ' (il separatore che il transform del wizard produce), ogni meta'
+  // normalizzata con `piatto` (la classe di spazi gemellata, PR #47) e
+  // cercata per confronto ESATTO. Squadra sconosciuta = verbatim + AVVISO
+  // non bloccante (deciso dal proprietario il 17/08/2026): la mappa porta
+  // anche le identita' Betfair→Betfair, quindi l'avviso scatta solo sui nomi
+  // davvero estranei. Senza mappa (nessuna sorgente nel parser) non si tocca
+  // niente. Stesso blocco in `esegui_parser`, vincolato dai casi di parita'.
+  const avvisi = [];
+  if (matched && aliasMap) {
+    const iEvento = COLUMNS.indexOf('EventName');
+    const evento = String(row[iEvento] ?? '');
+    if (piatto(evento)) {
+      const sep = evento.lastIndexOf(' - ');
+      const parti = sep < 0 ? [evento] : [evento.slice(0, sep), evento.slice(sep + 3)];
+      row[iEvento] = parti.map(parte => {
+        const nome = piatto(parte);
+        if (!nome) return nome;
+        if (Object.prototype.hasOwnProperty.call(aliasMap, nome)) return aliasMap[nome];
+        avvisi.push(`EventName: «${nome}» non ha un alias in questa sorgente `
+          + 'squadre: nel feed esce verbatim, e XTrader lo trovera' + "' "
+          + 'solo se coincide col nome Betfair.');
+        return nome;
+      }).join(' - ');
+    }
+  }
   // Le colonne NUMERICHE viaggiano nella forma su cui la guardia da' il
   // verdetto (`piatto`): un Price BOM+`2` e' una quota valida — i bordi
   // uniformi sono perdonati — ma il CSV emetteva il valore grezzo, BOM
@@ -376,7 +403,7 @@ export function runParser(message, config) {
     const i = COLUMNS.indexOf(c);
     if (reason === null && row[i]) row[i] = row[i].replace('.', DECIMAL_SEPARATOR);
   }
-  return { matched, row, missing, scarti,
+  return { matched, row, missing, scarti, avvisi,
            complete: matched && missing.length === 0 && scarti.length === 0 };
 }
 
