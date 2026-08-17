@@ -248,14 +248,23 @@ function _mercatoODemo(sport, id) {
   return mercato;
 }
 
-function _campoDemo(nome, valore) {
-  const pulito = String(valore || '').trim();
+function _campoDemo(nome, valore, vietaEmoji = true) {
+  // Il gemello di `_campo_mercato` in main.py, verdetto per verdetto
+  // (CodeRabbit, PR #66): un non-stringa si RIFIUTA come il 422 del server,
+  // non si coercizza con String() — e un campo assente resta «mancante».
+  if (valore === undefined) valore = '';
+  if (typeof valore !== 'string') throw new Error(nome + ' deve essere una stringa');
+  const pulito = valore.trim();
   if (!pulito) throw new Error(nome + ' mancante');
-  if (pulito.length > 120) throw new Error(nome + ' troppo lungo: massimo 120 caratteri');
-  // Stesso verdetto del server (#42): un'emoji creata nella demo verrebbe
-  // rifiutata dal relay vero con un 422 — meglio che la demo lo dica subito.
+  // Il server conta i CARATTERI (len() di Python = code point): '\u{1d54f}'
+  // e' UN carattere anche se .length dice 2. Contare le code unit UTF-16
+  // rifiuterebbe nomi che il relay vero accetta.
+  if ([...pulito].length > 120) throw new Error(nome + ' troppo lungo: massimo 120 caratteri');
+  // Stesso verdetto del server (#42): l'emoji si vieta SOLO dove il valore
+  // finisce nel CSV (squadra, campi mercato). Sport, competizioni e sorgenti
+  // sono etichette della UI: il server le lascia libere, la demo pure.
   // La classe e' quella del motore (EMOJI), non una seconda copia.
-  if (EMOJI.test(pulito)) {
+  if (vietaEmoji && EMOJI.test(pulito)) {
     throw new Error(nome + ' contiene un simbolo che XTrader non accetta: solo testo');
   }
   return pulito;
@@ -276,7 +285,7 @@ export function mercatiOf(sport) {
 }
 
 export async function createSport(nome) {
-  const pulito = _campoDemo('nome', nome);
+  const pulito = _campoDemo('nome', nome, false);
   const base = pulito.toLowerCase().replace(/[^a-z0-9-]+/g, '-')
     .replace(/^-+|-+$/g, '') || 'sport';
   const presi = new Set(_sportsDemo().map(s => s.slug));
@@ -297,9 +306,9 @@ export async function deleteSport(slug) {
   // (CodeRabbit, PR #66).
   const orfane = _competizioniDemo().filter(k => k.sport === slug);
   orfane.forEach(k => {
-    // `|| []`: un localStorage vecchio o ritoccato a mano potrebbe non avere
-    // l'array, e la cascata non deve morire di TypeError (Fable, PR #66).
-    (k.squadre || []).forEach(q => {
+    // Niente `|| []` qui: `_competizioniDemo()` ha gia' normalizzato l'array
+    // per TUTTI i consumatori (fonte unica, regola 3).
+    k.squadre.forEach(q => {
       _sorgentiDemo().forEach(g => { delete _aliasDemo()[`${g.id}:${q.id}`]; });
     });
   });
@@ -365,6 +374,11 @@ export async function deleteSelezione(sportSlug, mercatoId, id) {
 
 function _competizioniDemo() {
   stato.dati.competizioni = stato.dati.competizioni || [];
+  // Un localStorage vecchio o ritoccato a mano potrebbe non avere l'array
+  // delle squadre, e NESSUN consumatore deve morire di TypeError. Normalizzato
+  // QUI, una volta, invece che con `|| []` in dieci posti (Fable e GPT-5.5,
+  // PR #66; regola 3 — vincolato da tests/web/api_finta_squadre.mjs).
+  stato.dati.competizioni.forEach(k => { k.squadre = k.squadre || []; });
   return stato.dati.competizioni;
 }
 
@@ -437,7 +451,7 @@ export function aliasOf(cid, sorgente) {
 
 export async function createCompetizione(sportSlug, nome) {
   const sport = _sportODemo(sportSlug);
-  const pulito = _campoDemo('nome', nome);
+  const pulito = _campoDemo('nome', nome, false);
   if (_competizioniDemo().some(k => k.sport === sportSlug && k.nome === pulito)) {
     const errore = new Error("hai gia' una competizione con questo nome in questo sport");
     errore.status = 409;
@@ -489,7 +503,7 @@ export async function deleteSquadra(cid, id) {
 }
 
 export async function createSorgente(nome) {
-  const pulito = _campoDemo('nome', nome);
+  const pulito = _campoDemo('nome', nome, false);
   if (_sorgentiDemo().some(g => g.nome === pulito)) {
     const errore = new Error("hai gia' una sorgente con questo nome");
     errore.status = 409;
@@ -504,7 +518,7 @@ export async function createSorgente(nome) {
 
 export async function renameSorgente(id, nome) {
   const sorgente = _sorgenteODemo(id);
-  const pulito = _campoDemo('nome', nome);
+  const pulito = _campoDemo('nome', nome, false);
   if (_sorgentiDemo().some(g => g.nome === pulito && g.id !== sorgente.id)) {
     const errore = new Error("hai gia' una sorgente con questo nome");
     errore.status = 409;
@@ -537,11 +551,17 @@ export async function saveAlias(cid, sorgenteId, coppie) {
     if (!valide.has(squadra)) {
       throw new Error(`squadra ${chiave} non in questa competizione`);
     }
-    const pulito = String(valore || '').trim();
-    // RIFIUTATO come dal server (422), non troncato: uno slice a meta' di una
-    // coppia surrogata lascerebbe un lone surrogate nel localStorage
-    // (CodeRabbit, PR #66). Stesso messaggio del relay vero.
-    if (pulito.length > 120) {
+    // I verdetti del PUT vero, nello stesso ordine (CodeRabbit, PR #66):
+    // non-stringa rifiutato (non coercizzato con String()), poi trim, poi il
+    // tetto contato in CARATTERI come len() di Python — non in code unit
+    // UTF-16, che rifiuterebbe alias astrali validi. E RIFIUTATO, non
+    // troncato: uno slice a meta' di una coppia surrogata lascerebbe un lone
+    // surrogate nel localStorage. Stessi messaggi del relay vero.
+    if (typeof valore !== 'string') {
+      throw new Error('ogni alias deve essere una stringa');
+    }
+    const pulito = valore.trim();
+    if ([...pulito].length > 120) {
       throw new Error('alias troppo lungo: massimo 120 caratteri');
     }
     pulite.push([squadra, pulito]);

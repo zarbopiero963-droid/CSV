@@ -216,6 +216,10 @@ with sync_playwright() as pw:
     pg.wait_for_selector('[data-act="comp-new"]')      # risaliti all'elenco
     pg.goto(BASE + f'#/squadre/{cid}/999999')
     pg.wait_for_selector('[data-act="src-new"]')       # risaliti alla competizione
+    # E il caso a DUE salti (CodeRabbit): l'hash alias di una competizione
+    # morta risale prima alla competizione (ancora 404) e poi all'elenco.
+    pg.goto(BASE + '#/squadre/999999/999999')
+    pg.wait_for_selector('[data-act="comp-new"]')      # due 404, due salti, elenco
 
     # ------------------------------------------------ 390px, zero h-scroll
     pg.set_viewport_size({'width': 390, 'height': 844})

@@ -1,0 +1,162 @@
+// La demo (web/api_finta.js) davanti a un localStorage VECCHIO o ritoccato a
+// mano: una competizione senza l'array `squadre` non deve far morire di
+// TypeError nessuna delle funzioni che lo leggono.
+//
+// La classe e' quella della guardia aggiunta in deleteSport() (Fable, PR #66):
+// al giro dopo Fable e GPT-5.5 hanno chiesto la stessa guardia su saveAlias(),
+// e la regola 2 dice di cercare la CLASSE — qui girano TUTTI i consumatori di
+// `k.squadre`, cosi' la normalizzazione a fonte unica resta vincolata.
+//
+// Output: JSON [{nome, ok, errore}], come engine_cases.mjs. Il wrapper pytest
+// asserisce caso per caso.
+
+const CHIAVE = 'xtrelay:demo';
+
+// localStorage finto, seminato PRIMA dell'import: `boot()` legge da qui.
+const magazzino = new Map();
+globalThis.localStorage = {
+  getItem: (k) => (magazzino.has(k) ? magazzino.get(k) : null),
+  setItem: (k, v) => { magazzino.set(k, String(v)); },
+  removeItem: (k) => { magazzino.delete(k); },
+};
+
+// Il dato "rotto": la competizione 1 NON ha `squadre` ne' `prossimoId`, come
+// la lascerebbe un localStorage di una versione precedente o un ritocco a
+// mano. La 2 e' sana, per verificare che la normalizzazione non la tocchi.
+magazzino.set(CHIAVE, JSON.stringify({
+  loggato: true, slug: 'demo', token_prefix: '', parsers: [], campioni: {},
+  sports: [{ slug: 'calcio', nome: 'Calcio', mercati: [], prossimoId: 1 }],
+  competizioni: [
+    { id: 1, sport: 'calcio', sportNome: 'Calcio', nome: 'Rotta' },
+    { id: 2, sport: 'calcio', sportNome: 'Calcio', nome: 'Sana',
+      squadre: [{ id: 1, nome: 'Juventus' }], prossimoId: 2 },
+  ],
+  sorgenti: [{ id: 1, nome: 'canale' }],
+  alias: { '1:1': 'Juve' },
+}));
+
+const api = await import('../../web/api_finta.js');
+await api.boot();
+
+const esiti = [];
+
+async function caso(nome, fn) {
+  try {
+    await fn();
+    esiti.push({ nome, ok: true });
+  } catch (e) {
+    esiti.push({ nome, ok: false, errore: `${e.name}: ${e.message}` });
+  }
+}
+
+function esigi(condizione, messaggio) {
+  if (!condizione) throw new Error(messaggio);
+}
+
+await caso('competizioni() elenca anche la competizione senza array', () => {
+  const elenco = api.competizioni();
+  const rotta = elenco.find(k => k.id === 1);
+  esigi(rotta && rotta.squadre === 0, `attese 0 squadre, ho ${JSON.stringify(rotta)}`);
+  const sana = elenco.find(k => k.id === 2);
+  esigi(sana && sana.squadre === 1, `la competizione sana deve restare intatta: ${JSON.stringify(sana)}`);
+});
+
+await caso('competizione() apre il dettaglio con squadre vuote e badge 0', () => {
+  const dettaglio = api.competizione(1);
+  esigi(Array.isArray(dettaglio.squadre) && dettaglio.squadre.length === 0,
+    `attese squadre [], ho ${JSON.stringify(dettaglio.squadre)}`);
+  esigi(dettaglio.sorgenti[0].compilati === 0,
+    `atteso badge 0, ho ${dettaglio.sorgenti[0].compilati}`);
+});
+
+await caso('aliasOf() restituisce la tabella vuota', () => {
+  const righe = api.aliasOf(1, 1);
+  esigi(Array.isArray(righe) && righe.length === 0,
+    `attese 0 righe, ho ${JSON.stringify(righe)}`);
+});
+
+await caso('saveAlias() con coppie fuori competizione RIFIUTA senza TypeError', async () => {
+  let rifiutata = false;
+  try {
+    await api.saveAlias(1, 1, { 7: 'Fantasma' });
+  } catch (e) {
+    rifiutata = true;
+    esigi(!(e instanceof TypeError), `deve rifiutare, non morire: ${e.message}`);
+  }
+  esigi(rifiutata, 'una squadra inesistente deve essere rifiutata');
+});
+
+await caso('createSquadra() ripara e scrive nella competizione senza array', async () => {
+  const squadra = await api.createSquadra(1, 'AC Milan');
+  esigi(squadra.id === 1, `atteso id 1, ho ${squadra.id}`);
+  esigi(api.competizione(1).squadre.length === 1, 'la squadra deve comparire nel dettaglio');
+});
+
+// --- parita' di validazione col relay vero (CodeRabbit + regola 2, PR #66):
+// il server rifiuta i non-stringa con 422, conta i 120 caratteri in CODE
+// POINT (len() di Python), e vieta l'emoji SOLO dove il valore finisce nel
+// CSV (squadra, campi mercato) — non su sport, competizioni e sorgenti.
+
+await caso('saveAlias() rifiuta un alias non-stringa come il server', async () => {
+  let errore = null;
+  try { await api.saveAlias(2, 1, { 1: 42 }); } catch (e) { errore = e; }
+  esigi(errore && errore.message === 'ogni alias deve essere una stringa',
+    `atteso il 422 del server, ho ${errore && errore.message}`);
+});
+
+await caso('saveAlias() conta i 120 caratteri in code point, non code unit', async () => {
+  // 61 caratteri astrali = 122 code unit ma 61 caratteri: il server ACCETTA
+  // (len() Python conta i code point), quindi anche la demo deve accettare.
+  await api.saveAlias(2, 1, { 1: '\u{1d54f}'.repeat(61) });
+  esigi(api.aliasOf(2, 1)[0].alias === '\u{1d54f}'.repeat(61),
+    'alias di 61 caratteri astrali non salvato');
+  // E 121 caratteri veri restano rifiutati col messaggio del server.
+  let errore = null;
+  try { await api.saveAlias(2, 1, { 1: 'a'.repeat(121) }); } catch (e) { errore = e; }
+  esigi(errore && errore.message === 'alias troppo lungo: massimo 120 caratteri',
+    `attesi 121 caratteri rifiutati, ho ${errore && errore.message}`);
+});
+
+await caso('createSorgente() accetta le emoji come il server (etichetta UI)', async () => {
+  const creata = await api.createSorgente('canale \u{1f525}');
+  esigi(creata.nome === 'canale \u{1f525}', 'il server accetta le emoji nelle sorgenti');
+  await api.renameSorgente(creata.id, 'ancora \u{1f525}');
+  await api.deleteSorgente(creata.id);
+});
+
+await caso('createCompetizione() accetta le emoji come il server', async () => {
+  const creata = await api.createCompetizione('calcio', 'coppa \u{2b50}\u{fe0f}');
+  esigi(creata.nome === 'coppa \u{2b50}\u{fe0f}', 'il server accetta le emoji nelle competizioni');
+  await api.deleteCompetizione(creata.id);
+});
+
+await caso('createSquadra() RIFIUTA le emoji col messaggio del server', async () => {
+  let errore = null;
+  try { await api.createSquadra(2, 'Juve \u{1f525}'); } catch (e) { errore = e; }
+  esigi(errore && errore.message.includes('XTrader non accetta'),
+    `la squadra finisce nel CSV: emoji vietata, ho ${errore && errore.message}`);
+});
+
+await caso('_campoDemo rifiuta un nome non-stringa come il server', async () => {
+  let errore = null;
+  try { await api.createSorgente(42); } catch (e) { errore = e; }
+  esigi(errore && errore.message === 'nome deve essere una stringa',
+    `atteso il 422 del server, ho ${errore && errore.message}`);
+});
+
+await caso('deleteSquadra() e deleteCompetizione() chiudono senza TypeError', async () => {
+  await api.deleteSquadra(1, 1);
+  await api.deleteCompetizione(1);
+  esigi(api.competizione(1) === null, 'la competizione eliminata non deve tornare');
+});
+
+await caso('deleteSport() fa la cascata anche sul dato risanato', async () => {
+  // La competizione sana (id 2) sta sotto `calcio`: la cascata deve portarsi
+  // via lei e l'alias della sua squadra, come il relay vero.
+  await api.deleteSport('calcio');
+  esigi(api.competizioni().length === 0, 'le competizioni dello sport devono sparire');
+  esigi(api.aliasOf(2, 1) === null, 'il dettaglio eliminato non deve rispondere');
+});
+
+process.stdout.write(JSON.stringify(esiti, null, 1) + '\n');
+if (esiti.some(e => !e.ok)) process.exitCode = 1;
