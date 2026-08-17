@@ -291,6 +291,17 @@ export async function createSport(nome) {
 export async function deleteSport(slug) {
   _sportODemo(slug);
   stato.dati.sports = _sportsDemo().filter(s => s.slug !== slug);
+  // La cascata del server (#34): via anche le competizioni di questo sport,
+  // con le loro squadre e gli alias relativi in tutte le sorgenti. Senza,
+  // la demo terrebbe competizioni orfane che il relay vero non avrebbe
+  // (CodeRabbit, PR #66).
+  const orfane = _competizioniDemo().filter(k => k.sport === slug);
+  orfane.forEach(k => {
+    k.squadre.forEach(q => {
+      _sorgentiDemo().forEach(g => { delete _aliasDemo()[`${g.id}:${q.id}`]; });
+    });
+  });
+  stato.dati.competizioni = _competizioniDemo().filter(k => k.sport !== slug);
   salva();
 }
 
@@ -521,8 +532,17 @@ export async function saveAlias(cid, sorgenteId, coppie) {
       throw new Error(`squadra ${chiave} non in questa competizione`);
     }
     const pulito = String(valore || '').trim();
-    if (pulito === '') delete _aliasDemo()[`${sorgente.id}:${squadra}`];
-    else _aliasDemo()[`${sorgente.id}:${squadra}`] = pulito.slice(0, 120);
+    if (pulito === '') {
+      delete _aliasDemo()[`${sorgente.id}:${squadra}`];
+    } else {
+      // RIFIUTATO come dal server (422), non troncato: uno slice a meta' di
+      // una coppia surrogata lascerebbe un lone surrogate nel localStorage
+      // (CodeRabbit, PR #66). Stesso messaggio del relay vero.
+      if (pulito.length > 120) {
+        throw new Error('alias troppo lungo: massimo 120 caratteri');
+      }
+      _aliasDemo()[`${sorgente.id}:${squadra}`] = pulito;
+    }
   }
   salva();
 }

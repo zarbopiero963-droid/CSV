@@ -649,17 +649,22 @@ function squadreAlias() {
     <button data-act="src-ren" data-nome="${esc(sorgente.nome)}">Rinomina</button>
     <button class="danger" data-act="src-del" data-nome="${esc(sorgente.nome)}">Elimina sorgente</button></div>
     <div class="card stack">
-      ${righe.length ? righe.map(r => `
+      ${righe.length ? righe.map(r => {
+        // Normalizzato UNA volta: `data-vuoto` e `value` devono raccontare lo
+        // stesso alias, qualunque forma arrivi dal layer (CodeRabbit, PR #66).
+        const alias = r.alias || '';
+        return `
         <div class="list-item">
           <div class="grow"><span class="name">${esc(r.squadra)}</span></div>
           <input data-squadra="${r.squadra_id}" data-nome="${esc(r.squadra)}"
-                 ${r.alias === '' ? 'data-vuoto="1"' : ''}
-                 value="${esc(r.alias)}" placeholder="alias della sorgente"
+                 ${alias === '' ? 'data-vuoto="1"' : ''}
+                 value="${esc(alias)}" placeholder="alias della sorgente"
                  maxlength="120" style="width:min(46%,260px)">
           <button class="small" title="Svuota l'alias solo in questa sorgente"
                   data-act="alias-clear" data-id="${r.squadra_id}"
                   data-nome="${esc(r.squadra)}">⌫</button>
-        </div>`).join('') : `<div class="empty">Questa competizione non ha ancora squadre
+        </div>`;
+      }).join('') : `<div class="empty">Questa competizione non ha ancora squadre
           Betfair: <a href="#/squadre/${k.id}">aggiungile prima</a>.</div>`}
       ${righe.length ? `<div class="row"><div class="spacer"></div>
         <button class="primary" data-act="alias-save">Salva alias</button></div>` : ''}
@@ -1548,7 +1553,15 @@ const actions = {
     render();
   },
   async 'alias-clear'(el) {
-    try { await api.saveAlias(route.id, route.tab, { [el.dataset.id]: '' }); }
+    // La ⌫ salva la tabella COME LA VEDI, con questa riga svuotata: mandare la
+    // sola coppia svuotata farebbe perdere al re-render le modifiche digitate
+    // e non ancora salvate nelle altre righe (GPT-5.5, PR #66).
+    const coppie = {};
+    document.querySelectorAll('[data-squadra]').forEach(i => {
+      coppie[i.dataset.squadra] = i.value;
+    });
+    coppie[el.dataset.id] = '';
+    try { await api.saveAlias(route.id, route.tab, coppie); }
     catch (e) { fallita(e); return; }
     render();
   },

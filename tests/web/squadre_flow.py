@@ -33,6 +33,8 @@ ROTTE_401_ATTESE = ('/api/me',)
 # I 409 PROVOCATI dal test: la squadra doppia. Chromium logga il fetch fallito
 # come errore di risorsa, ma e' il contratto sotto verifica.
 ROTTE_409_ATTESE = ('/squadre',)
+# E i 404 degli hash morti (id inventato 999999): sono il fallback sotto verifica.
+ROTTE_404_ATTESE = ('/999999',)
 
 
 def _console(m):
@@ -44,6 +46,8 @@ def _console(m):
         if '401' in m.text and any(percorso.endswith(r) for r in ROTTE_401_ATTESE):
             return
         if '409' in m.text and any(percorso.endswith(r) for r in ROTTE_409_ATTESE):
+            return
+        if '404' in m.text and any(percorso.endswith(r) for r in ROTTE_404_ATTESE):
             return
     errors.append(f'console.{m.type}: {m.text}')
 
@@ -108,6 +112,7 @@ with sync_playwright() as pw:
     pg.wait_for_selector('a.name:has-text("Serie A")')
     pg.click('a.name:has-text("Serie A")')
     pg.wait_for_selector('#sq-nome')
+    cid = pg.evaluate('location.hash').split('/')[2]
 
     for squadra in ('Juventus', 'AC Milan'):
         pg.fill('#sq-nome', squadra)
@@ -139,7 +144,7 @@ with sync_playwright() as pw:
     shot(pg, 'squadre-alias')
 
     # Il badge si aggiorna: 2/2.
-    pg.click(f'a:has-text("Serie A")')
+    pg.click('a:has-text("Serie A")')
     pg.wait_for_selector('a.src-btn:has-text("test 1")')
     assert '2/2' in pg.inner_text('a.src-btn:has-text("test 1")')
 
@@ -157,7 +162,7 @@ with sync_playwright() as pw:
     pg.wait_for_selector('.toast:has-text("Alias salvati")')
 
     # ------------------------------------ ⌫ alias: svuota SOLO una sorgente
-    pg.click(f'a:has-text("Serie A")')
+    pg.click('a:has-text("Serie A")')
     pg.wait_for_selector('a.src-btn:has-text("test 1")')
     pg.click('a.src-btn:has-text("test 1")')
     pg.wait_for_selector('[data-act="alias-save"]')
@@ -165,7 +170,7 @@ with sync_playwright() as pw:
     pg.wait_for_selector('[data-nome="Juventus"][data-vuoto="1"]')
     assert alias_visibili(pg)['Juventus'] == ''
     assert alias_visibili(pg)['AC Milan'] == 'Milan', 'le altre righe non si muovono'
-    pg.click(f'a:has-text("Serie A")')
+    pg.click('a:has-text("Serie A")')
     pg.wait_for_selector('a.src-btn:has-text("fonte B")')
     pg.click('a.src-btn:has-text("fonte B")')
     pg.wait_for_selector('[data-act="alias-save"]')
@@ -202,6 +207,15 @@ with sync_playwright() as pw:
     assert pg.locator('.list-item .name:text-is("AC Milan")').count() == 1, \
         'le squadre Betfair sopravvivono alla sorgente'
     shot(pg, 'squadre-finale')
+
+    # ------------------- gli hash morti RISALGONO, non si piantano (CodeRabbit)
+    # Una competizione eliminata da un altro dispositivo, o un segnalibro
+    # stantio: il 404 del server deve riportare al livello sopra, non lasciare
+    # la pagina su «Caricamento…».
+    pg.goto(BASE + '#/squadre/999999')
+    pg.wait_for_selector('[data-act="comp-new"]')      # risaliti all'elenco
+    pg.goto(BASE + f'#/squadre/{cid}/999999')
+    pg.wait_for_selector('[data-act="src-new"]')       # risaliti alla competizione
 
     # ------------------------------------------------ 390px, zero h-scroll
     pg.set_viewport_size({'width': 390, 'height': 844})
