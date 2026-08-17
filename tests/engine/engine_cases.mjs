@@ -434,6 +434,28 @@ function casiConfronto() {
       { market_type: 'OVER_UNDER_25', selection_name: '',
         start_after: 'Risultati:', end_before: ';' }], selections: [] },
   });
+  aggiungi('multi: gate #41 sulla riga generata da base tutta costante',
+    'P.Bet.\nRisultati: 1-0; @ 1.85', {
+    ...multiBase, columns: { ...vuoteMulti,
+      EventName: { source: 'constant', value: 'Juve - Milan' },
+      MarketType: { source: 'constant', value: 'OVER_UNDER_15' },
+      SelectionName: { source: 'constant', value: 'Over 1,5' },
+      BetType: { source: 'constant', value: 'PUNTA' } },
+    multi: { markets: [
+      { market_type: 'OVER_UNDER_25', selection_name: 'Over 2,5' }],
+      selections: [] },
+  });
+  aggiungi('multi: gate #41 quando la riga sovrascrive l\'unica estratta',
+    'P.Bet.\nOver 1,5\n@ 1.85', {
+    ...multiBase, columns: { ...vuoteMulti,
+      EventName: { source: 'constant', value: 'Juve - Milan' },
+      MarketType: { source: 'constant', value: 'OVER_UNDER_15' },
+      SelectionName: { source: 'regex', pattern: '(Over [0-9],[0-9])', group: 1 },
+      BetType: { source: 'constant', value: 'PUNTA' } },
+    multi: { markets: [
+      { market_type: 'OVER_UNDER_25', selection_name: 'Over 9,9' }],
+      selections: [{ bet_type: 'BANCA' }] },
+  });
   aggiungi('multi: delimitatori CON selezione estraggono la quota',
     'P.Bet.\nJuve v Milan\nquota: 2.10 fine', {
     ...multiBase, multi: { markets: [
@@ -873,11 +895,18 @@ caso('csv: il feed multi-riga (#35) passa il verificatore JS', () => {
   riga2[COLUMNS.indexOf('MarketType')] = 'OVER_UNDER_25';
   const d1 = toCsv(riga1);
   const d2 = toCsv(riga2);
-  const multi = d1 + d2.slice(d2.indexOf('\r\n') + 2);
+  // `componiFeed` (#35 pezzo 2): la composizione e' la stessa del relay
+  // (`componi_feed`), fonte unica anche in JS — la usa la demo per mostrare
+  // gli stessi byte della prova del server.
+  const multi = E.componiFeed([d1, d2]);
+  eq(multi, d1 + d2.slice(d2.indexOf('\r\n') + 2),
+    'primo documento intero, del secondo la sola data line');
+  eq(E.componiFeed([d1]), d1, 'un documento passa intatto');
+  eq(E.componiFeed([]), headerOnlyCsv(), 'vuoto = la sola intestazione');
   eq(E.verifyCsv(multi), null, 'due segnali vivi devono passare');
   const rotta = multi + 'solo,tre,campi\r\n';
   eq(E.verifyCsv(rotta) === null, false, 'la riga malformata resta respinta');
-  return { multi };
+  return { multi, documenti: [d1, d2] };
 });
 
 // Il motore base+override (#35 pezzo 2): un messaggio → N righe. La riga BASE
@@ -965,6 +994,52 @@ caso('multi: somma, eredita, enabled, riga rotta isolata, punteggi dinamici', ()
   eq(s.righe[0].complete, false, 'ma non genera niente di piazzabile');
   eq(s.righe[0].scarti.some(x => x.includes('CORRECT_SCORE')), true,
     'il motivo dice DOVE la selezione vuota e- ammessa');
+  return 'ok';
+});
+
+caso('multi: il gate di contenuto (#41) vale anche sulle righe generate', () => {
+  // Base con TUTTE le obbligatorie costanti: il gate #41 scarta la base — e
+  // deve scartare anche ogni riga di override, che aggiunge solo altre
+  // costanti. Senza, `multi` sarebbe la porta sul retro del gate: la stessa
+  // scommessa fissa scritta N volte per qualunque messaggio riconosciuto.
+  const columns = {}; for (const c of COLUMNS) columns[c] = { source: 'empty' };
+  columns.EventName = { source: 'constant', value: 'Juve - Milan' };
+  columns.MarketType = { source: 'constant', value: 'OVER_UNDER_15' };
+  columns.SelectionName = { source: 'constant', value: 'Over 1,5' };
+  columns.BetType = { source: 'constant', value: 'PUNTA' };
+  columns.Price = { source: 'constant', value: '1.85' };
+  const base = { match: { type: 'contains', value: 'P.Bet.' }, columns };
+  const msg = 'P.Bet.\nRisultati: 1-0 2-1; @ 1.85';
+
+  const fissa = runParser(msg, { ...base, multi: { markets: [
+    { market_type: 'OVER_UNDER_25', selection_name: 'Over 2,5' },
+  ], selections: [] } });
+  eq(fissa.complete, false, 'la base fissa resta scartata dal gate');
+  eq(fissa.righe.length, 1, 'la riga di override resta nel conteggio');
+  eq(fissa.righe[0].complete, false, 'ma il gate la scarta come la base');
+  eq(fissa.righe[0].scarti.some(x => x.includes('nessuna colonna obbligatoria')),
+    true, 'con lo stesso motivo del gate #41');
+
+  // L'unica estrazione reale della base e' la SELEZIONE: la riga che la
+  // sovrascrive con una costante torna tutta fissa, e il gate vale PER RIGA.
+  const estrae = { ...base, columns: { ...columns,
+    SelectionName: { source: 'regex', pattern: '(Over [0-9],[0-9])', group: 1 } } };
+  const perRiga = runParser('P.Bet.\nOver 1,5\n@ 1.85', { ...estrae, multi: {
+    markets: [{ market_type: 'OVER_UNDER_25', selection_name: 'Over 9,9' }],
+    selections: [{ bet_type: 'BANCA' }] } });
+  eq(perRiga.righe.length, 2, 'due righe generate');
+  eq(perRiga.righe[0].complete, false, 'selezione sovrascritta = tutta fissa');
+  eq(perRiga.righe[1].complete, true, 'la selezione estratta ereditata passa');
+
+  // I punteggi dinamici sono ESENTI: la selezione viene dal messaggio per
+  // costruzione (dai delimitatori), quindi la riga varia col messaggio.
+  const punteggi = runParser(msg, { ...base, multi: { markets: [
+    { market_type: 'CORRECT_SCORE', selection_name: '',
+      start_after: 'Risultati:', end_before: ';' },
+  ], selections: [] } });
+  eq(punteggi.righe.length, 2, 'un punteggio, una riga');
+  eq(punteggi.righe.every(x => x.complete), true,
+    'i punteggi estratti dal messaggio non sono una scommessa fissa');
   return 'ok';
 });
 

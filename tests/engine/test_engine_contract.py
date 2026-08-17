@@ -371,3 +371,9 @@ def test_il_feed_multi_riga_passa_ENTRAMBI_i_verificatori(casi):
     assert main.verify_csv(multi) == multi, 'il gemello Python deve accettare gli stessi byte'
     with pytest.raises(ValueError):
         main.verify_csv(multi + 'solo,tre,campi\r\n')
+    # #35 pezzo 2, regola 3: anche la COMPOSIZIONE e' un contratto a due
+    # implementazioni — `componiFeed` (JS, demo) e `componi_feed` (relay)
+    # devono produrre gli stessi byte dagli stessi documenti.
+    documenti = esportato['dettaglio']['documenti']
+    assert main.componi_feed(documenti) == multi, (
+        'componi_feed diverge da componiFeed sugli stessi documenti')

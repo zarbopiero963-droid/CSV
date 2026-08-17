@@ -302,6 +302,20 @@ function realExtraction(columns, row) {
   });
 }
 
+// Il gate di CONTENUTO (#41) come fonte unica: null se almeno una obbligatoria
+// e' estratta davvero, altrimenti lo scarto. Lo usano la riga base e ogni riga
+// di override (#35 pezzo 2): senza il secondo uso, `multi` era la porta sul
+// retro del gate — base tutta costante, una riga di override, e la stessa
+// scommessa fissa usciva per qualunque messaggio riconosciuto.
+// Gemella di `_scarto_estrazione` in main.py.
+function scartoEstrazione(columns, row) {
+  if (realExtraction(columns, row)) return null;
+  return "nessuna colonna obbligatoria viene estratta dal messaggio: con soli "
+    + 'valori fissi questo parser scriverebbe la stessa scommessa per qualunque '
+    + 'messaggio. Almeno una fra ' + REQUIRED_COLUMNS.join(', ')
+    + ' deve leggere dal messaggio.';
+}
+
 // Esegue il parser sul messaggio.
 //
 // Restituisce:
@@ -346,11 +360,9 @@ export function runParser(message, config, aliasMap) {
   const rowGiudicata = giudizio.row;
   const missing = giudizio.missing;
   const scarti = giudizio.scarti;
-  if (matched && missing.length === 0 && !realExtraction(config.columns, rowGiudicata)) {
-    scarti.push("nessuna colonna obbligatoria viene estratta dal messaggio: con soli "
-      + 'valori fissi questo parser scriverebbe la stessa scommessa per qualunque '
-      + 'messaggio. Almeno una fra ' + REQUIRED_COLUMNS.join(', ')
-      + ' deve leggere dal messaggio.');
+  if (matched && missing.length === 0) {
+    const gate = scartoEstrazione(config.columns, rowGiudicata);
+    if (gate) scarti.push(gate);
   }
   const complete = matched && missing.length === 0 && scarti.length === 0;
   // Il multi-riga (#35 pezzo 2): `righe` e' l'elenco delle righe GENERATE —
@@ -471,6 +483,10 @@ function generaRighe(message, config, matched, base) {
   const righe = [];
   for (const { riga, mercato } of attive) {
     const derivata = base.row.slice();
+    // Le colonne SOVRASCRITTE dalla riga: per il gate #41 non contano come
+    // estratte — il valore che portano e' una costante della riga, qualunque
+    // cosa dica la regola della base.
+    const sovrascritte = [];
     for (const [campo, colonna] of Object.entries(MULTI_CAMPI)) {
       // Le MultiSelection non toccano il mercato: e' il contratto della
       // somma — per le combinazioni si elencano righe MultiMarket.
@@ -478,6 +494,7 @@ function generaRighe(message, config, matched, base) {
       const valore = riga[campo];
       if (valore !== undefined && valore !== null && String(valore) !== '') {
         derivata[COLUMNS.indexOf(colonna)] = String(valore);
+        sovrascritte.push(colonna);
       }
     }
     const selEsplicita = piatto(String(riga.selection_name ?? ''));
@@ -508,6 +525,8 @@ function generaRighe(message, config, matched, base) {
       for (const punteggio of punteggi) {
         const perPunteggio = derivata.slice();
         perPunteggio[iSel] = punteggio;
+        // Niente gate #41 qui: il punteggio VIENE dal messaggio per
+        // costruzione, quindi la riga varia col messaggio — non e' fissa.
         const g = giudicaRiga(perPunteggio, true);
         righe.push({ row: g.row, missing: g.missing, scarti: g.scarti,
           complete: g.missing.length === 0 && g.scarti.length === 0 });
@@ -515,6 +534,15 @@ function generaRighe(message, config, matched, base) {
       continue;
     }
     const g = giudicaRiga(derivata, true);
+    if (g.missing.length === 0) {
+      // Il gate #41 vale PER RIGA: le colonne sovrascritte non contano come
+      // estratte (il loro valore e' una costante della riga), quindi la
+      // regola della base si toglie dal conto prima di giudicare.
+      const colonne = { ...(config.columns || {}) };
+      for (const colonna of sovrascritte) delete colonne[colonna];
+      const gate = scartoEstrazione(colonne, g.row);
+      if (gate) g.scarti.push(gate);
+    }
     righe.push({ row: g.row, missing: g.missing, scarti: g.scarti,
       complete: g.missing.length === 0 && g.scarti.length === 0 });
   }
@@ -545,6 +573,23 @@ export function toCsv(row) {
 
 export function headerOnlyCsv() {
   return csvText(COLUMNS);
+}
+
+// UN documento CSV da N documenti completi (#35): il primo intero, dei
+// successivi la sola parte dopo la prima CRLF (la data line) — BOM e
+// intestazione una volta sola, in testa. Lista vuota = la sola intestazione.
+// Gemella di `componi_feed` in main.py: la usa la demo per mostrare gli
+// STESSI byte che la prova del server comporrebbe.
+export function componiFeed(documenti) {
+  const validi = (documenti || []).filter(d => d);
+  if (!validi.length) return headerOnlyCsv();
+  const pezzi = [validi[0]];
+  for (const documento of validi.slice(1)) {
+    const i = documento.indexOf('\r\n');
+    const coda = i < 0 ? '' : documento.slice(i + 2);
+    if (coda) pezzi.push(coda);
+  }
+  return pezzi.join('');
 }
 
 // Intestazione attesa, derivata dalle colonne e non ricopiata: una copia a mano
