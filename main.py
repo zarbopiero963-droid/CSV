@@ -5071,14 +5071,21 @@ def elimina_sport_mio(slug: str, request: Request):
         # E le competizioni (#34), che vivono sotto lo sport: senza queste tre
         # DELETE resterebbero righe orfane — invisibili alle API (la proprieta'
         # si risolve passando dallo sport) e non piu' eliminabili. Le sorgenti
-        # NON si toccano: sono dell'utente, non dello sport.
+        # NON si toccano: sono dell'utente, non dello sport. Il vincolo
+        # `user_id` dentro ogni statement e' il [REAL_FINDING] di Sol sulla
+        # PR #64: la proprieta' letta da `_sport_o_404` puo' invecchiare prima
+        # del write-lock, quindi la si ripete dove la scrittura avviene.
         c.execute('DELETE FROM alias_squadre WHERE squadra_id IN'
                   ' (SELECT q.id FROM squadre_betfair q JOIN competizioni k'
-                  '  ON q.competizione_id = k.id WHERE k.sport_id=?)', (sport[0],))
+                  '  ON q.competizione_id = k.id WHERE k.sport_id=? AND k.user_id=?)',
+                  (sport[0], utente['id']))
         c.execute('DELETE FROM squadre_betfair WHERE competizione_id IN'
-                  ' (SELECT id FROM competizioni WHERE sport_id=?)', (sport[0],))
-        c.execute('DELETE FROM competizioni WHERE sport_id=?', (sport[0],))
-        c.execute('DELETE FROM sports WHERE id=?', (sport[0],))
+                  ' (SELECT id FROM competizioni WHERE sport_id=? AND user_id=?)',
+                  (sport[0], utente['id']))
+        c.execute('DELETE FROM competizioni WHERE sport_id=? AND user_id=?',
+                  (sport[0], utente['id']))
+        c.execute('DELETE FROM sports WHERE id=? AND user_id=?',
+                  (sport[0], utente['id']))
         c.commit()
     finally:
         c.close()
@@ -5266,26 +5273,83 @@ def _inserisci_competizione(c, user_id, sport_id, nome):
     eliminabile. None = sport sparito, il chiamante risponde 404.
     """
     c.execute('INSERT INTO competizioni(user_id, sport_id, nome)'
-              ' SELECT ?,?,? WHERE EXISTS (SELECT 1 FROM sports WHERE id=?)',
-              (user_id, sport_id, nome, sport_id))
+              ' SELECT ?,?,? WHERE EXISTS'
+              ' (SELECT 1 FROM sports WHERE id=? AND user_id=?)',
+              (user_id, sport_id, nome, sport_id, user_id))
     if not c.execute('SELECT changes()').fetchone()[0]:
         return None
     return c.execute('SELECT last_insert_rowid()').fetchone()[0]
 
 
-def _inserisci_squadra(c, competizione_id, nome):
+def _inserisci_squadra(c, user_id, competizione_id, nome):
     """Come `_inserisci_competizione`, per la squadra: il padre e' la competizione.
 
     Copre anche lo sport eliminato nel frattempo: la sua DELETE porta via le
     competizioni nella stessa transazione (vedi `elimina_sport_mio`), quindi la
-    competizione sparita e' il sintomo unico da controllare.
+    competizione sparita e' il sintomo unico da controllare. Il vincolo
+    `user_id` nella subquery e' il [REAL_FINDING] di GPT-5.6 Sol al gate della
+    PR #64: la proprieta' letta prima del write-lock puo' invecchiare — un
+    travaso concorrente della riconciliazione sposta il padre fra il check e
+    la scrittura — quindi ogni statement la ripete DENTRO il write-lock.
     """
     c.execute('INSERT INTO squadre_betfair(competizione_id, nome)'
-              ' SELECT ?,? WHERE EXISTS (SELECT 1 FROM competizioni WHERE id=?)',
-              (competizione_id, nome, competizione_id))
+              ' SELECT ?,? WHERE EXISTS'
+              ' (SELECT 1 FROM competizioni WHERE id=? AND user_id=?)',
+              (competizione_id, nome, competizione_id, user_id))
     if not c.execute('SELECT changes()').fetchone()[0]:
         return None
     return c.execute('SELECT last_insert_rowid()').fetchone()[0]
+
+
+def _elimina_squadra(c, user_id, competizione_id, squadra_id):
+    """La «× squadra», vincolata al proprietario DENTRO ogni statement.
+
+    Stessa ragione del vincolo in `_inserisci_squadra` (Sol, PR #64): il
+    controllo di proprieta' della rotta e' una lettura, e questi statement
+    girano nel write-lock — la subquery su `competizioni.user_id` vede lo
+    stato vero. None = niente da eliminare per QUESTO utente: la rotta
+    risponde 404, identico al padre gia' sparito.
+    """
+    c.execute('DELETE FROM alias_squadre WHERE squadra_id IN'
+              ' (SELECT q.id FROM squadre_betfair q JOIN competizioni k'
+              '  ON k.id = q.competizione_id'
+              '  WHERE q.id=? AND q.competizione_id=? AND k.user_id=?)',
+              (squadra_id, competizione_id, user_id))
+    tolte = c.execute('DELETE FROM squadre_betfair WHERE id=? AND competizione_id IN'
+                      ' (SELECT id FROM competizioni WHERE id=? AND user_id=?)',
+                      (squadra_id, competizione_id, user_id)).rowcount
+    return True if tolte else None
+
+
+def _elimina_competizione(c, user_id, competizione_id):
+    """Cascata della competizione (alias → squadre → riga), tutta vincolata."""
+    c.execute('DELETE FROM alias_squadre WHERE squadra_id IN'
+              ' (SELECT q.id FROM squadre_betfair q WHERE q.competizione_id IN'
+              '  (SELECT id FROM competizioni WHERE id=? AND user_id=?))',
+              (competizione_id, user_id))
+    c.execute('DELETE FROM squadre_betfair WHERE competizione_id IN'
+              ' (SELECT id FROM competizioni WHERE id=? AND user_id=?)',
+              (competizione_id, user_id))
+    tolte = c.execute('DELETE FROM competizioni WHERE id=? AND user_id=?',
+                      (competizione_id, user_id)).rowcount
+    return True if tolte else None
+
+
+def _elimina_sorgente(c, user_id, sorgente_id):
+    """Cascata della sorgente (i SUOI alias → la riga), vincolata."""
+    c.execute('DELETE FROM alias_squadre WHERE sorgente_id IN'
+              ' (SELECT id FROM sorgenti_squadre WHERE id=? AND user_id=?)',
+              (sorgente_id, user_id))
+    tolte = c.execute('DELETE FROM sorgenti_squadre WHERE id=? AND user_id=?',
+                      (sorgente_id, user_id)).rowcount
+    return True if tolte else None
+
+
+def _rinomina_sorgente(c, user_id, sorgente_id, nome):
+    """La rinomina, vincolata. Il doppione solleva `IntegrityError` come prima."""
+    toccate = c.execute('UPDATE sorgenti_squadre SET nome=? WHERE id=? AND user_id=?',
+                        (nome, sorgente_id, user_id)).rowcount
+    return True if toccate else None
 
 
 def _scrivi_alias(c, user_id, sorgente_id, squadra_id, competizione_id, alias):
@@ -5383,8 +5447,8 @@ async def rinomina_sorgente_mia(sid: str, request: Request):
     try:
         sorgente = _sorgente_o_404(c, utente['id'], sid)
         try:
-            c.execute('UPDATE sorgenti_squadre SET nome=? WHERE id=?',
-                      (nome, sorgente[0]))
+            if _rinomina_sorgente(c, utente['id'], sorgente[0], nome) is None:
+                raise HTTPException(404, 'sorgente non trovata')
         except sqlite3.IntegrityError:
             raise HTTPException(409, 'hai gia\' una sorgente con questo nome') from None
         c.commit()
@@ -5402,8 +5466,8 @@ def elimina_sorgente_mia(sid: str, request: Request):
     c = db()
     try:
         sorgente = _sorgente_o_404(c, utente['id'], sid)
-        c.execute('DELETE FROM alias_squadre WHERE sorgente_id=?', (sorgente[0],))
-        c.execute('DELETE FROM sorgenti_squadre WHERE id=?', (sorgente[0],))
+        if _elimina_sorgente(c, utente['id'], sorgente[0]) is None:
+            raise HTTPException(404, 'sorgente non trovata')
         c.commit()
     finally:
         c.close()
@@ -5491,12 +5555,8 @@ def elimina_competizione_mia(cid: str, request: Request):
     c = db()
     try:
         competizione = _competizione_o_404(c, utente['id'], cid)
-        c.execute('DELETE FROM alias_squadre WHERE squadra_id IN'
-                  ' (SELECT id FROM squadre_betfair WHERE competizione_id=?)',
-                  (competizione[0],))
-        c.execute('DELETE FROM squadre_betfair WHERE competizione_id=?',
-                  (competizione[0],))
-        c.execute('DELETE FROM competizioni WHERE id=?', (competizione[0],))
+        if _elimina_competizione(c, utente['id'], competizione[0]) is None:
+            raise HTTPException(404, 'competizione non trovata')
         c.commit()
     finally:
         c.close()
@@ -5514,7 +5574,7 @@ async def crea_squadra_mia(cid: str, request: Request):
     try:
         competizione = _competizione_o_404(c, utente['id'], cid)
         try:
-            nuovo = _inserisci_squadra(c, competizione[0], nome)
+            nuovo = _inserisci_squadra(c, utente['id'], competizione[0], nome)
         except sqlite3.IntegrityError:
             raise HTTPException(
                 409, 'squadra gia\' presente in questa competizione') from None
@@ -5542,12 +5602,7 @@ def elimina_squadra_mia(cid: str, sid: str, request: Request):
     try:
         competizione = _competizione_o_404(c, utente['id'], cid)
         sid = _intero_o_404(sid, 'squadra')
-        c.execute('DELETE FROM alias_squadre WHERE squadra_id IN'
-                  ' (SELECT id FROM squadre_betfair WHERE id=? AND competizione_id=?)',
-                  (sid, competizione[0]))
-        tolte = c.execute('DELETE FROM squadre_betfair WHERE id=? AND competizione_id=?',
-                          (sid, competizione[0])).rowcount
-        if not tolte:
+        if _elimina_squadra(c, utente['id'], competizione[0], sid) is None:
             raise HTTPException(404, 'squadra non trovata')
         c.commit()
     finally:

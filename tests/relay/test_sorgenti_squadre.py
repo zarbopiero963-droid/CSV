@@ -451,7 +451,7 @@ def test_l_inserimento_non_lascia_orfani_se_il_padre_sparisce(tmp_path, monkeypa
     assert c.execute('SELECT COUNT(*) FROM competizioni').fetchone()[0] == 0
 
     competizione_sparita = 4242
-    assert main._inserisci_squadra(c, competizione_sparita, 'Juventus') is None
+    assert main._inserisci_squadra(c, utente, competizione_sparita, 'Juventus') is None
     assert c.execute('SELECT COUNT(*) FROM squadre_betfair').fetchone()[0] == 0
 
     # E il TERZO sito della stessa classe, quello mancato al primo giro:
@@ -464,7 +464,7 @@ def test_l_inserimento_non_lascia_orfani_se_il_padre_sparisce(tmp_path, monkeypa
               (utente, 'sorgente di prova'))
     sorgente = c.execute('SELECT id FROM sorgenti_squadre').fetchone()[0]
     cid = main._inserisci_competizione(c, utente, sport, 'Serie A')
-    squadra = main._inserisci_squadra(c, cid, 'Juventus')
+    squadra = main._inserisci_squadra(c, utente, cid, 'Juventus')
 
     assert main._scrivi_alias(c, utente, sorgente, squadra, cid, 'Juve') is True
     assert main._scrivi_alias(c, utente, sorgente, squadra, cid, 'JUV') is True, \
@@ -513,6 +513,63 @@ def test_l_inserimento_non_lascia_orfani_se_il_padre_sparisce(tmp_path, monkeypa
         'la sorgente di un altro utente non deve accettare alias'
     assert c.execute('SELECT COUNT(*) FROM alias_squadre WHERE sorgente_id=?',
                      (sorgente_altrui,)).fetchone()[0] == 0
+    c.close()
+
+
+def test_le_scritture_sono_vincolate_al_proprietario_anche_nel_write_lock(
+        tmp_path, monkeypatch):
+    """[REAL_FINDING] di GPT-5.6 Sol al gate della PR #64: la proprieta' letta
+    PRIMA del write-lock puo' invecchiare — una riconciliazione concorrente
+    travasa il padre fra il check e la scrittura, e uno statement che filtra
+    solo per id atterrerebbe su dati ormai di un altro account. Qui ogni
+    helper distruttivo ripete il vincolo `user_id` DENTRO lo statement: col
+    proprietario sbagliato, zero righe toccate e None al chiamante.
+
+    (Il travaso avviene solo fra account della STESSA persona, quindi non e'
+    una falla cross-utente viva: e' la stessa difesa in profondita' del
+    vincolo di proprieta' in `_scrivi_alias`, applicata al lato distruttivo.)
+    """
+    import sqlite3
+    percorso = relay_in_processo(monkeypatch, tmp_path / 'proprietario.db')
+    c = sqlite3.connect(percorso)
+    utenti = {}
+    for slug in ('mio', 'altrui'):
+        c.execute("INSERT INTO users(slug, first_name, status) VALUES (?, ?, 'attivo')",
+                  (slug, slug.capitalize()))
+        utenti[slug] = c.execute('SELECT id FROM users WHERE slug=?',
+                                 (slug,)).fetchone()[0]
+    c.execute('INSERT INTO sports(user_id, slug, nome) VALUES (?, ?, ?)',
+              (utenti['mio'], 'calcio', 'Calcio'))
+    sport = c.execute("SELECT id FROM sports WHERE slug='calcio'").fetchone()[0]
+    cid = main._inserisci_competizione(c, utenti['mio'], sport, 'Serie A')
+    squadra = main._inserisci_squadra(c, utenti['mio'], cid, 'Juventus')
+    c.execute('INSERT INTO sorgenti_squadre(user_id, nome) VALUES (?, ?)',
+              (utenti['mio'], 'fonte'))
+    sorgente = c.execute('SELECT id FROM sorgenti_squadre').fetchone()[0]
+    assert main._scrivi_alias(c, utenti['mio'], sorgente, squadra, cid, 'Juve') is True
+
+    # Il proprietario SBAGLIATO non tocca niente, nemmeno conoscendo gli id.
+    assert main._elimina_squadra(c, utenti['altrui'], cid, squadra) is None
+    assert main._elimina_competizione(c, utenti['altrui'], cid) is None
+    assert main._elimina_sorgente(c, utenti['altrui'], sorgente) is None
+    assert main._rinomina_sorgente(c, utenti['altrui'], sorgente, 'rubata') is None
+    assert c.execute('SELECT COUNT(*) FROM squadre_betfair').fetchone()[0] == 1
+    assert c.execute('SELECT COUNT(*) FROM competizioni').fetchone()[0] == 1
+    assert c.execute('SELECT COUNT(*) FROM alias_squadre').fetchone()[0] == 1
+    assert c.execute('SELECT nome FROM sorgenti_squadre').fetchone()[0] == 'fonte'
+
+    # E il creare sotto un padre TRAVASATO nel frattempo: zero righe.
+    assert main._inserisci_competizione(c, utenti['altrui'], sport, 'Abuso') is None
+    assert main._inserisci_squadra(c, utenti['altrui'], cid, 'Abuso') is None
+
+    # Il proprietario vero fa tutto, nell'ordine inverso delle guardie.
+    assert main._rinomina_sorgente(c, utenti['mio'], sorgente, 'fonte B') is True
+    assert main._elimina_squadra(c, utenti['mio'], cid, squadra) is True
+    assert main._elimina_competizione(c, utenti['mio'], cid) is True
+    assert main._elimina_sorgente(c, utenti['mio'], sorgente) is True
+    for tabella in ('squadre_betfair', 'competizioni', 'alias_squadre',
+                    'sorgenti_squadre'):
+        assert c.execute(f'SELECT COUNT(*) FROM {tabella}').fetchone()[0] == 0, tabella
     c.close()
 
 
