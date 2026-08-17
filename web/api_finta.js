@@ -99,6 +99,22 @@ export function botAccessoUrl() {
   return null;
 }
 
+/* ----------------------------------------------------------- pannello admin */
+
+// La demo non ha un amministratore (me().admin e' false): il pannello non
+// compare mai e queste funzioni esistono per la parita' di superficie. Se
+// qualcosa le chiamasse comunque, rispondono come il server a un non-admin.
+function _non_admin() {
+  const errore = new Error('not found');
+  errore.status = 404;
+  throw errore;
+}
+
+export async function adminRequests() { _non_admin(); }
+export async function adminApprove() { _non_admin(); }
+export async function adminReject() { _non_admin(); }
+export async function adminReminder() { _non_admin(); }
+
 /* ----------------------------------------------------------------- parser */
 
 export async function listParsers() {

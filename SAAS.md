@@ -1536,7 +1536,8 @@ senza doppio ruolo.
 | Fatto | **Accesso su approvazione** (PR 7), lato server: `stato_effettivo` / `giorni_rimasti` / `nuova_scadenza` come fonte unica, la richiesta del cliente col deep link del bot, la decisione del proprietario con i giorni liberi e l'errore di invio **non ingoiato**, il promemoria a 5 giorni una volta per scadenza, e gli effetti della scadenza su feed e webhook. Il **token non viene revocato** alla scadenza |
 | Fatto | **Aggancio web app → backend** (PR 8 del piano sincronizzato in #2, #32 · 3.3a): `web/api.js` parla col relay via `fetch` (login a password, login Telegram in modalità redirect di oauth.telegram.org costruito col `bot_id` di `GET /api/settings`, CRUD parser, prova sul server con gli `scarti`, token del feed a livello utente), il vecchio layer a `localStorage` vive in `web/api_finta.js` per la sola copia dimostrativa a file unico. Test browser end-to-end in `tests/web/` |
 | Fatto | **Schermate dell'accesso su approvazione** (PR 9, #7 lato cliente): il gate sugli stati in `render()`, le quattro schermate (registrato/in_attesa/scaduto/sospeso) con «Richiedi accesso» sul `POST` vero e il deep link del bot, la pillola gialla con 5 giorni o meno. Test browser con utenti seminati e cookie firmati in `tests/web/test_schermate_accesso.py` |
-| M3 | Il pannello admin (`Richieste`, giorni liberi, «Attiva», «Entra come»): backend già in PR 7, viste con la PR 10 |
+| Fatto | **Pannello Richieste** (PR 10, #7 lato admin): la vista con l'elenco, «Attiva» col campo giorni libero e l'avviso Telegram fallito **visibile**, «Rifiuta» con conferma, il giro dei promemoria. Test browser end-to-end con decisioni verificate sul database in `tests/web/test_pannello_admin.py` |
+| M3 | «Entra come» e lo storico di `admin_audit` nel pannello: servono rotte nuove lato server |
 | M4 | Log persistenti, sospensione, suggerimento AI lato server, abbonamenti |
 
 ## Facciata pubblica
@@ -1638,7 +1639,34 @@ Telegram: i due avvisi devono raccontare la stessa storia.
 ### Struttura
 
 Sidebar: «Dashboard», «Parser», «Feed CSV», «Chat Telegram», «Log messaggi»,
-«Impostazioni», più nome utente, profilo (slug) e «Esci».
+«Impostazioni», più nome utente, profilo (slug) e «Esci». **Solo per
+l'amministratore** compare anche «Richieste», subito sotto la Dashboard.
+
+### Il pannello Richieste (#7, solo amministratore)
+
+La voce e la vista esistono solo con `admin` vero; il server risponde comunque
+**404** a chi non lo è, e un cliente che digita l'hash a mano vede la dashboard.
+
+- **Elenco**: per ogni richiesta, nome, `@username`, «chiesto il» (timestamp del
+  server), stato — e, se il cliente non ha mai aperto il bot, l'avvertimento in
+  giallo verbatim: «Non ha ancora aperto il bot: il messaggio di approvazione non
+  potrà raggiungerlo.» (trappola 1).
+- **«Attiva»** con il campo **giorni libero** (placeholder `giorni`, 1–3650):
+  senza un numero non parte nessun POST. L'esito resta sopra l'elenco:
+  - avviso partito → «Accesso attivato: N giorni. Il cliente è stato avvisato su
+    Telegram.»;
+  - avviso **fallito** → banner giallo: «Accesso attivato (N giorni), **ma
+    l'avviso Telegram NON è partito** — <motivo>. Contatta il cliente a mano: per
+    lui non è cambiato niente finché non lo sa.» L'invio fallito non si ingoia
+    mai; l'accesso resta concesso, com'è da contratto del server.
+- **«Rifiuta»**, con conferma: la modale dice che il cliente torna «registrato»
+  e potrà chiedere di nuovo — un rifiuto non è una sospensione.
+- **Promemoria di scadenza**: la card spiega che non c'è uno scheduler e il giro
+  parte dal pulsante «Manda il giro di promemoria»; l'esito è «avvisati: N ·
+  falliti: M» accanto al pulsante.
+
+**Non ancora nel pannello** (restano in M3): «Entra come» e lo storico di
+`admin_audit` — servono rotte nuove, non esistono lato server.
 
 - **Dashboard**: la pillola dello stato dell'accesso («amministratore», «attivo, N
   giorni rimasti», o lo stato grezzo), quattro contatori misurati («Parser», «Parser

@@ -93,6 +93,17 @@ function parseHash() {
 
 function go(hash) { location.hash = hash; }
 
+// La generazione delle viste: render() la incrementa a ogni passaggio, le
+// viste async la fotografano prima dell'await e scartano risposta ED errore
+// se nel frattempo un altro render e' partito. Il confronto sull'HASH non
+// bastava: uscire e RIENTRARE nella stessa pagina lascia l'hash identico, e
+// una risposta della prima visita arrivata fuori ordine ridisegnava sopra
+// quella fresca — race ABA, bloccante di GPT-5.6 Sol sulla PR #53. (Il
+// confronto sul NOME della rotta era stato scartato prima: viewOverview fa da
+// fallback per rotte altrui e il nome non combaciava mai, lasciando la pagina
+// al «Caricamento» — misurato nel test del pannello.)
+let generazione = 0;
+
 window.addEventListener('hashchange', render);
 
 /* ------------------------------------------------------------------ login */
@@ -146,6 +157,7 @@ function shell(inner) {
       <div class="brand"><i>XT</i> Signal Relay</div>
       <nav>
         ${item('#/', '◱', 'Dashboard', route.name === 'overview')}
+        ${u.admin ? item('#/richieste', '▤', 'Richieste', route.name === 'richieste') : ''}
         ${item('#/parsers', '⌗', 'Parser', route.name === 'parsers' || route.name === 'parser')}
         ${item('#/feed', '⇩', 'Feed CSV', route.name === 'feed')}
         ${item('#/chats', '✆', 'Chat Telegram', route.name === 'chats')}
@@ -238,12 +250,68 @@ function viewAccesso(u) {
   </div></div>`;
 }
 
+/* ---------------------------------------------------------- pannello admin */
+
+// L'esito dell'ultima decisione, mostrato sopra l'elenco delle richieste:
+// sopravvive al re-render della vista e si azzera cambiando pagina. Serve
+// SOPRATTUTTO per l'avviso Telegram fallito: la Issue #7 pretende che un
+// invio non partito sia visibile, mai ingoiato.
+let esitoRichieste = null;
+
+async function viewRichieste() {
+  shell('<div class="dim">Caricamento…</div>');
+  // La guardia anti-stantio: vedi `generazione` accanto al router.
+  const invocazione = generazione;
+  let richieste;
+  try { richieste = await api.adminRequests(); }
+  catch (e) { if (invocazione === generazione) fallita(e); return; }
+  if (invocazione !== generazione) return;
+
+  const righe = richieste.map(r => `
+    <div class="list-item">
+      <div class="grow">
+        <span class="name">${esc(r.nome || 'Senza nome')}</span>
+        ${r.username ? `<span class="dim small mono"> @${esc(r.username)}</span>` : ''}
+        <div class="dim small">chiesto il <span class="mono">${esc(String(r.chiesto_il || '').slice(0, 16))}</span>
+          · stato ${esc(r.stato)}</div>
+        ${r.raggiungibile ? '' : `<div class="small" style="color:var(--warn);margin-top:4px">
+          Non ha ancora aperto il bot: il messaggio di approvazione non potrà raggiungerlo.
+        </div>`}
+      </div>
+      <input type="number" min="1" max="3650" placeholder="giorni"
+             id="giorni-${esc(r.richiesta)}" style="width:90px;padding:6px 8px">
+      <button class="primary small" data-act="approva-richiesta" data-id="${esc(r.richiesta)}">Attiva</button>
+      <button class="danger small" data-act="rifiuta-richiesta" data-id="${esc(r.richiesta)}">Rifiuta</button>
+    </div>`).join('');
+
+  shell(`
+    <div class="head"><div>
+      <h1>Richieste</h1>
+      <p class="muted small">Chi chiede l'accesso. I giorni sono un campo libero: 7, 30, 90 — decidi tu.</p>
+    </div></div>
+    ${esitoRichieste || ''}
+    ${richieste.length ? `<div class="card stack">${righe}</div>`
+      : '<div class="empty">Nessuna richiesta in attesa.</div>'}
+    <div class="card stack" style="margin-top:18px">
+      <strong class="small">Promemoria di scadenza</strong>
+      <p class="dim small" style="margin:0">
+        Non c'è uno scheduler: il giro parte quando lo lanci da qui. Avvisa su Telegram
+        chi è a 5 giorni o meno dalla scadenza, una volta per scadenza.
+      </p>
+      <div class="row"><button data-act="giro-promemoria">Manda il giro di promemoria</button>
+        <span class="small dim" id="esito-promemoria"></span></div>
+    </div>`);
+}
+
 /* --------------------------------------------------------------- overview */
 
 async function viewOverview() {
   shell('<div class="dim">Caricamento…</div>');
+  const invocazione = generazione;  // guardia anti-stantio: vedi il router
   let parsers;
-  try { parsers = await api.listParsers(); } catch (e) { fallita(e); return; }
+  try { parsers = await api.listParsers(); }
+  catch (e) { if (invocazione === generazione) fallita(e); return; }
+  if (invocazione !== generazione) return;
   const u = api.me();
   const stat = (n, l) => `<div class="card"><div style="font-size:26px">${n}</div>
     <div class="muted small">${l}</div></div>`;
@@ -287,8 +355,11 @@ function parserRow(p) {
 
 async function viewParsers() {
   shell('<div class="dim">Caricamento…</div>');
+  const invocazione = generazione;  // guardia anti-stantio: vedi il router
   let parsers;
-  try { parsers = await api.listParsers(); } catch (e) { fallita(e); return; }
+  try { parsers = await api.listParsers(); }
+  catch (e) { if (invocazione === generazione) fallita(e); return; }
+  if (invocazione !== generazione) return;
   shell(`
     <div class="head"><div>
       <h1>Parser</h1>
@@ -1023,6 +1094,62 @@ const actions = {
   },
 
   // ------- token del feed (dell'utente)
+  // ------- pannello admin
+  async 'approva-richiesta'(el) {
+    const campo = document.getElementById(`giorni-${el.dataset.id}`);
+    const giorni = Number(campo && campo.value);
+    if (!Number.isInteger(giorni) || giorni < 1) {
+      toast('Scrivi i giorni da concedere (un numero intero).');
+      if (campo) campo.focus();
+      return;
+    }
+    let r;
+    try { r = await api.adminApprove(el.dataset.id, giorni); }
+    catch (e) { fallita(e); return; }
+    // L'invio fallito NON si ingoia (Issue #7): l'accesso resta concesso —
+    // e' una decisione — ma il proprietario deve sapere che l'avviso non e'
+    // arrivato, o crede di aver avvisato un cliente che non sa niente.
+    esitoRichieste = r.notificato
+      ? `<div class="banner" id="esito-decisione">Accesso attivato: ${esc(r.giorni_rimasti)}
+           giorni. Il cliente è stato avvisato su Telegram.</div>`
+      : `<div class="banner warn" id="esito-decisione">Accesso attivato
+           (${esc(r.giorni_rimasti)} giorni), <strong>ma l'avviso Telegram NON è
+           partito</strong>${r.motivo ? ` — ${esc(r.motivo)}` : ''}. Contatta il
+           cliente a mano: per lui non è cambiato niente finché non lo sa.</div>`;
+    render();
+  },
+  'rifiuta-richiesta'(el) {
+    openModal(`<h2>Rifiutare la richiesta?</h2>
+      <p class="muted small">Il cliente torna «registrato» e potrà chiedere di nuovo:
+      un rifiuto non è una sospensione.</p>
+      <div class="foot"><button data-act="close">Annulla</button>
+        <button class="danger" data-act="rifiuta-richiesta-ok" data-id="${esc(el.dataset.id)}">Rifiuta</button></div>`);
+  },
+  async 'rifiuta-richiesta-ok'(el) {
+    closeModal();
+    try { await api.adminReject(el.dataset.id); } catch (e) { fallita(e); return; }
+    esitoRichieste = '<div class="banner" id="esito-decisione">Richiesta rifiutata: il cliente può richiedere di nuovo.</div>';
+    render();
+  },
+  async 'giro-promemoria'() {
+    const dove = document.getElementById('esito-promemoria');
+    try {
+      const r = await api.adminReminder();
+      if (dove) {
+        // I motivi dei falliti si mostrano, non solo il conteggio: un giro
+        // con 3 falliti senza il perche' obbligherebbe ad andare nei log
+        // (nota di Claude Fable 5 sulla PR #53). Il motivo e' il TIPO
+        // dell'errore, mai il token: e' il contratto di invia_messaggio.
+        const falliti = r.falliti || [];
+        dove.textContent = 'avvisati: ' + (r.avvisati || []).length
+          + ' · falliti: ' + falliti.length
+          + (falliti.length
+             ? ' — ' + falliti.map(f => f.motivo || 'motivo ignoto').join('; ')
+             : '');
+      }
+    } catch (e) { fallita(e); }
+  },
+
   'ask-token'() {
     if (!api.hasToken()) { actions['generate-token'](); return; }
     openModal(`<h2>Rigenerare il token?</h2>
@@ -1146,6 +1273,7 @@ document.addEventListener('keydown', e => {
 /* ----------------------------------------------------------------- render */
 
 function render() {
+  generazione += 1;
   Object.assign(route, { id: null, tab: 'config' }, parseHash());
   if (!api.me()) { viewLogin(); return; }
   // Il cancello degli stati (#7): chi non e' attivo vede a che punto e' il suo
@@ -1153,6 +1281,14 @@ function render() {
   // approva — e il suo caso sta PRIMA del controllo sullo stato.
   const u = api.me();
   if (!u.admin && u.stato !== 'attivo') { viewAccesso(u); return; }
+  // L'esito di una decisione vive solo dentro «Richieste»: cambiando pagina
+  // si azzera, o un banner vecchio tornerebbe alla prossima visita.
+  if (route.name !== 'richieste') esitoRichieste = null;
+  if (route.name === 'richieste') {
+    // Il server risponde comunque 404 a chi non e' admin: questo e' solo il
+    // riflesso in UI — un cliente che digita l'hash vede la dashboard.
+    return u.admin ? viewRichieste() : viewOverview();
+  }
   if (route.name === 'parsers') return viewParsers();
   if (route.name === 'parser') return viewParser();
   if (route.name === 'feed') return viewFeed();
