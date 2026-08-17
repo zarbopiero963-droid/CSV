@@ -136,11 +136,11 @@ function viewLogin() {
 
     <div class="stack" style="text-align:left">
       <div>
-        <label>Username</label>
+        <label for="login-user">Username</label>
         <input id="login-user" autocomplete="username">
       </div>
       <div>
-        <label>Password</label>
+        <label for="login-pass">Password</label>
         <input id="login-pass" type="password" autocomplete="current-password">
       </div>
       <button class="primary" data-act="login-password">Entra</button>

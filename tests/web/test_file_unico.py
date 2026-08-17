@@ -54,6 +54,10 @@ def test_il_file_unico_esegue_il_flusso_demo_da_file(tmp_path):
         # CODIFICA, versione immagine (#59).
         assert pg.eval_on_selector('.login img.logo', 'e => e.naturalWidth > 0'), \
             'il logo relay non e\' incorporato nel file unico'
+        # E la favicon: stesso contratto, stessa verifica (Sourcery, PR #62).
+        href = pg.get_attribute('link[rel="icon"]', 'href')
+        assert href and href.startswith('data:image/x-icon;base64,'), \
+            f'favicon del file unico non incorporata come data URI: {href[:40]!r}'
         pg.fill('#login-user', 'demo')
         pg.fill('#login-pass', 'demo')
         pg.click('[data-act="login-password"]')

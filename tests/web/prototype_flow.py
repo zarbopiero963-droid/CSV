@@ -135,8 +135,18 @@ with sync_playwright() as pw:
     assert 'BetRelay' in pg.text_content('.login h1'), pg.text_content('.login h1')
     assert pg.eval_on_selector('.login img.logo', 'e => e.naturalWidth > 0'), \
         'il logo relay della pagina di login non si e\' caricato'
-    assert pg.text_content('.login label') == 'Username', \
-        f'etichetta inattesa: {pg.text_content(".login label")!r}'
+    # L'etichetta si trova per ASSOCIAZIONE (`for=`), non per posizione: cosi'
+    # il controllo resta legato al campo anche se la pagina aggiunge altre
+    # label, e l'associazione stessa e' accessibilita' vera (screen reader e
+    # click sull'etichetta). Suggerito da Sourcery sulla PR #62.
+    etichetta = pg.text_content('label[for="login-user"]')
+    assert etichetta == 'Username', f'etichetta inattesa: {etichetta!r}'
+    # Anche i metadati del documento sono marchio (CodeRabbit, PR #62): titolo
+    # e favicon .ico del sito, servita accanto all'app.
+    assert pg.title() == 'BetRelay', f'titolo inatteso: {pg.title()!r}'
+    favicon = pg.get_attribute('link[rel="icon"]', 'href')
+    assert favicon and favicon.endswith('betrelay-favicon-sito.ico'), \
+        f'favicon inattesa: {favicon!r}'
     segnaposto = pg.get_attribute('#login-user', 'placeholder')
     assert not segnaposto, f'il campo utente suggerisce ancora {segnaposto!r}'
 

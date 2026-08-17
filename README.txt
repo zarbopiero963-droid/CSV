@@ -416,7 +416,8 @@ AUTENTICAZIONE
 CSV_ACCESS_TOKEN protegge dieci rotte: i due feed CSV (/xtrader.csv e
 /profiles/NOME.csv, col parametro ?token=) e le otto API di gestione (con
 l'header X-Admin-Token). Quattro sono in lettura, sei in scrittura.
-Restano pubbliche soltanto /, /health, /telegram/webhook e /app.
+Restano pubbliche soltanto /, /health, /telegram/webhook, /app e /admin (che
+e' solo un redirect verso l'app: vedi SCORCIATOIA /admin).
 
 Il controllo e' FAIL-CLOSED: se CSV_ACCESS_TOKEN non e' configurato il servizio
 risponde 503 "servizio non configurato" a tutte le rotte protette, e NON le
