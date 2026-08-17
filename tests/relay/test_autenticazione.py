@@ -121,6 +121,17 @@ ROTTE_CON_AUTENTICAZIONE_PROPRIA = {
     ('GET', '/feed/{slug}.csv'): 404,
     # Conia il token del feed: autenticazione a sessione, come `/api/me`.
     ('POST', '/api/me/token'): 401,
+    # La libreria mercati Betfair (#33): sessione come i parser, corpo letto a mano
+    # DOPO il controllo (401 prima del 422, stessa regola e stessa guardia).
+    ('GET', '/api/me/sports'): 401,
+    ('POST', '/api/me/sports'): 401,
+    ('DELETE', '/api/me/sports/{slug}'): 401,
+    ('GET', '/api/me/sports/{slug}/mercati'): 401,
+    ('POST', '/api/me/sports/{slug}/mercati'): 401,
+    ('DELETE', '/api/me/sports/{slug}/mercati/{mid}'): 401,
+    ('GET', '/api/me/sports/{slug}/mercati/{mid}/selezioni'): 401,
+    ('POST', '/api/me/sports/{slug}/mercati/{mid}/selezioni'): 401,
+    ('DELETE', '/api/me/sports/{slug}/mercati/{mid}/selezioni/{sid}'): 401,
 }
 
 # I MOUNT sono un'altra cosa dalle rotte, e vanno dichiarati a parte: non hanno

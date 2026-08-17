@@ -52,7 +52,9 @@ def test_le_viste_chiamano_solo_funzioni_che_esistono():
 # diventasse async, le viste riceverebbero una Promise al posto del valore e
 # `u.nome` diventerebbe `undefined` — senza errore, che e' il modo peggiore.
 SINCRONE = {'me', 'settings', 'getParser', 'telegramAuthUrl', 'suggest',
-            'sampleMessage', 'saveSampleMessage', 'feedUrl', 'hasToken'}
+            'sampleMessage', 'saveSampleMessage', 'feedUrl', 'hasToken',
+            # La libreria mercati (#33): il wizard le legge dentro un render.
+            'sports', 'mercatiOf'}
 
 
 def test_la_cache_sincrona_resta_sincrona():

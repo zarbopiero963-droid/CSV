@@ -693,6 +693,13 @@ def _intero_da_env(nome, default):
 MAX_PARSER_PER_UTENTE = _intero_da_env('MAX_PARSER_PER_UTENTE', 20)
 MAX_TITOLO_PARSER = 80
 MAX_CONFIG_PARSER = 20_000
+# La libreria mercati Betfair (#33) e' per-utente e a inserimento libero: i tetti
+# esistono perche' un utente non deve poter gonfiare lo storage condiviso
+# (hardening per-tenant, #31). Regolabili da variabile su Railway senza deploy.
+MAX_SPORT_PER_UTENTE = _intero_da_env('MAX_SPORT_PER_UTENTE', 20)
+MAX_MERCATI_PER_SPORT = _intero_da_env('MAX_MERCATI_PER_SPORT', 200)
+MAX_SELEZIONI_PER_MERCATO = _intero_da_env('MAX_SELEZIONI_PER_MERCATO', 200)
+MAX_CAMPO_MERCATO = 120
 # In BYTE, sul corpo HTTP grezzo: i tetti sui campi qui sopra si misurano solo DOPO la
 # deserializzazione, e a quel punto il corpo e' gia' tutto in RAM. 64 KiB lasciano oltre
 # 3x di margine a un corpo legittimo (config 20k + titolo 80, serializzati ASCII).
@@ -795,6 +802,27 @@ SCHEMA_MULTIUTENTE = (
     # senza questa tabella una riconsegna riscrive il segnale e fa ripartire il TTL.
     'CREATE TABLE IF NOT EXISTS webhook_seen (update_id TEXT PRIMARY KEY,'
     ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP)',
+    # La libreria mercati Betfair (#33): sport → mercato → selezioni, TUTTO
+    # per-utente. Nessun catalogo incorporato — correzione del proprietario del
+    # 13/08/2026: questi dati li crea ogni utente, e un database vergine resta
+    # vergine. `user_id` vive solo su `sports`: mercati e selezioni ereditano la
+    # proprieta' per join, cosi' non esistono due copie del proprietario che
+    # possano divergere. Le cascate di eliminazione sono ESPLICITE nelle rotte
+    # (sqlite non ha le FK attive qui), dentro una sola transazione.
+    'CREATE TABLE IF NOT EXISTS sports (id INTEGER PRIMARY KEY AUTOINCREMENT,'
+    ' user_id INTEGER NOT NULL, slug TEXT NOT NULL, nome TEXT NOT NULL,'
+    ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP,'
+    ' UNIQUE (user_id, slug))',
+    # UNIQUE su (sport, type, name): blocca il doppione ESATTO, non la variante —
+    # due nomi diversi sullo stesso MarketType sono una scelta legittima
+    # dell'utente, un doppione identico e' sempre un errore di battitura.
+    'CREATE TABLE IF NOT EXISTS betfair_markets (id INTEGER PRIMARY KEY AUTOINCREMENT,'
+    ' sport_id INTEGER NOT NULL, market_type TEXT NOT NULL, market_name TEXT NOT NULL,'
+    ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP,'
+    ' UNIQUE (sport_id, market_type, market_name))',
+    'CREATE TABLE IF NOT EXISTS betfair_selections (id INTEGER PRIMARY KEY AUTOINCREMENT,'
+    ' market_id INTEGER NOT NULL, selection_name TEXT NOT NULL,'
+    ' UNIQUE (market_id, selection_name))',
     # Le migrazioni che vanno fatte UNA VOLTA SOLA per database, non a ogni avvio.
     # Nasce con la rimozione del seme (#25 lavoro E): il travaso dei link
     # `parser_chats` dai profili legacy e' una conversione di dati, e una
@@ -1506,6 +1534,7 @@ def riconcilia_su_utente(c, da_utente, a_utente):
         c.execute(f'UPDATE {tabella} SET {colonna}=? WHERE {colonna}=?',
                   (a_utente, da_utente))
     _trasferisci_parser(c, da_utente, a_utente)
+    _trasferisci_sport(c, da_utente, a_utente)
     # `session_version` incrementata sulla riga svuotata: i cookie emessi per quell'account
     # restano altrimenti validi, e da quel momento aprono una sessione su un utente che non
     # possiede piu' niente. Appartengono comunque al proprietario, quindi non e' un buco di
@@ -1542,6 +1571,28 @@ def _trasferisci_parser(c, da_utente, a_utente):
             c.execute('UPDATE parsers SET slug=? WHERE name=?',
                       (_slug_libero(slug, presi), nome))
         c.execute('UPDATE parsers SET user_id=? WHERE name=?', (a_utente, nome))
+
+
+def _trasferisci_sport(c, da_utente, a_utente):
+    """Passa gli sport (#33) di un utente a un altro, come `_trasferisci_parser`.
+
+    Stessa classe, stesso vincolo: `UNIQUE (user_id, slug)` rende legale lo stesso
+    slug su due utenti diversi, quindi il travaso cieco lo incontra e solleva.
+    Chi era gia' del destinatario tiene il suo slug; a cambiare nome e' chi
+    arriva. Mercati e selezioni riferiscono `sport_id`, che non cambia: seguono
+    il loro sport senza una riga di codice. `sports.user_id` e' quindi fuori da
+    `RIFERIMENTI_UTENTE` per lo stesso motivo di `parsers.user_id` — la guardia
+    dello schema lo dichiara esplicitamente.
+    """
+    for sport_id, slug in c.execute(
+            'SELECT id, slug FROM sports WHERE user_id=? ORDER BY id',
+            (da_utente,)).fetchall():
+        if c.execute('SELECT 1 FROM sports WHERE user_id=? AND slug=?',
+                     (a_utente, slug)).fetchone():
+            presi = {r[0] for r in c.execute('SELECT slug FROM sports').fetchall()}
+            c.execute('UPDATE sports SET slug=? WHERE id=?',
+                      (_slug_libero(slug, presi), sport_id))
+        c.execute('UPDATE sports SET user_id=? WHERE id=?', (a_utente, sport_id))
 
 
 def _completa_colonne_nuove(c, profilo_proprietario):
@@ -1643,6 +1694,7 @@ def _travasa_nel_multiutente(c):
                 c.execute(f'UPDATE {tabella} SET {colonna}=? WHERE {colonna}=?',
                           (superstite, perdente))
             _trasferisci_parser(c, perdente, superstite)
+            _trasferisci_sport(c, perdente, superstite)
             c.execute('UPDATE users SET origin_profile=NULL WHERE id=?', (perdente,))
     # `ORDER BY name` non e' decorazione: decide CHI vince quando due profili
     # rivendicano la stessa cosa — una chat o un parser. Senza, «il primo» significa
@@ -4585,6 +4637,9 @@ async def crea_parser_mio(request: Request):
     # senza il `finally` la connessione resterebbe aperta con la transazione in corso,
     # rischiando un lock sulle richieste successive. Segnalato da Claude Fable 5, PR #30.
     try:
+        # La modalita' «Da mercati Betfair» (#33) si valida DENTRO la connessione:
+        # serve leggere la libreria dell'utente, e serve la sessione gia' accertata.
+        _valida_betfair(c, utente['id'], dati.config)
         parser = _crea_parser_utente(c, utente['id'], titolo, dati.config, dati.active)
         c.commit()
     finally:
@@ -4611,6 +4666,9 @@ async def modifica_parser_mio(slug: str, request: Request):
                          (utente['id'], slug)).fetchone()
         if not riga:
             raise HTTPException(404, 'parser non trovato')
+        # Stessa guardia della creazione (regola 3, fonte unica): un PUT che
+        # spendesse una selezione altrui aggirerebbe il confine del POST.
+        _valida_betfair(c, utente['id'], dati.config)
         c.execute('UPDATE parsers SET titolo=?, config_json=?, active=?'
                   ' WHERE user_id=? AND slug=?',
                   (titolo, json.dumps(dati.config), 1 if dati.active else 0, utente['id'], slug))
@@ -4702,6 +4760,398 @@ async def prova_parser_mio(slug: str, request: Request):
         corpo['event'] = row[HEADERS.index('EventName')]
         corpo['csv'] = make_csv(row)
     return _rispondi_con_sessione(utente['id'], utente['versione'], corpo)
+
+
+# ------------------------------------------------------------------------------
+#  Mercati Betfair per-utente (#33). Sport → mercato (MarketType + MarketName) →
+#  selezioni (SelectionName), tutto creato dall'utente: NESSUN catalogo
+#  incorporato. Il wizard del parser consuma questi dati come regole costanti
+#  (`{source:'constant'}`), quindi il motore e il contratto CSV non cambiano.
+# ------------------------------------------------------------------------------
+
+def _campo_mercato(nome, valore, vieta_emoji=True):
+    """Un campo della libreria: testo pulito, entro il tetto, senza emoji.
+
+    L'emoji si vieta sui campi che FINISCONO nel CSV (MarketType, MarketName,
+    SelectionName): XTrader li scarterebbe in silenzio (#42), e la guardia di
+    `verify_csv` li fermerebbe comunque a valle — meglio il 422 alla creazione,
+    dove l'utente riceve il motivo. Il nome dello sport invece resta libero: e'
+    un'etichetta della sua UI e non tocca mai il feed.
+    """
+    if not isinstance(valore, str):
+        raise HTTPException(422, f'{nome} deve essere una stringa')
+    valore = valore.strip()
+    if not valore:
+        raise HTTPException(422, f'{nome} mancante')
+    if len(valore) > MAX_CAMPO_MERCATO:
+        raise HTTPException(422, f'{nome} troppo lungo: massimo {MAX_CAMPO_MERCATO} caratteri')
+    if vieta_emoji and _EMOJI.search(valore):
+        raise HTTPException(422, f'{nome} contiene un simbolo che XTrader non accetta: solo testo')
+    return valore
+
+
+def _intero_o_404(valore, cosa):
+    """Un id di percorso non numerico e' un 404, non un 422 (vedi `_identificativo_o_404`)."""
+    try:
+        return int(valore)
+    except (TypeError, ValueError):
+        raise HTTPException(404, f'{cosa} non trovato') from None
+
+
+def _sport_o_404(c, user_id, slug):
+    """Lo sport DELL'UTENTE, o 404: uno slug altrui non esiste, per definizione."""
+    riga = c.execute('SELECT id, slug, nome FROM sports WHERE user_id=? AND slug=?',
+                     (user_id, slug)).fetchone()
+    if not riga:
+        raise HTTPException(404, 'sport non trovato')
+    return riga
+
+
+def _mercato_o_404(c, sport_id, mid):
+    mid = _intero_o_404(mid, 'mercato')
+    riga = c.execute('SELECT id, market_type, market_name FROM betfair_markets'
+                     ' WHERE id=? AND sport_id=?', (mid, sport_id)).fetchone()
+    if not riga:
+        raise HTTPException(404, 'mercato non trovato')
+    return riga
+
+
+def _selezioni_di(c, market_id):
+    return [{'id': r[0], 'selectionName': r[1]} for r in c.execute(
+        'SELECT id, selection_name FROM betfair_selections WHERE market_id=?'
+        ' ORDER BY id', (market_id,)).fetchall()]
+
+
+def _inserisci_mercato(c, sport_id, tipo, nome):
+    """INSERT del mercato CONDIZIONATO all'esistenza dello sport, in UNO statement.
+
+    Il controllo di proprieta' delle rotte e' una LETTURA, e fra quella lettura e
+    l'INSERT una DELETE concorrente dello sport puo' committare: l'INSERT diretto
+    scriveva una riga orfana — invisibile alle API (la proprieta' si risolve per
+    join, e uno sport sparito non si joina piu') e non piu' eliminabile, storage
+    perso. Il `WHERE EXISTS` gira dentro il write-lock dell'INSERT, quindi vede
+    lo stato vero: sport sparito → zero righe inserite → il chiamante risponde
+    404, come se la lettura fosse arrivata dopo la DELETE.
+    [REAL_FINDING] di Claude Fable 5 sulla PR #55; misurato prima di correggere:
+    1 riga orfana con l'INSERT diretto.
+
+    Restituisce l'id del mercato, o None se lo sport non esiste piu'. Un
+    doppione solleva `sqlite3.IntegrityError`, come l'INSERT diretto.
+    """
+    c.execute('INSERT INTO betfair_markets(sport_id, market_type, market_name)'
+              ' SELECT ?,?,? WHERE EXISTS (SELECT 1 FROM sports WHERE id=?)',
+              (sport_id, tipo, nome, sport_id))
+    if not c.execute('SELECT changes()').fetchone()[0]:
+        return None
+    return c.execute('SELECT last_insert_rowid()').fetchone()[0]
+
+
+def _inserisci_selezione(c, market_id, selezione):
+    """Come `_inserisci_mercato`, per la selezione: il padre e' il mercato.
+
+    Copre anche lo sport eliminato nel frattempo: la sua DELETE porta via i
+    mercati nella stessa transazione, quindi il mercato sparito e' il sintomo
+    unico da controllare. Stessa classe, stesso rimedio (regola 2).
+    """
+    c.execute('INSERT INTO betfair_selections(market_id, selection_name)'
+              ' SELECT ?,? WHERE EXISTS (SELECT 1 FROM betfair_markets WHERE id=?)',
+              (market_id, selezione, market_id))
+    if not c.execute('SELECT changes()').fetchone()[0]:
+        return None
+    return c.execute('SELECT last_insert_rowid()').fetchone()[0]
+
+
+async def _oggetto_dal_corpo(request, forma):
+    """Il corpo JSON come dict, o 422 con la forma attesa. Dopo la sessione, sempre."""
+    try:
+        corpo = await _json_dal_corpo(request)
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(422, f'corpo non valido: serve {forma}') from None
+    if not isinstance(corpo, dict):
+        raise HTTPException(422, f'corpo non valido: serve {forma}')
+    return corpo
+
+
+@app.get('/api/me/sports')
+def sport_miei(request: Request):
+    """Gli sport dell'utente della sessione. Al primo login: VUOTO, per progetto."""
+    utente = _sessione_valida(request)
+    c = db()
+    try:
+        righe = c.execute(
+            'SELECT s.slug, s.nome,'
+            ' (SELECT COUNT(*) FROM betfair_markets m WHERE m.sport_id = s.id)'
+            ' FROM sports s WHERE s.user_id=? ORDER BY s.nome', (utente['id'],)).fetchall()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'], {'sports': [
+        {'slug': r[0], 'nome': r[1], 'mercati': r[2]} for r in righe]})
+
+
+@app.post('/api/me/sports')
+async def crea_sport_mio(request: Request):
+    """Crea uno sport. Lo slug si disambigua col retry, come i parser (PR #30)."""
+    utente = _sessione_valida(request)
+    corpo = await _oggetto_dal_corpo(request, '{"nome": "..."}')
+    nome = _campo_mercato('nome', corpo.get('nome', ''), vieta_emoji=False)
+    c = db()
+    try:
+        scelto = None
+        falliti = set()
+        for _ in range(8):
+            presi = falliti | {r[0] for r in c.execute(
+                'SELECT slug FROM sports WHERE user_id=?', (utente['id'],)).fetchall()}
+            slug = _slug_libero(_slugifica(nome), presi)
+            try:
+                c.execute('INSERT INTO sports(user_id, slug, nome) VALUES (?,?,?)',
+                          (utente['id'], slug, nome))
+                scelto = slug
+                break
+            except sqlite3.IntegrityError:
+                falliti.add(slug)
+                continue
+        if scelto is None:
+            raise HTTPException(409, 'creazione non riuscita per contesa, riprova')
+        # La quota si misura DOPO l'INSERT, dentro il suo write-lock: misurata
+        # prima, due POST concorrenti sull'ultimo posto la bucherebbero entrambi
+        # (stessa corsa della quota parser, PR #30). Il perdente riceve 409 e la
+        # close senza commit toglie la sua riga.
+        quanti = c.execute('SELECT COUNT(*) FROM sports WHERE user_id=?',
+                           (utente['id'],)).fetchone()[0]
+        if quanti > MAX_SPORT_PER_UTENTE:
+            raise HTTPException(
+                409, f'quota sport esaurita: massimo {MAX_SPORT_PER_UTENTE} per utente')
+        c.commit()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'],
+                                  {'slug': scelto, 'nome': nome})
+
+
+@app.delete('/api/me/sports/{slug}')
+def elimina_sport_mio(slug: str, request: Request):
+    """Elimina uno sport e la sua libreria. La cascata e' esplicita e in UNA transazione.
+
+    I parser gia' salvati NON si toccano: le loro regole sono costanti, la
+    libreria e' provenienza e non dipendenza viva (vedi `_valida_betfair`).
+    """
+    utente = _sessione_valida(request)
+    c = db()
+    try:
+        sport = _sport_o_404(c, utente['id'], slug)
+        c.execute('DELETE FROM betfair_selections WHERE market_id IN'
+                  ' (SELECT id FROM betfair_markets WHERE sport_id=?)', (sport[0],))
+        c.execute('DELETE FROM betfair_markets WHERE sport_id=?', (sport[0],))
+        c.execute('DELETE FROM sports WHERE id=?', (sport[0],))
+        c.commit()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'], {'ok': True})
+
+
+@app.get('/api/me/sports/{slug}/mercati')
+def mercati_miei(slug: str, request: Request):
+    """I mercati dello sport, con le selezioni ANNIDATE: il wizard legge tutto in una chiamata."""
+    utente = _sessione_valida(request)
+    c = db()
+    try:
+        sport = _sport_o_404(c, utente['id'], slug)
+        mercati = []
+        for r in c.execute('SELECT id, market_type, market_name FROM betfair_markets'
+                           ' WHERE sport_id=? ORDER BY market_type, market_name',
+                           (sport[0],)).fetchall():
+            mercati.append({'id': r[0], 'marketType': r[1], 'marketName': r[2],
+                            'selezioni': _selezioni_di(c, r[0])})
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'], {'mercati': mercati})
+
+
+@app.post('/api/me/sports/{slug}/mercati')
+async def crea_mercato_mio(slug: str, request: Request):
+    """Crea un mercato con le sue selezioni iniziali. Doppione esatto → 409."""
+    utente = _sessione_valida(request)
+    corpo = await _oggetto_dal_corpo(
+        request, '{"marketType": ..., "marketName": ..., "selections": [...]}')
+    tipo = _campo_mercato('marketType', corpo.get('marketType', ''))
+    nome = _campo_mercato('marketName', corpo.get('marketName', ''))
+    grezze = corpo.get('selections', [])
+    if not isinstance(grezze, list):
+        raise HTTPException(422, 'selections deve essere una lista di stringhe')
+    if len(grezze) > MAX_SELEZIONI_PER_MERCATO:
+        raise HTTPException(
+            422, f'troppe selezioni: massimo {MAX_SELEZIONI_PER_MERCATO} per mercato')
+    selezioni = [_campo_mercato('selectionName', s) for s in grezze]
+    c = db()
+    try:
+        sport = _sport_o_404(c, utente['id'], slug)
+        try:
+            mid = _inserisci_mercato(c, sport[0], tipo, nome)
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, 'mercato gia\' presente in questo sport') from None
+        if mid is None:
+            # Lo sport e' morto fra il controllo e l'INSERT (DELETE concorrente).
+            raise HTTPException(404, 'sport non trovato')
+        quanti = c.execute('SELECT COUNT(*) FROM betfair_markets WHERE sport_id=?',
+                           (sport[0],)).fetchone()[0]
+        if quanti > MAX_MERCATI_PER_SPORT:
+            raise HTTPException(
+                409, f'quota mercati esaurita: massimo {MAX_MERCATI_PER_SPORT} per sport')
+        for selezione in selezioni:
+            try:
+                c.execute('INSERT INTO betfair_selections(market_id, selection_name)'
+                          ' VALUES (?,?)', (mid, selezione))
+            except sqlite3.IntegrityError:
+                # Un doppione NELLA stessa richiesta: si rifiuta tutto, e la close
+                # senza commit non lascia il mercato mezzo scritto.
+                raise HTTPException(
+                    409, f'selezione duplicata: {selezione!r}') from None
+        c.commit()
+        creato = {'id': mid, 'marketType': tipo, 'marketName': nome,
+                  'selezioni': _selezioni_di(c, mid)}
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'], creato)
+
+
+@app.delete('/api/me/sports/{slug}/mercati/{mid}')
+def elimina_mercato_mio(slug: str, mid: str, request: Request):
+    utente = _sessione_valida(request)
+    c = db()
+    try:
+        sport = _sport_o_404(c, utente['id'], slug)
+        mercato = _mercato_o_404(c, sport[0], mid)
+        c.execute('DELETE FROM betfair_selections WHERE market_id=?', (mercato[0],))
+        c.execute('DELETE FROM betfair_markets WHERE id=?', (mercato[0],))
+        c.commit()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'], {'ok': True})
+
+
+@app.get('/api/me/sports/{slug}/mercati/{mid}/selezioni')
+def selezioni_mie(slug: str, mid: str, request: Request):
+    """Le selezioni di UN mercato, da sole.
+
+    Il wizard NON passa di qui: legge quelle annidate nella lista dei mercati
+    (una chiamata sola). La rotta esiste perche' la #33 la elenca e per chi
+    vuole solo la lista corta — descriverla come «la tendina del wizard»
+    mandava a cercare un chiamante che non esiste (CodeRabbit, PR #55).
+    """
+    utente = _sessione_valida(request)
+    c = db()
+    try:
+        sport = _sport_o_404(c, utente['id'], slug)
+        mercato = _mercato_o_404(c, sport[0], mid)
+        selezioni = _selezioni_di(c, mercato[0])
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'],
+                                  {'selezioni': selezioni})
+
+
+@app.post('/api/me/sports/{slug}/mercati/{mid}/selezioni')
+async def crea_selezione_mia(slug: str, mid: str, request: Request):
+    """«Aggiungi» dello sketch: una selezione in piu', quante ne servono."""
+    utente = _sessione_valida(request)
+    corpo = await _oggetto_dal_corpo(request, '{"selectionName": "..."}')
+    selezione = _campo_mercato('selectionName', corpo.get('selectionName', ''))
+    c = db()
+    try:
+        sport = _sport_o_404(c, utente['id'], slug)
+        mercato = _mercato_o_404(c, sport[0], mid)
+        try:
+            sid = _inserisci_selezione(c, mercato[0], selezione)
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, 'selezione gia\' presente in questo mercato') from None
+        if sid is None:
+            # Il mercato (o il suo sport) e' morto fra il controllo e l'INSERT.
+            raise HTTPException(404, 'mercato non trovato')
+        quante = c.execute('SELECT COUNT(*) FROM betfair_selections WHERE market_id=?',
+                           (mercato[0],)).fetchone()[0]
+        if quante > MAX_SELEZIONI_PER_MERCATO:
+            raise HTTPException(
+                409, f'quota selezioni esaurita: massimo {MAX_SELEZIONI_PER_MERCATO} per mercato')
+        c.commit()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'],
+                                  {'id': sid, 'selectionName': selezione})
+
+
+@app.delete('/api/me/sports/{slug}/mercati/{mid}/selezioni/{sid}')
+def elimina_selezione_mia(slug: str, mid: str, sid: str, request: Request):
+    utente = _sessione_valida(request)
+    c = db()
+    try:
+        sport = _sport_o_404(c, utente['id'], slug)
+        mercato = _mercato_o_404(c, sport[0], mid)
+        sid = _intero_o_404(sid, 'selezione')
+        tolte = c.execute('DELETE FROM betfair_selections WHERE id=? AND market_id=?',
+                          (sid, mercato[0])).rowcount
+        if not tolte:
+            raise HTTPException(404, 'selezione non trovata')
+        c.commit()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'], {'ok': True})
+
+
+def _valida_betfair(c, user_id, config):
+    """La modalita' «Da mercati Betfair» (#33): riferimento E byte devono combaciare.
+
+    Il wizard scrive tre regole costanti e il riferimento `betfair`
+    `{market_id, selection_id}`. Qui si verifica, al confine di scrittura, che:
+    la selezione esista fra quelle create DALL'UTENTE per quel mercato (una
+    selezione arbitraria via HTTP → 422, e' il test che la #33 chiede per nome);
+    i valori costanti coincidano con la libreria (il riferimento da solo non
+    basta: nel CSV finiscono i byte delle costanti); nessun campo usi i
+    segnaposto `{HOME_TEAM}`/`{AWAY_TEAM}` — la loro risoluzione e' la sorgente
+    squadre (#34), e finche' non esiste il token uscirebbe LETTERALE nel feed,
+    che XTrader scarterebbe in silenzio. Fail-closed, col motivo.
+
+    Un parser senza `betfair` non passa di qui: le costanti scritte a mano
+    restano libere come sono sempre state. E un mercato eliminato DOPO il
+    salvataggio non rompe il parser: la validazione avviene solo alla scrittura,
+    le costanti salvate restano valide — la libreria e' provenienza, non
+    dipendenza viva.
+    """
+    riferimento = config.get('betfair')
+    if riferimento is None:
+        return
+    if not isinstance(riferimento, dict):
+        raise HTTPException(422, 'betfair deve essere un oggetto {market_id, selection_id}')
+    try:
+        market_id = int(riferimento.get('market_id'))
+        selection_id = int(riferimento.get('selection_id'))
+    except (TypeError, ValueError):
+        raise HTTPException(
+            422, 'betfair.market_id e betfair.selection_id devono essere numeri') from None
+    riga = c.execute(
+        'SELECT m.market_type, m.market_name, sel.selection_name'
+        ' FROM betfair_selections sel'
+        ' JOIN betfair_markets m ON m.id = sel.market_id'
+        ' JOIN sports s ON s.id = m.sport_id'
+        ' WHERE sel.id=? AND m.id=? AND s.user_id=?',
+        (selection_id, market_id, user_id)).fetchone()
+    if not riga:
+        raise HTTPException(
+            422, 'selezione non trovata fra i tuoi mercati Betfair: scegli dal tuo elenco')
+    tipo, nome, selezione = riga
+    if any(token in campo for token in ('{HOME_TEAM}', '{AWAY_TEAM}')
+           for campo in (tipo, nome, selezione)):
+        raise HTTPException(
+            422, 'questa selezione usa i segnaposto squadra {HOME_TEAM}/{AWAY_TEAM}:'
+                 ' serve la sorgente squadre (#34), non ancora disponibile')
+    colonne = config.get('columns') or {}
+    for colonna, atteso in (('MarketType', tipo), ('MarketName', nome),
+                            ('SelectionName', selezione)):
+        regola = colonne.get(colonna) or {}
+        if regola.get('source') != 'constant' or regola.get('value') != atteso:
+            raise HTTPException(
+                422, f'{colonna} non coincide con il mercato scelto: rifai la scelta dal wizard')
 
 
 @app.post('/telegram/webhook')

@@ -88,6 +88,14 @@ function parseHash() {
     try { id = decodeURIComponent(parts[1]); } catch { /* hash storto: si usa il grezzo */ }
     return { name: 'parser', id, tab: parts[2] || 'config' };
   }
+  if (parts[0] === 'mercati' && parts[1]) {
+    // #/mercati/<sport>[/<mercato>]: `id` e' lo slug dello sport, `tab` l'id
+    // numerico del mercato aperto sulle selezioni. Stessa guardia dei parser
+    // sul percento storto.
+    let id = parts[1];
+    try { id = decodeURIComponent(parts[1]); } catch { /* hash storto: si usa il grezzo */ }
+    return { name: 'mercati', id, tab: parts[2] || null };
+  }
   return { name: parts[0] };
 }
 
@@ -159,6 +167,7 @@ function shell(inner) {
         ${item('#/', '◱', 'Dashboard', route.name === 'overview')}
         ${u.admin ? item('#/richieste', '▤', 'Richieste', route.name === 'richieste') : ''}
         ${item('#/parsers', '⌗', 'Parser', route.name === 'parsers' || route.name === 'parser')}
+        ${item('#/mercati', '◎', 'Mercati Betfair', route.name === 'mercati')}
         ${item('#/feed', '⇩', 'Feed CSV', route.name === 'feed')}
         ${item('#/chats', '✆', 'Chat Telegram', route.name === 'chats')}
         ${item('#/logs', '☰', 'Log messaggi', route.name === 'logs')}
@@ -385,6 +394,150 @@ function modalNewParser() {
     </div>`);
 }
 
+/* ------------------------------------------------- mercati Betfair (#33) */
+
+// I segnaposto squadra dei mercati handicap. Oggi NON sono spendibili nel
+// wizard (la risoluzione e' la sorgente squadre, #34): la libreria li accetta,
+// il passo due li mostra spenti col motivo, e il server li rifiuta comunque.
+const SEGNAPOSTO_SQUADRE = ['{HOME_TEAM}', '{AWAY_TEAM}'];
+
+function haSegnaposto(testo) {
+  return SEGNAPOSTO_SQUADRE.some(t => String(testo).includes(t));
+}
+
+async function viewMercati() {
+  shell('<div class="dim">Caricamento…</div>');
+  const invocazione = generazione;  // guardia anti-stantio: vedi il router
+  try {
+    await api.loadSports();
+    if (route.id) await api.loadMercati(route.id);
+  } catch (e) {
+    if (invocazione !== generazione) return;
+    // Uno sport sparito (eliminato da un altro dispositivo) non e' un errore
+    // di sessione: si torna all'elenco invece di piantarsi sul 404.
+    if (e.status === 404) { go('#/mercati'); return; }
+    fallita(e);
+    return;
+  }
+  if (invocazione !== generazione) return;
+  if (!route.id) return mercatiElenco();
+  if (!route.tab) return mercatiSport();
+  return mercatiSelezioni();
+}
+
+function mercatiElenco() {
+  const sports = api.sports() || [];
+  shell(`
+    <div class="head"><div>
+      <h1>Mercati Betfair</h1>
+      <p class="muted small">La tua libreria: sport, mercati e selezioni che crei una volta
+        e riusi in ogni parser. Parte vuota: qui non c'è nessun catalogo precompilato.</p>
+    </div><div class="spacer"></div>
+    <button class="primary" data-act="sport-new">Nuovo sport</button></div>
+    ${sports.length ? sports.map(s => `
+      <div class="list-item">
+        <div class="grow">
+          <a class="name" href="#/mercati/${encodeURIComponent(s.slug)}">${esc(s.nome)}</a>
+          <div class="dim small">${s.mercati} mercat${s.mercati === 1 ? 'o' : 'i'}</div>
+        </div>
+        <button class="danger small" data-act="sport-del" data-id="${esc(s.slug)}"
+                data-nome="${esc(s.nome)}">× elimina</button>
+      </div>`).join('') : `
+      <div class="empty"><p>Non hai ancora sport: si parte da zero, come deve essere.</p>
+       <button class="primary" data-act="sport-new">Crea il primo sport</button></div>`}`);
+}
+
+function mercatiSport() {
+  const sport = (api.sports() || []).find(s => s.slug === route.id);
+  if (!sport) { go('#/mercati'); return; }
+  const mercati = api.mercatiOf(route.id) || [];
+  shell(`
+    <div class="crumb"><a href="#/mercati">Mercati Betfair</a> / ${esc(sport.nome)}</div>
+    <div class="head"><div>
+      <h1>${esc(sport.nome)}</h1>
+      <p class="muted small">Un mercato è <span class="mono">MarketType</span> +
+        <span class="mono">MarketName</span>; le selezioni le apri cliccandolo.</p>
+    </div><div class="spacer"></div>
+    <button class="primary" data-act="mercato-new">Crea mercato</button></div>
+    ${mercati.length ? mercati.map(m => `
+      <div class="list-item">
+        <div class="grow">
+          <a class="name mono" href="#/mercati/${encodeURIComponent(route.id)}/${m.id}">${esc(m.marketType)}</a>
+          <div class="dim small">${esc(m.marketName)} · ${m.selezioni.length}
+            selezion${m.selezioni.length === 1 ? 'e' : 'i'}</div>
+        </div>
+        <button class="danger small" data-act="mercato-del" data-id="${m.id}"
+                data-nome="${esc(m.marketType)}">× elimina</button>
+      </div>`).join('') : `
+      <div class="empty"><p>Nessun mercato in questo sport.</p>
+       <button class="primary" data-act="mercato-new">Crea il primo mercato</button></div>`}`);
+}
+
+function mercatiSelezioni() {
+  const mercati = api.mercatiOf(route.id) || [];
+  const mercato = mercati.find(m => m.id === Number(route.tab));
+  if (!mercato) { go(`#/mercati/${encodeURIComponent(route.id)}`); return; }
+  // Il NOME dello sport nella briciola, come nella vista dei mercati: lo slug
+  // e' l'indirizzo, non l'etichetta. CodeRabbit, PR #55.
+  const sport = (api.sports() || []).find(s => s.slug === route.id);
+  shell(`
+    <div class="crumb"><a href="#/mercati">Mercati Betfair</a> /
+      <a href="#/mercati/${encodeURIComponent(route.id)}">${esc(sport ? sport.nome : route.id)}</a> /
+      <span class="mono">${esc(mercato.marketType)}</span></div>
+    <div class="head"><div>
+      <h1><span class="mono">${esc(mercato.marketType)}</span></h1>
+      <p class="muted small">${esc(mercato.marketName)} — crea tutte le selezioni che ti
+        servono: due per un Over/Under, tante per un Risultato esatto.</p>
+    </div></div>
+    <div class="card stack">
+      ${mercato.selezioni.length ? mercato.selezioni.map(s => `
+        <div class="list-item">
+          <div class="grow"><span class="name">${esc(s.selectionName)}</span>
+            ${haSegnaposto(s.selectionName) ? `<div class="dim small">usa i segnaposto
+              squadra: spendibile nel parser quando arriverà la sorgente squadre (#34)</div>` : ''}
+          </div>
+          <button class="danger small" data-act="sel-del" data-id="${s.id}">×</button>
+        </div>`).join('') : '<div class="empty">Nessuna selezione ancora.</div>'}
+      <div class="row">
+        <input id="sel-nome" class="grow" placeholder="es. Over 0,5 goal" maxlength="120">
+        <button class="primary" data-act="sel-add">Aggiungi</button>
+      </div>
+      <div id="sel-err" class="small" style="color:var(--err)"></div>
+    </div>`);
+}
+
+function modalNewSport() {
+  openModal(`
+    <h2>Nuovo sport</h2>
+    <div style="margin-top:16px">
+      <label>Nome dello sport</label>
+      <input id="ns-nome" placeholder="Calcio" maxlength="120">
+      <div id="ns-err" class="small" style="color:var(--err);margin-top:8px"></div>
+    </div>
+    <div class="foot">
+      <button data-act="close">Annulla</button>
+      <button class="primary" data-act="sport-create">Salva</button>
+    </div>`);
+}
+
+function modalNewMercato() {
+  openModal(`
+    <h2>Crea mercato</h2>
+    <p class="muted small">A inserimento libero: scrivi il codice e il nome come li vuole
+      XTrader. Le selezioni le aggiungi dopo, dentro il mercato.</p>
+    <div class="stack" style="margin-top:16px">
+      <div><label>MarketType (codice)</label>
+        <input id="nm-type" class="mono" placeholder="OVER_UNDER_05HT" maxlength="120"></div>
+      <div><label>MarketName (etichetta)</label>
+        <input id="nm-name" placeholder="Over/Under 0.5 Goals HT" maxlength="120"></div>
+      <div id="nm-err" class="small" style="color:var(--err)"></div>
+    </div>
+    <div class="foot">
+      <button data-act="close">Annulla</button>
+      <button class="primary" data-act="mercato-create">Salva</button>
+    </div>`);
+}
+
 /* ---------------------------------------------- dettaglio parser: wizard */
 
 // Stato del wizard, vivo solo in memoria: step 0 = condizione, 1..14 = colonne, 15 = riepilogo.
@@ -401,6 +554,10 @@ function initWiz(p) {
     match: p.config.match || { type: 'contains', value: '' },
     columns: Object.fromEntries(COLUMNS.map(c => [c, colonne[c] || { source: 'empty' }])),
   };
+  // La provenienza «Da mercati Betfair» (#33) viaggia nella config e si
+  // conserva: riaprire il parser non deve far perdere il riferimento che il
+  // server ha gia' validato.
+  if (p.config.betfair) draft.betfair = p.config.betfair;
   wiz = {
     parserId: p.slug,
     step: campione ? (configured ? 15 : 0) : 0,
@@ -410,7 +567,61 @@ function initWiz(p) {
     mode: 'message',
     pick: null,
     test: null,
+    bfSport: null,   // sport aperto nel passo «Da mercati Betfair»
+    bfMarket: null,  // mercato scelto al passo ①
+    // I valori scelti dalla libreria, per la verifica di coerenza al
+    // salvataggio: al riapri, sono le costanti gia' validate dal server.
+    bfValori: p.config.betfair ? {
+      MarketType: (colonne.MarketType || {}).value,
+      MarketName: (colonne.MarketName || {}).value,
+      SelectionName: (colonne.SelectionName || {}).value,
+    } : null,
   };
+}
+
+// Le tre colonne che la scelta dalla libreria compila insieme.
+const TRIO_BETFAIR = ['MarketType', 'MarketName', 'SelectionName'];
+
+// Il riferimento `betfair` resta nella config SOLO se le tre costanti sono
+// ancora i valori scelti dalla libreria: qualunque strada abbia preso la
+// modifica (valore fisso riscritto, frammento, regex, svuota), qui c'e' il
+// punto di passaggio unico — il salvataggio — e un riferimento non piu' vero
+// si toglie invece di farsi rifiutare dal server con un 422 criptico.
+function coerenzaBetfair() {
+  if (!wiz || !wiz.draft.betfair) return;
+  const valori = wiz.bfValori || {};
+  const coerente = TRIO_BETFAIR.every(c => {
+    const r = wiz.draft.columns[c] || {};
+    return r.source === 'constant' && r.value === valori[c];
+  });
+  if (!coerente) { delete wiz.draft.betfair; wiz.bfValori = null; }
+}
+
+// Lo sport corrente del passo «Da mercati Betfair»: quello scelto, o il primo.
+// Fonte unica (regola 3): chi CARICA i mercati e chi li LEGGE devono decidere
+// allo stesso modo, o il wizard mostra la lista di uno sport mai caricato —
+// in silenzio. Prima l'espressione viveva in tre siti; CodeRabbit, PR #55.
+function sportDelWizard() {
+  const sports = api.sports() || [];
+  return wiz.bfSport || (sports[0] && sports[0].slug) || null;
+}
+
+// Carica sport e mercati per il passo «Da mercati Betfair» del wizard, poi
+// ridisegna — se nel frattempo non e' partito un altro render (guardia
+// `generazione`, come le viste async).
+async function caricaLibreriaWizard() {
+  const invocazione = generazione;
+  try {
+    await api.loadSports();
+    const slug = sportDelWizard();
+    if (slug) await api.loadMercati(slug);
+  } catch (e) {
+    // La sessione scaduta si tratta come ovunque: `fallita` ricarica al login.
+    // Ogni altro errore lascia la vista com'e' — libreria vuota o caricamento
+    // fermo — senza esplodere in console. CodeRabbit, PR #55.
+    if (e && e.status === 401) { fallita(e); return; }
+  }
+  if (invocazione === generazione) render();
 }
 
 const HINTS = {
@@ -623,6 +834,50 @@ function stepColumn(idx) {
     body = `<div class="card"><label>Valore fisso, uguale in ogni segnale</label>
       <input id="rule-const" value="${esc(rule.source === 'constant' ? rule.value : '')}"
              placeholder="es. OVER_UNDER_15"></div>`;
+  } else if (mode === 'betfair') {
+    // Il flusso a DUE PASSI della #33: ① mercato (MarketName si compila da
+    // solo) → ② risultato, scelto fra le SOLE selezioni che l'utente ha
+    // creato. Tutto dalla cache sincrona: il caricamento parte da `wiz-mode`.
+    const sports = api.sports();
+    if (sports === null) {
+      body = '<div class="dim">Caricamento della tua libreria…</div>';
+    } else if (!sports.length) {
+      body = `<div class="empty"><p>La tua libreria è vuota.</p>
+        <p class="dim small">Crea sport e mercati in
+        <a href="#/mercati">Mercati Betfair</a>, poi torna qui: li sceglierai
+        dalla lista invece di riscriverli in ogni parser.</p></div>`;
+    } else {
+      const sportScelto = sportDelWizard();
+      const mercati = api.mercatiOf(sportScelto);
+      const mercato = (mercati || []).find(m => m.id === wiz.bfMarket) || null;
+      const rif = wiz.draft.betfair || null;
+      const frag = (attivo, dati, testo) =>
+        `<button class="frag ${attivo ? 'picked' : ''}" ${dati}>${testo}</button>`;
+      body = `<div class="card stack">
+        ${sports.length > 1 ? `<div><label>Sport</label>
+          <select id="bf-sport">${sports.map(s => `<option value="${esc(s.slug)}"
+            ${s.slug === sportScelto ? 'selected' : ''}>${esc(s.nome)}</option>`).join('')}
+          </select></div>` : ''}
+        <div><label>① Scegli il mercato — MarketName si compila da solo</label>
+          <div class="frag-list">${mercati === null
+            ? '<div class="dim small">Caricamento…</div>'
+            : mercati.map(m => frag(mercato && mercato.id === m.id,
+                `data-act="bf-market" data-id="${m.id}"`,
+                `<span class="mono">${esc(m.marketType)}</span> · ${esc(m.marketName)}`)).join('')
+              || '<div class="dim small">Nessun mercato in questo sport.</div>'}</div></div>
+        ${mercato ? `<div><label>② Scegli il risultato — solo le selezioni che hai creato</label>
+          <div class="frag-list">${mercato.selezioni.map(s => haSegnaposto(s.selectionName)
+            ? `<button class="frag" disabled>${esc(s.selectionName)}
+                <span class="dim small">— spendibile con la sorgente squadre (#34)</span></button>`
+            : frag(rif && rif.market_id === mercato.id && rif.selection_id === s.id,
+                   `data-act="bf-selection" data-id="${s.id}"`,
+                   esc(s.selectionName))).join('')
+            || '<div class="dim small">Questo mercato non ha ancora selezioni.</div>'}</div></div>` : ''}
+        ${rif ? `<div class="banner ok">Scelto dalla libreria: le colonne
+          <span class="mono">MarketType</span>, <span class="mono">MarketName</span> e
+          <span class="mono">SelectionName</span> sono compilate. Prosegui con Avanti.</div>` : ''}
+      </div>`;
+    }
   } else if (mode === 'regex') {
     const err = rule.source === 'regex' ? regexError(rule.pattern) : null;
     body = `<div class="card stack">
@@ -654,6 +909,7 @@ function stepColumn(idx) {
     </div>
     <div class="row wrap" style="gap:7px;margin:2px 0 12px">
       ${tab('message', 'Dal messaggio')}${tab('constant', 'Valore fisso')}${tab('regex', 'Regex')}
+      ${col === 'MarketType' ? tab('betfair', 'Da mercati Betfair') : ''}
       <button class="small" data-act="rule-empty">Lascia vuota</button>
     </div>
     ${body}
@@ -985,6 +1241,57 @@ const actions = {
     closeModal(); wiz = null; go('#/parsers'); render();
   },
 
+  // ------- mercati Betfair (#33)
+  'sport-new'() { modalNewSport(); },
+  async 'sport-create'() {
+    const nome = document.getElementById('ns-nome').value;
+    try { await api.createSport(nome); }
+    catch (e) { document.getElementById('ns-err').textContent = e.message; return; }
+    closeModal(); render();
+  },
+  'sport-del'(el) {
+    openModal(`<h2>Eliminare lo sport?</h2>
+      <p class="muted small">«${esc(el.dataset.nome)}» sparisce con tutti i suoi mercati
+        e le selezioni. I parser già salvati non cambiano: le loro regole restano.</p>
+      <div class="foot"><button data-act="close">Annulla</button>
+        <button class="danger" data-act="sport-del-ok" data-id="${esc(el.dataset.id)}">Elimina</button></div>`);
+  },
+  async 'sport-del-ok'(el) {
+    try { await api.deleteSport(el.dataset.id); } catch (e) { fallita(e); return; }
+    closeModal(); go('#/mercati'); render();
+  },
+  'mercato-new'() { modalNewMercato(); },
+  async 'mercato-create'() {
+    const marketType = document.getElementById('nm-type').value;
+    const marketName = document.getElementById('nm-name').value;
+    try { await api.createMercato(route.id, { marketType, marketName, selections: [] }); }
+    catch (e) { document.getElementById('nm-err').textContent = e.message; return; }
+    closeModal(); render();
+  },
+  'mercato-del'(el) {
+    openModal(`<h2>Eliminare il mercato?</h2>
+      <p class="muted small"><span class="mono">${esc(el.dataset.nome)}</span> e le sue
+        selezioni. I parser già salvati non cambiano.</p>
+      <div class="foot"><button data-act="close">Annulla</button>
+        <button class="danger" data-act="mercato-del-ok" data-id="${esc(el.dataset.id)}">Elimina</button></div>`);
+  },
+  async 'mercato-del-ok'(el) {
+    try { await api.deleteMercato(route.id, el.dataset.id); }
+    catch (e) { fallita(e); return; }
+    closeModal(); go(`#/mercati/${encodeURIComponent(route.id)}`); render();
+  },
+  async 'sel-add'() {
+    const campo = document.getElementById('sel-nome');
+    try { await api.createSelezione(route.id, route.tab, campo.value); }
+    catch (e) { document.getElementById('sel-err').textContent = e.message; return; }
+    render();
+  },
+  async 'sel-del'(el) {
+    try { await api.deleteSelezione(route.id, route.tab, el.dataset.id); }
+    catch (e) { fallita(e); return; }
+    render();
+  },
+
   // ------- wizard
   'start-wizard'() {
     const msg = document.getElementById('paste-msg').value;
@@ -1018,7 +1325,32 @@ const actions = {
     wiz.pick = null;
     render();
   },
-  'wiz-mode'(el) { wiz.mode = el.dataset.mode; render(); },
+  'wiz-mode'(el) {
+    wiz.mode = el.dataset.mode;
+    // PRIMA il render, POI il caricamento: il loader fotografa `generazione`,
+    // e col render dopo la fotografia il contatore avanzava e il loader
+    // scartava il proprio render di completamento — a cache fredda il passo
+    // restava su «Caricamento…» per sempre. Trovato da CodeRabbit (PR #55),
+    // riprodotto dal caso «cache fredda» di mercati_flow.py.
+    render();
+    if (wiz.mode === 'betfair') caricaLibreriaWizard();
+  },
+  'bf-market'(el) { wiz.bfMarket = Number(el.dataset.id); render(); },
+  'bf-selection'(el) {
+    const mercato = (api.mercatiOf(sportDelWizard()) || [])
+      .find(m => m.id === wiz.bfMarket);
+    const selezione = mercato
+      && mercato.selezioni.find(s => s.id === Number(el.dataset.id));
+    if (!selezione) return;
+    wiz.draft.columns.MarketType = { source: 'constant', value: mercato.marketType };
+    wiz.draft.columns.MarketName = { source: 'constant', value: mercato.marketName };
+    wiz.draft.columns.SelectionName = { source: 'constant', value: selezione.selectionName };
+    wiz.draft.betfair = { market_id: mercato.id, selection_id: selezione.id };
+    wiz.bfValori = { MarketType: mercato.marketType, MarketName: mercato.marketName,
+                     SelectionName: selezione.selectionName };
+    toast('MarketType, MarketName e SelectionName compilate dalla libreria.');
+    render();
+  },
   'rule-empty'() {
     wiz.draft.columns[COLUMNS[wiz.step - 1]] = { source: 'empty' };
     advance();
@@ -1074,6 +1406,7 @@ const actions = {
   async 'wiz-save'() {
     const msg = document.getElementById('test-msg')?.value ?? wiz.message;
     api.saveSampleMessage(wiz.parserId, msg);
+    coerenzaBetfair();
     try { await api.updateParser(wiz.parserId, { config: wiz.draft }); }
     catch (e) { fallita(e); return; }
     toast('Configurazione salvata sul server.');
@@ -1083,6 +1416,7 @@ const actions = {
     const msg = document.getElementById('test-msg').value;
     wiz.message = msg;
     api.saveSampleMessage(wiz.parserId, msg);
+    coerenzaBetfair();
     // Prima si salva la config, poi si prova: la prova gira sul server, che
     // conosce solo cio' che e' stato salvato — provare un draft non salvato
     // mostrerebbe l'esito di un'altra configurazione.
@@ -1186,6 +1520,9 @@ function readCurrentRule() {
   const col = COLUMNS[wiz.step - 1];
   const rule = wiz.draft.columns[col];
 
+  // In modalita' «Da mercati Betfair» le regole le scrive la scelta della
+  // selezione (azione bf-selection), non il DOM: qui non c'e' niente da leggere.
+  if (wiz.mode === 'betfair') return;
   if (wiz.mode === 'constant') {
     const v = document.getElementById('rule-const');
     wiz.draft.columns[col] = { source: 'constant', value: v ? v.value : (rule.value || '') };
@@ -1264,6 +1601,14 @@ document.addEventListener('input', e => {
 });
 document.addEventListener('change', e => {
   if (e.target.matches('#match-type')) updateMatchHelp();
+  if (e.target.matches('#bf-sport')) {
+    // Cambio sport nel passo «Da mercati Betfair»: si azzera il mercato scelto
+    // (era dell'altro sport) e si carica la libreria di quello nuovo.
+    wiz.bfSport = e.target.value;
+    wiz.bfMarket = null;
+    api.loadMercati(wiz.bfSport).then(() => render())
+      .catch(err => { if (err && err.status === 401) fallita(err); else render(); });
+  }
 });
 
 document.addEventListener('keydown', e => {
@@ -1291,6 +1636,7 @@ function render() {
   }
   if (route.name === 'parsers') return viewParsers();
   if (route.name === 'parser') return viewParser();
+  if (route.name === 'mercati') return viewMercati();
   if (route.name === 'feed') return viewFeed();
   if (route.name === 'chats') return viewChats();
   if (route.name === 'logs') return viewLogs();

@@ -11,7 +11,7 @@
 // leggendo le RIGHE `export function` / `export async function` — qui non si
 // esportano costanti, e le funzioni si dichiarano una per riga.
 
-import { COLUMNS, runParser, toCsv, suggestConfig } from './engine.js';
+import { COLUMNS, EMOJI, runParser, toCsv, suggestConfig } from './engine.js';
 
 const CHIAVE = 'xtrelay:demo';
 
@@ -214,4 +214,133 @@ export function feedUrl() {
 
 export function hasToken() {
   return Boolean(stato.dati.token_prefix);
+}
+
+/* -------------------------------------------------- mercati Betfair (#33) */
+
+// La libreria mercati nella demo e' VERA (localStorage), non uno stub 404: il
+// file unico deve poter mostrare il flusso completo sport → mercato →
+// selezioni → wizard, che e' il punto della #33. Le forme delle risposte sono
+// quelle del server; gli errori portano lo stesso messaggio che darebbe lui.
+
+function _sportsDemo() {
+  stato.dati.sports = stato.dati.sports || [];
+  return stato.dati.sports;
+}
+
+function _sportODemo(slug) {
+  const sport = _sportsDemo().find(s => s.slug === slug);
+  if (!sport) {
+    const errore = new Error('sport non trovato');
+    errore.status = 404;
+    throw errore;
+  }
+  return sport;
+}
+
+function _mercatoODemo(sport, id) {
+  const mercato = sport.mercati.find(m => m.id === Number(id));
+  if (!mercato) {
+    const errore = new Error('mercato non trovato');
+    errore.status = 404;
+    throw errore;
+  }
+  return mercato;
+}
+
+function _campoDemo(nome, valore) {
+  const pulito = String(valore || '').trim();
+  if (!pulito) throw new Error(nome + ' mancante');
+  if (pulito.length > 120) throw new Error(nome + ' troppo lungo: massimo 120 caratteri');
+  // Stesso verdetto del server (#42): un'emoji creata nella demo verrebbe
+  // rifiutata dal relay vero con un 422 — meglio che la demo lo dica subito.
+  // La classe e' quella del motore (EMOJI), non una seconda copia.
+  if (EMOJI.test(pulito)) {
+    throw new Error(nome + ' contiene un simbolo che XTrader non accetta: solo testo');
+  }
+  return pulito;
+}
+
+export async function loadSports() { return sports(); }
+
+export function sports() {
+  return _sportsDemo().map(s => ({ slug: s.slug, nome: s.nome,
+                                   mercati: s.mercati.length }));
+}
+
+export async function loadMercati(sport) { return mercatiOf(sport); }
+
+export function mercatiOf(sport) {
+  const trovato = _sportsDemo().find(s => s.slug === sport);
+  return trovato ? trovato.mercati : null;
+}
+
+export async function createSport(nome) {
+  const pulito = _campoDemo('nome', nome);
+  const base = pulito.toLowerCase().replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'sport';
+  const presi = new Set(_sportsDemo().map(s => s.slug));
+  let slug = base;
+  let n = 2;
+  while (presi.has(slug)) { slug = `${base}-${n}`; n += 1; }
+  _sportsDemo().push({ slug, nome: pulito, mercati: [], prossimoId: 1 });
+  salva();
+  return { slug, nome: pulito };
+}
+
+export async function deleteSport(slug) {
+  _sportODemo(slug);
+  stato.dati.sports = _sportsDemo().filter(s => s.slug !== slug);
+  salva();
+}
+
+export async function createMercato(sportSlug, dati) {
+  const sport = _sportODemo(sportSlug);
+  const tipo = _campoDemo('marketType', dati.marketType);
+  const nome = _campoDemo('marketName', dati.marketName);
+  if (sport.mercati.some(m => m.marketType === tipo && m.marketName === nome)) {
+    const errore = new Error("mercato gia' presente in questo sport");
+    errore.status = 409;
+    throw errore;
+  }
+  const mercato = { id: sport.prossimoId || 1, marketType: tipo, marketName: nome,
+                    selezioni: [] };
+  sport.prossimoId = mercato.id + 1;
+  (dati.selections || []).forEach(s => {
+    mercato.selezioni.push({ id: mercato.selezioni.length + 1,
+                             selectionName: _campoDemo('selectionName', s) });
+  });
+  sport.mercati.push(mercato);
+  salva();
+  return mercato;
+}
+
+export async function deleteMercato(sportSlug, id) {
+  const sport = _sportODemo(sportSlug);
+  _mercatoODemo(sport, id);
+  sport.mercati = sport.mercati.filter(m => m.id !== Number(id));
+  salva();
+}
+
+export async function createSelezione(sportSlug, mercatoId, selectionName) {
+  const sport = _sportODemo(sportSlug);
+  const mercato = _mercatoODemo(sport, mercatoId);
+  const pulita = _campoDemo('selectionName', selectionName);
+  if (mercato.selezioni.some(s => s.selectionName === pulita)) {
+    const errore = new Error("selezione gia' presente in questo mercato");
+    errore.status = 409;
+    throw errore;
+  }
+  const massimo = mercato.selezioni.reduce((m, s) => Math.max(m, s.id), 0);
+  const selezione = { id: massimo + 1, selectionName: pulita };
+  mercato.selezioni.push(selezione);
+  salva();
+  return selezione;
+}
+
+export async function deleteSelezione(sportSlug, mercatoId, id) {
+  const sport = _sportODemo(sportSlug);
+  const mercato = _mercatoODemo(sport, mercatoId);
+  mercato.selezioni = mercato.selezioni.filter(s => s.id !== Number(id));
+  salva();
 }
