@@ -397,6 +397,49 @@ function casiConfronto() {
     MSG_VALIDO, prod,
     JSON.parse('{"__proto__":"Ghost","toString":"X",'
       + '"Manchester City":"Man City","Aston Villa":"Villa"}'));
+  // --- Multi-riga (#35 pezzo 2): le N righe devono uscire IDENTICHE ---------
+  const vuoteMulti = {};
+  for (const c of COLUMNS) vuoteMulti[c] = { source: 'empty' };
+  const multiBase = {
+    match: { type: 'contains', value: 'P.Bet.' },
+    columns: { ...vuoteMulti,
+      EventName: { source: 'line', anchor: ' v ', part: 'whole',
+        transforms: [{ op: 'replace_last', from: ' v ', to: ' - ' }, { op: 'trim' }] },
+      MarketType: { source: 'constant', value: 'OVER_UNDER_15' },
+      SelectionName: { source: 'constant', value: 'Over 1,5' },
+      BetType: { source: 'constant', value: 'PUNTA' },
+      Price: { source: 'constant', value: '1.85' } },
+  };
+  const MSG_MULTI = 'P.Bet.\nJuve v Milan\nRisultati: 1-0 2-1; @ 1.85';
+  aggiungi('multi: somma con eredita e bet_type per riga', MSG_MULTI, {
+    ...multiBase, multi: {
+      markets: [
+        { market_type: 'OVER_UNDER_25', selection_name: 'Over 2,5' },
+        { enabled: false, market_type: 'MATCH_ODDS', selection_name: 'Mai' }],
+      selections: [{ selection_name: 'Under 1,5', bet_type: 'BANCA' }] },
+  });
+  aggiungi('multi: la riga rotta non ferma le altre (k su N)', MSG_MULTI, {
+    ...multiBase, multi: { markets: [
+      { market_type: 'OVER_UNDER_25', selection_name: 'Over 2,5' },
+      { market_type: 'OVER_UNDER_05', selection_name: 'Over 0,5', price: 'abc' }],
+      selections: [] },
+  });
+  aggiungi('multi: punteggi dinamici sul mercato dei risultati', MSG_MULTI, {
+    ...multiBase, multi: { markets: [
+      { market_type: 'CORRECT_SCORE', selection_name: '',
+        start_after: 'Risultati:', end_before: ';' }], selections: [] },
+  });
+  aggiungi('multi: selezione vuota fuori dai mercati punteggio', MSG_MULTI, {
+    ...multiBase, multi: { markets: [
+      { market_type: 'OVER_UNDER_25', selection_name: '',
+        start_after: 'Risultati:', end_before: ';' }], selections: [] },
+  });
+  aggiungi('multi: delimitatori CON selezione estraggono la quota',
+    'P.Bet.\nJuve v Milan\nquota: 2.10 fine', {
+    ...multiBase, multi: { markets: [
+      { market_type: 'OVER_UNDER_25', selection_name: 'Over 2,5',
+        start_after: 'quota:', end_before: 'fine' }], selections: [] },
+  });
   aggiungi('prod: messaggio valido → completo', MSG_VALIDO, prod);
   aggiungi('prod: " v " dentro un nome squadra → sostituita solo l-ultima',
     `P.Bet. PREMACHT 0,5HT\n${VS} Man v City v Napoli\n@ 1.90`, prod);
@@ -835,6 +878,94 @@ caso('csv: il feed multi-riga (#35) passa il verificatore JS', () => {
   const rotta = multi + 'solo,tre,campi\r\n';
   eq(E.verifyCsv(rotta) === null, false, 'la riga malformata resta respinta');
   return { multi };
+});
+
+// Il motore base+override (#35 pezzo 2): un messaggio → N righe. La riga BASE
+// e' il modello; ogni riga multi dice SOLO cosa cambia e il resto EREDITA
+// (tranello 3: vuoto = eredita, mai azzera). Somma, non prodotto (tranello
+// della UI); enabled=false resta salvata e non genera (tranello 2); ogni riga
+// e' giudicata DA SOLA e una rotta non ferma le altre (tranello 1).
+caso('multi: somma, eredita, enabled, riga rotta isolata, punteggi dinamici', () => {
+  const columns = {}; for (const c of COLUMNS) columns[c] = { source: 'empty' };
+  columns.EventName = { source: 'line', anchor: ' v ', part: 'whole',
+    transforms: [{ op: 'replace_last', from: ' v ', to: ' - ' }, { op: 'trim' }] };
+  columns.MarketType = { source: 'constant', value: 'OVER_UNDER_15' };
+  columns.SelectionName = { source: 'constant', value: 'Over 1,5' };
+  columns.BetType = { source: 'constant', value: 'PUNTA' };
+  columns.Price = { source: 'constant', value: '1.85' };
+  const base = { match: { type: 'contains', value: 'P.Bet.' }, columns };
+  const msg = 'P.Bet.\nJuve v Milan\n@ 1.85';
+  const iEv = COLUMNS.indexOf('EventName');
+  const iMt = COLUMNS.indexOf('MarketType');
+  const iSel = COLUMNS.indexOf('SelectionName');
+  const iBt = COLUMNS.indexOf('BetType');
+  const iPr = COLUMNS.indexOf('Price');
+
+  // Senza multi: una riga sola, la base — il comportamento storico.
+  const solo = runParser(msg, base);
+  eq(solo.righe.length, 1, 'senza multi la lista porta la sola base');
+  eq(solo.righe[0].complete, true, 'la base resta completa');
+  eq(solo.righe[0].row[iSel], 'Over 1,5', 'la base non cambia');
+
+  // 2 mercati + 1 selezione ATTIVI (+1 spenta) = 3 righe, non 4 e non prodotto.
+  const config = { ...base, multi: {
+    markets: [
+      { market_type: 'OVER_UNDER_25', selection_name: 'Over 2,5' },
+      { market_type: 'OVER_UNDER_05', selection_name: 'Over 0,5', price: '1.20' },
+      { enabled: false, market_type: 'MATCH_ODDS', selection_name: 'Mai' },
+    ],
+    selections: [
+      { selection_name: 'Under 1,5', bet_type: 'BANCA' },
+    ],
+  } };
+  const r = runParser(msg, config, { Juve: 'Juventus', Milan: 'AC Milan' });
+  eq(r.righe.length, 3, 'somma: 2 mercati attivi + 1 selezione');
+  eq(r.righe.every(x => x.complete), true, 'tutte piazzabili');
+  // Eredita: evento (tradotto UNA volta), BetType e Price della base dove non
+  // sovrascritti; la riga mercato porta il SUO mercato.
+  eq(r.righe[0].row[iEv], 'Juventus - AC Milan', 'l-evento eredita, gia- tradotto');
+  eq(r.righe[0].row[iMt], 'OVER_UNDER_25', 'il mercato della riga');
+  eq(r.righe[0].row[iPr], '1,85', 'la quota eredita dalla base, localizzata');
+  eq(r.righe[1].row[iPr], '1,20', 'la quota della riga vince sulla base');
+  // La selezione resta sul mercato BASE e cambia direzione.
+  eq(r.righe[2].row[iMt], 'OVER_UNDER_15', 'MultiSelection: mercato della base');
+  eq(r.righe[2].row[iSel], 'Under 1,5', 'la selezione della riga');
+  eq(r.righe[2].row[iBt], 'BANCA', 'bet_type per riga');
+
+  // Tranello 1: una riga con quota rotta e' SCARTATA, le altre passano.
+  const rotta = { ...base, multi: { markets: [
+    { market_type: 'OVER_UNDER_25', selection_name: 'Over 2,5' },
+    { market_type: 'OVER_UNDER_05', selection_name: 'Over 0,5', price: 'abc' },
+  ], selections: [] } };
+  const k = runParser(msg, rotta);
+  eq(k.righe.length, 2, 'la riga rotta resta nel conteggio');
+  eq(k.righe[0].complete, true, 'la sana passa');
+  eq(k.righe[1].complete, false, 'la rotta no');
+  eq(k.righe[1].scarti.length >= 1, true, 'col motivo della guardia');
+
+  // Tranello 4: selezione VUOTA + delimitatori = punteggi dinamici, SOLO su
+  // CORRECT_SCORE/HALF_TIME_SCORE — una riga per N-N trovato fra i delimitatori.
+  const punteggi = { ...base, multi: { markets: [
+    { market_type: 'CORRECT_SCORE', selection_name: '',
+      start_after: 'Risultati:', end_before: ';' },
+  ], selections: [] } };
+  const p = runParser('P.Bet.\nJuve v Milan\nRisultati: 1-0 2-1; @ 1.85', punteggi);
+  eq(p.righe.length, 2, 'un punteggio, una riga');
+  eq(p.righe[0].row[iSel], '1-0', 'primo punteggio');
+  eq(p.righe[1].row[iSel], '2-1', 'secondo punteggio');
+  eq(p.righe[0].row[iMt], 'CORRECT_SCORE', 'sul mercato della riga');
+
+  // Fuori da quei due mercati e' un ERRORE DI CONFIG, segnalato — non una riga.
+  const sbagliata = { ...base, multi: { markets: [
+    { market_type: 'OVER_UNDER_25', selection_name: '',
+      start_after: 'Risultati:', end_before: ';' },
+  ], selections: [] } };
+  const s = runParser('P.Bet.\nJuve v Milan\nRisultati: 1-0; @ 1.85', sbagliata);
+  eq(s.righe.length, 1, 'la riga di config sbagliata resta nel conteggio');
+  eq(s.righe[0].complete, false, 'ma non genera niente di piazzabile');
+  eq(s.righe[0].scarti.some(x => x.includes('CORRECT_SCORE')), true,
+    'il motivo dice DOVE la selezione vuota e- ammessa');
+  return 'ok';
 });
 
 caso('motore: casi di confronto per il gemello Python', () => casiConfronto());

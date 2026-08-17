@@ -2700,24 +2700,6 @@ def esegui_parser(message, config, mappa_alias=None):
     colonne = config.get('columns') or {}
     matched = condizione_soddisfatta(message, config.get('match'), scadenza)
     row = [_estrai_valore(message, colonne.get(c), scadenza) for c in HEADERS]
-    # Le colonne NUMERICHE viaggiano nella forma su cui la guardia da' il
-    # verdetto (`_piatto` del testo canonico): un Price BOM+`2` e' una quota
-    # valida — i bordi uniformi sono perdonati — ma il CSV emetteva il valore
-    # grezzo, BOM compreso: XTrader riceveva il byte che la guardia aveva
-    # perdonato solo ai fini del giudizio. Stessa riga in `runParser`, o i due
-    # motori scriverebbero feed diversi. [REAL_FINDING] di GPT-5.6 Sol al gate
-    # finale della PR #47.
-    for colonna in INTERVALLI_NUMERICI:
-        indice = HEADERS.index(colonna)
-        row[indice] = _piatto(_testo_canonico(row[indice]))
-    # `None`→'' e basta, NON `or ''`: JS usa `String(v ?? '')`, che sostituisce
-    # solo null/undefined. Con `or ''` una costante `0` o `False` (JSON validi)
-    # sarebbe letta come vuota qui e valorizzata in JS — i due motori
-    # divergerebbero su `missing` e `complete`, cioe' l-utente vedrebbe «completo»
-    # nel browser e feed vuoto in produzione. Segnalato da CodeRabbit, PR #28.
-    # `_piatto`, non `strip()`: l'emptiness ha la stessa coppia divergente del
-    # verdetto numerico — una obbligatoria di solo BOM era «mancante» in JS e
-    # «valorizzata» in Python (stessa classe del [REAL_FINDING] dei gate, PR #47).
     # La sorgente squadre (#34 pezzo 3): con una mappa alias→Betfair l'evento
     # si traduce QUI, sul valore finale di EventName — spezzato sull'ULTIMO
     # ' - ' (il separatore che il transform del wizard produce), ogni meta'
@@ -2752,28 +2734,60 @@ def esegui_parser(message, config, mappa_alias=None):
                 tradotte.append(nome)
             row[i_evento] = ' - '.join(tradotte)
 
+    giudizio = _giudica_riga(row, matched)
+    row = giudizio['row']
+    mancanti = giudizio['missing']
+    scarti = giudizio['scarti']
+    # Il gate di CONTENUTO (#41): almeno una colonna obbligatoria deve venire da
+    # un'estrazione REALE che ha prodotto qualcosa. Un parser con tutte e quattro
+    # le obbligatorie costanti produce una riga piazzabile per QUALSIASI messaggio
+    # che soddisfi la condizione — misurato: «ciao a tutti» e «oggi partita»
+    # davano `complete=True`. Oggi va bene per accidente, perche' nell'uso normale
+    # almeno `EventName` si estrae; il caso reale e' chi prova il parser con valori
+    # fissi per vedere il CSV uscire e poi lo lascia attivo.
+    if matched and not mancanti and not _estrazione_reale(colonne, row):
+        scarti.append(
+            'nessuna colonna obbligatoria viene estratta dal messaggio: con soli '
+            'valori fissi questo parser scriverebbe la stessa scommessa per '
+            'qualunque messaggio. Almeno una fra '
+            + ', '.join(COLONNE_OBBLIGATORIE) + ' deve leggere dal messaggio.')
+    completo = matched and not mancanti and not scarti
+    # Il multi-riga (#35 pezzo 2): `righe` e' l'elenco delle righe GENERATE —
+    # senza `config.multi` e' la sola base (comportamento storico), con le
+    # righe di override e' la loro somma. I campi storici continuano a
+    # descrivere la BASE: i consumatori esistenti non cambiano.
+    righe = _genera_righe(message, config, matched,
+                          {'row': row, 'missing': mancanti, 'scarti': scarti,
+                           'complete': completo})
+    return {'matched': matched, 'row': row, 'missing': mancanti, 'scarti': scarti,
+            'avvisi': avvisi, 'righe': righe, 'complete': completo}
+
+
+def _giudica_riga(row_grezza, matched):
+    """Giudica UNA riga gia' estratta, come `giudicaRiga` in engine.js.
+
+    Appiattisce i numerici (`_piatto` del testo canonico — il CSV non deve
+    emettere il byte che la guardia ha solo perdonato, PR #47), calcola le
+    obbligatorie mancanti (`None`→'' e basta, NON `or ''`: una costante `0`
+    e' valorizzata, PR #28), gli scarti (guardie numeriche + emoji #42, solo
+    a messaggio riconosciuto, PR #47) e localizza gli accettati (#40, la
+    virgola di XTrader; i rifiutati restano in forma giudicata). Fonte unica
+    (#35 pezzo 2): la usano la riga base e ogni riga generata dagli override —
+    un giudizio scritto due volte sarebbe due giudizi.
+    """
+    row = list(row_grezza)
+    for colonna in INTERVALLI_NUMERICI:
+        indice = HEADERS.index(colonna)
+        row[indice] = _piatto(_testo_canonico(row[indice]))
+
     def _vuota(valore):
         return not _piatto(str('' if valore is None else valore))
 
     mancanti = [c for c in COLONNE_OBBLIGATORIE if _vuota(row[HEADERS.index(c)])]
-    # Il motivo per colonna serve DUE volte: per gli scarti e per decidere quali
-    # valori localizzare al confine di scrittura (solo quelli accettati).
     motivi_numerici = {c: motivo_valore_numerico(c, row[HEADERS.index(c)])
                        for c in INTERVALLI_NUMERICI}
-    # Nessuno scarto senza riconoscimento: un parser la cui condizione non e'
-    # soddisfatta ma con una costante numerica invalida produrrebbe motivi per
-    # QUALUNQUE messaggio della chat, e il dispatch li archivierebbe come
-    # «scartato» sotto un parser che non c'entra, conservando testo estraneo.
-    # [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #47.
     scarti = [m for m in motivi_numerici.values() if m] if matched else []
     if matched:
-        # Niente emoji nei valori (#42): il feed uscirebbe formalmente valido
-        # — 14 colonne, virgolette, CRLF, BOM — e XTrader lo scarterebbe in
-        # silenzio, icona rossa e nessun errore. Il caso reale e' la regola
-        # «riga intera» su una riga che comincia col marcatore. Si scarta
-        # (regola della #39: un valore che il consumatore rifiuta non e' un
-        # valore); le colonne numeriche sono escluse perche' li' un'emoji e'
-        # gia' «non un numero», col motivo giusto. Stesso blocco in `runParser`.
         for colonna in HEADERS:
             if colonna in INTERVALLI_NUMERICI:
                 continue
@@ -2788,37 +2802,128 @@ def esegui_parser(message, config, mappa_alias=None):
                     'XTrader marcherebbe il segnale non valido, senza nessun '
                     'errore di ritorno: estrai il testo DOPO il marcatore, '
                     'non la riga intera.')
-    # Il gate di CONTENUTO (#41): almeno una colonna obbligatoria deve venire da
-    # un'estrazione REALE che ha prodotto qualcosa. Un parser con tutte e quattro
-    # le obbligatorie costanti produce una riga piazzabile per QUALSIASI messaggio
-    # che soddisfi la condizione — misurato: «ciao a tutti» e «oggi partita»
-    # davano `complete=True`. Oggi va bene per accidente, perche' nell'uso normale
-    # almeno `EventName` si estrae; il caso reale e' chi prova il parser con valori
-    # fissi per vedere il CSV uscire e poi lo lascia attivo.
-    if matched and not mancanti and not _estrazione_reale(colonne, row):
-        scarti.append(
-            'nessuna colonna obbligatoria viene estratta dal messaggio: con soli '
-            'valori fissi questo parser scriverebbe la stessa scommessa per '
-            'qualunque messaggio. Almeno una fra '
-            + ', '.join(COLONNE_OBBLIGATORIE) + ' deve leggere dal messaggio.')
-    # Il confine di scrittura (#40): i valori numerici ACCETTATI escono nella
-    # forma localizzata — per XTrader la virgola, misurato tre volte (guida
-    # ufficiale p.169 `"1,23"`, il Bridge in produzione, conferma del
-    # proprietario). Prima il separatore era un incidente: usciva cio' che la
-    # regola produceva, e `"1.85"` in contesto italiano rischia la lettura come
-    # migliaia — quota 185, dentro i tetti della #39, invisibile a ogni
-    # guardia. La localizzazione sta QUI e non in `make_csv` (condiviso col
-    # legacy di PIERO, che non deve cambiare di un byte) ne' nei chiamanti (tre
-    # siti JS, due Python: uno che dimentica = anteprima e feed diversi). I
-    # valori RIFIUTATI restano in forma giudicata: non vengono mai scritti, e
-    # il motivo li cita cosi' come la guardia li ha visti.
     for colonna, motivo in motivi_numerici.items():
         indice = HEADERS.index(colonna)
         if motivo is None and row[indice]:
             row[indice] = row[indice].replace('.', SEPARATORE_DECIMALE, 1)
-    return {'matched': matched, 'row': row, 'missing': mancanti, 'scarti': scarti,
-            'avvisi': avvisi,
-            'complete': matched and not mancanti and not scarti}
+    return {'row': row, 'missing': mancanti, 'scarti': scarti}
+
+
+# Gli override del multi-riga (#35): campo della riga → colonna del CSV.
+CAMPI_MULTI = {
+    'market_type': 'MarketType', 'market_name': 'MarketName',
+    'selection_name': 'SelectionName', 'price': 'Price',
+    'min_price': 'MinPrice', 'max_price': 'MaxPrice', 'bet_type': 'BetType',
+    'handicap': 'Handicap', 'points': 'Points',
+}
+
+# I soli mercati dove la selezione VUOTA + delimitatori estrae i punteggi.
+MERCATI_PUNTEGGI = ('CORRECT_SCORE', 'HALF_TIME_SCORE')
+
+
+def _segmento(message, dopo, prima):
+    """Il testo del messaggio fra i due delimitatori della riga, come
+    `segmento` in engine.js: delimitatore assente = dal principio / fino alla
+    fine; delimitatore NON TROVATO = ''."""
+    inizio = 0
+    fine = len(message)
+    if dopo:
+        i = message.find(dopo)
+        if i < 0:
+            return ''
+        inizio = i + len(dopo)
+    if prima:
+        j = message.find(prima, inizio)
+        if j < 0:
+            return ''
+        fine = j
+    return message[inizio:fine]
+
+
+def _genera_righe(message, config, matched, base):
+    """Le righe GENERATE dal parser (#35 pezzo 2), come `generaRighe` in JS.
+
+    La base e' il modello; ogni riga di `config.multi` dice solo cosa cambia e
+    il resto EREDITA (tranello 3: campo vuoto = quello della base, mai
+    «nessuno»). Somma, non prodotto: mercati attivi + selezioni attive.
+    `enabled: false` resta salvata e non genera (tranello 2). Ogni riga e'
+    giudicata DA SOLA: una rotta non ferma le altre (tranello 1). Le
+    MultiSelection restano sul mercato base per contratto: un loro
+    `market_type` viene ignorato. Selezione VUOTA + delimitatori = punteggi
+    dinamici, SOLO su CORRECT_SCORE/HALF_TIME_SCORE (tranello 4): altrove e'
+    un errore di config segnalato, non una riga.
+    """
+    if not matched:
+        return []
+    multi = config.get('multi') if isinstance(config.get('multi'), dict) else {}
+    attive = []
+    for m in (multi.get('markets') or []):
+        riga = m if isinstance(m, dict) else {}
+        if m and riga.get('enabled') is not False:
+            attive.append((riga, True))
+    for s in (multi.get('selections') or []):
+        riga = s if isinstance(s, dict) else {}
+        if s and riga.get('enabled') is not False:
+            attive.append((riga, False))
+    if not attive:
+        return [base]
+    i_sel = HEADERS.index('SelectionName')
+    i_prezzo = HEADERS.index('Price')
+    i_mercato = HEADERS.index('MarketType')
+    righe = []
+    for riga, mercato in attive:
+        derivata = list(base['row'])
+        for campo, colonna in CAMPI_MULTI.items():
+            # Le MultiSelection non toccano il mercato: e' il contratto della
+            # somma — per le combinazioni si elencano righe MultiMarket.
+            if not mercato and campo in ('market_type', 'market_name'):
+                continue
+            valore = riga.get(campo)
+            if valore is not None and _testo_canonico(valore) != '':
+                derivata[HEADERS.index(colonna)] = _testo_canonico(valore)
+        sel = riga.get('selection_name')
+        sel_esplicita = _piatto(_testo_canonico('' if sel is None else sel))
+        dopo_grezzo = riga.get('start_after')
+        prima_grezzo = riga.get('end_before')
+        con_delimitatori = bool(dopo_grezzo or prima_grezzo)
+        dopo = _testo_canonico(dopo_grezzo) if dopo_grezzo else ''
+        prima = _testo_canonico(prima_grezzo) if prima_grezzo else ''
+        if con_delimitatori and sel_esplicita:
+            # Delimitatori con selezione: estraggono la QUOTA propria della riga.
+            derivata[i_prezzo] = _segmento(message, dopo, prima)
+        if con_delimitatori and not sel_esplicita:
+            if derivata[i_mercato] not in MERCATI_PUNTEGGI:
+                righe.append({'row': derivata, 'missing': [], 'scarti': [
+                    'SelectionName: la selezione vuota con i delimitatori '
+                    'estrae i punteggi ed e\' ammessa solo su CORRECT_SCORE e '
+                    'HALF_TIME_SCORE: questa riga non genera nulla.'],
+                    'complete': False})
+                continue
+            # `[0-9]`, non `\\d`: in JS `\\d` e' solo ASCII, in Python
+            # prenderebbe anche le cifre unicode — i due motori divergerebbero.
+            punteggi = re.findall(r'[0-9]+-[0-9]+',
+                                  _segmento(message, dopo, prima))
+            if not punteggi:
+                righe.append({'row': derivata, 'missing': [], 'scarti': [
+                    'SelectionName: nessun punteggio N-N fra i delimitatori '
+                    'della riga.'], 'complete': False})
+                continue
+            for punteggio in punteggi:
+                per_punteggio = list(derivata)
+                per_punteggio[i_sel] = punteggio
+                giudizio = _giudica_riga(per_punteggio, True)
+                righe.append({'row': giudizio['row'],
+                              'missing': giudizio['missing'],
+                              'scarti': giudizio['scarti'],
+                              'complete': (not giudizio['missing']
+                                           and not giudizio['scarti'])})
+            continue
+        giudizio = _giudica_riga(derivata, True)
+        righe.append({'row': giudizio['row'], 'missing': giudizio['missing'],
+                      'scarti': giudizio['scarti'],
+                      'complete': (not giudizio['missing']
+                                   and not giudizio['scarti'])})
+    return righe
 
 
 def _estrazione_reale(colonne, row):

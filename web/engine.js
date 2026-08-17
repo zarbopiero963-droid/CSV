@@ -342,24 +342,42 @@ export function runParser(message, config, aliasMap) {
       }).join(' - ');
     }
   }
+  const giudizio = giudicaRiga(row, matched);
+  const rowGiudicata = giudizio.row;
+  const missing = giudizio.missing;
+  const scarti = giudizio.scarti;
+  if (matched && missing.length === 0 && !realExtraction(config.columns, rowGiudicata)) {
+    scarti.push("nessuna colonna obbligatoria viene estratta dal messaggio: con soli "
+      + 'valori fissi questo parser scriverebbe la stessa scommessa per qualunque '
+      + 'messaggio. Almeno una fra ' + REQUIRED_COLUMNS.join(', ')
+      + ' deve leggere dal messaggio.');
+  }
+  const complete = matched && missing.length === 0 && scarti.length === 0;
+  // Il multi-riga (#35 pezzo 2): `righe` e' l'elenco delle righe GENERATE —
+  // senza `config.multi` e' la sola base (comportamento storico), con le righe
+  // di override e' la loro somma. I campi storici continuano a descrivere la
+  // BASE: i consumatori esistenti non cambiano.
+  const righe = generaRighe(message, config, matched,
+    { row: rowGiudicata, missing, scarti, complete });
+  return { matched, row: rowGiudicata, missing, scarti, avvisi, righe, complete };
+}
+
+// Giudica UNA riga gia' estratta: appiattisce i numerici, calcola le
+// obbligatorie mancanti, gli scarti (guardie numeriche + emoji) e localizza
+// gli accettati. Fonte unica (#35 pezzo 2): la usano la riga base e ogni riga
+// generata dagli override — un giudizio scritto due volte sarebbe due giudizi.
+// Gemella di `_giudica_riga` in main.py.
+function giudicaRiga(rowGrezza, matched) {
+  const row = rowGrezza.slice();
   // Le colonne NUMERICHE viaggiano nella forma su cui la guardia da' il
   // verdetto (`piatto`): un Price BOM+`2` e' una quota valida — i bordi
   // uniformi sono perdonati — ma il CSV emetteva il valore grezzo, BOM
-  // compreso: XTrader riceveva il byte che la guardia aveva perdonato solo
-  // ai fini del giudizio. Stessa riga in `esegui_parser`, o i due motori
-  // scriverebbero feed diversi. `String()` qui e `_testo_canonico` in
-  // main.py danno lo stesso testo per ogni valore JSON (e' il contratto di
-  // `_numero_stile_js`). [REAL_FINDING] di GPT-5.6 Sol al gate finale, PR #47.
+  // compreso. Stessa riga in `esegui_parser`, o i due motori scriverebbero
+  // feed diversi. [REAL_FINDING] di GPT-5.6 Sol al gate finale, PR #47.
   for (const c of Object.keys(NUMERIC_RANGES)) {
     const i = COLUMNS.indexOf(c);
     row[i] = piatto(String(row[i] ?? ''));
   }
-  // Il valore va normalizzato prima del confronto: " " e' truthy, quindi senza
-  // trim una colonna obbligatoria fatta di soli spazi passerebbe per valorizzata
-  // e il feed riceverebbe una riga quotata e priva di senso. Non basta il `trim`
-  // fra le trasformazioni della regola: quello e' opzionale e lo decide l'utente
-  // nel wizard, mentre questo controllo e' il pavimento che non deve dipendere
-  // dalla configurazione.
   // `piatto`, non `trim()`: una obbligatoria di solo BOM era "mancante" in
   // JS e "valorizzata" in Python (classe del [REAL_FINDING] dei gate, PR #47).
   const missing = REQUIRED_COLUMNS.filter(c => !piatto(row[COLUMNS.indexOf(c)] ?? ''));
@@ -371,15 +389,11 @@ export function runParser(message, config, aliasMap) {
   }
   // Nessuno scarto senza riconoscimento: un parser mai riconosciuto ma con
   // una costante numerica invalida produrrebbe motivi per QUALUNQUE
-  // messaggio, e il dispatch li archivierebbe sotto un parser che non
-  // c'entra. [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #47.
+  // messaggio. [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #47.
   const scarti = !matched ? [] : Object.values(numericReasons).filter(Boolean);
   if (matched) {
     // Niente emoji nei valori (#42): il feed uscirebbe formalmente valido e
-    // XTrader lo scarterebbe in silenzio. Il caso reale e' la regola «riga
-    // intera» su una riga che comincia col marcatore. Si scarta (regola della
-    // #39); le colonne numeriche sono escluse perche' li' un'emoji e' gia'
-    // «non un numero», col motivo giusto. Stesso blocco in `esegui_parser`.
+    // XTrader lo scarterebbe in silenzio. Stesso blocco in `esegui_parser`.
     for (const c of COLUMNS) {
       if (NUMERIC_RANGES[c]) continue;
       const testo = String(row[COLUMNS.indexOf(c)] ?? '');
@@ -392,27 +406,119 @@ export function runParser(message, config, aliasMap) {
       }
     }
   }
-  if (matched && missing.length === 0 && !realExtraction(config.columns, row)) {
-    scarti.push("nessuna colonna obbligatoria viene estratta dal messaggio: con soli "
-      + 'valori fissi questo parser scriverebbe la stessa scommessa per qualunque '
-      + 'messaggio. Almeno una fra ' + REQUIRED_COLUMNS.join(', ')
-      + ' deve leggere dal messaggio.');
-  }
   // Il confine di scrittura (#40): i valori numerici ACCETTATI escono nella
-  // forma localizzata — per XTrader la virgola. Prima il separatore era un
-  // incidente: usciva cio' che la regola produceva, e il suggeritore spingeva
-  // verso il punto — che in contesto italiano rischia la lettura come
-  // migliaia: quota 185, dentro i tetti della #39, invisibile a ogni guardia.
-  // La localizzazione sta QUI e non in `toCsv` ne' nei chiamanti (tre siti):
-  // uno che dimentica = anteprima e feed diversi. Stessa riga in
-  // `esegui_parser`. I valori RIFIUTATI restano in forma giudicata: non
-  // vengono mai scritti, e il motivo li cita come la guardia li ha visti.
+  // forma localizzata — per XTrader la virgola. I RIFIUTATI restano in forma
+  // giudicata: non vengono mai scritti, e il motivo li cita cosi'.
   for (const [c, reason] of Object.entries(numericReasons)) {
     const i = COLUMNS.indexOf(c);
     if (reason === null && row[i]) row[i] = row[i].replace('.', DECIMAL_SEPARATOR);
   }
-  return { matched, row, missing, scarti, avvisi,
-           complete: matched && missing.length === 0 && scarti.length === 0 };
+  return { row, missing, scarti };
+}
+
+// Gli override del multi-riga (#35): campo della riga → colonna del CSV.
+const MULTI_CAMPI = {
+  market_type: 'MarketType', market_name: 'MarketName',
+  selection_name: 'SelectionName', price: 'Price', min_price: 'MinPrice',
+  max_price: 'MaxPrice', bet_type: 'BetType', handicap: 'Handicap',
+  points: 'Points',
+};
+
+// I soli mercati dove la selezione VUOTA + delimitatori estrae i punteggi.
+const MERCATI_PUNTEGGI = ['CORRECT_SCORE', 'HALF_TIME_SCORE'];
+
+// Il testo del messaggio fra i due delimitatori della riga. Delimitatore
+// assente = dal principio / fino alla fine; delimitatore NON TROVATO = ''.
+// Gemella di `_segmento` in main.py.
+function segmento(message, dopo, prima) {
+  let inizio = 0;
+  let fine = message.length;
+  if (dopo) {
+    const i = message.indexOf(dopo);
+    if (i < 0) return '';
+    inizio = i + dopo.length;
+  }
+  if (prima) {
+    const j = message.indexOf(prima, inizio);
+    if (j < 0) return '';
+    fine = j;
+  }
+  return message.slice(inizio, fine);
+}
+
+// Le righe GENERATE dal parser (#35 pezzo 2): la base e' il modello, ogni
+// riga di `config.multi` dice solo cosa cambia e il resto EREDITA (tranello
+// 3: campo vuoto = quello della base, mai «nessuno»). Somma, non prodotto:
+// mercati attivi + selezioni attive. `enabled: false` resta salvata e non
+// genera (tranello 2). Ogni riga e' giudicata DA SOLA: una rotta non ferma
+// le altre (tranello 1). Le MultiSelection restano sul mercato base per
+// contratto: un loro `market_type` viene ignorato. Gemella di
+// `_genera_righe` in main.py, parita' vincolata sui casi.
+function generaRighe(message, config, matched, base) {
+  if (!matched) return [];
+  const multi = config.multi || {};
+  const attive = [];
+  for (const m of multi.markets || []) {
+    if (m && m.enabled !== false) attive.push({ riga: m, mercato: true });
+  }
+  for (const s of multi.selections || []) {
+    if (s && s.enabled !== false) attive.push({ riga: s, mercato: false });
+  }
+  if (!attive.length) return [base];
+  const iSel = COLUMNS.indexOf('SelectionName');
+  const iPrezzo = COLUMNS.indexOf('Price');
+  const iMercato = COLUMNS.indexOf('MarketType');
+  const righe = [];
+  for (const { riga, mercato } of attive) {
+    const derivata = base.row.slice();
+    for (const [campo, colonna] of Object.entries(MULTI_CAMPI)) {
+      // Le MultiSelection non toccano il mercato: e' il contratto della
+      // somma — per le combinazioni si elencano righe MultiMarket.
+      if (!mercato && (campo === 'market_type' || campo === 'market_name')) continue;
+      const valore = riga[campo];
+      if (valore !== undefined && valore !== null && String(valore) !== '') {
+        derivata[COLUMNS.indexOf(colonna)] = String(valore);
+      }
+    }
+    const selEsplicita = piatto(String(riga.selection_name ?? ''));
+    const conDelimitatori = Boolean(riga.start_after || riga.end_before);
+    if (conDelimitatori && selEsplicita) {
+      // Delimitatori con selezione: estraggono la QUOTA propria della riga.
+      derivata[iPrezzo] = segmento(message, riga.start_after, riga.end_before);
+    }
+    if (conDelimitatori && !selEsplicita) {
+      // Selezione VUOTA + delimitatori = punteggi dinamici, SOLO sui due
+      // mercati dei risultati esatti (tranello 4): fuori da li' e' un errore
+      // di config SEGNALATO, non una scorciatoia e non una riga.
+      if (!MERCATI_PUNTEGGI.includes(derivata[iMercato])) {
+        righe.push({ row: derivata, missing: [], scarti: [
+          'SelectionName: la selezione vuota con i delimitatori estrae i '
+          + 'punteggi ed e\' ammessa solo su CORRECT_SCORE e HALF_TIME_SCORE: '
+          + 'questa riga non genera nulla.'], complete: false });
+        continue;
+      }
+      const punteggi = segmento(message, riga.start_after, riga.end_before)
+        .match(/\d+-\d+/g) || [];
+      if (!punteggi.length) {
+        righe.push({ row: derivata, missing: [], scarti: [
+          'SelectionName: nessun punteggio N-N fra i delimitatori della riga.'],
+          complete: false });
+        continue;
+      }
+      for (const punteggio of punteggi) {
+        const perPunteggio = derivata.slice();
+        perPunteggio[iSel] = punteggio;
+        const g = giudicaRiga(perPunteggio, true);
+        righe.push({ row: g.row, missing: g.missing, scarti: g.scarti,
+          complete: g.missing.length === 0 && g.scarti.length === 0 });
+      }
+      continue;
+    }
+    const g = giudicaRiga(derivata, true);
+    righe.push({ row: g.row, missing: g.missing, scarti: g.scarti,
+      complete: g.missing.length === 0 && g.scarti.length === 0 });
+  }
+  return righe;
 }
 
 // XTrader legge il feed come UTF-8 CON BOM. Provato su x1.csv, il file che il

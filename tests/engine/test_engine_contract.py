@@ -202,7 +202,11 @@ def test_i_due_motori_producono_lo_STESSO_runParser(casi):
         # `avvisi` sta nel confronto (#34 pezzo 3): e' il motivo mostrato
         # all'utente per la squadra senza alias, e due motori che avvisano
         # diversamente manderebbero il cliente su piste diverse.
-        for campo in ('matched', 'row', 'missing', 'scarti', 'avvisi', 'complete'):
+        # `righe` (#35 pezzo 2) sta nel confronto INTERO: N righe generate,
+        # ciascuna con row/missing/scarti/complete — un solo campo diverso in
+        # una sola riga nomina caso e campo.
+        for campo in ('matched', 'row', 'missing', 'scarti', 'avvisi', 'righe',
+                      'complete'):
             if ottenuto[campo] != atteso[campo]:
                 divergenti.append(
                     f'{nome} · {campo}: JS={atteso[campo]!r} Python={ottenuto[campo]!r}')
