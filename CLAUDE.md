@@ -44,7 +44,7 @@ Il merge resta sempre manuale del repository owner.
 | Test del relay: sorgenti squadre, modello e rotte (#34 pezzo 1) | `tests/relay/test_sorgenti_squadre.py` |
 | Schema multiutente e migrazione idempotente | `migra()` in `main.py`, `tests/relay/test_schema.py` |
 | Test del motore e del contratto CSV (casi eseguiti in node) | `tests/engine/engine_cases.mjs`, `tests/engine/test_engine_contract.py` |
-| Test della web app in browser, end-to-end sul relay vero (Playwright/Chromium) | `tests/web/prototype_flow.py`, `tests/web/mobile_layout.py`, `tests/web/mercati_flow.py`, `tests/web/test_prototype_flow.py`, `tests/web/test_file_unico.py`, `tests/web/test_api_parita.py`, `tests/web/test_schermate_accesso.py`, `tests/web/test_pannello_admin.py`, `tests/web/test_mercati_web.py` |
+| Test della web app in browser, end-to-end sul relay vero (Playwright/Chromium) | `tests/web/prototype_flow.py`, `tests/web/mobile_layout.py`, `tests/web/mercati_flow.py`, `tests/web/squadre_flow.py`, `tests/web/test_prototype_flow.py`, `tests/web/test_file_unico.py`, `tests/web/test_api_parita.py`, `tests/web/test_schermate_accesso.py`, `tests/web/test_pannello_admin.py`, `tests/web/test_mercati_web.py`, `tests/web/test_squadre_web.py` |
 | Test della facciata: HTTP e browser | `tests/relay/test_facciata.py`, `tests/web/sito_flow.py`, `tests/web/test_sito.py` |
 | Ambiente dei sottoprocessi di test (whitelist) + sua guardia | `tests/ambiente.py`, `tests/safety/test_ambiente_dei_test.py` |
 | Dipendenze dei soli test | `requirements-dev.txt` |

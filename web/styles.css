@@ -91,6 +91,27 @@ code, .mono { font-family: var(--mono); font-size: 13px; }
    l'accesso e' ancora vivo, il messaggio e' "rinnova", non "guasto". */
 .pill.warn { color: var(--warn); border-color: #4a3a1a; background: #241d0c; }
 
+/* Il pulsante-sorgente delle Sorgenti squadre (#34): un link vestito da
+   bottone, col badge compilati/squadre dentro. */
+.src-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--txt);
+  text-decoration: none;
+}
+.src-btn:hover { border-color: var(--txt-3); }
+.src-btn .badge {
+  font-size: 12px;
+  padding: 1px 8px;
+  border-radius: 20px;
+  border: 1px solid var(--line);
+  color: var(--txt-2);
+}
+
 .banner {
   border: 1px solid var(--line);
   border-left: 3px solid var(--accent);

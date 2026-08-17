@@ -96,6 +96,11 @@ function parseHash() {
     try { id = decodeURIComponent(parts[1]); } catch { /* hash storto: si usa il grezzo */ }
     return { name: 'mercati', id, tab: parts[2] || null };
   }
+  if (parts[0] === 'squadre' && parts[1]) {
+    // #/squadre/<competizione>[/<sorgente>]: entrambi id numerici del server,
+    // niente da decodificare.
+    return { name: 'squadre', id: parts[1], tab: parts[2] || null };
+  }
   return { name: parts[0] };
 }
 
@@ -168,6 +173,7 @@ function shell(inner) {
         ${u.admin ? item('#/richieste', '▤', 'Richieste', route.name === 'richieste') : ''}
         ${item('#/parsers', '⌗', 'Parser', route.name === 'parsers' || route.name === 'parser')}
         ${item('#/mercati', '◎', 'Mercati Betfair', route.name === 'mercati')}
+        ${item('#/squadre', '⇄', 'Sorgenti squadre', route.name === 'squadre')}
         ${item('#/feed', '⇩', 'Feed CSV', route.name === 'feed')}
         ${item('#/chats', '✆', 'Chat Telegram', route.name === 'chats')}
         ${item('#/logs', '☰', 'Log messaggi', route.name === 'logs')}
@@ -535,6 +541,171 @@ function modalNewMercato() {
     <div class="foot">
       <button data-act="close">Annulla</button>
       <button class="primary" data-act="mercato-create">Salva</button>
+    </div>`);
+}
+
+/* ------------------------------------------------ sorgenti squadre (#34) */
+
+async function viewSquadre() {
+  shell('<div class="dim">Caricamento…</div>');
+  const invocazione = generazione;  // guardia anti-stantio: vedi il router
+  try {
+    await api.loadCompetizioni();
+    await api.loadSports();   // la modale «Nuova competizione» sceglie lo sport
+    if (route.id) await api.loadCompetizione(route.id);
+    if (route.id && route.tab) await api.loadAlias(route.id, route.tab);
+  } catch (e) {
+    if (invocazione !== generazione) return;
+    // Una competizione o una sorgente sparita (eliminata altrove) non e' un
+    // errore di sessione: si risale di un livello invece di piantarsi sul 404.
+    if (e.status === 404) { go(route.tab ? `#/squadre/${route.id}` : '#/squadre'); return; }
+    fallita(e);
+    return;
+  }
+  if (invocazione !== generazione) return;
+  if (!route.id) return squadreElenco();
+  if (!route.tab) return squadreCompetizione();
+  return squadreAlias();
+}
+
+function squadreElenco() {
+  const competizioni = api.competizioni() || [];
+  shell(`
+    <div class="head"><div>
+      <h1>Sorgenti squadre</h1>
+      <p class="muted small">I nomi Betfair li salvi UNA volta per competizione; ogni
+        sorgente è una colonna di alias sopra la stessa lista — come scrive le squadre
+        quel canale. La traduzione nel parser arriva col prossimo passo della #34.</p>
+    </div><div class="spacer"></div>
+    <button class="primary" data-act="comp-new">Nuova competizione</button></div>
+    ${competizioni.length ? competizioni.map(k => `
+      <div class="list-item">
+        <div class="grow">
+          <a class="name" href="#/squadre/${k.id}">${esc(k.nome)}</a>
+          <div class="dim small">${esc(k.sportNome)} · ${k.squadre}
+            squadr${k.squadre === 1 ? 'a' : 'e'} Betfair</div>
+        </div>
+        <button class="danger small" data-act="comp-del" data-id="${k.id}"
+                data-nome="${esc(k.nome)}">× elimina</button>
+      </div>`).join('') : `
+      <div class="empty"><p>Non hai ancora competizioni: si parte da zero, come per i
+        mercati.</p>
+       <button class="primary" data-act="comp-new">Crea la prima competizione</button></div>`}`);
+}
+
+function squadreCompetizione() {
+  const k = api.competizione(route.id);
+  if (!k) { go('#/squadre'); return; }
+  shell(`
+    <div class="crumb"><a href="#/squadre">Sorgenti squadre</a> / ${esc(k.nome)}</div>
+    <div class="head"><div>
+      <h1>${esc(k.nome)}</h1>
+      <p class="muted small">La colonna Betfair è salvata QUI, condivisa da tutte le
+        sorgenti: aggiungere una squadra la rende disponibile ovunque, con alias vuoto.</p>
+    </div></div>
+    <div class="card stack">
+      <h3>Squadre Betfair</h3>
+      ${k.squadre.length ? k.squadre.map(q => `
+        <div class="list-item">
+          <div class="grow"><span class="name">${esc(q.nome)}</span></div>
+          <button class="danger small" data-act="sq-del" data-id="${q.id}"
+                  data-nome="${esc(q.nome)}">× squadra</button>
+        </div>`).join('') : '<div class="empty">Nessuna squadra ancora.</div>'}
+      <div class="row">
+        <input id="sq-nome" class="grow" placeholder="es. Juventus (nome Betfair)"
+               maxlength="120">
+        <button class="primary" data-act="sq-add">Aggiungi</button>
+      </div>
+      <div id="sq-err" class="small" style="color:var(--err)"></div>
+    </div>
+    <div class="card stack">
+      <h3>Sorgenti</h3>
+      <p class="muted small">Clicca una sorgente per compilare i suoi alias su questa
+        competizione. Il numero dice quante squadre hanno già l'alias.</p>
+      <div class="row" style="flex-wrap:wrap">
+        ${k.sorgenti.map(g => `
+          <a class="src-btn" href="#/squadre/${k.id}/${g.id}">${esc(g.nome)}
+            <span class="badge">${g.compilati}/${k.squadre.length}</span></a>`).join('')}
+        <button data-act="src-new">+ Aggiungi sorgente</button>
+      </div>
+    </div>`);
+}
+
+function squadreAlias() {
+  const k = api.competizione(route.id);
+  if (!k) { go('#/squadre'); return; }
+  const sorgente = k.sorgenti.find(g => g.id === Number(route.tab));
+  if (!sorgente) { go(`#/squadre/${route.id}`); return; }
+  const righe = api.aliasOf(route.id, route.tab) || [];
+  shell(`
+    <div class="crumb"><a href="#/squadre">Sorgenti squadre</a> /
+      <a href="#/squadre/${k.id}">${esc(k.nome)}</a> / ${esc(sorgente.nome)}</div>
+    <div class="head"><div>
+      <h1>${esc(sorgente.nome)}</h1>
+      <p class="muted small">Come questa sorgente scrive le squadre di ${esc(k.nome)}.
+        La «⌫» svuota l'alias SOLO qui; la squadra Betfair resta, e resta nelle altre
+        sorgenti.</p>
+    </div><div class="spacer"></div>
+    <button data-act="src-ren" data-nome="${esc(sorgente.nome)}">Rinomina</button>
+    <button class="danger" data-act="src-del" data-nome="${esc(sorgente.nome)}">Elimina sorgente</button></div>
+    <div class="card stack">
+      ${righe.length ? righe.map(r => `
+        <div class="list-item">
+          <div class="grow"><span class="name">${esc(r.squadra)}</span></div>
+          <input data-squadra="${r.squadra_id}" data-nome="${esc(r.squadra)}"
+                 ${r.alias === '' ? 'data-vuoto="1"' : ''}
+                 value="${esc(r.alias)}" placeholder="alias della sorgente"
+                 maxlength="120" style="width:min(46%,260px)">
+          <button class="small" title="Svuota l'alias solo in questa sorgente"
+                  data-act="alias-clear" data-id="${r.squadra_id}"
+                  data-nome="${esc(r.squadra)}">⌫</button>
+        </div>`).join('') : `<div class="empty">Questa competizione non ha ancora squadre
+          Betfair: <a href="#/squadre/${k.id}">aggiungile prima</a>.</div>`}
+      ${righe.length ? `<div class="row"><div class="spacer"></div>
+        <button class="primary" data-act="alias-save">Salva alias</button></div>` : ''}
+      <div id="alias-err" class="small" style="color:var(--err)"></div>
+    </div>`);
+}
+
+function modalNewCompetizione() {
+  const sports = api.sports() || [];
+  if (!sports.length) {
+    openModal(`
+      <h2>Prima serve uno sport</h2>
+      <p class="muted small">Le competizioni vivono sotto uno sport della tua libreria.
+        Crealo in <a href="#/mercati">Mercati Betfair</a>, poi torna qui.</p>
+      <div class="foot"><button data-act="close">Ho capito</button></div>`);
+    return;
+  }
+  openModal(`
+    <h2>Nuova competizione</h2>
+    <div class="stack" style="margin-top:16px">
+      <div><label>Sport</label>
+        <select id="nc-sport">${sports.map(s =>
+          `<option value="${esc(s.slug)}">${esc(s.nome)}</option>`).join('')}</select></div>
+      <div><label>Nome della competizione</label>
+        <input id="nc-nome" placeholder="Serie A" maxlength="120"></div>
+      <div id="nc-err" class="small" style="color:var(--err)"></div>
+    </div>
+    <div class="foot">
+      <button data-act="close">Annulla</button>
+      <button class="primary" data-act="comp-create">Salva</button>
+    </div>`);
+}
+
+function modalNewSorgente() {
+  openModal(`
+    <h2>Aggiungi sorgente</h2>
+    <p class="muted small">Il nome del canale o della fonte, es. <em>test 1</em>. Vale per
+      tutte le competizioni: qui compilerai solo gli alias di questa.</p>
+    <div style="margin-top:16px">
+      <label>Nome della sorgente</label>
+      <input id="nsrc-nome" placeholder="test 1" maxlength="120">
+      <div id="nsrc-err" class="small" style="color:var(--err);margin-top:8px"></div>
+    </div>
+    <div class="foot">
+      <button data-act="close">Annulla</button>
+      <button class="primary" data-act="src-create">Salva</button>
     </div>`);
 }
 
@@ -1292,6 +1463,96 @@ const actions = {
     render();
   },
 
+  // ------- sorgenti squadre (#34)
+  'comp-new'() { modalNewCompetizione(); },
+  async 'comp-create'() {
+    const sport = document.getElementById('nc-sport').value;
+    const nome = document.getElementById('nc-nome').value;
+    try { await api.createCompetizione(sport, nome); }
+    catch (e) { document.getElementById('nc-err').textContent = e.message; return; }
+    closeModal(); render();
+  },
+  'comp-del'(el) {
+    openModal(`<h2>Eliminare la competizione?</h2>
+      <p class="muted small">«${esc(el.dataset.nome)}» sparisce con le sue squadre Betfair
+        e gli alias relativi in tutte le sorgenti. Le sorgenti restano.</p>
+      <div class="foot"><button data-act="close">Annulla</button>
+        <button class="danger" data-act="comp-del-ok" data-id="${esc(el.dataset.id)}">Elimina</button></div>`);
+  },
+  async 'comp-del-ok'(el) {
+    try { await api.deleteCompetizione(el.dataset.id); } catch (e) { fallita(e); return; }
+    closeModal(); go('#/squadre'); render();
+  },
+  async 'sq-add'() {
+    const campo = document.getElementById('sq-nome');
+    try { await api.createSquadra(route.id, campo.value); }
+    catch (e) { document.getElementById('sq-err').textContent = e.message; return; }
+    render();
+  },
+  'sq-del'(el) {
+    // La «× squadra» e' l'azione CONDIVISA (deciso 13/08): tocca tutte le
+    // sorgenti, quindi chiede conferma — la «⌫» invece e' locale e non la chiede.
+    openModal(`<h2>Eliminare la squadra?</h2>
+      <p class="muted small">«${esc(el.dataset.nome)}» sparisce dalla competizione e dai
+        suoi alias in <strong>tutte le sorgenti</strong>.</p>
+      <div class="foot"><button data-act="close">Annulla</button>
+        <button class="danger" data-act="sq-del-ok" data-id="${esc(el.dataset.id)}">Elimina</button></div>`);
+  },
+  async 'sq-del-ok'(el) {
+    try { await api.deleteSquadra(route.id, el.dataset.id); }
+    catch (e) { fallita(e); return; }
+    closeModal(); render();
+  },
+  'src-new'() { modalNewSorgente(); },
+  async 'src-create'() {
+    const nome = document.getElementById('nsrc-nome').value;
+    try { await api.createSorgente(nome); }
+    catch (e) { document.getElementById('nsrc-err').textContent = e.message; return; }
+    closeModal(); render();
+  },
+  'src-ren'(el) {
+    openModal(`<h2>Rinomina sorgente</h2>
+      <div style="margin-top:16px">
+        <label>Nuovo nome</label>
+        <input id="rsrc-nome" value="${esc(el.dataset.nome)}" maxlength="120">
+        <div id="rsrc-err" class="small" style="color:var(--err);margin-top:8px"></div>
+      </div>
+      <div class="foot"><button data-act="close">Annulla</button>
+        <button class="primary" data-act="src-ren-ok">Salva</button></div>`);
+  },
+  async 'src-ren-ok'() {
+    const nome = document.getElementById('rsrc-nome').value;
+    try { await api.renameSorgente(route.tab, nome); }
+    catch (e) { document.getElementById('rsrc-err').textContent = e.message; return; }
+    closeModal(); render();
+  },
+  'src-del'(el) {
+    openModal(`<h2>Eliminare la sorgente?</h2>
+      <p class="muted small">«${esc(el.dataset.nome)}» sparisce con i SUOI alias, in tutte
+        le competizioni. Le squadre Betfair restano dove sono.</p>
+      <div class="foot"><button data-act="close">Annulla</button>
+        <button class="danger" data-act="src-del-ok">Elimina</button></div>`);
+  },
+  async 'src-del-ok'() {
+    try { await api.deleteSorgente(route.tab); } catch (e) { fallita(e); return; }
+    closeModal(); go(`#/squadre/${route.id}`); render();
+  },
+  async 'alias-save'() {
+    const coppie = {};
+    document.querySelectorAll('[data-squadra]').forEach(el => {
+      coppie[el.dataset.squadra] = el.value;
+    });
+    try { await api.saveAlias(route.id, route.tab, coppie); }
+    catch (e) { document.getElementById('alias-err').textContent = e.message; return; }
+    toast('Alias salvati.');
+    render();
+  },
+  async 'alias-clear'(el) {
+    try { await api.saveAlias(route.id, route.tab, { [el.dataset.id]: '' }); }
+    catch (e) { fallita(e); return; }
+    render();
+  },
+
   // ------- wizard
   'start-wizard'() {
     const msg = document.getElementById('paste-msg').value;
@@ -1637,6 +1898,7 @@ function render() {
   if (route.name === 'parsers') return viewParsers();
   if (route.name === 'parser') return viewParser();
   if (route.name === 'mercati') return viewMercati();
+  if (route.name === 'squadre') return viewSquadre();
   if (route.name === 'feed') return viewFeed();
   if (route.name === 'chats') return viewChats();
   if (route.name === 'logs') return viewLogs();

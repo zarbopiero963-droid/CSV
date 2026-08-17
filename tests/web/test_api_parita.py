@@ -54,7 +54,9 @@ def test_le_viste_chiamano_solo_funzioni_che_esistono():
 SINCRONE = {'me', 'settings', 'getParser', 'telegramAuthUrl', 'suggest',
             'sampleMessage', 'saveSampleMessage', 'feedUrl', 'hasToken',
             # La libreria mercati (#33): il wizard le legge dentro un render.
-            'sports', 'mercatiOf'}
+            'sports', 'mercatiOf',
+            # Le sorgenti squadre (#34): stesse ragioni, stesse viste.
+            'competizioni', 'competizione', 'aliasOf'}
 
 
 def test_la_cache_sincrona_resta_sincrona():

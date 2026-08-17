@@ -344,3 +344,185 @@ export async function deleteSelezione(sportSlug, mercatoId, id) {
   mercato.selezioni = mercato.selezioni.filter(s => s.id !== Number(id));
   salva();
 }
+
+/* ------------------------------------------------ sorgenti squadre (#34) */
+
+// Stessa scelta della libreria mercati: la demo e' VERA (localStorage), con le
+// forme delle risposte del server e gli stessi messaggi d'errore.
+
+function _competizioniDemo() {
+  stato.dati.competizioni = stato.dati.competizioni || [];
+  return stato.dati.competizioni;
+}
+
+function _sorgentiDemo() {
+  stato.dati.sorgenti = stato.dati.sorgenti || [];
+  return stato.dati.sorgenti;
+}
+
+function _aliasDemo() {
+  stato.dati.alias = stato.dati.alias || {};   // `${sorgente}:${squadra}` -> alias
+  return stato.dati.alias;
+}
+
+function _competizioneODemo(cid) {
+  const trovata = _competizioniDemo().find(k => k.id === Number(cid));
+  if (!trovata) {
+    const errore = new Error('competizione non trovata');
+    errore.status = 404;
+    throw errore;
+  }
+  return trovata;
+}
+
+function _sorgenteODemo(id) {
+  const trovata = _sorgentiDemo().find(g => g.id === Number(id));
+  if (!trovata) {
+    const errore = new Error('sorgente non trovata');
+    errore.status = 404;
+    throw errore;
+  }
+  return trovata;
+}
+
+function _compilatiDemo(competizione, sorgente) {
+  return competizione.squadre.filter(
+    q => (_aliasDemo()[`${sorgente.id}:${q.id}`] || '') !== '').length;
+}
+
+export async function loadCompetizioni() { return competizioni(); }
+
+export function competizioni() {
+  return _competizioniDemo().map(k => ({
+    id: k.id, sport: k.sport, sportNome: k.sportNome, nome: k.nome,
+    squadre: k.squadre.length }));
+}
+
+export async function loadCompetizione(cid) { return competizione(cid); }
+
+export function competizione(cid) {
+  const k = _competizioniDemo().find(x => x.id === Number(cid));
+  if (!k) return null;
+  return {
+    id: k.id, nome: k.nome, sport: k.sport,
+    squadre: k.squadre.map(q => ({ id: q.id, nome: q.nome })),
+    sorgenti: _sorgentiDemo().map(g => ({
+      id: g.id, nome: g.nome, compilati: _compilatiDemo(k, g) })),
+  };
+}
+
+export async function loadAlias(cid, sorgente) { return aliasOf(cid, sorgente); }
+
+export function aliasOf(cid, sorgente) {
+  const k = _competizioniDemo().find(x => x.id === Number(cid));
+  const g = _sorgentiDemo().find(x => x.id === Number(sorgente));
+  if (!k || !g) return null;
+  return k.squadre.map(q => ({
+    squadra_id: q.id, squadra: q.nome,
+    alias: _aliasDemo()[`${g.id}:${q.id}`] || '' }));
+}
+
+export async function createCompetizione(sportSlug, nome) {
+  const sport = _sportODemo(sportSlug);
+  const pulito = _campoDemo('nome', nome);
+  if (_competizioniDemo().some(k => k.sport === sportSlug && k.nome === pulito)) {
+    const errore = new Error("hai gia' una competizione con questo nome in questo sport");
+    errore.status = 409;
+    throw errore;
+  }
+  const massimo = _competizioniDemo().reduce((m, k) => Math.max(m, k.id), 0);
+  const creata = { id: massimo + 1, sport: sport.slug, sportNome: sport.nome,
+                   nome: pulito, squadre: [], prossimoId: 1 };
+  _competizioniDemo().push(creata);
+  salva();
+  return { id: creata.id, sport: sport.slug, nome: pulito };
+}
+
+export async function deleteCompetizione(cid) {
+  const k = _competizioneODemo(cid);
+  k.squadre.forEach(q => {
+    _sorgentiDemo().forEach(g => { delete _aliasDemo()[`${g.id}:${q.id}`]; });
+  });
+  stato.dati.competizioni = _competizioniDemo().filter(x => x.id !== k.id);
+  salva();
+}
+
+export async function createSquadra(cid, nome) {
+  const k = _competizioneODemo(cid);
+  const pulito = _campoDemo('nome', nome);
+  if (k.squadre.some(q => q.nome === pulito)) {
+    const errore = new Error("squadra gia' presente in questa competizione");
+    errore.status = 409;
+    throw errore;
+  }
+  const squadra = { id: k.prossimoId || 1, nome: pulito };
+  k.prossimoId = squadra.id + 1;
+  k.squadre.push(squadra);
+  salva();
+  return squadra;
+}
+
+export async function deleteSquadra(cid, id) {
+  const k = _competizioneODemo(cid);
+  const squadra = k.squadre.find(q => q.id === Number(id));
+  if (!squadra) {
+    const errore = new Error('squadra non trovata');
+    errore.status = 404;
+    throw errore;
+  }
+  _sorgentiDemo().forEach(g => { delete _aliasDemo()[`${g.id}:${squadra.id}`]; });
+  k.squadre = k.squadre.filter(q => q.id !== squadra.id);
+  salva();
+}
+
+export async function createSorgente(nome) {
+  const pulito = _campoDemo('nome', nome);
+  if (_sorgentiDemo().some(g => g.nome === pulito)) {
+    const errore = new Error("hai gia' una sorgente con questo nome");
+    errore.status = 409;
+    throw errore;
+  }
+  const massimo = _sorgentiDemo().reduce((m, g) => Math.max(m, g.id), 0);
+  const creata = { id: massimo + 1, nome: pulito };
+  _sorgentiDemo().push(creata);
+  salva();
+  return creata;
+}
+
+export async function renameSorgente(id, nome) {
+  const sorgente = _sorgenteODemo(id);
+  const pulito = _campoDemo('nome', nome);
+  if (_sorgentiDemo().some(g => g.nome === pulito && g.id !== sorgente.id)) {
+    const errore = new Error("hai gia' una sorgente con questo nome");
+    errore.status = 409;
+    throw errore;
+  }
+  sorgente.nome = pulito;
+  salva();
+  return { id: sorgente.id, nome: pulito };
+}
+
+export async function deleteSorgente(id) {
+  const sorgente = _sorgenteODemo(id);
+  for (const chiave of Object.keys(_aliasDemo())) {
+    if (chiave.startsWith(`${sorgente.id}:`)) delete _aliasDemo()[chiave];
+  }
+  stato.dati.sorgenti = _sorgentiDemo().filter(g => g.id !== sorgente.id);
+  salva();
+}
+
+export async function saveAlias(cid, sorgenteId, coppie) {
+  const k = _competizioneODemo(cid);
+  const sorgente = _sorgenteODemo(sorgenteId);
+  const valide = new Set(k.squadre.map(q => q.id));
+  for (const [chiave, valore] of Object.entries(coppie || {})) {
+    const squadra = Number(chiave);
+    if (!valide.has(squadra)) {
+      throw new Error(`squadra ${chiave} non in questa competizione`);
+    }
+    const pulito = String(valore || '').trim();
+    if (pulito === '') delete _aliasDemo()[`${sorgente.id}:${squadra}`];
+    else _aliasDemo()[`${sorgente.id}:${squadra}`] = pulito.slice(0, 120);
+  }
+  salva();
+}
