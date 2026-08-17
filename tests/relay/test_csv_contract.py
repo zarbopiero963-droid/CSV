@@ -827,7 +827,9 @@ def test_un_messaggio_multi_riga_esce_con_UN_bom_e_UNA_intestazione(tmp_path, mo
         f'composizione multi-riga sbagliata:\n  atteso  {atteso!r}\n  servito {corpo!r}')
     assert corpo.count('\ufeff') == 1, 'il BOM deve comparire UNA volta, in testa'
     assert corpo.count('"Provider"') == 1, 'intestazione ripetuta nel feed'
-    assert main.verify_csv(corpo) is None or True  # non deve sollevare
+    # verify_csv restituisce il testo o SOLLEVA: la chiamata nuda e' l'assert.
+    # (La prima versione diceva `is None or True`: sempre vera — GPT-5.5, PR #68.)
+    assert main.verify_csv(corpo) == corpo
 
 
 def test_alla_scadenza_di_UNA_riga_il_feed_perde_solo_quella(tmp_path, monkeypatch):
@@ -882,3 +884,51 @@ def test_la_stringa_singola_resta_il_caso_storico(tmp_path, monkeypatch):
     finally:
         c.close()
     assert _feed().body.decode('utf-8') == buono
+
+
+def test_un_errore_sqlite_a_meta_inserimento_non_lascia_mezzo_feed(tmp_path, monkeypatch):
+    """La transazione e' del CHIAMANTE (come dice `_elabora_per_utente`): se un
+    INSERT esplode a meta' lista, nessun commit arriva e alla chiusura SQLite
+    riporta indietro anche la DELETE — il feed resta al segnale precedente,
+    mai vuoto e mai a meta'. Chiesto da GPT-5.5 sulla PR #68."""
+    import sqlite3
+
+    relay_in_processo(monkeypatch, tmp_path / 'rollback.db')
+    precedente = main.make_csv(RIGA_VALIDA)
+    c = main.db()
+    try:
+        main.store_signal(c, precedente, 'parser-finto', 'PIERO')
+        c.commit()
+    finally:
+        c.close()
+
+    seconda = list(RIGA_VALIDA)
+    seconda[main.HEADERS.index('MarketType')] = 'OVER_UNDER_25'
+    d1, d2 = main.make_csv(RIGA_VALIDA), main.make_csv(seconda)
+
+    class ConnEsplosiva:
+        """Il connettore vero, ma il SECONDO insert dei segnali esplode."""
+
+        def __init__(self, vera):
+            self._vera = vera
+            self._inserts = 0
+
+        def execute(self, sql, *argomenti):
+            if sql.lstrip().startswith('INSERT INTO signals'):
+                self._inserts += 1
+                if self._inserts >= 2:
+                    raise sqlite3.OperationalError('disco pieno (finto)')
+            return self._vera.execute(sql, *argomenti)
+
+        def __getattr__(self, nome):
+            return getattr(self._vera, nome)
+
+    c = main.db()
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            main.store_signal(ConnEsplosiva(c), [d1, d2], 'parser-finto', 'PIERO')
+    finally:
+        c.close()   # nessun commit: la transazione torna indietro qui
+
+    assert _feed().body.decode('utf-8') == precedente, \
+        'il feed doveva restare al segnale precedente, non vuoto ne\' a meta\''
