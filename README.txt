@@ -416,7 +416,8 @@ AUTENTICAZIONE
 CSV_ACCESS_TOKEN protegge dieci rotte: i due feed CSV (/xtrader.csv e
 /profiles/NOME.csv, col parametro ?token=) e le otto API di gestione (con
 l'header X-Admin-Token). Quattro sono in lettura, sei in scrittura.
-Restano pubbliche soltanto /, /health, /telegram/webhook e /app.
+Restano pubbliche soltanto /, /health, /telegram/webhook, /app e /admin (che
+e' solo un redirect verso l'app: vedi SCORCIATOIA /admin).
 
 Il controllo e' FAIL-CLOSED: se CSV_ACCESS_TOKEN non e' configurato il servizio
 risponde 503 "servizio non configurato" a tutte le rotte protette, e NON le
@@ -558,6 +559,12 @@ test che richiedono node o Chromium si saltano con motivo scritto.
 Il percorso di Chromium e la decisione salta/fallisce vivono in un punto solo,
 tests/runtime.py. Le due guardie sono tests/safety/test_ci.py (legge il workflow) e
 tests/safety/test_runtime_severo.py (esercita il meccanismo).
+
+SCORCIATOIA /admin
+GET /admin reindirizza a /app/#/richieste: la porta di servizio del proprietario.
+Solo un redirect, nessuna autenticazione propria — la serratura resta il login e
+il 404 delle rotte /api/admin/* per chi non e' amministratore. Chi non e' admin
+ci atterra sul login o sulla propria dashboard e non vede nulla.
 
 FACCIATA DEL SITO
 GET / restituisce la pagina pubblica di BetRelay (web/sito.html), non piu' l'oggetto

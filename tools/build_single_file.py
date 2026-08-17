@@ -22,6 +22,7 @@ di testo. La versione modulare in web/ non ha questo problema, perche' i moduli 
 sono UTF-8 per specifica.
 """
 
+import base64
 import re
 import sys
 from pathlib import Path
@@ -29,13 +30,12 @@ from pathlib import Path
 RADICE = Path(__file__).resolve().parents[1]
 WEB = RADICE / 'web'
 
-# Stessa favicon di index.html, incorporata come data URI.
-FAVICON = (
-    "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E"
-    "%3Crect width='32' height='32' rx='7' fill='%232aabee'/%3E"
-    "%3Ctext x='16' y='22' font-family='sans-serif' font-size='15' font-weight='700'"
-    " fill='%2304121b' text-anchor='middle'%3EXT%3C/text%3E%3C/svg%3E"
-)
+# Il marcatore del logo relay nelle viste (#59): l'app lo serve come file da
+# /app/, ma il bundle si apre da file:// dove un percorso relativo e' un'icona
+# rotta SENZA errori — la classe di guasto silenzioso della REGOLA CODIFICA,
+# versione immagine. Il generatore lo sostituisce con un data URI base64, che
+# e' ASCII per costruzione.
+MARCATORE_LOGO = 'src="betrelay-icona-256.png"'
 
 
 def strip_module_syntax(src):
@@ -124,11 +124,29 @@ def build():
         '/* ===== app.js ===== */', strip_module_syntax(app),
     ])
 
+    # Il logo relay: la sostituzione DEVE avvenire davvero. Un marcatore sparito
+    # (file rinominato, vista riscritta) non e' un dettaglio: il bundle uscirebbe
+    # con l'icona rotta e nessun controllo sui byte se ne accorgerebbe — quindi
+    # ci si ferma a voce alta, come per gli import esterni.
+    if MARCATORE_LOGO not in js:
+        raise SystemExit(
+            'il marcatore del logo (%s) non e\' piu\' nelle viste: aggiorna '
+            'MARCATORE_LOGO in questo generatore o ripristina l\'immagine.'
+            % MARCATORE_LOGO)
+    icona = base64.b64encode(
+        (WEB / 'betrelay-icona-256.png').read_bytes()).decode('ascii')
+    js = js.replace(MARCATORE_LOGO, 'src="data:image/png;base64,' + icona + '"')
+
+    # La favicon del bundle e' lo stesso .ico dell'app, incorporato: da file://
+    # non esiste un server che serva il file accanto.
+    favicon = ('data:image/x-icon;base64,' + base64.b64encode(
+        (WEB / 'betrelay-favicon-sito.ico').read_bytes()).decode('ascii'))
+
     return (
         '<!doctype html>\n<html lang="it">\n<head>\n<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
-        '<title>Prototipo XTrader Signal Relay</title>\n'
-        '<link rel="icon" href="' + FAVICON + '">\n'
+        '<title>Prototipo BetRelay</title>\n'
+        '<link rel="icon" href="' + favicon + '">\n'
         '<style>\n' + css + '\n</style>\n</head>\n<body>\n'
         '<div class="proto">PROTOTIPO &middot; DATI FINTI</div>\n'
         '<div id="app"></div>\n'

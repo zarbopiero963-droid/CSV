@@ -1657,9 +1657,20 @@ Due porte, le stesse del backend (PR 6):
   costruito col `bot_id` numerico di `GET /api/settings`. Al ritorno la pagina consuma
   il frammento `#tgAuthResult`, lo POSTa a `/api/login/telegram` e lo toglie dall'URL.
   Se il servizio non ha un bot configurato, la porta non compare;
-- il modulo **Utente / Password** («Entra»): la porta di riserva dell'amministratore
+- il modulo **Username / Password** («Entra»): la porta di riserva dell'amministratore
   (`POST /api/login/password`). L'errore del server compare sotto il pulsante, verbatim
-  («credenziali non valide», il 429 del freno, il 503 della variabile assente).
+  («credenziali non valide», il 429 del freno, il 503 della variabile assente). Dal
+  17/08/2026 (#58) il campo Username **non ha segnaposto**: il vecchio
+  `administrator` suggeriva a chiunque il probabile nome dell'amministratore.
+
+La pagina porta il marchio **BetRelay** (#59): il logo relay committato con la
+facciata (`betrelay-icona-256.png`) sopra il nome «BetRelay», e la favicon `.ico`
+del sito anche su `/app` (`web/index.html`, `<title>BetRelay</title>`). «XTrader»
+resta nel sottotitolo e ovunque si parli del software di betting di destinazione:
+è il prodotto compatibile, non il marchio del servizio. Nel file unico demo il
+logo è **incorporato** come data URI dal generatore (da `file://` un percorso
+relativo sarebbe un'icona rotta senza errori), con un marcatore vincolato che
+ferma il build se la sostituzione non può avvenire.
 
 La sessione è il cookie firmato del server: al 401 (venti minuti di inattività) la
 pagina si ricarica e torna al login, senza stati intermedi bugiardi.
@@ -1694,9 +1705,14 @@ Telegram: i due avvisi devono raccontare la stessa storia.
 
 ### Struttura
 
-Sidebar: «Dashboard», «Parser», «Mercati Betfair», «Feed CSV», «Chat Telegram»,
-«Log messaggi», «Impostazioni», più nome utente, profilo (slug) e «Esci». **Solo per
+Sidebar: in alto il marchio — logo relay + «BetRelay» (#59) — poi «Dashboard»,
+«Parser», «Mercati Betfair», «Feed CSV», «Chat Telegram», «Log messaggi»,
+«Impostazioni», più nome utente, profilo (slug) e «Esci». **Solo per
 l'amministratore** compare anche «Richieste», subito sotto la Dashboard.
+
+La scorciatoia **`/admin`** (#57) reindirizza a `/app/#/richieste`: solo un
+redirect, la serratura resta il login più il 404 server-side delle rotte admin —
+chi non è amministratore ci atterra sul login o sulla propria dashboard.
 
 ### La libreria «Mercati Betfair» (#33)
 
