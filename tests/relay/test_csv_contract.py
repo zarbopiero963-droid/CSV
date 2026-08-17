@@ -932,3 +932,28 @@ def test_un_errore_sqlite_a_meta_inserimento_non_lascia_mezzo_feed(tmp_path, mon
 
     assert _feed().body.decode('utf-8') == precedente, \
         'il feed doveva restare al segnale precedente, non vuoto ne\' a meta\''
+
+
+def test_store_signal_rifiuta_un_documento_che_porta_piu_di_una_riga(tmp_path, monkeypatch):
+    """Un record = una riga (CodeRabbit, PR #68): `verify_csv` ora accetta i
+    documenti composti, ma come INGRESSO di `store_signal` ogni documento deve
+    portare esattamente una data line — un multi-riga in un record solo
+    condividerebbe una sola scadenza e le sue righe non potrebbero morire
+    una per una. Vale anche per il documento a sola intestazione: zero righe
+    non sono un segnale."""
+    relay_in_processo(monkeypatch, tmp_path / 'unrecord.db')
+    prima = list(RIGA_VALIDA)
+    seconda = list(RIGA_VALIDA)
+    seconda[main.HEADERS.index('MarketType')] = 'OVER_UNDER_25'
+    composto = main.componi_feed([main.make_csv(prima), main.make_csv(seconda)])
+    c = main.db()
+    try:
+        with pytest.raises(ValueError):
+            main.store_signal(c, composto, 'parser-finto', 'PIERO')
+        with pytest.raises(ValueError):
+            main.store_signal(c, [main.make_csv(prima), main.empty_csv()],
+                              'parser-finto', 'PIERO')
+        assert c.execute('SELECT COUNT(*) FROM signals').fetchone()[0] == 0, \
+            'niente deve essere stato scritto'
+    finally:
+        c.close()

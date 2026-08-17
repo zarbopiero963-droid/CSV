@@ -93,7 +93,8 @@ ora esce "1,85". E' il fix, non un effetto collaterale.
 
 ENDPOINT PUBBLICO CSV
 GET /xtrader.csv?token=TOKEN
-Restituisce l'ultimo segnale ricevuto. Se non ci sono segnali restituisce la sola intestazione.
+Restituisce TUTTE le righe vive (non scadute) in ordine di scrittura, composte
+in un documento solo. Se non ci sono segnali restituisce la sola intestazione.
 
 IL NOME DEL FILE SCARICATO (#60)
 Chi incolla l'URL del feed in un browser scarica un file, e quel file si

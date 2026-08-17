@@ -2067,6 +2067,15 @@ def store_signal(c, csv_text_value, parser, profile=PIERO_PROFILE, utente=None):
         raise ValueError('nessun documento CSV da scrivere')
     for documento in documenti:
         verify_csv(documento)
+        # UN record = UNA riga (CodeRabbit, PR #68): `verify_csv` accetta anche
+        # i documenti COMPOSTI — quelli che il feed serve — ma come ingresso di
+        # scrittura ogni documento porta esattamente una data line, o le sue
+        # righe condividerebbero un record e una scadenza sola e non potrebbero
+        # morire una per una. Zero righe (sola intestazione) non e' un segnale.
+        righe_dati = documento[len(CSV_BOM):].count('\r\n') - 1
+        if righe_dati != 1:
+            raise ValueError(
+                'un documento per riga: questo ne porta %d' % righe_dati)
     if utente is None and profile is not None:
         riga = c.execute('SELECT id FROM users WHERE origin_profile=?', (profile,)).fetchone()
         utente = riga[0] if riga else None

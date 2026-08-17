@@ -79,7 +79,7 @@ parser_chats
 signals            ← tabella PREESISTENTE, estesa con ALTER additivo
   id, csv, parser, profile, created_at, expires_at,   ← formato originale
   user_id                                             ← destinazione nuova
-  una sola riga viva per parser. `profile` continua a governare il feed: il
+  le righe vive del parser (dal #35: N per messaggio). `profile` continua a governare il feed: il
   passaggio a `user_id` è del PR sul feed per utente, non di questo
 
 message_logs
@@ -810,7 +810,8 @@ separatore — e aggiungere una lingua sarà una riga di tabella.
 Il contratto non è affidato a una convenzione: c'è una funzione che lo controlla,
 in entrambe le implementazioni. `verify_csv()` in `main.py` e `verifyCsv()` in
 `web/engine.js` verificano BOM, intestazione esatta nell'ordine, CRLF senza LF
-nudi, tutti i campi fra virgolette, 14 campi per riga, e al massimo due righe.
+nudi, tutti i campi fra virgolette, 14 campi per riga — riga per riga, senza
+tetto sul numero: dal #35 (pezzo 1) il feed composto porta N segnali vivi.
 
 È agganciata in **due** punti, e il numero conta più della funzione:
 
