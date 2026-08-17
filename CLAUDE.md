@@ -1143,8 +1143,12 @@ Preserva sempre:
 2. Il parser non inventa dati mancanti.
 3. Il CSV resta compatibile con XTrader: 14 colonne, quell'ordine, quel quoting, CRLF, UTF-8
    **con BOM**, verificato da `verify_csv()` prima di ogni scrittura e da `/health`.
-4. Ogni feed contiene solo il segnale attivo del proprio parser.
-5. Il segnale scade dopo 90 secondi e il feed torna a sola intestazione.
+4. Ogni feed contiene solo il segnale attivo del proprio parser — che dal #35
+   (pezzo 1) può essere composto da **N righe vive** prodotte dallo stesso
+   messaggio, con BOM e intestazione **unici** in testa (`componi_feed`).
+5. Il segnale scade dopo 90 secondi e il feed torna a sola intestazione; il TTL
+   è **per riga** nel filtro di lettura, e alla scadenza di una riga il feed
+   perde solo quella.
 6. Un parser non può cancellare, modificare o sostituire il segnale di un altro parser.
 7. Un utente non può vedere né toccare i dati di un altro utente.
 8. I token dei feed esistono in chiaro una sola volta, alla generazione; il server conserva solo
@@ -1244,8 +1248,10 @@ Devi verificare:
 - tutti i campi tra virgolette (`QUOTE_ALL`), separatore virgola, terminatore `\r\n`, UTF-8
   **con BOM** (`\ufeff` davanti a `"Provider"`);
 - compatibilità XTrader;
-- una sola riga attiva per parser;
-- svuotamento con sola intestazione allo scadere dei 90 secondi;
+- le righe attive di un feed vengono dallo stesso messaggio del parser attivo
+  (dal #35: **N righe vive**, composte con BOM e intestazione unici); nessuna
+  intestazione ripetuta in mezzo al feed;
+- svuotamento con sola intestazione allo scadere dei 90 secondi (TTL per riga);
 - nessun append incontrollato;
 - nessun file o risposta corrotta se arrivano due segnali ravvicinati;
 - nessuna scrittura se il segnale non è valido;

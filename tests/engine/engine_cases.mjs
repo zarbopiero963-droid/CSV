@@ -819,6 +819,24 @@ caso('sorgente squadre: tradotto, avviso non bloccante, verbatim senza mappa', (
   return 'ok';
 });
 
+// Il feed a N segnali vivi (#35 pezzo 1): il verificatore JS deve accettare
+// un documento con piu' data line — come il gemello Python, che lo esporta
+// qui per il confronto — e continuare a respingere le righe malformate.
+caso('csv: il feed multi-riga (#35) passa il verificatore JS', () => {
+  const riga1 = COLUMNS.map(() => '');
+  riga1[COLUMNS.indexOf('EventName')] = 'Juventus - Palermo';
+  riga1[COLUMNS.indexOf('BetType')] = 'PUNTA';
+  const riga2 = [...riga1];
+  riga2[COLUMNS.indexOf('MarketType')] = 'OVER_UNDER_25';
+  const d1 = toCsv(riga1);
+  const d2 = toCsv(riga2);
+  const multi = d1 + d2.slice(d2.indexOf('\r\n') + 2);
+  eq(E.verifyCsv(multi), null, 'due segnali vivi devono passare');
+  const rotta = multi + 'solo,tre,campi\r\n';
+  eq(E.verifyCsv(rotta) === null, false, 'la riga malformata resta respinta');
+  return { multi };
+});
+
 caso('motore: casi di confronto per il gemello Python', () => casiConfronto());
 
 process.stdout.write(JSON.stringify(casi, null, 1));

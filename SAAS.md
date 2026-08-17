@@ -267,6 +267,10 @@ veda.
    parser. Il `DELETE` che precede l'inserimento di un nuovo segnale è sempre
    filtrato per `parser_id`.
 6. Ogni parser ha il proprio timer di 90 secondi, indipendente.
+   Dal #35 (pezzo 1) il feed può portare **N righe vive** prodotte dallo stesso
+   messaggio, composte da `componi_feed` con BOM e intestazione unici in testa;
+   il TTL è per riga nel filtro di lettura e `store_signal` verifica **tutti**
+   i documenti prima di scrivere (uno rotto = niente scritto).
 7. Stesso messaggio, stessa chat, parser diversi: due elaborazioni indipendenti e
    due CSV distinti. Chi non riconosce il messaggio lo ignora senza toccare nulla.
 

@@ -825,7 +825,7 @@ def test_un_messaggio_multi_riga_esce_con_UN_bom_e_UNA_intestazione(tmp_path, mo
     atteso = d1 + d2.split('\r\n', 1)[1]
     assert corpo == atteso, (
         f'composizione multi-riga sbagliata:\n  atteso  {atteso!r}\n  servito {corpo!r}')
-    assert corpo.count('﻿') == 1, 'il BOM deve comparire UNA volta, in testa'
+    assert corpo.count('\ufeff') == 1, 'il BOM deve comparire UNA volta, in testa'
     assert corpo.count('"Provider"') == 1, 'intestazione ripetuta nel feed'
     assert main.verify_csv(corpo) is None or True  # non deve sollevare
 

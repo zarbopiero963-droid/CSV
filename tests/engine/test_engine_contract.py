@@ -345,3 +345,25 @@ def test_le_costanti_JSON_arrivano_nel_CSV_come_in_anteprima(casi):
         'la riga del feed diverge dall\'anteprima:\n'
         f'  JS     : {dal_js["csv"]!r}\n'
         f'  Python : {parsed["csv"]!r}')
+
+
+def test_il_feed_multi_riga_passa_ENTRAMBI_i_verificatori(casi):
+    """#35 pezzo 1, regola 3: i due verificatori accettano N segnali vivi.
+
+    Il documento lo COSTRUISCE il motore JS (`toCsv` + coda del secondo) e lo
+    esporta; qui il gemello Python deve accettare gli stessi byte. Prima del
+    #35 entrambi rifiutavano oltre la singola riga — misurato dal test sui
+    byte del contratto, rosso su `verify_csv` prima della patch.
+    """
+    import importlib
+    import sys
+    sys.path.insert(0, str(RADICE))
+    main = importlib.import_module('main')
+
+    esportato = next((c for c in casi if 'feed multi-riga' in c['nome']), None)
+    assert esportato and esportato['ok'], \
+        'il caso JS multi-riga non e\' passato: ' + str(esportato and esportato.get('errore'))
+    multi = esportato['dettaglio']['multi']
+    assert main.verify_csv(multi) == multi, 'il gemello Python deve accettare gli stessi byte'
+    with pytest.raises(ValueError):
+        main.verify_csv(multi + 'solo,tre,campi\r\n')

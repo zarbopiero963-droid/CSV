@@ -3248,6 +3248,10 @@ def health():
     try:
         verify_csv(empty_csv())
         verify_csv(make_csv(sample))
+        # Il contratto multi-riga (#35 pezzo 1): due segnali vivi composti da
+        # `componi_feed` devono passare come un documento solo — /health
+        # esercita anche la composizione, non solo la riga singola.
+        verify_csv(componi_feed([make_csv(sample), make_csv(sample)]))
         csv_state = 'ok'
     except ValueError as e:
         csv_state = 'fault: %s' % e
@@ -3401,25 +3405,28 @@ def feed_utente_csv(slug: str, token: str | None = Query(None)):
         # `store_signal`, che cancella per entrambe le chiavi alla scrittura
         # successiva: resta al piu' una riga scaduta per utente, invisibile a
         # questo filtro. Vincolato dal test sul database di sola lettura.
-        r = c.execute("SELECT csv FROM signals WHERE user_id=?"
-                      " AND (expires_at IS NULL OR expires_at > strftime('%s','now'))"
-                      ' ORDER BY id DESC LIMIT 1', (utente,)).fetchone()
+        # TUTTE le righe vive in ordine di scrittura (#35 pezzo 1), come in
+        # `profile_csv`: un messaggio multi-riga ne inserisce N nello stesso
+        # commit e il feed le compone in un documento solo.
+        righe = c.execute("SELECT csv FROM signals WHERE user_id=?"
+                          " AND (expires_at IS NULL OR expires_at > strftime('%s','now'))"
+                          ' ORDER BY id', (utente,)).fetchall()
     finally:
         c.close()
     # Stesso fallback di `profile_csv`, per la stessa ragione: una riga scritta
     # da una versione precedente non deve uscire rotta, e un raise sul percorso
     # di consegna sarebbe un 500 verso XTrader. Lo slug come etichetta del log:
-    # e' gia' nell'URL, non e' un segreto.
-    body = empty_csv()
-    if r:
+    # e' gia' nell'URL, non e' un segreto. Una riga guasta degrada SOLO se
+    # stessa (#35): le altre righe vive continuano a uscire.
+    validi = []
+    for (documento,) in righe:
         try:
-            body = verify_csv(r[0])
+            validi.append(verify_csv(documento))
         except ValueError as e:
-            if _registra_scarto(slug, r[0], e):
+            if _registra_scarto(slug, documento, e):
                 logging.getLogger('xtrader.relay').warning(
-                    'feed dell\'utente %s degradato a sola intestazione: %s', slug, e)
-            body = empty_csv()
-    return Response(body, media_type='text/csv',
+                    'riga del feed dell\'utente %s scartata dalla verifica: %s', slug, e)
+    return Response(componi_feed(validi), media_type='text/csv',
                     headers=_intestazioni_feed(f'betrelay-{slug}.csv'))
 
 # Il nome del cookie di sessione, in un posto solo perche' lo leggono in quattro.
