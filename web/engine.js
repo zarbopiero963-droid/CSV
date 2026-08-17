@@ -520,10 +520,19 @@ function generaRighe(message, config, matched, base) {
       }
     }
     const selEsplicita = piatto(String(riga.selection_name ?? ''));
-    const conDelimitatori = Boolean(riga.start_after || riga.end_before);
+    // I delimitatori vanno in forma CANONICA (`String`), come `_testo_canonico`
+    // in Python: la validazione ammette scalari, e un delimitatore NUMERICO
+    // grezzo qui rompeva `segmento` — `(5).length` e' undefined, `inizio`
+    // diventava NaN e `slice(NaN)` partiva da 0, delimitatore incluso, mentre
+    // Python tagliava dopo. [REAL_FINDING] di Fable al gate finale, PR #69.
+    const dopoGrezzo = riga.start_after;
+    const primaGrezzo = riga.end_before;
+    const conDelimitatori = Boolean(dopoGrezzo || primaGrezzo);
+    const dopo = dopoGrezzo ? String(dopoGrezzo) : '';
+    const prima = primaGrezzo ? String(primaGrezzo) : '';
     if (conDelimitatori && selEsplicita) {
       // Delimitatori con selezione: estraggono la QUOTA propria della riga.
-      derivata[iPrezzo] = segmento(message, riga.start_after, riga.end_before);
+      derivata[iPrezzo] = segmento(message, dopo, prima);
     }
     if (conDelimitatori && !selEsplicita) {
       // Selezione VUOTA + delimitatori = punteggi dinamici, SOLO sui due
@@ -539,7 +548,7 @@ function generaRighe(message, config, matched, base) {
       // `[0-9]`, come nel gemello Python: in JS `\d` E' gia' solo ASCII, ma
       // il contratto a due implementazioni si legge meglio quando i due testi
       // coincidono — e la parita' sulle cifre unicode lo blinda.
-      const punteggi = segmento(message, riga.start_after, riga.end_before)
+      const punteggi = segmento(message, dopo, prima)
         .match(/[0-9]+-[0-9]+/g) || [];
       if (!punteggi.length) {
         righe.push({ row: derivata, missing: [], scarti: [

@@ -480,6 +480,12 @@ function casiConfronto() {
       { market_type: 'CORRECT_SCORE', selection_name: '',
         start_after: 'Risultati:', end_before: ';' }], selections: [] },
   });
+  aggiungi('multi: delimitatore NUMERICO canonicalizzato come in Python',
+    'P.Bet.\nJuve v Milan\nquota5 2.10; x', {
+    ...multiBase, multi: { markets: [
+      { market_type: 'OVER_UNDER_25', selection_name: 'Over 2,5',
+        start_after: 5, end_before: ';' }], selections: [] },
+  });
   aggiungi('multi: delimitatori CON selezione estraggono la quota',
     'P.Bet.\nJuve v Milan\nquota: 2.10 fine', {
     ...multiBase, multi: { markets: [
