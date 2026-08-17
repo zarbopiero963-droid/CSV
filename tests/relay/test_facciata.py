@@ -164,6 +164,91 @@ def test_la_facciata_e_TROVABILE_mentre_l_applicazione_resta_noindex(servizio):
         'il prototipo ha perso il proprio noindex'
 
 
+# --------------------------------------- la facciata definitiva (#37 / #38)
+
+def test_la_facciata_usa_il_logo_relay_e_la_favicon_ico(servizio):
+    """Le icone sono ASSET COMMITTATI e serviti, non un segnaposto disegnato.
+
+    Il quadrato «BR» era un segnaposto dichiarato tale nella #37: la facciata
+    definitiva usa l'icona relay fornita dal proprietario. Il test chiede tre
+    cose: la pagina li referenzia, i file rispondono davvero (un `src` che
+    punta a un 404 e' un logo rotto che i byte della pagina non mostrano), e
+    i byte sono del formato giusto — firma PNG e firma ICO, non un HTML di
+    errore salvato col nome dell'immagine.
+    """
+    testo = _prendi(f'{servizio}/')[2].decode('utf-8')
+    assert 'betrelay-icona-256.png' in testo, 'la pagina non usa il logo relay'
+    assert 'betrelay-favicon-sito.ico' in testo, 'la pagina non usa la favicon .ico'
+    assert '>BR<' not in testo, 'il quadrato segnaposto «BR» e\' ancora nella pagina'
+
+    stato, header, corpo = _prendi(f'{servizio}/app/betrelay-icona-256.png')
+    assert stato == 200, f'il logo relay risponde {stato}'
+    assert corpo[:8] == b'\x89PNG\r\n\x1a\n', f'il logo non e\' un PNG: {corpo[:8]!r}'
+
+    stato, header, corpo = _prendi(f'{servizio}/app/betrelay-favicon-sito.ico')
+    assert stato == 200, f'la favicon risponde {stato}'
+    assert corpo[:4] == b'\x00\x00\x01\x00', f'la favicon non e\' un ICO: {corpo[:4]!r}'
+
+
+def test_la_facciata_mostra_la_famiglia_XTrader_first(servizio):
+    """La decisione della #37: la famiglia si vede, ma il servizio copre XTrader.
+
+    «Attivo» su XTrader e «In arrivo» sugli altri non sono decorazione: sono la
+    promessa commerciale — un cliente di BETTINGTOOLKIT.ES che si registra oggi
+    deve averlo letto PRIMA, non scoprirlo dal parser che non funziona.
+    """
+    testo = _prendi(f'{servizio}/')[2].decode('utf-8')
+    assert 'Oggi la guida copre XTrader' in testo
+
+    # L'associazione scheda -> stato, non due substring sull'intera pagina:
+    # con le pillole SCAMBIATE (XTrader «In arrivo», Toolkit «Attivo») un
+    # controllo globale resterebbe verde. Le schede sono i blocchi
+    # `<div class="prod">`: ognuna deve contenere il SUO stato e non l'altro.
+    # Segnalato da CodeRabbit sulla PR #54.
+    schede = testo.split('<div class="prod">')[1:]
+    assert len(schede) == 4, f'attese 4 schede prodotto, trovate {len(schede)}'
+    attesi = {'XTrader': 'Attivo', 'BETTINGTOOLKIT.COM': 'In arrivo',
+              'BETTINGTOOLKIT.ES': 'In arrivo', 'BETTINGTOOLKIT.LAT': 'In arrivo'}
+    for nome, stato in attesi.items():
+        scheda = next((s for s in schede if nome in s), None)
+        assert scheda is not None, f'manca la scheda del prodotto {nome}'
+        assert stato in scheda, f'{nome}: la scheda non dice «{stato}»'
+        altro = 'In arrivo' if stato == 'Attivo' else 'Attivo'
+        assert altro not in scheda, f'{nome}: la scheda dice anche «{altro}»'
+
+
+def test_la_facciata_dichiara_cosa_NON_fa_e_il_disclaimer(servizio):
+    """La pagina dice che BetRelay non piazza scommesse, e di chi NON e'.
+
+    Il disclaimer di non affiliazione (TradingSportivo / Betting Toolkit) e il
+    «18+» stanno nel footer dello sketch approvato (#38) e sono la parte legale
+    della facciata: se un restyle futuro li perde, questo test lo dice.
+    """
+    testo = _prendi(f'{servizio}/')[2].decode('utf-8')
+    assert 'non piazza scommesse' in testo
+    assert '18+' in testo, 'il footer ha perso l\'avvertenza 18+'
+    assert 'non è affiliato' in testo, 'il footer ha perso il disclaimer di affiliazione'
+
+
+def test_la_facciata_ha_la_card_di_flusso(servizio):
+    """La catena Telegram → parser → CSV → software → svuotamento, come card.
+
+    E' il pezzo di design che la #37 chiama «card di flusso»: il riassunto del
+    servizio in cinque nodi. I marcatori qui sotto sono le etichette che solo
+    quella card contiene.
+    """
+    testo = _prendi(f'{servizio}/')[2].decode('utf-8')
+    # I nodi si cercano DENTRO la card (`class="flow"` fino alla sezione
+    # successiva), non nell'intera pagina: «Custom Parser» compare anche
+    # altrove, e un test globale non direbbe niente sulla card. Segnalato da
+    # CodeRabbit sulla PR #54.
+    assert 'class="flow"' in testo, 'manca la card di flusso'
+    card = testo[testo.index('class="flow"'):testo.index('<section id="come"')]
+    for nodo in ('Telegram', 'Custom Parser', 'segnali.csv',
+                 'XTrader / Betting Toolkit', 'CSV pulito — mai segnali vecchi'):
+        assert nodo in card, f'manca il nodo {nodo!r} nella card di flusso'
+
+
 # ------------------------------------------------- e adesso: niente catch-all
 
 def test_il_feed_di_XTrader_NON_e_intercettato_dalla_facciata(servizio):

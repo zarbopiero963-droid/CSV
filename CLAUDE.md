@@ -24,7 +24,7 @@ Il merge resta sempre manuale del repository owner.
 | Cosa | Dove |
 |---|---|
 | Servizio FastAPI (relay, API, webhook Telegram, feed CSV) | `main.py` |
-| Facciata pubblica del sito, servita sull'apex | `web/sito.html` |
+| Facciata pubblica del sito, servita sull'apex | `web/sito.html` (icone: `web/betrelay-favicon-sito.ico`, `web/betrelay-icona-256.png`) |
 | Web app multiutente agganciata al backend (moduli ES, nessun build step) | `web/index.html`, `web/app.js`, `web/api.js` (fetch verso il relay), `web/styles.css` |
 | Gemello a dati finti di `api.js`, usato SOLO dal file unico demo | `web/api_finta.js` (parità vincolata da `tests/web/test_api_parita.py`) |
 | Motore di parsing configurabile — specifica eseguibile | `web/engine.js` |

@@ -3,9 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>BetRelay — i segnali del tuo canale Telegram, dentro XTrader</title>
-  <meta name="description" content="BetRelay legge i segnali del tuo canale Telegram e li serve a XTrader come feed CSV. Nessun programma da installare: XTrader legge un indirizzo, BetRelay lo tiene aggiornato.">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232aabee'/%3E%3Ctext x='16' y='22' font-family='sans-serif' font-size='14' font-weight='700' fill='%2304121b' text-anchor='middle'%3EBR%3C/text%3E%3C/svg%3E">
+  <title>BetRelay — i segnali del tuo canale Telegram, dentro il tuo software di betting</title>
+  <meta name="description" content="BetRelay legge i segnali del tuo canale Telegram e li serve al tuo software di betting come feed CSV. Oggi copre XTrader. Niente da installare: il software legge un indirizzo, BetRelay lo tiene aggiornato.">
+  <!-- Le icone sono ASSET COMMITTATI (#37), serviti dal mount statico /app:
+       nessun CDN, nessuna dipendenza esterna. La favicon e' l'.ico fornito dal
+       proprietario (16/32/48), il PNG 256 fa da logo header e da touch icon. -->
+  <link rel="icon" href="/app/betrelay-favicon-sito.ico">
+  <link rel="apple-touch-icon" href="/app/betrelay-icona-256.png">
   <style>
     /* Stessi token della web app (web/styles.css): una sola identita' visiva.
        Sono ricopiati e non importati di proposito — la facciata deve restare una
@@ -20,7 +24,9 @@
       --txt-3: #667584;
       --accent: #2aabee;
       --accent-2: #1d8ec4;
+      --orange: #f2b45a;
       --ok: #3fb950;
+      --warn: #d29922;
       --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       --radius: 10px;
     }
@@ -30,7 +36,8 @@
        il contenitore invece di scorrere dentro il proprio. E' il difetto tornato
        quattro volte nella web app (regola 2 di CLAUDE.md), e qui e' spento in
        partenza su TUTTI i figli, non sui tre che me ne ricordo oggi. */
-    body > *, .griglia > *, .coppia > *, .righe > * { min-width: 0; }
+    body > *, .griglia > *, .coppia > *, .righe > *,
+    .apertura-griglia > *, .prodotti > *, .flow > * { min-width: 0; }
 
     body {
       margin: 0;
@@ -55,7 +62,7 @@
        il sito e lasciato viva la trappola; separare gli elementi la toglie,
        perche' non esiste piu' una forma breve che possa sovrascrivere il margine.
        Misurato da `tests/web/sito_flow.py` a 390 px e a 1280. */
-    .dentro { width: 100%; max-width: 960px; margin: 0 auto; padding: 0 20px; }
+    .dentro { width: 100%; max-width: 1000px; margin: 0 auto; padding: 0 20px; }
 
     /* ---------- barra ---------- */
     header {
@@ -63,17 +70,19 @@
       background: rgba(15, 20, 25, .9);
       position: sticky; top: 0; z-index: 2;
     }
-    .barra { display: flex; align-items: center; gap: 16px; height: 62px; }
+    .barra { display: flex; align-items: center; gap: 14px; height: 62px; }
     .marchio {
       display: flex; align-items: center; gap: 10px;
       font-weight: 700; font-size: 19px; letter-spacing: -.2px;
       color: var(--txt); text-decoration: none;
     }
-    .segno {
-      width: 28px; height: 28px; border-radius: 7px; flex: 0 0 auto;
-      background: var(--accent); color: #04121b;
-      font: 700 13px/28px var(--mono); text-align: center;
+    .marchio img { width: 28px; height: 28px; border-radius: 7px; flex: 0 0 auto; display: block; }
+    .barra nav { display: flex; gap: 6px; }
+    .barra nav a {
+      color: var(--txt-2); text-decoration: none;
+      padding: 7px 12px; border-radius: 8px; font-size: 14px;
     }
+    .barra nav a.attiva, .barra nav a:hover { color: var(--txt); background: var(--bg-2); }
     .barra .spinta { margin-left: auto; }
 
     /* ---------- pulsanti ---------- */
@@ -88,7 +97,11 @@
     .bottone.calmo:hover { border-color: var(--txt-3); background: var(--bg-2); }
 
     /* ---------- apertura ---------- */
-    .apertura { padding: 72px 0 56px; }
+    .apertura { padding: 64px 0 48px; }
+    .apertura-griglia {
+      display: grid; gap: 38px; align-items: center;
+      grid-template-columns: 1.05fr .95fr;
+    }
     .stato {
       display: inline-flex; align-items: center; gap: 8px;
       font-size: 13px; color: var(--txt-2);
@@ -101,7 +114,7 @@
     }
     h1 {
       margin: 0 0 18px;
-      font-size: clamp(30px, 6.2vw, 50px);
+      font-size: clamp(30px, 5vw, 46px);
       line-height: 1.12; letter-spacing: -1px; font-weight: 700;
     }
     h1 em { color: var(--accent); font-style: normal; }
@@ -111,13 +124,25 @@
     }
     .azioni { display: flex; flex-wrap: wrap; gap: 12px; }
 
+    /* La card di flusso: la catena del servizio in cinque nodi (#37). */
+    .flow {
+      background: var(--bg-2); border: 1px solid var(--line);
+      border-radius: 14px; padding: 18px 20px;
+      font-family: var(--mono); font-size: 13.5px;
+    }
+    .flow .nodo { display: flex; align-items: center; gap: 9px; font-weight: 600; }
+    .flow .sotto-nodo { color: var(--txt-3); padding: 2px 0 2px 26px; font-size: 12.5px; }
+    .flow .giu { color: var(--txt-3); padding-left: 6px; font-size: 12px; }
+    .flow .verde { color: var(--ok); }
+    .flow .dim { color: var(--txt-3); font-weight: 400; }
+
     /* ---------- sezioni ---------- */
     section { padding: 52px 0; border-top: 1px solid var(--line); }
     h2 {
       margin: 0 0 8px; font-size: clamp(21px, 3.4vw, 28px);
       letter-spacing: -.4px; font-weight: 700;
     }
-    .sotto { margin: 0 0 30px; color: var(--txt-2); max-width: 620px; }
+    .sotto { margin: 0 0 30px; color: var(--txt-2); max-width: 640px; }
     .griglia { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
     .scheda {
       background: var(--bg-2); border: 1px solid var(--line);
@@ -128,6 +153,33 @@
     .numero {
       display: block; font: 700 12px/1 var(--mono);
       color: var(--accent); margin-bottom: 12px; letter-spacing: 1px;
+    }
+    .occhiello {
+      font: 700 11px/1 var(--mono); color: var(--orange);
+      letter-spacing: .12em; text-transform: uppercase;
+    }
+    .perche .scheda h3 { margin-top: 10px; }
+
+    /* ---------- famiglia prodotti ---------- */
+    .prodotti { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+    .prod {
+      background: var(--bg-2); border: 1px solid var(--line);
+      border-radius: var(--radius); padding: 18px;
+    }
+    .prod .bandiera { font-size: 22px; }
+    .prod h3 { margin: 10px 0 4px; font-size: 15px; letter-spacing: .3px; }
+    .prod p { margin: 0; color: var(--txt-3); font-size: 13px; }
+    .pill {
+      display: inline-block; font-size: 12px; padding: 2px 9px;
+      border-radius: 20px; border: 1px solid var(--line); color: var(--txt-2);
+    }
+    .pill.on { color: var(--ok); border-color: #1d3d24; background: #102315; }
+    .pill.presto { color: var(--warn); border-color: #3d3115; background: #221b0d; }
+
+    .nota {
+      border: 1px solid var(--line); border-left: 3px solid var(--ok);
+      background: var(--bg-3); border-radius: 6px;
+      padding: 12px 16px; font-size: 14px; color: var(--txt-2); margin-top: 22px;
     }
 
     /* ---------- dal messaggio alla riga ---------- */
@@ -161,12 +213,20 @@
       color: var(--txt-3); font-size: 14px;
     }
     .righe { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; }
+    .righe .spazio { flex: 1; }
     footer a { color: var(--txt-2); }
+    .disc { max-width: 850px; line-height: 1.55; margin: 12px 0 0; font-size: 13px; }
 
+    @media (max-width: 880px) {
+      .apertura-griglia { grid-template-columns: 1fr; gap: 26px; }
+    }
     @media (max-width: 520px) {
       .apertura { padding: 46px 0 38px; }
       section { padding: 40px 0; }
       .azioni .bottone { flex: 1 1 100%; text-align: center; }
+      /* Il menu ha una voce sola (#37): sul telefono si toglie, come nello
+         sketch approvato — il marchio fa gia' da Home. */
+      .barra nav { display: none; }
     }
   </style>
 </head>
@@ -175,7 +235,8 @@
 <header>
   <div class="dentro">
     <div class="barra">
-      <a class="marchio" href="/"><span class="segno">BR</span>BetRelay</a>
+      <a class="marchio" href="/"><img src="/app/betrelay-icona-256.png" alt="" width="28" height="28">BetRelay</a>
+      <nav><a class="attiva" href="/">Home</a></nav>
       <a class="bottone calmo spinta" href="/app/">Entra</a>
     </div>
   </div>
@@ -184,16 +245,35 @@
 <main>
   <div class="apertura">
     <div class="dentro">
-      <p class="stato"><span class="pallino"></span>Servizio in avviamento · accesso su approvazione</p>
-      <h1>I segnali del tuo canale Telegram, <em>dentro XTrader</em>.</h1>
-      <p class="sommario">
-        BetRelay legge i messaggi della chat che gli indichi, ne ricava il segnale e lo
-        serve a XTrader come feed CSV. Niente da installare: XTrader legge un indirizzo,
-        BetRelay lo tiene aggiornato.
-      </p>
-      <div class="azioni">
-        <a class="bottone" href="/app/">Entra con Telegram</a>
-        <a class="bottone calmo" href="#come">Come funziona</a>
+      <div class="apertura-griglia">
+        <div>
+          <p class="stato"><span class="pallino"></span>Servizio in avviamento · accesso su approvazione</p>
+          <h1>I segnali del tuo canale Telegram, <em>dentro il tuo software di betting</em>. Automaticamente.</h1>
+          <p class="sommario">
+            BetRelay legge i messaggi della chat che gli indichi, li traduce con un parser su
+            misura nel CSV che il tuo software monitora, e svuota il file dopo il timeout.
+            Tu configuri una volta; poi la catena lavora da sola. Niente da installare.
+          </p>
+          <div class="azioni">
+            <a class="bottone" href="/app/">Entra con Telegram</a>
+            <a class="bottone calmo" href="#come">Come funziona</a>
+          </div>
+        </div>
+        <div class="flow">
+          <div class="nodo">📲 Telegram</div>
+          <div class="sotto-nodo">solo chat configurate</div>
+          <div class="giu">▼</div>
+          <div class="nodo">🧩 Custom Parser</div>
+          <div class="sotto-nodo">estrae campi, non inventa dati</div>
+          <div class="giu">▼</div>
+          <div class="nodo">📄 segnali.csv <span class="dim">(14 colonne)</span></div>
+          <div class="sotto-nodo">un solo segnale attivo per parser</div>
+          <div class="giu">▼</div>
+          <div class="nodo">🎯 XTrader / Betting Toolkit</div>
+          <div class="sotto-nodo">timeout / conferma</div>
+          <div class="giu">▼</div>
+          <div class="nodo verde">🧹 CSV pulito — mai segnali vecchi</div>
+        </div>
       </div>
     </div>
   </div>
@@ -255,28 +335,69 @@
 
   <section>
     <div class="dentro">
-      <h2>Cosa ottieni</h2>
+      <h2>Oggi la guida copre XTrader</h2>
+      <p class="sotto">
+        BetRelay è nato per <strong>XTrader</strong> (Italia) e parla lo stesso CSV degli
+        altri prodotti della stessa casa madre. Per ora il servizio copre
+        <strong>solo XTrader</strong>: le altre versioni sono <strong>in arrivo</strong>.
+      </p>
+      <div class="prodotti">
+        <div class="prod"><div class="bandiera">🇮🇹</div><h3>XTrader</h3>
+          <p>TradingSportivo · Italia</p>
+          <p style="margin-top:8px"><span class="pill on">Attivo</span></p></div>
+        <div class="prod"><div class="bandiera">🌍</div><h3>BETTINGTOOLKIT.COM</h3>
+          <p>World</p>
+          <p style="margin-top:8px"><span class="pill presto">In arrivo</span></p></div>
+        <div class="prod"><div class="bandiera">🇪🇸</div><h3>BETTINGTOOLKIT.ES</h3>
+          <p>Spagna</p>
+          <p style="margin-top:8px"><span class="pill presto">In arrivo</span></p></div>
+        <div class="prod"><div class="bandiera">🌎</div><h3>BETTINGTOOLKIT.LAT</h3>
+          <p>America Latina</p>
+          <p style="margin-top:8px"><span class="pill presto">In arrivo</span></p></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="dentro perche">
+      <h2>Perché è diverso da un bot di scommesse</h2>
+      <p class="sotto">
+        BetRelay <strong>non piazza scommesse</strong> e non parla con Betfair: scrive solo
+        il file CSV che il tuo software monitora. È XTrader a operare — BetRelay resta un
+        ponte prevedibile e verificabile.
+      </p>
       <div class="griglia">
-        <div class="scheda">
-          <h3>Un feed tuo</h3>
+        <div class="scheda"><span class="occhiello">Parser su misura</span>
+          <h3>🧩 Legge il TUO canale</h3>
+          <p>Ogni canale scrive i segnali a modo suo. Col Parser Personalizzato definisci
+             come estrarre evento, mercato, selezione e quota — con anteprima e diagnostica
+             su un messaggio reale prima di andare live.</p></div>
+        <div class="scheda"><span class="occhiello">Provalo prima</span>
+          <h3>🧪 Prova, poi vai live</h3>
+          <p>«Prova messaggio» esegue il parser su un messaggio vero e ti mostra le 14
+             colonne e la riga CSV che ne esce, prima che un solo segnale raggiunga XTrader.</p></div>
+        <div class="scheda"><span class="occhiello">Mai segnali vecchi</span>
+          <h3>🧹 CSV sempre pulito</h3>
+          <p>Un solo segnale attivo per parser, timeout di 90 secondi, svuotamento
+             automatico: il tuo software vede il segnale più recente o nessuno.</p></div>
+        <div class="scheda"><span class="occhiello">Multi-canale</span>
+          <h3>📡 Più chat sorgenti</h3>
+          <p>Più canali, ognuno col suo parser, tutti attivi insieme. Il filtro delle chat
+             è un'invariante: i messaggi da chat non configurate vengono sempre ignorati.</p></div>
+        <div class="scheda"><span class="occhiello">Un feed tuo</span>
+          <h3>🔒 Isolamento fra clienti</h3>
           <p>Un indirizzo e un token personali. Nessun altro cliente può leggere il tuo
-             feed, e tu non vedi il suo.</p>
-        </div>
-        <div class="scheda">
-          <h3>Più parser insieme</h3>
-          <p>Regole diverse per canali diversi, tutte attive nello stesso momento, con
-             l'ordine di precedenza sotto il tuo controllo.</p>
-        </div>
-        <div class="scheda">
-          <h3>Log dei messaggi</h3>
+             feed, e tu non vedi il suo. Il token esiste in chiaro una volta sola.</p></div>
+        <div class="scheda"><span class="occhiello">Tutto sotto controllo</span>
+          <h3>📊 Log dei messaggi</h3>
           <p>Vedi cosa è arrivato, cosa è stato riconosciuto e cosa no. Quando un segnale
-             non passa, sai perché.</p>
-        </div>
-        <div class="scheda">
-          <h3>Niente da installare</h3>
-          <p>Nessun programma sul tuo computer, nessuna finestra da tenere aperta. Il
-             servizio sta online e XTrader legge un indirizzo.</p>
-        </div>
+             non passa, il log dice <em>perché</em>.</p></div>
+      </div>
+      <div class="nota">
+        <strong>Nota di trasparenza.</strong> BetRelay è un servizio web: niente da
+        installare, nessuna finestra da tenere aperta. I token del feed esistono in chiaro
+        una sola volta, alla generazione, e il server ne conserva solo l'hash: non
+        compaiono mai nei log.
       </div>
     </div>
   </section>
@@ -302,7 +423,15 @@
       <span><strong style="color:var(--txt-2)">BetRelay</strong> · betrelay.net</span>
       <a href="/app/">Applicazione</a>
       <a href="/health">Stato del servizio</a>
+      <span class="spazio"></span>
+      <span>18+ · Gioca responsabilmente</span>
     </div>
+    <p class="disc">© 2026 BetRelay · BetRelay non piazza scommesse: scrive solo il CSV che
+      il tuo software legge. Progetto indipendente: BetRelay non è affiliato, associato,
+      autorizzato né sponsorizzato da TradingSportivo (XTrader) né da Betting Toolkit
+      (BETTINGTOOLKIT.COM / .ES / .LAT). XTrader, Betting Toolkit, Betfair, Telegram e i
+      relativi marchi appartengono ai rispettivi proprietari e sono citati solo a scopo
+      descrittivo, per indicare la compatibilità.</p>
   </div>
 </footer>
 
