@@ -93,6 +93,7 @@ def test_il_profilo_nominato_scarica_col_suo_nome(tmp_path, monkeypatch):
     r = main.named_profile_csv(main.PIERO_PROFILE, token=TOKEN_DI_PROVA)
     assert r.headers.get('content-disposition') == \
         f'attachment; filename="betrelay-{main.PIERO_PROFILE}.csv"'
+    assert r.headers.get('cache-control') == 'no-store'
 
 
 def test_il_feed_utente_scarica_con_lo_slug(tmp_path, monkeypatch):
@@ -101,6 +102,7 @@ def test_il_feed_utente_scarica_con_lo_slug(tmp_path, monkeypatch):
     r = main.feed_utente_csv('marco', token='xt_token-di-prova-abcdef')
     assert r.headers.get('content-disposition') == \
         'attachment; filename="betrelay-marco.csv"'
+    assert r.headers.get('cache-control') == 'no-store'
 
 
 def test_anche_il_feed_scaduto_porta_il_nome(tmp_path, monkeypatch):
@@ -114,6 +116,40 @@ def test_anche_il_feed_scaduto_porta_il_nome(tmp_path, monkeypatch):
     assert bytes(r.body) == main.empty_csv().encode('utf-8')
     assert r.headers.get('content-disposition') == \
         'attachment; filename="betrelay-resto.csv"'
+    assert r.headers.get('cache-control') == 'no-store', \
+        'il ramo bloccato non deve perdere la politica di cache (Sourcery, PR #63)'
+
+
+def test_il_default_del_nome_copre_i_chiamanti_che_non_lo_passano(tmp_path, monkeypatch):
+    """`profile_csv` senza `nome_scaricato` (la firma retrocompatibile): il
+    default e' `betrelay-{profilo}.csv`, non un header assente (CodeRabbit,
+    PR #63)."""
+    relay_in_processo(monkeypatch, tmp_path / 'default.db')
+    r = main.profile_csv(main.PIERO_PROFILE, TOKEN_DI_PROVA)
+    assert r.headers.get('content-disposition') == \
+        f'attachment; filename="betrelay-{main.PIERO_PROFILE}.csv"'
+    assert r.headers.get('cache-control') == 'no-store'
+    assert bytes(r.body) == main.empty_csv().encode('utf-8')
+
+
+def test_anche_il_profilo_bloccato_porta_il_nome(tmp_path, monkeypatch):
+    """Il ramo bloccato di `profile_csv` (accesso scaduto → sola intestazione,
+    `200`): stesso nome del download, o il nome dipenderebbe dallo stato
+    dell'abbonamento (CodeRabbit, PR #63)."""
+    percorso = relay_in_processo(monkeypatch, tmp_path / 'bloccato.db')
+    c = sqlite3.connect(percorso)
+    c.execute("UPDATE users SET status='attivo', access_expires_at=? "
+              'WHERE origin_profile=?',
+              (int(time.time()) - GIORNO, main.PIERO_PROFILE))
+    assert c.total_changes == 1, 'la migrazione non ha creato l\'utente ponte del profilo'
+    c.commit()
+    c.close()
+    r = main.profile_csv(main.PIERO_PROFILE, TOKEN_DI_PROVA)
+    assert bytes(r.body) == main.empty_csv().encode('utf-8'), \
+        'l\'accesso scaduto deve degradare a sola intestazione'
+    assert r.headers.get('content-disposition') == \
+        f'attachment; filename="betrelay-{main.PIERO_PROFILE}.csv"'
+    assert r.headers.get('cache-control') == 'no-store'
 
 
 def test_un_nome_profilo_ostile_esce_ripulito_dalla_rotta(tmp_path, monkeypatch):
@@ -158,3 +194,17 @@ def test_i_byte_http_portano_il_nome_e_il_contratto_intatto(tmp_path):
             byte = r.read()
         assert byte.startswith(b'\xef\xbb\xbf"Provider"'), (
             f'i byte HTTP non cominciano con BOM+intestazione: {byte[:24]!r}')
+
+        # E l'alias storico, sullo stesso servizio vero (Sourcery, PR #63):
+        # `/xtrader.csv` e' l'URL configurato in XTrader, e la sua serratura e'
+        # `CSV_ACCESS_TOKEN` — non il token utente coniato sopra, che su questa
+        # rotta non apre niente.
+        url_alias = f'{base}/xtrader.csv?token={AMBIENTE_DEL_SERVIZIO["CSV_ACCESS_TOKEN"]}'
+        with urllib.request.urlopen(url_alias, timeout=10) as r:  # noqa: S310 - loopback
+            assert r.status == 200
+            assert r.headers.get('Content-Disposition') == \
+                'attachment; filename="betrelay.csv"'
+            assert r.headers.get('Content-Type', '').startswith('text/csv')
+            byte_alias = r.read()
+        assert byte_alias.startswith(b'\xef\xbb\xbf"Provider"'), (
+            f'i byte HTTP dell\'alias non cominciano con BOM+intestazione: {byte_alias[:24]!r}')
