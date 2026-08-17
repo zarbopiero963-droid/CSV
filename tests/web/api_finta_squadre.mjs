@@ -176,6 +176,16 @@ await caso('saveAlias() rifiuta lo stesso alias su due squadre della sorgente', 
   try { await api.saveAlias(2, 1, { [seconda.id]: 'Doppione' }); } catch (e) { errore = e; }
   esigi(errore && errore.message.includes("gia' usato per un'altra squadra"),
     `atteso il 422 del server, ho ${errore && errore.message}`);
+  // L'ambiguita' si giudica NORMALIZZATA, come cerca il motore (GPT-5.5,
+  // PR #67): 'Spazi  Doppi' e 'Spazi Doppi' sono LO STESSO alias a
+  // parse-time, e il salvataggio non deve farli convivere.
+  await api.saveAlias(2, 1, { 1: 'Spazi  Doppi' });
+  errore = null;
+  try { await api.saveAlias(2, 1, { [seconda.id]: 'Spazi Doppi' }); } catch (e) { errore = e; }
+  esigi(errore && errore.message.includes("gia' usato"),
+    `il doppione normalizzato deve fallire: ${errore && errore.message}`);
+  await api.saveAlias(2, 1, { [seconda.id]: 'Spazi Tripli' });   // diverso: libero
+  await api.saveAlias(2, 1, { [seconda.id]: '', 1: 'Doppione' });
   // Lo SPOSTAMENTO in un solo salvataggio resta lecito, in qualunque ordine.
   await api.saveAlias(2, 1, { [seconda.id]: 'Doppione', 1: '' });
   esigi(api.aliasOf(2, 1).find(r => r.squadra_id === seconda.id).alias === 'Doppione',

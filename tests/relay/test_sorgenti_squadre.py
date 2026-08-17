@@ -695,6 +695,13 @@ def test_lo_stesso_alias_su_due_squadre_della_stessa_sorgente_e_un_422(servizio,
         _metti_alias(servizio, cookie_a, cid, sid,
                      {str(ju): 'Zebra', str(mi): 'Zebra'}, atteso=422)
         assert _leggi_alias(servizio, cookie_a, cid, sid)['Juventus'] == 'Juve'
+        # L'ambiguita' si giudica con la chiave con cui il PARSER cerca
+        # (`_piatto`): 'Gemella  FC' (doppio spazio) e 'Gemella FC' sarebbero
+        # due alias al PUT e UNO a parse-time — la mappa ne perderebbe uno a
+        # caso. [REAL_FINDING] di GPT-5.5 sulla PR #67.
+        _metti_alias(servizio, cookie_a, cid, sid, {str(ju): 'Gemella  FC'})
+        _metti_alias(servizio, cookie_a, cid, sid, {str(mi): 'Gemella FC'},
+                     atteso=422)
     finally:
         for s in (sid, sid2):
             _chiama(servizio, 'DELETE', f'/api/me/sorgenti-squadre/{s}',

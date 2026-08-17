@@ -639,10 +639,14 @@ export async function saveAlias(cid, sorgenteId, coppie) {
   }
   const occupanti = {};
   for (const [squadra, testo] of Object.entries(finale)) {
-    if (testo in occupanti && occupanti[testo] !== squadra) {
+    // La chiave dell'ambiguita' e' quella con cui il motore cerca
+    // (`normalizzaNome`), come sul server (GPT-5.5, PR #67).
+    const chiave = normalizzaNome(testo);
+    if (!chiave) continue;
+    if (chiave in occupanti && occupanti[chiave] !== squadra) {
       throw new Error(`alias «${testo}» gia' usato per un'altra squadra in questa sorgente`);
     }
-    occupanti[testo] = squadra;
+    occupanti[chiave] = squadra;
   }
   for (const [squadra, pulito] of pulite) {
     if (pulito === '') delete _aliasDemo()[`${sorgente.id}:${squadra}`];

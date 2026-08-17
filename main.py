@@ -5781,11 +5781,19 @@ async def scrivi_alias_miei(cid: str, sid: str, request: Request):
                 finale[squadra] = valore
         occupanti = {}
         for squadra, valore in finale.items():
-            if valore in occupanti and occupanti[valore] != squadra:
+            # La chiave dell'ambiguita' e' quella con cui il PARSER cerca —
+            # `_piatto`, la stessa di `_mappa_team_source` — non il testo
+            # com'e' scritto: «Juve  FC» e «Juve FC» sarebbero due alias al
+            # PUT e UNO a parse-time, e la mappa ne perderebbe uno.
+            # [REAL_FINDING] di GPT-5.5 sulla PR #67.
+            chiave = _piatto(valore)
+            if not chiave:
+                continue
+            if chiave in occupanti and occupanti[chiave] != squadra:
                 raise HTTPException(
                     422, f"alias «{valore}» gia' usato per un'altra squadra "
                          'in questa sorgente')
-            occupanti[valore] = squadra
+            occupanti[chiave] = squadra
         scritte = 0
         for squadra, valore in pulite:
             if valore == '':
@@ -5840,10 +5848,16 @@ def _mappa_team_source(c, user_id, sorgente_id):
                      (sorgente_id, user_id)).fetchone():
         return None
     mappa = {}
+    # ORDER BY: senza, una collisione di chiavi normalizzate si risolverebbe
+    # nell'ordine in cui SQLite decide di restituire le righe — cioe' in modo
+    # diverso fra ambienti. Il PUT vieta i doppioni normalizzati DENTRO una
+    # sorgente, ma le identita' (nomi squadra) possono ancora collidere fra
+    # competizioni: vince deterministicamente l'id piu' alto (l'ultima
+    # scritta). GPT-5.5 sulla PR #67.
     for (nome,) in c.execute(
             'SELECT q.nome FROM squadre_betfair q'
             ' JOIN competizioni k ON k.id = q.competizione_id'
-            ' WHERE k.user_id=?', (user_id,)).fetchall():
+            ' WHERE k.user_id=? ORDER BY q.id', (user_id,)).fetchall():
         chiave = _piatto(nome)
         if chiave:
             mappa[chiave] = nome
@@ -5851,7 +5865,7 @@ def _mappa_team_source(c, user_id, sorgente_id):
             'SELECT a.alias, q.nome FROM alias_squadre a'
             ' JOIN squadre_betfair q ON q.id = a.squadra_id'
             ' JOIN competizioni k ON k.id = q.competizione_id'
-            ' WHERE a.sorgente_id=? AND k.user_id=?',
+            ' WHERE a.sorgente_id=? AND k.user_id=? ORDER BY a.id',
             (sorgente_id, user_id)).fetchall():
         chiave = _piatto(alias)
         if chiave:
