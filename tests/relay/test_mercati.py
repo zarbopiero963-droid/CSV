@@ -535,6 +535,51 @@ def test_eliminare_il_mercato_NON_rompe_il_parser_gia_salvato(servizio, sessioni
     assert _json(corpo)['complete'], 'il parser salvato dipende ancora dalla libreria'
 
 
+def test_l_INSERT_e_condizionato_al_padre_e_non_lascia_orfani(tmp_path, monkeypatch):
+    """[REAL_FINDING] di Claude Fable 5 sulla PR #55: la finestra TOCTOU.
+
+    Il controllo di proprieta' delle rotte e' una LETTURA; fra quella lettura e
+    l'INSERT una DELETE concorrente del padre puo' committare, e l'INSERT diretto
+    scriveva una riga orfana — invisibile alle API e non piu' eliminabile.
+    Misurato sul codice precedente: 1 riga orfana. La simulazione qui e'
+    deterministica: la DELETE e' GIA' committata quando l'INSERT parte, che e'
+    esattamente lo stato del mondo dentro la finestra.
+    """
+    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'orfani.db'))
+    monkeypatch.setattr(main, '_PERCORSI_MIGRATI', set())
+    c = main.db()
+    c.execute("INSERT INTO users(telegram_id) VALUES ('1')")
+    uid = c.execute('SELECT last_insert_rowid()').fetchone()[0]
+
+    # Mercato il cui sport muore fra il controllo e l'INSERT.
+    c.execute("INSERT INTO sports(user_id, slug, nome) VALUES (?, 'calcio', 'Calcio')",
+              (uid,))
+    sport_id = c.execute('SELECT last_insert_rowid()').fetchone()[0]
+    c.execute('DELETE FROM sports WHERE id=?', (sport_id,))
+    assert main._inserisci_mercato(c, sport_id, 'MATCH_ODDS', 'Match Odds') is None
+    assert c.execute('SELECT COUNT(*) FROM betfair_markets').fetchone()[0] == 0, \
+        'l\'INSERT ha scritto un mercato orfano'
+
+    # Selezione il cui mercato muore fra il controllo e l'INSERT (regola 2:
+    # stessa classe, entrambi i siti).
+    c.execute("INSERT INTO sports(user_id, slug, nome) VALUES (?, 'tennis', 'Tennis')",
+              (uid,))
+    sport_id = c.execute('SELECT last_insert_rowid()').fetchone()[0]
+    c.execute('INSERT INTO betfair_markets(sport_id, market_type, market_name)'
+              " VALUES (?, 'MATCH_ODDS', 'Match Odds')", (sport_id,))
+    market_id = c.execute('SELECT last_insert_rowid()').fetchone()[0]
+    c.execute('DELETE FROM betfair_markets WHERE id=?', (market_id,))
+    assert main._inserisci_selezione(c, market_id, 'Casa') is None
+    assert c.execute('SELECT COUNT(*) FROM betfair_selections').fetchone()[0] == 0, \
+        'l\'INSERT ha scritto una selezione orfana'
+
+    # E il caso normale resta normale: padre vivo → id vero, riga scritta.
+    mid = main._inserisci_mercato(c, sport_id, 'OVER_UNDER_05', 'Over/Under 0.5')
+    assert isinstance(mid, int)
+    assert main._inserisci_selezione(c, mid, 'Over 0,5 goal') is not None
+    c.close()
+
+
 # --------------------------------------------- riparazione account e libreria
 
 def test_la_riconciliazione_travasa_gli_sport_e_ridisambigua_gli_slug(tmp_path,

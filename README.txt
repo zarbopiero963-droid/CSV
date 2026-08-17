@@ -133,7 +133,9 @@ DELETE /api/me/sports/SLUG                            elimina sport + mercati + 
 GET    /api/me/sports/SLUG/mercati                    mercati con selezioni annidate
 POST   /api/me/sports/SLUG/mercati                    body {"marketType","marketName","selections":[...]}
 DELETE /api/me/sports/SLUG/mercati/ID
-GET    /api/me/sports/SLUG/mercati/ID/selezioni       la tendina del passo 2 del wizard
+GET    /api/me/sports/SLUG/mercati/ID/selezioni       le selezioni di UN mercato (il
+                                                      wizard non la usa: legge quelle
+                                                      annidate in .../mercati)
 POST   /api/me/sports/SLUG/mercati/ID/selezioni       body {"selectionName":"..."}
 DELETE /api/me/sports/SLUG/mercati/ID/selezioni/ID
 Campi obbligatori non vuoti, massimo 120 caratteri, niente emoji nei tre campi che

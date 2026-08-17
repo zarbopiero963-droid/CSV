@@ -11,7 +11,7 @@
 // leggendo le RIGHE `export function` / `export async function` — qui non si
 // esportano costanti, e le funzioni si dichiarano una per riga.
 
-import { COLUMNS, runParser, toCsv, suggestConfig } from './engine.js';
+import { COLUMNS, EMOJI, runParser, toCsv, suggestConfig } from './engine.js';
 
 const CHIAVE = 'xtrelay:demo';
 
@@ -252,6 +252,12 @@ function _campoDemo(nome, valore) {
   const pulito = String(valore || '').trim();
   if (!pulito) throw new Error(nome + ' mancante');
   if (pulito.length > 120) throw new Error(nome + ' troppo lungo: massimo 120 caratteri');
+  // Stesso verdetto del server (#42): un'emoji creata nella demo verrebbe
+  // rifiutata dal relay vero con un 422 — meglio che la demo lo dica subito.
+  // La classe e' quella del motore (EMOJI), non una seconda copia.
+  if (EMOJI.test(pulito)) {
+    throw new Error(nome + ' contiene un simbolo che XTrader non accetta: solo testo');
+  }
   return pulito;
 }
 

@@ -35,7 +35,7 @@ def base_url(tmp_path_factory):
 
 def test_libreria_mercati_e_wizard_a_due_passi(base_url, tmp_path):
     """Sport → mercati → selezioni → parser «Da mercati Betfair», in browser."""
-    proc = subprocess.run(
+    proc = subprocess.run(  # noqa: S603 - comando fisso, nessun input esterno
         [sys.executable, str(Path(__file__).with_name('mercati_flow.py')),
          base_url, str(tmp_path)],
         cwd=RADICE, capture_output=True, text=True, timeout=300,

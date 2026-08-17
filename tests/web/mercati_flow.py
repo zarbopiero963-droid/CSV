@@ -122,7 +122,10 @@ with sync_playwright() as pw:
     pg.fill('#sel-nome', 'Over 0,5 goal')
     pg.click('[data-act="sel-add"]')
     pg.wait_for_selector('#sel-err:has-text("presente")')
-    quante = pg.locator('.list-item').count()
+    # Si contano le RIGHE-SELEZIONE (il loro bottone di elimina), non ogni
+    # .list-item della pagina: una riga estranea futura non deve far accusare
+    # il controllo del doppione. Segnalato da CodeRabbit sulla PR #55.
+    quante = pg.locator('.list-item [data-act="sel-del"]').count()
     assert quante == 2, f'il doppione ha cambiato la lista: {quante} selezioni'
 
     # ...e l'eliminazione di UNA selezione non tocca l'altra.
@@ -203,13 +206,30 @@ with sync_playwright() as pw:
 
     # Salva e verifica la PERSISTENZA del riferimento betfair nella config.
     pg.click('[data-act="wiz-save"]')
-    pg.wait_for_selector('.toast', state='attached', timeout=5000)
+    # Il toast SPECIFICO del salvataggio: aspettare un `.toast` qualunque
+    # passerebbe su quello della scelta betfair ancora nel DOM, e la fetch qui
+    # sotto leggerebbe la config PRECEDENTE. Segnalato da CodeRabbit, PR #55.
+    pg.wait_for_selector('.toast:has-text("Configurazione salvata")',
+                         state='attached', timeout=5000)
     salvato = pg.evaluate(
         "fetch('/api/me/parsers').then(r => r.json())")
     parser = next(p for p in salvato if p['titolo'] == 'Da libreria')
     assert parser['config'].get('betfair'), 'il riferimento betfair non e\' stato salvato'
     assert parser['config']['columns']['MarketName']['value'] == 'Over/Under 0.5 Goals HT'
     print('betfair salvato:', json.dumps(parser['config']['betfair']))
+
+    # ---- cache FREDDA: il tab betfair carica la libreria DA SOLO ---------
+    # Il [Major] di CodeRabbit sulla PR #55: entrando nel wizard senza aver
+    # visitato #/mercati, il loader fotografava `generazione` prima del render
+    # dell'azione e scartava il proprio render di completamento — il passo
+    # restava su «Caricamento della tua libreria…» per sempre.
+    pg.reload()
+    pg.wait_for_selector('[data-act="wiz-goto"]')       # riepilogo (campione salvato)
+    pg.click('[data-act="wiz-goto"][data-i="5"]')       # -> passo MarketType
+    pg.wait_for_selector('.bubble:has-text("MarketType")')
+    pg.click('[data-act="wiz-mode"][data-mode="betfair"]')
+    pg.wait_for_selector('[data-act="bf-market"]', timeout=10000)
+    shot(pg, '08-cache-fredda')
 
     # ---- niente scorrimento orizzontale a 390 px sulla libreria ----------
     # STESSA pagina (il cookie di sessione vive nel suo contesto): si cambia
@@ -220,7 +240,7 @@ with sync_playwright() as pw:
     largo = pg.evaluate('document.documentElement.scrollWidth')
     visibile = pg.evaluate('document.documentElement.clientWidth')
     assert largo <= visibile + 1, f'la libreria scorre in orizzontale ({largo} > {visibile})'
-    shot(pg, '08-mercati-390')
+    shot(pg, '09-mercati-390')
 
     pg.close()
     b.close()

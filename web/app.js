@@ -477,9 +477,12 @@ function mercatiSelezioni() {
   const mercati = api.mercatiOf(route.id) || [];
   const mercato = mercati.find(m => m.id === Number(route.tab));
   if (!mercato) { go(`#/mercati/${encodeURIComponent(route.id)}`); return; }
+  // Il NOME dello sport nella briciola, come nella vista dei mercati: lo slug
+  // e' l'indirizzo, non l'etichetta. CodeRabbit, PR #55.
+  const sport = (api.sports() || []).find(s => s.slug === route.id);
   shell(`
     <div class="crumb"><a href="#/mercati">Mercati Betfair</a> /
-      <a href="#/mercati/${encodeURIComponent(route.id)}">${esc(route.id)}</a> /
+      <a href="#/mercati/${encodeURIComponent(route.id)}">${esc(sport ? sport.nome : route.id)}</a> /
       <span class="mono">${esc(mercato.marketType)}</span></div>
     <div class="head"><div>
       <h1><span class="mono">${esc(mercato.marketType)}</span></h1>
@@ -594,6 +597,15 @@ function coerenzaBetfair() {
   if (!coerente) { delete wiz.draft.betfair; wiz.bfValori = null; }
 }
 
+// Lo sport corrente del passo «Da mercati Betfair»: quello scelto, o il primo.
+// Fonte unica (regola 3): chi CARICA i mercati e chi li LEGGE devono decidere
+// allo stesso modo, o il wizard mostra la lista di uno sport mai caricato —
+// in silenzio. Prima l'espressione viveva in tre siti; CodeRabbit, PR #55.
+function sportDelWizard() {
+  const sports = api.sports() || [];
+  return wiz.bfSport || (sports[0] && sports[0].slug) || null;
+}
+
 // Carica sport e mercati per il passo «Da mercati Betfair» del wizard, poi
 // ridisegna — se nel frattempo non e' partito un altro render (guardia
 // `generazione`, come le viste async).
@@ -601,10 +613,14 @@ async function caricaLibreriaWizard() {
   const invocazione = generazione;
   try {
     await api.loadSports();
-    const sports = api.sports() || [];
-    const slug = wiz.bfSport || (sports[0] && sports[0].slug);
+    const slug = sportDelWizard();
     if (slug) await api.loadMercati(slug);
-  } catch { /* la vista mostra la libreria vuota o il caricamento fermo */ }
+  } catch (e) {
+    // La sessione scaduta si tratta come ovunque: `fallita` ricarica al login.
+    // Ogni altro errore lascia la vista com'e' — libreria vuota o caricamento
+    // fermo — senza esplodere in console. CodeRabbit, PR #55.
+    if (e && e.status === 401) { fallita(e); return; }
+  }
   if (invocazione === generazione) render();
 }
 
@@ -831,7 +847,7 @@ function stepColumn(idx) {
         <a href="#/mercati">Mercati Betfair</a>, poi torna qui: li sceglierai
         dalla lista invece di riscriverli in ogni parser.</p></div>`;
     } else {
-      const sportScelto = wiz.bfSport || sports[0].slug;
+      const sportScelto = sportDelWizard();
       const mercati = api.mercatiOf(sportScelto);
       const mercato = (mercati || []).find(m => m.id === wiz.bfMarket) || null;
       const rif = wiz.draft.betfair || null;
@@ -1311,16 +1327,18 @@ const actions = {
   },
   'wiz-mode'(el) {
     wiz.mode = el.dataset.mode;
-    // «Da mercati Betfair» legge dalla cache sincrona: il caricamento parte
-    // qui e ridisegna da solo quando la libreria arriva.
-    if (wiz.mode === 'betfair') caricaLibreriaWizard();
+    // PRIMA il render, POI il caricamento: il loader fotografa `generazione`,
+    // e col render dopo la fotografia il contatore avanzava e il loader
+    // scartava il proprio render di completamento — a cache fredda il passo
+    // restava su «Caricamento…» per sempre. Trovato da CodeRabbit (PR #55),
+    // riprodotto dal caso «cache fredda» di mercati_flow.py.
     render();
+    if (wiz.mode === 'betfair') caricaLibreriaWizard();
   },
   'bf-market'(el) { wiz.bfMarket = Number(el.dataset.id); render(); },
   'bf-selection'(el) {
-    const sports = api.sports() || [];
-    const sport = wiz.bfSport || (sports[0] && sports[0].slug);
-    const mercato = (api.mercatiOf(sport) || []).find(m => m.id === wiz.bfMarket);
+    const mercato = (api.mercatiOf(sportDelWizard()) || [])
+      .find(m => m.id === wiz.bfMarket);
     const selezione = mercato
       && mercato.selezioni.find(s => s.id === Number(el.dataset.id));
     if (!selezione) return;
@@ -1588,7 +1606,8 @@ document.addEventListener('change', e => {
     // (era dell'altro sport) e si carica la libreria di quello nuovo.
     wiz.bfSport = e.target.value;
     wiz.bfMarket = null;
-    api.loadMercati(wiz.bfSport).then(() => render()).catch(() => render());
+    api.loadMercati(wiz.bfSport).then(() => render())
+      .catch(err => { if (err && err.status === 401) fallita(err); else render(); });
   }
 });
 

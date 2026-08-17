@@ -4822,6 +4822,45 @@ def _selezioni_di(c, market_id):
         ' ORDER BY id', (market_id,)).fetchall()]
 
 
+def _inserisci_mercato(c, sport_id, tipo, nome):
+    """INSERT del mercato CONDIZIONATO all'esistenza dello sport, in UNO statement.
+
+    Il controllo di proprieta' delle rotte e' una LETTURA, e fra quella lettura e
+    l'INSERT una DELETE concorrente dello sport puo' committare: l'INSERT diretto
+    scriveva una riga orfana — invisibile alle API (la proprieta' si risolve per
+    join, e uno sport sparito non si joina piu') e non piu' eliminabile, storage
+    perso. Il `WHERE EXISTS` gira dentro il write-lock dell'INSERT, quindi vede
+    lo stato vero: sport sparito → zero righe inserite → il chiamante risponde
+    404, come se la lettura fosse arrivata dopo la DELETE.
+    [REAL_FINDING] di Claude Fable 5 sulla PR #55; misurato prima di correggere:
+    1 riga orfana con l'INSERT diretto.
+
+    Restituisce l'id del mercato, o None se lo sport non esiste piu'. Un
+    doppione solleva `sqlite3.IntegrityError`, come l'INSERT diretto.
+    """
+    c.execute('INSERT INTO betfair_markets(sport_id, market_type, market_name)'
+              ' SELECT ?,?,? WHERE EXISTS (SELECT 1 FROM sports WHERE id=?)',
+              (sport_id, tipo, nome, sport_id))
+    if not c.execute('SELECT changes()').fetchone()[0]:
+        return None
+    return c.execute('SELECT last_insert_rowid()').fetchone()[0]
+
+
+def _inserisci_selezione(c, market_id, selezione):
+    """Come `_inserisci_mercato`, per la selezione: il padre e' il mercato.
+
+    Copre anche lo sport eliminato nel frattempo: la sua DELETE porta via i
+    mercati nella stessa transazione, quindi il mercato sparito e' il sintomo
+    unico da controllare. Stessa classe, stesso rimedio (regola 2).
+    """
+    c.execute('INSERT INTO betfair_selections(market_id, selection_name)'
+              ' SELECT ?,? WHERE EXISTS (SELECT 1 FROM betfair_markets WHERE id=?)',
+              (market_id, selezione, market_id))
+    if not c.execute('SELECT changes()').fetchone()[0]:
+        return None
+    return c.execute('SELECT last_insert_rowid()').fetchone()[0]
+
+
 async def _oggetto_dal_corpo(request, forma):
     """Il corpo JSON come dict, o 422 con la forma attesa. Dopo la sessione, sempre."""
     try:
@@ -4949,11 +4988,12 @@ async def crea_mercato_mio(slug: str, request: Request):
     try:
         sport = _sport_o_404(c, utente['id'], slug)
         try:
-            c.execute('INSERT INTO betfair_markets(sport_id, market_type, market_name)'
-                      ' VALUES (?,?,?)', (sport[0], tipo, nome))
+            mid = _inserisci_mercato(c, sport[0], tipo, nome)
         except sqlite3.IntegrityError:
             raise HTTPException(409, 'mercato gia\' presente in questo sport') from None
-        mid = c.execute('SELECT last_insert_rowid()').fetchone()[0]
+        if mid is None:
+            # Lo sport e' morto fra il controllo e l'INSERT (DELETE concorrente).
+            raise HTTPException(404, 'sport non trovato')
         quanti = c.execute('SELECT COUNT(*) FROM betfair_markets WHERE sport_id=?',
                            (sport[0],)).fetchone()[0]
         if quanti > MAX_MERCATI_PER_SPORT:
@@ -4993,7 +5033,13 @@ def elimina_mercato_mio(slug: str, mid: str, request: Request):
 
 @app.get('/api/me/sports/{slug}/mercati/{mid}/selezioni')
 def selezioni_mie(slug: str, mid: str, request: Request):
-    """Le selezioni create per quel mercato: e' la tendina dello step-2 del wizard."""
+    """Le selezioni di UN mercato, da sole.
+
+    Il wizard NON passa di qui: legge quelle annidate nella lista dei mercati
+    (una chiamata sola). La rotta esiste perche' la #33 la elenca e per chi
+    vuole solo la lista corta — descriverla come «la tendina del wizard»
+    mandava a cercare un chiamante che non esiste (CodeRabbit, PR #55).
+    """
     utente = _sessione_valida(request)
     c = db()
     try:
@@ -5017,11 +5063,12 @@ async def crea_selezione_mia(slug: str, mid: str, request: Request):
         sport = _sport_o_404(c, utente['id'], slug)
         mercato = _mercato_o_404(c, sport[0], mid)
         try:
-            c.execute('INSERT INTO betfair_selections(market_id, selection_name)'
-                      ' VALUES (?,?)', (mercato[0], selezione))
+            sid = _inserisci_selezione(c, mercato[0], selezione)
         except sqlite3.IntegrityError:
             raise HTTPException(409, 'selezione gia\' presente in questo mercato') from None
-        sid = c.execute('SELECT last_insert_rowid()').fetchone()[0]
+        if sid is None:
+            # Il mercato (o il suo sport) e' morto fra il controllo e l'INSERT.
+            raise HTTPException(404, 'mercato non trovato')
         quante = c.execute('SELECT COUNT(*) FROM betfair_selections WHERE market_id=?',
                            (mercato[0],)).fetchone()[0]
         if quante > MAX_SELEZIONI_PER_MERCATO:
