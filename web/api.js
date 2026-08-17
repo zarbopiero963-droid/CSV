@@ -372,3 +372,100 @@ export async function deleteSelezione(sport, mercato, id) {
     `/api/me/sports/${encodeURIComponent(sport)}/mercati/${mercato}/selezioni/${id}`);
   await loadMercati(sport);
 }
+
+/* ------------------------------------------------ sorgenti squadre (#34) */
+
+// Stessa forma della libreria mercati: cache sincrona per le viste, `null`
+// finche' il rispettivo `load*` non e' passato («Caricamento…», non «vuoto»).
+// Le mutazioni ricaricano cio' che le viste leggono, cosi' un render dopo la
+// scrittura trova gia' lo stato vero.
+stato.competizioni = null;
+stato.dettagliCompetizioni = {};   // id -> {id, nome, sport, squadre, sorgenti}
+stato.aliasSorgenti = {};          // `${cid}:${sorgente}` -> righe della tabella
+
+export async function loadCompetizioni() {
+  stato.competizioni = (await http('GET', '/api/me/competizioni')).competizioni;
+  return stato.competizioni;
+}
+
+export function competizioni() { return stato.competizioni; }
+
+export async function loadCompetizione(cid) {
+  stato.dettagliCompetizioni[cid] = await http('GET', `/api/me/competizioni/${cid}`);
+  return stato.dettagliCompetizioni[cid];
+}
+
+export function competizione(cid) {
+  return Object.prototype.hasOwnProperty.call(stato.dettagliCompetizioni, cid)
+    ? stato.dettagliCompetizioni[cid] : null;
+}
+
+export async function loadAlias(cid, sorgente) {
+  const r = await http('GET', `/api/me/competizioni/${cid}/alias/${sorgente}`);
+  stato.aliasSorgenti[`${cid}:${sorgente}`] = r.alias;
+  return r.alias;
+}
+
+export function aliasOf(cid, sorgente) {
+  const chiave = `${cid}:${sorgente}`;
+  return Object.prototype.hasOwnProperty.call(stato.aliasSorgenti, chiave)
+    ? stato.aliasSorgenti[chiave] : null;
+}
+
+function _scordaAlias(cid) {
+  // Le squadre sono cambiate: ogni tabella alias di quella competizione e'
+  // stantia, qualunque sorgente mostrasse.
+  for (const chiave of Object.keys(stato.aliasSorgenti)) {
+    if (chiave.startsWith(`${cid}:`)) delete stato.aliasSorgenti[chiave];
+  }
+}
+
+export async function createCompetizione(sport, nome) {
+  const creata = await http('POST', '/api/me/competizioni', { sport, nome });
+  await loadCompetizioni();
+  return creata;
+}
+
+export async function deleteCompetizione(cid) {
+  await http('DELETE', `/api/me/competizioni/${cid}`);
+  delete stato.dettagliCompetizioni[cid];
+  _scordaAlias(cid);
+  await loadCompetizioni();
+}
+
+export async function createSquadra(cid, nome) {
+  const squadra = await http('POST', `/api/me/competizioni/${cid}/squadre`, { nome });
+  _scordaAlias(cid);
+  await loadCompetizione(cid);
+  return squadra;
+}
+
+export async function deleteSquadra(cid, id) {
+  await http('DELETE', `/api/me/competizioni/${cid}/squadre/${id}`);
+  _scordaAlias(cid);
+  await loadCompetizione(cid);
+}
+
+export async function createSorgente(nome) {
+  return await http('POST', '/api/me/sorgenti-squadre', { nome });
+}
+
+export async function renameSorgente(id, nome) {
+  return await http('PATCH', `/api/me/sorgenti-squadre/${id}`, { nome });
+}
+
+export async function deleteSorgente(id) {
+  await http('DELETE', `/api/me/sorgenti-squadre/${id}`);
+  // Gli alias di quella sorgente sono spariti ovunque: via le cache che
+  // potrebbero mostrarli.
+  for (const chiave of Object.keys(stato.aliasSorgenti)) {
+    if (chiave.endsWith(`:${id}`)) delete stato.aliasSorgenti[chiave];
+  }
+}
+
+export async function saveAlias(cid, sorgente, coppie) {
+  await http('PUT', `/api/me/competizioni/${cid}/alias/${sorgente}`,
+             { alias: coppie });
+  await loadAlias(cid, sorgente);
+  await loadCompetizione(cid);   // il badge «compilati» e' cambiato
+}

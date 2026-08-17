@@ -1625,7 +1625,8 @@ senza doppio ruolo.
 | Fatto | **Pannello Richieste** (PR 10, #7 lato admin): la vista con l'elenco, «Attiva» col campo giorni libero e l'avviso Telegram fallito **visibile**, «Rifiuta» con conferma, il giro dei promemoria. Test browser end-to-end con decisioni verificate sul database in `tests/web/test_pannello_admin.py` |
 | Fatto | **Mercati Betfair per-utente** (PR 12, #33): la libreria sport → mercato → selezioni a inserimento libero (nessun catalogo incorporato), le rotte `/api/me/sports*` isolate, la vista «Mercati Betfair» e il wizard «Da mercati Betfair» a due passi con `config.betfair` validato alla scrittura. I segnaposto handicap restano fail-closed fino alla #34. Test in `tests/relay/test_mercati.py` e `tests/web/test_mercati_web.py` |
 | Fatto | **Il file scaricato si chiama betrelay** (#60): `Content-Disposition: attachment` sulle risposte CSV — `betrelay.csv`, `betrelay-{slug}.csv`, `betrelay-{p}.csv` — con nome ripulito e fonte unica `_intestazioni_feed()`. URL e byte del corpo intatti. Test in `tests/relay/test_nome_download.py` |
-| Fatto | **Sorgenti squadre, pezzo 1** (#34): modello dati e rotte `/api/me/sorgenti-squadre*` + `/api/me/competizioni*` — competizioni con lista Betfair condivisa, sorgenti rinominabili, alias per (sorgente, squadra), azioni «⌫ alias»/«× squadra», cascate esplicite (sport compreso), travaso alla riconciliazione. Test in `tests/relay/test_sorgenti_squadre.py`. Pezzi 2 (UI) e 3 (trasform nei due motori) a seguire |
+| Fatto | **Sorgenti squadre, pezzo 1** (#34): modello dati e rotte `/api/me/sorgenti-squadre*` + `/api/me/competizioni*` — competizioni con lista Betfair condivisa, sorgenti rinominabili, alias per (sorgente, squadra), azioni «⌫ alias»/«× squadra», cascate esplicite (sport compreso), travaso alla riconciliazione. Test in `tests/relay/test_sorgenti_squadre.py` |
+| Fatto | **Sorgenti squadre, pezzo 2** (#34): la sezione web «Sorgenti squadre» — elenco competizioni, squadre Betfair salvate una volta, pulsanti sorgente col badge `compilati`, tabella a due colonne con ⌫/×, Rinomina/Elimina — su `api.js`/`api_finta.js` in parità. Test browser in `tests/web/test_squadre_web.py`. Pezzo 3 (trasform nei due motori) a seguire |
 | M3 | «Entra come» e lo storico di `admin_audit` nel pannello: servono rotte nuove lato server |
 | M4 | Log persistenti, sospensione, suggerimento AI lato server, abbonamenti |
 
@@ -1755,9 +1756,10 @@ Telegram: i due avvisi devono raccontare la stessa storia.
 ### Struttura
 
 Sidebar: in alto il marchio — logo relay + «BetRelay» (#59) — poi «Dashboard»,
-«Parser», «Mercati Betfair», «Feed CSV», «Chat Telegram», «Log messaggi»,
-«Impostazioni», più nome utente, profilo (slug) e «Esci». **Solo per
-l'amministratore** compare anche «Richieste», subito sotto la Dashboard.
+«Parser», «Mercati Betfair», «Sorgenti squadre», «Feed CSV», «Chat Telegram»,
+«Log messaggi», «Impostazioni», più nome utente, profilo (slug) e «Esci».
+**Solo per l'amministratore** compare anche «Richieste», subito sotto la
+Dashboard.
 
 La scorciatoia **`/admin`** (#57) reindirizza a `/app/#/richieste`: solo un
 redirect, la serratura resta il login più il 404 server-side delle rotte admin —
@@ -1792,6 +1794,40 @@ coi segnaposto sono **spente** («— spendibile con la sorgente squadre (#34)»
 l'utente riscrive a mano una delle tre colonne, il riferimento si toglie da solo al
 salvataggio (`coerenzaBetfair`): restano costanti libere, come sono sempre state.
 Libreria vuota → «Crea sport e mercati in Mercati Betfair, poi torna qui».
+
+### La sezione «Sorgenti squadre» (#34, pezzo 2)
+
+Tre livelli sugli sketch approvati (13/08), con la briciola per risalire:
+
+- **Elenco competizioni** (`#/squadre`): parte **vuoto** — «Non hai ancora
+  competizioni: si parte da zero, come per i mercati» — con «Nuova competizione»
+  e, per ogni competizione, il nome dello sport, il conteggio delle squadre
+  Betfair e «× elimina» con conferma («sparisce con le sue squadre Betfair e gli
+  alias relativi in tutte le sorgenti. Le sorgenti restano.»). La modale di
+  creazione chiede **Sport** (tendina della libreria #33) e **Nome della
+  competizione**; senza sport in libreria rimanda: «Crealo in Mercati Betfair,
+  poi torna qui».
+- **Competizione** (`#/squadre/{id}`): due riquadri. **«Squadre Betfair»** — la
+  lista canonica, salvata QUI e condivisa da tutte le sorgenti, col campo «es.
+  Juventus (nome Betfair)» + «Aggiungi» (errore del server verbatim sotto il
+  campo) e la **«× squadra»** per riga, con conferma: «sparisce dalla
+  competizione e dai suoi alias in **tutte le sorgenti**». **«Sorgenti»** — i
+  pulsanti delle sorgenti già create, ognuno col badge `compilati/squadre`
+  (quante squadre hanno già l'alias in quella sorgente), più «+ Aggiungi
+  sorgente» (modale col solo nome: la sorgente vale per tutte le competizioni).
+- **Tabella alias** (`#/squadre/{id}/{sorgente}`): in testa «Rinomina» ed
+  «Elimina sorgente» («sparisce con i SUOI alias, in tutte le competizioni. Le
+  squadre Betfair restano dove sono.»); poi una riga per squadra Betfair con
+  l'input dell'alias accanto e la **«⌫»** che svuota l'alias **solo in questa
+  sorgente**, subito e senza conferma (azione locale — la conferma è della «×»,
+  che è condivisa). La ⌫ salva la tabella **come la vedi**: le altre righe,
+  anche se digitate e non ancora salvate, restano quello che mostrano (deciso
+  al giro di review della PR #66). «Salva alias» scrive le coppie e mostra il
+  toast «Alias salvati.»; il badge nel livello sopra si aggiorna.
+
+Le invarianti che la UI racconta: la colonna Betfair non si ridigita mai per
+sorgente; ⌫ = locale e senza conferma, × = condivisa e con conferma; eliminare
+una sorgente non tocca le squadre. La traduzione nel parser è il pezzo 3.
 
 ### Il pannello Richieste (#7, solo amministratore)
 
