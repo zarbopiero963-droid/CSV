@@ -1546,19 +1546,30 @@ senza doppio ruolo.
 all'11/08/2026 l'apex restituiva `{"service": "xtrader-signal-relay", ...}` — corretto
 per una sonda, inutile per una persona.
 
+Dal 17/08/2026 la pagina è la **facciata definitiva** decisa in #37/#38: solo italiano,
+menu con la sola voce «Home», niente Demo / Documentazione / FAQ / Contatti (differite
+dal proprietario nei commenti della #37). Il widget chatbot arriverà con la #36.
+
 **Cosa contiene**, nell'ordine, perché la documentazione UI deve descrivere la pagina
 com'è e non come sarebbe comoda:
 
 | Fascia | Contenuto, verbatim dove è una scritta |
 |---|---|
-| Barra | marchio `BR` + «BetRelay», pulsante «Entra» → `/app/` |
+| Barra | logo relay (`web/betrelay-icona-256.png`) + «BetRelay», menu «Home» (nascosto sul telefono: il marchio fa da Home), pulsante «Entra» → `/app/` |
 | Stato | pastiglia con pallino verde: «Servizio in avviamento · accesso su approvazione» |
-| Apertura | titolo «I segnali del tuo canale Telegram, **dentro XTrader**.», sommario, «Entra con Telegram» → `/app/` e «Come funziona» → `#come` |
+| Apertura | due colonne (una sul telefono): titolo «I segnali del tuo canale Telegram, **dentro il tuo software di betting**. Automaticamente.», sommario, «Entra con Telegram» → `/app/` e «Come funziona» → `#come`; accanto la **card di flusso** |
+| Card di flusso | cinque nodi: «📲 Telegram» (solo chat configurate) → «🧩 Custom Parser» (estrae campi, non inventa dati) → «📄 segnali.csv (14 colonne)» (un solo segnale attivo per parser) → «🎯 XTrader / Betting Toolkit» (timeout / conferma) → «🧹 CSV pulito — mai segnali vecchi» |
 | Come funziona | tre schede numerate: «Colleghi la chat», «Descrivi il messaggio», «Incolli l'indirizzo in XTrader» |
 | Dal messaggio alla riga | il messaggio Telegram d'esempio accanto alle quattro colonne obbligatorie del CSV, e la nota dei 90 secondi |
-| Cosa ottieni | «Un feed tuo», «Più parser insieme», «Log dei messaggi», «Niente da installare» |
+| Oggi la guida copre XTrader | la famiglia prodotti, XTrader-first: «XTrader · TradingSportivo · Italia» con pillola verde «Attivo»; «BETTINGTOOLKIT.COM / .ES / .LAT» con pillola gialla «In arrivo» |
+| Perché è diverso da un bot di scommesse | «BetRelay **non piazza scommesse** e non parla con Betfair»; sei schede con occhiello: «Legge il TUO canale», «Prova, poi vai live», «CSV sempre pulito», «Più chat sorgenti», «Isolamento fra clienti», «Log dei messaggi»; chiude la «Nota di trasparenza» (token in chiaro una volta sola, solo hash sul server, mai nei log) |
 | Come si entra | l'accesso su approvazione, e «Entra con Telegram» → `/app/` |
-| Chiusura | «BetRelay · betrelay.net», «Applicazione» → `/app/`, «Stato del servizio» → `/health` |
+| Chiusura | «BetRelay · betrelay.net», «Applicazione» → `/app/`, «Stato del servizio» → `/health`, «18+ · Gioca responsabilmente», e il disclaimer: progetto indipendente, non affiliato a TradingSportivo (XTrader) né a Betting Toolkit; i marchi citati solo per indicare la compatibilità |
+
+**Le icone sono asset committati** (#37): `web/betrelay-favicon-sito.ico` (favicon,
+16/32/48) e `web/betrelay-icona-256.png` (logo header e apple-touch-icon), serviti dal
+mount statico `/app` già esistente — nessuna rotta nuova, nessun CDN. Non sono segreti:
+la cartella `web/` è pubblica per progetto.
 
 **Invarianti che vincolano questa pagina**, non preferenze estetiche:
 
@@ -1569,16 +1580,21 @@ com'è e non come sarebbe comoda:
   valore scritto lì è pubblicato;
 - **nessun `noindex`**, al contrario di `/app`: una landing che si esclude dai motori di
   ricerca non è una landing. La differenza fra le due pagine è vincolata da un test;
-- **una pagina sola**: stile incorporato, nessun CDN, nessuna richiesta di rete oltre al
-  documento. Gli stessi token di colore di `web/styles.css`, ricopiati di proposito;
+- **stile incorporato, nessun CDN**: le uniche richieste oltre al documento sono i due
+  asset icona committati nel repo. Gli stessi token di colore di `web/styles.css`,
+  ricopiati di proposito;
 - `.dentro` porta i margini laterali e **sta sempre da sola sul proprio elemento**. La
   prima versione la combinava con `.apertura`, la cui forma breve `padding: 72px 0 56px`
   azzerava il margine laterale: titolo e pulsanti attaccati al bordo del telefono.
   Misurato a 390 px, non guardato a occhio.
 
-Il testo dice quello che il servizio fa **oggi**. La pastiglia «Servizio in avviamento»
-e la sezione «Come si entra» esistono perché l'accesso su approvazione non è ancora
-costruito: quando lo sarà, quella pastiglia va cambiata, non lasciata lì.
+Il testo dice quello che il servizio fa **oggi**: XTrader attivo, Betting Toolkit «in
+arrivo», accesso su approvazione. Due adattamenti dichiarati rispetto allo sketch della
+#38, dove il copy descriveva il Bridge: «scrittura atomica» sotto `segnali.csv` è
+diventato «un solo segnale attivo per parser» (qui il feed esce dal database, non da un
+file su disco) e «un solo set di segnali attivo» è diventato «un solo segnale attivo per
+parser» — il comportamento vero del relay. La pastiglia «Servizio in avviamento» va
+cambiata quando il servizio sarà aperto, non lasciata lì.
 
 ## La web app su `/app`
 

@@ -81,7 +81,10 @@ GUARDIA_PX = 16
 # Un blocco per ogni fascia della pagina: se il margine si perde, si perde per
 # fascia, non per elemento.
 BLOCCHI = ['h1', '.sommario', '.stato', '.azioni a.bottone', 'h2',
-           '.scheda', '.telaio', '.freccia', 'footer .righe > *']
+           '.scheda', '.telaio', '.freccia', 'footer .righe > *',
+           # la facciata definitiva (#37/#38): card di flusso, famiglia
+           # prodotti e disclaimer devono stare dentro i margini come il resto
+           '.flow', '.prod', '.disc']
 
 
 def _dentro_i_margini(pagina, dove):
@@ -125,12 +128,24 @@ with sync_playwright() as pw:
         _ascolta(pagina)
         pagina.goto(BASE, wait_until='load')
 
-        # La facciata c'e' davvero, e non e' il JSON di prima.
+        # La facciata c'e' davvero, e non e' il JSON di prima. L'hero della
+        # facciata definitiva (#37/#38) parla di «software di betting», non
+        # piu' di XTrader: XTrader vive nella sezione della famiglia prodotti.
         pagina.wait_for_selector('h1')
         titolo = pagina.text_content('h1')
-        assert 'XTrader' in titolo, f'{nome}: titolo inatteso {titolo!r}'
+        assert 'software di betting' in titolo, f'{nome}: titolo inatteso {titolo!r}'
         assert pagina.is_visible('.marchio'), f'{nome}: il marchio non e- visibile'
         print(f'  {nome}: h1 = {" ".join(titolo.split())!r}')
+
+        # Il logo relay e' un'IMMAGINE CARICATA, non un src qualunque: un path
+        # sbagliato mostrerebbe l'icona rotta del browser e nessun errore di
+        # pagina. `naturalWidth > 0` misura che i byte sono arrivati e decodificati.
+        assert pagina.eval_on_selector('.marchio img', 'e => e.naturalWidth > 0'), \
+            f'{nome}: il logo relay non si e\' caricato'
+        # Il menu (solo «Home» per decisione della #37) si vede a schermo
+        # grande; a 390 px e' nascosto per progetto, come nello sketch.
+        if larghezza == 1280:
+            assert pagina.is_visible('header nav a'), f'{nome}: manca il menu Home'
 
         pagina.screenshot(path=str(OUT / f'{nome}-1-apertura.png'))
         pagina.screenshot(path=str(OUT / f'{nome}-2-intera.png'), full_page=True)
