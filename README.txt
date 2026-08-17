@@ -61,6 +61,17 @@ nascere e morire fra due letture. Un segnale gia' riconosciuto NON viene riletto
 nuovo se la riga resta nel feed per tutti i 90 secondi: e' XTrader a evitare la doppia
 scommessa, non lo svuotamento.
 
+FEED A N RIGHE ATTIVE (#35 pezzo 1)
+Un messaggio puo' produrre N righe CSV (multi-mercato/multi-selezione, in arrivo
+coi pezzi 2-3): il feed le serve TUTTE, composte in un documento solo — BOM e
+intestazione UNA volta in testa, poi le data line nell'ordine di scrittura,
+ciascuna con CRLF. store_signal accetta la lista di documenti e li verifica
+TUTTI prima di scrivere (uno rotto = niente scritto: mai mezzo segnale nel
+feed). Il TTL resta 90 secondi ed e' PER RIGA nel filtro di lettura: alla
+scadenza di una riga il feed perde solo quella. Una riga guasta nel database
+degrada solo se stessa, le altre continuano a uscire. Feed vuoto = la sola
+intestazione, come sempre.
+
 FORME LOCALIZZATE DEL CSV
 Tre cose dipendono dalla lingua del prodotto che legge il feed, e oggi ne serviamo una.
 
@@ -82,7 +93,8 @@ ora esce "1,85". E' il fix, non un effetto collaterale.
 
 ENDPOINT PUBBLICO CSV
 GET /xtrader.csv?token=TOKEN
-Restituisce l'ultimo segnale ricevuto. Se non ci sono segnali restituisce la sola intestazione.
+Restituisce TUTTE le righe vive (non scadute) in ordine di scrittura, composte
+in un documento solo. Se non ci sono segnali restituisce la sola intestazione.
 
 IL NOME DEL FILE SCARICATO (#60)
 Chi incolla l'URL del feed in un browser scarica un file, e quel file si

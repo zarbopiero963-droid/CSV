@@ -469,7 +469,9 @@ export function verifyCsv(text) {
   if (!lines.length) return 'CSV vuoto: manca anche l’intestazione';
   if (lines.includes('')) return `c’e’ una riga vuota alla posizione ${lines.indexOf('') + 1}`;
   if (lines[0] !== HEADER_LINE) return `intestazione diversa dal contratto (${lines[0].split(',').length} colonne)`;
-  if (lines.length > 2) return `${lines.length} righe: attesa intestazione piu’ al massimo un segnale`;
+  // Dal #35 (pezzo 1) il feed puo' portare N segnali vivi: niente piu' tetto a
+  // una riga — ogni data line passa comunque, una per una, dal controllo del
+  // ciclo. Gemello di `verify_csv` in main.py (parita' in test_engine_contract).
   for (let i = 1; i < lines.length; i++) {
     if (!ROW_RE.test(lines[i])) return `la riga ${i + 1} non ha ${COLUMNS.length} campi tutti fra virgolette`;
     // Il formato dei campi NUMERICI e' parte del contratto (#40): un punto
