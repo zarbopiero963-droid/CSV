@@ -2634,7 +2634,7 @@ def condizione_soddisfatta(message, cond, scadenza=None):
     return cond['value'].lower() in message.lower()
 
 
-def esegui_parser(message, config):
+def esegui_parser(message, config, mappa_alias=None):
     """Esegue la config sul messaggio (`runParser`).
 
     Restituisce `matched` (soddisfa la condizione), `row` (le 14 colonne, sempre
@@ -2673,6 +2673,40 @@ def esegui_parser(message, config):
     # `_piatto`, non `strip()`: l'emptiness ha la stessa coppia divergente del
     # verdetto numerico — una obbligatoria di solo BOM era «mancante» in JS e
     # «valorizzata» in Python (stessa classe del [REAL_FINDING] dei gate, PR #47).
+    # La sorgente squadre (#34 pezzo 3): con una mappa alias→Betfair l'evento
+    # si traduce QUI, sul valore finale di EventName — spezzato sull'ULTIMO
+    # ' - ' (il separatore che il transform del wizard produce), ogni meta'
+    # normalizzata con `_piatto` (la classe di spazi gemellata, PR #47) e
+    # cercata per confronto ESATTO. Squadra sconosciuta = verbatim + AVVISO
+    # non bloccante (deciso dal proprietario il 17/08/2026): la mappa porta
+    # anche le identita' Betfair→Betfair, quindi l'avviso scatta solo sui nomi
+    # davvero estranei. Senza mappa (nessuna sorgente nel parser) non si tocca
+    # niente. Stesso blocco in `runParser`, vincolato dai casi di parita'.
+    avvisi = []
+    # `is not None`, NON la verita' del dict: una mappa VUOTA e' una sorgente
+    # selezionata senza alias compilati, e deve tradurre (cioe' avvisare) come
+    # in JS, dove `{}` e' truthy. Con `and mappa_alias` i due motori
+    # divergevano esattamente li' — misurato dal caso di parita'.
+    if matched and mappa_alias is not None:
+        i_evento = HEADERS.index('EventName')
+        evento = str('' if row[i_evento] is None else row[i_evento])
+        if _piatto(evento):
+            sep = evento.rfind(' - ')
+            parti = [evento] if sep < 0 else [evento[:sep], evento[sep + 3:]]
+            tradotte = []
+            for parte in parti:
+                nome = _piatto(parte)
+                if nome and nome in mappa_alias:
+                    tradotte.append(mappa_alias[nome])
+                    continue
+                if nome:
+                    avvisi.append(
+                        f'EventName: «{nome}» non ha un alias in questa sorgente '
+                        "squadre: nel feed esce verbatim, e XTrader lo trovera' "
+                        'solo se coincide col nome Betfair.')
+                tradotte.append(nome)
+            row[i_evento] = ' - '.join(tradotte)
+
     def _vuota(valore):
         return not _piatto(str('' if valore is None else valore))
 
@@ -2738,6 +2772,7 @@ def esegui_parser(message, config):
         if motivo is None and row[indice]:
             row[indice] = row[indice].replace('.', SEPARATORE_DECIMALE, 1)
     return {'matched': matched, 'row': row, 'missing': mancanti, 'scarti': scarti,
+            'avvisi': avvisi,
             'complete': matched and not mancanti and not scarti}
 
 
@@ -2783,7 +2818,7 @@ def elabora_messaggio(message, cfg):
     return esito_messaggio(message, cfg)[0]
 
 
-def esito_messaggio(message, cfg):
+def esito_messaggio(message, cfg, risolvi_mappa=None):
     """`(parsed, motivi)`: il segnale se c'e', e PERCHE' no quando non c'e'.
 
     `elabora_messaggio` e' questa funzione senza il secondo valore, e i suoi tre
@@ -2808,7 +2843,16 @@ def esito_messaggio(message, cfg):
     # e Claude Fable 5 sulla PR #29 (isolamento «non deve bloccare a tutti»).
     try:
         config = json.loads(grezzo)
-        risultato = esegui_parser(message, config)
+        # La sorgente squadre (#34 pezzo 3): il riferimento sta DENTRO la
+        # config, quindi la mappa si risolve qui — ma con un RISOLUTORE del
+        # chiamante, che e' chi possiede la connessione e l'utente. Senza
+        # risolutore (i chiamanti legacy) o senza riferimento: verbatim.
+        # Un risolutore che restituisce None (sorgente eliminata) idem.
+        mappa = None
+        riferimento = config.get('team_source') if isinstance(config, dict) else None
+        if riferimento is not None and risolvi_mappa is not None:
+            mappa = risolvi_mappa(riferimento)
+        risultato = esegui_parser(message, config, mappa)
         if not risultato['complete']:
             return None, list(risultato.get('scarti') or [])
         # `esegui_parser` puo' lasciare valori non-stringa nella riga (una costante
@@ -2842,7 +2886,11 @@ def esito_messaggio(message, cfg):
         except Exception:  # noqa: BLE001 - config illeggibile: silenzio
             riconosciuto = False
         return None, (['config non eseguibile'] if riconosciuto else [])
-    return {'event': evento, 'csv': csv_riga}, []
+    # `avvisi` viaggia nel segnale (#34 pezzo 3): e' il «verbatim + avviso»
+    # della squadra senza alias, e il dispatch lo scrive in `message_logs` —
+    # l'unico posto dove il cliente lo vede sul traffico vero.
+    return {'event': evento, 'csv': csv_riga,
+            'avvisi': list(risultato.get('avvisi') or [])}, []
 
 
 def auth(token):
@@ -4764,6 +4812,7 @@ async def crea_parser_mio(request: Request):
         # La modalita' «Da mercati Betfair» (#33) si valida DENTRO la connessione:
         # serve leggere la libreria dell'utente, e serve la sessione gia' accertata.
         _valida_betfair(c, utente['id'], dati.config)
+        _valida_team_source(c, utente['id'], dati.config)
         parser = _crea_parser_utente(c, utente['id'], titolo, dati.config, dati.active)
         c.commit()
     finally:
@@ -4793,6 +4842,7 @@ async def modifica_parser_mio(slug: str, request: Request):
         # Stessa guardia della creazione (regola 3, fonte unica): un PUT che
         # spendesse una selezione altrui aggirerebbe il confine del POST.
         _valida_betfair(c, utente['id'], dati.config)
+        _valida_team_source(c, utente['id'], dati.config)
         c.execute('UPDATE parsers SET titolo=?, config_json=?, active=?'
                   ' WHERE user_id=? AND slug=?',
                   (titolo, json.dumps(dati.config), 1 if dati.active else 0, utente['id'], slug))
@@ -4866,7 +4916,16 @@ async def prova_parser_mio(slug: str, request: Request):
         raise HTTPException(404, 'parser non trovato')
     try:
         config = json.loads(riga[0]) if riga[0] else {}
-        risultato = esegui_parser(dati.message, config)
+        # La prova deve mostrare cio' che farebbe il webhook (#34 pezzo 3):
+        # stessa risoluzione della mappa, per l'utente della sessione.
+        mappa = None
+        if isinstance(config, dict) and config.get('team_source') is not None:
+            c2 = db()
+            try:
+                mappa = _mappa_team_source(c2, utente['id'], config['team_source'])
+            finally:
+                c2.close()
+        risultato = esegui_parser(dati.message, config, mappa)
     except Exception:
         return _rispondi_con_sessione(utente['id'], utente['versione'],
                                       {'matched': False, 'missing': [], 'complete': False,
@@ -4876,7 +4935,9 @@ async def prova_parser_mio(slug: str, request: Request):
     # «non completo» con `missing` vuota — cioe' il sintomo senza la causa, che e'
     # il difetto che la #39 e la #41 esistono per chiudere.
     corpo = {'matched': risultato['matched'], 'missing': risultato['missing'],
-             'scarti': risultato.get('scarti') or [], 'complete': risultato['complete']}
+             'scarti': risultato.get('scarti') or [],
+             'avvisi': risultato.get('avvisi') or [],
+             'complete': risultato['complete']}
     if risultato['complete']:
         # `_testo_canonico` come nel webhook (`esito_messaggio`): l'anteprima
         # della prova deve mostrare gli STESSI byte che uscirebbero nel feed.
@@ -5687,7 +5748,9 @@ async def scrivi_alias_miei(cid: str, sid: str, request: Request):
         valide = {r[0] for r in c.execute(
             'SELECT id FROM squadre_betfair WHERE competizione_id=?',
             (competizione[0],)).fetchall()}
-        scritte = 0
+        # PRIMA tutta la validazione, POI le scritture: il 422 non deve
+        # lasciare coppie gia' scritte (stessa forma della demo).
+        pulite = []
         for chiave, valore in coppie.items():
             try:
                 squadra = int(chiave)
@@ -5698,12 +5761,66 @@ async def scrivi_alias_miei(cid: str, sid: str, request: Request):
             if not isinstance(valore, str):
                 raise HTTPException(422, 'ogni alias deve essere una stringa')
             valore = valore.strip()
+            if len(valore) > MAX_CAMPO_MERCATO:
+                raise HTTPException(
+                    422, f'alias troppo lungo: massimo {MAX_CAMPO_MERCATO} caratteri')
+            pulite.append((squadra, valore))
+        # Alias ambiguo vietato (#34 pezzo 3, deciso dal proprietario il
+        # 17/08/2026): a parse-time la ricerca corre su TUTTA la sorgente,
+        # quindi lo stesso testo su due squadre non deve poter essere salvato.
+        # Il controllo e' sullo STATO FINALE — la mappa della sorgente con il
+        # corpo sovrapposto — cosi' spostare un alias da una squadra all'altra
+        # in un solo PUT resta lecito in qualunque ordine arrivino le coppie.
+        finale = {r[0]: r[1] for r in c.execute(
+            'SELECT squadra_id, alias FROM alias_squadre WHERE sorgente_id=?',
+            (sorgente[0],)).fetchall()}
+        for squadra, valore in pulite:
+            if valore == '':
+                finale.pop(squadra, None)
+            else:
+                finale[squadra] = valore
+        occupanti = {}
+        for squadra, valore in finale.items():
+            # La chiave dell'ambiguita' e' quella con cui il PARSER cerca —
+            # `_piatto`, la stessa di `_mappa_team_source` — non il testo
+            # com'e' scritto: «Juve  FC» e «Juve FC» sarebbero due alias al
+            # PUT e UNO a parse-time, e la mappa ne perderebbe uno.
+            # [REAL_FINDING] di GPT-5.5 sulla PR #67.
+            chiave = _piatto(valore)
+            if not chiave:
+                continue
+            if chiave in occupanti and occupanti[chiave] != squadra:
+                raise HTTPException(
+                    422, f"alias «{valore}» gia' usato per un'altra squadra "
+                         'in questa sorgente')
+            occupanti[chiave] = squadra
+        # E l'alias non puo' OMBREGGIARE il nome Betfair di un'ALTRA squadra
+        # dell'utente (qualunque competizione: l'identita' e' sua, non della
+        # competizione): l'alias vince sull'identita' nella mappa, quindi quel
+        # testo tradurrebbe un nome canonico nella squadra sbagliata — dentro
+        # EventName, cioe' dentro il CSV. Stessa classe dell'ambiguita' qui
+        # sopra, stessa cura: non deve poter nascere. Il nome della squadra
+        # STESSA resta lecito: e' un'identita' innocua.
+        # [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #67.
+        nomi_betfair = {}
+        for id_q, nome_q in c.execute(
+                'SELECT q.id, q.nome FROM squadre_betfair q'
+                ' JOIN competizioni k ON k.id = q.competizione_id'
+                ' WHERE k.user_id=? ORDER BY q.id',
+                (utente['id'],)).fetchall():
+            chiave_q = _piatto(nome_q)
+            if chiave_q:
+                nomi_betfair.setdefault(chiave_q, id_q)
+        for chiave, squadra in occupanti.items():
+            if chiave in nomi_betfair and nomi_betfair[chiave] != squadra:
+                raise HTTPException(
+                    422, f"alias «{chiave}» e' il nome Betfair di un'altra "
+                         'squadra: tradurrebbe quel nome nella squadra sbagliata')
+        scritte = 0
+        for squadra, valore in pulite:
             if valore == '':
                 _cancella_alias(c, utente['id'], sorgente[0], squadra)
             else:
-                if len(valore) > MAX_CAMPO_MERCATO:
-                    raise HTTPException(
-                        422, f'alias troppo lungo: massimo {MAX_CAMPO_MERCATO} caratteri')
                 if _scrivi_alias(c, utente['id'], sorgente[0], squadra,
                                  competizione[0], valore) is None:
                     # Un padre e' morto fra la lettura e la scrittura: 404
@@ -5714,6 +5831,68 @@ async def scrivi_alias_miei(cid: str, sid: str, request: Request):
     finally:
         c.close()
     return _rispondi_con_sessione(utente['id'], utente['versione'], {'scritte': scritte})
+
+
+def _valida_team_source(c, user_id, config):
+    """Il riferimento «Sorgente squadre» del parser (#34 pezzo 3), al confine di
+    scrittura, come `_valida_betfair`: deve essere l'id di una sorgente che
+    esiste ED e' dell'utente — quella di un altro e' indistinguibile da una
+    inesistente. `None`/assente = nessuna sorgente, passthrough verbatim.
+    """
+    sorgente = (config or {}).get('team_source') if isinstance(config, dict) else None
+    if sorgente is None:
+        return
+    if isinstance(sorgente, bool) or not isinstance(sorgente, int):
+        raise HTTPException(
+            422, 'team_source deve essere l\'id di una sorgente squadre')
+    if not c.execute('SELECT 1 FROM sorgenti_squadre WHERE id=? AND user_id=?',
+                     (sorgente, user_id)).fetchone():
+        raise HTTPException(422, 'sorgente squadre inesistente')
+
+
+def _mappa_team_source(c, user_id, sorgente_id):
+    """La mappa alias→Betfair di una sorgente, pronta per i motori.
+
+    Porta anche le IDENTITA' Betfair→Betfair di TUTTE le squadre dell'utente
+    (deciso il 17/08/2026): chi scrive gia' il nome Betfair non deve mappare
+    niente e non riceve avvisi — l'avviso scatta solo sui nomi davvero
+    estranei. Gli alias espliciti vincono sulle identita'. Le chiavi passano
+    da `_piatto`, la stessa normalizzazione con cui i motori cercano.
+
+    None se la sorgente non esiste (piu') o non e' dell'utente: il parser che
+    la riferisce torna al passthrough puro, come «nessuna sorgente» — una
+    mezza traduzione fatta di sole identita' sembrerebbe funzionare e non
+    avvertirebbe che la sorgente e' sparita.
+    """
+    if isinstance(sorgente_id, bool) or not isinstance(sorgente_id, int):
+        return None
+    if not c.execute('SELECT 1 FROM sorgenti_squadre WHERE id=? AND user_id=?',
+                     (sorgente_id, user_id)).fetchone():
+        return None
+    mappa = {}
+    # ORDER BY: senza, una collisione di chiavi normalizzate si risolverebbe
+    # nell'ordine in cui SQLite decide di restituire le righe — cioe' in modo
+    # diverso fra ambienti. Il PUT vieta i doppioni normalizzati DENTRO una
+    # sorgente, ma le identita' (nomi squadra) possono ancora collidere fra
+    # competizioni: vince deterministicamente l'id piu' alto (l'ultima
+    # scritta). GPT-5.5 sulla PR #67.
+    for (nome,) in c.execute(
+            'SELECT q.nome FROM squadre_betfair q'
+            ' JOIN competizioni k ON k.id = q.competizione_id'
+            ' WHERE k.user_id=? ORDER BY q.id', (user_id,)).fetchall():
+        chiave = _piatto(nome)
+        if chiave:
+            mappa[chiave] = nome
+    for alias, nome in c.execute(
+            'SELECT a.alias, q.nome FROM alias_squadre a'
+            ' JOIN squadre_betfair q ON q.id = a.squadra_id'
+            ' JOIN competizioni k ON k.id = q.competizione_id'
+            ' WHERE a.sorgente_id=? AND k.user_id=? ORDER BY a.id',
+            (sorgente_id, user_id)).fetchall():
+        chiave = _piatto(alias)
+        if chiave:
+            mappa[chiave] = nome
+    return mappa
 
 
 def _valida_betfair(c, user_id, config):
@@ -6030,7 +6209,10 @@ def _elabora_per_utente(c, chat_riga_id, utente_id, righe, text):
                         'selection_name', 'handicap', 'bet_type',
                         'config_json'], (r[1], r[2], r[3], r[4], r[5],
                                          r[6], r[7], r[8]), strict=True))
-        parsed, scarti = esito_messaggio(text, cfg)
+        # Il risolutore della mappa (#34 pezzo 3): la connessione e l'utente
+        # sono QUI, `esito_messaggio` sa solo se la config porta il riferimento.
+        parsed, scarti = esito_messaggio(
+            text, cfg, lambda sid: _mappa_team_source(c, utente_id, sid))
         if parsed:
             riconosciuti.append((r, parsed))
         motivi.extend((r, m) for m in scarti)
@@ -6080,6 +6262,15 @@ def _elabora_per_utente(c, chat_riga_id, utente_id, righe, text):
               ' esito) VALUES (?,?,?,?,?)',
               (utente_id, vincente[0], chat_riga_id, text,
                f'segnale scritto ({nome_vincente})'))
+    # Gli avvisi della sorgente squadre (#34 pezzo 3): il segnale E' scritto —
+    # verbatim, deciso dal proprietario — ma la squadra senza alias va detta
+    # QUI, l'unico posto dove il cliente la vede sul traffico vero. Al piu'
+    # due righe per messaggio (le due meta' di EventName).
+    for avviso in parsed.get('avvisi') or []:
+        c.execute('INSERT INTO message_logs(user_id, parser_id, chat_id, text,'
+                  ' esito) VALUES (?,?,?,?,?)',
+                  (utente_id, vincente[0], chat_riga_id, text,
+                   f'avviso: {avviso}'))
     return {'event': parsed['event']}
 
 

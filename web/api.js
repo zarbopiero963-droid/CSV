@@ -382,6 +382,14 @@ export async function deleteSelezione(sport, mercato, id) {
 stato.competizioni = null;
 stato.dettagliCompetizioni = {};   // id -> {id, nome, sport, squadre, sorgenti}
 stato.aliasSorgenti = {};          // `${cid}:${sorgente}` -> righe della tabella
+stato.sorgenti = null;             // l'elenco piatto, per il selettore del parser
+
+export async function loadSorgenti() {
+  stato.sorgenti = (await http('GET', '/api/me/sorgenti-squadre')).sorgenti;
+  return stato.sorgenti;
+}
+
+export function sorgenti() { return stato.sorgenti; }
 
 export async function loadCompetizioni() {
   stato.competizioni = (await http('GET', '/api/me/competizioni')).competizioni;
@@ -447,15 +455,20 @@ export async function deleteSquadra(cid, id) {
 }
 
 export async function createSorgente(nome) {
-  return await http('POST', '/api/me/sorgenti-squadre', { nome });
+  const creata = await http('POST', '/api/me/sorgenti-squadre', { nome });
+  stato.sorgenti = null;   // il selettore del parser ricarichera'
+  return creata;
 }
 
 export async function renameSorgente(id, nome) {
-  return await http('PATCH', `/api/me/sorgenti-squadre/${id}`, { nome });
+  const esito = await http('PATCH', `/api/me/sorgenti-squadre/${id}`, { nome });
+  stato.sorgenti = null;
+  return esito;
 }
 
 export async function deleteSorgente(id) {
   await http('DELETE', `/api/me/sorgenti-squadre/${id}`);
+  stato.sorgenti = null;
   // Gli alias di quella sorgente sono spariti ovunque: via le cache che
   // potrebbero mostrarli.
   for (const chiave of Object.keys(stato.aliasSorgenti)) {

@@ -11,7 +11,7 @@
 // leggendo le RIGHE `export function` / `export async function` — qui non si
 // esportano costanti, e le funzioni si dichiarano una per riga.
 
-import { COLUMNS, EMOJI, runParser, toCsv, suggestConfig } from './engine.js';
+import { COLUMNS, EMOJI, normalizzaNome, runParser, toCsv, suggestConfig } from './engine.js';
 
 const CHIAVE = 'xtrelay:demo';
 
@@ -139,7 +139,18 @@ export async function updateParser(slug, patch) {
   const p = getParser(slug);
   if (!p) throw new Error('parser non trovato');
   if (patch.titolo !== undefined) p.titolo = patch.titolo;
-  if (patch.config !== undefined) p.config = patch.config;
+  if (patch.config !== undefined) {
+    // Il riferimento «Sorgente squadre» (#34 pezzo 3) si valida al confine
+    // di scrittura come sul server: una sorgente che non esiste = 422.
+    const rif = patch.config && patch.config.team_source;
+    if (rif !== undefined && rif !== null
+        && !_sorgentiDemo().some(g => g.id === Number(rif))) {
+      const errore = new Error('sorgente squadre inesistente');
+      errore.status = 422;
+      throw errore;
+    }
+    p.config = patch.config;
+  }
   if (patch.active !== undefined) p.active = patch.active;
   salva();
   return p;
@@ -153,18 +164,46 @@ export async function deleteParser(slug) {
 // Stessa forma della risposta del server: matched, missing, scarti, complete,
 // e — se completo — csv ed event. Qui gira il motore JS, che per contratto
 // produce gli stessi byte di quello Python (test_engine_contract.py).
+// La mappa della sorgente per i motori, come `_mappa_team_source` del relay:
+// identita' Betfair→Betfair di TUTTE le squadre sotto gli alias della
+// sorgente, chiavi normalizzate con la stessa classe di spazi del motore.
+// null se la sorgente non esiste (piu'): passthrough puro, non una mezza
+// traduzione di sole identita'.
+function _mappaSorgenteDemo(sorgenteId) {
+  if (!_sorgentiDemo().some(g => g.id === Number(sorgenteId))) return null;
+  // `Object.create(null)`: un nome o un alias `__proto__`/`toString` deve
+  // diventare una chiave VERA della mappa, non sparire nel prototype
+  // ([REAL_FINDING] di GPT-5.6 Sol, PR #67). `runParser` cerca con
+  // `hasOwnProperty.call`, che su un oggetto senza prototype funziona uguale.
+  const mappa = Object.create(null);
+  _competizioniDemo().forEach(k => k.squadre.forEach(q => {
+    const chiave = normalizzaNome(q.nome);
+    if (chiave) mappa[chiave] = q.nome;
+  }));
+  _competizioniDemo().forEach(k => k.squadre.forEach(q => {
+    const alias = _aliasDemo()[`${Number(sorgenteId)}:${q.id}`];
+    const chiave = alias ? normalizzaNome(alias) : '';
+    if (chiave) mappa[chiave] = q.nome;
+  }));
+  return mappa;
+}
+
 export async function testParser(slug, message) {
   const p = getParser(slug);
   if (!p) throw new Error('parser non trovato');
   let r;
   try {
-    r = runParser(message, p.config);
+    let mappa = null;
+    const rif = p.config && p.config.team_source;
+    if (rif !== undefined && rif !== null) mappa = _mappaSorgenteDemo(rif);
+    r = runParser(message, p.config, mappa);
   } catch {
     return { matched: false, missing: [], scarti: [], complete: false,
              errore: 'config non eseguibile' };
   }
   const corpo = { matched: r.matched, missing: r.missing,
-                  scarti: r.scarti || [], complete: r.complete };
+                  scarti: r.scarti || [], avvisi: r.avvisi || [],
+                  complete: r.complete };
   if (r.complete) {
     corpo.event = r.row[COLUMNS.indexOf('EventName')];
     corpo.csv = toCsv(r.row);
@@ -412,6 +451,12 @@ function _competizioneODemo(cid) {
   return trovata;
 }
 
+export async function loadSorgenti() { return sorgenti(); }
+
+export function sorgenti() {
+  return _sorgentiDemo().map(g => ({ id: g.id, nome: g.nome }));
+}
+
 function _sorgenteODemo(id) {
   const trovata = _sorgentiDemo().find(g => g.id === Number(id));
   if (!trovata) {
@@ -584,6 +629,45 @@ export async function saveAlias(cid, sorgenteId, coppie) {
       throw new Error('alias troppo lungo: massimo 120 caratteri');
     }
     pulite.push([squadra, pulito]);
+  }
+  // Alias ambiguo vietato (#34 pezzo 3, come il server): il controllo e'
+  // sullo STATO FINALE della sorgente col corpo sovrapposto, cosi' spostare
+  // un alias fra due squadre in un solo salvataggio resta lecito.
+  const finale = {};
+  for (const [chiave, testo] of Object.entries(_aliasDemo())) {
+    if (chiave.startsWith(`${sorgente.id}:`)) finale[chiave.split(':')[1]] = testo;
+  }
+  for (const [squadra, pulito] of pulite) {
+    if (pulito === '') delete finale[squadra];
+    else finale[squadra] = pulito;
+  }
+  // `Object.create(null)`, non `{}`: un alias legittimo chiamato `toString`
+  // o `__proto__` non deve inciampare nelle proprieta' ereditate dal
+  // prototype ([REAL_FINDING] di GPT-5.6 Sol, PR #67).
+  const occupanti = Object.create(null);
+  for (const [squadra, testo] of Object.entries(finale)) {
+    // La chiave dell'ambiguita' e' quella con cui il motore cerca
+    // (`normalizzaNome`), come sul server (GPT-5.5, PR #67).
+    const chiave = normalizzaNome(testo);
+    if (!chiave) continue;
+    if (chiave in occupanti && occupanti[chiave] !== squadra) {
+      throw new Error(`alias «${testo}» gia' usato per un'altra squadra in questa sorgente`);
+    }
+    occupanti[chiave] = squadra;
+  }
+  // E l'alias non puo' ombreggiare il nome Betfair di un'ALTRA squadra
+  // dell'utente: nella mappa l'alias vince sull'identita', e quel testo
+  // tradurrebbe un nome canonico nella squadra sbagliata (Sol, PR #67).
+  const nomiBetfair = Object.create(null);
+  _competizioniDemo().forEach(k2 => k2.squadre.forEach(q => {
+    const chiaveQ = normalizzaNome(q.nome);
+    if (chiaveQ && !(chiaveQ in nomiBetfair)) nomiBetfair[chiaveQ] = q.id;
+  }));
+  for (const [chiave, squadra] of Object.entries(occupanti)) {
+    if (chiave in nomiBetfair && nomiBetfair[chiave] !== Number(squadra)) {
+      throw new Error(`alias «${chiave}» e' il nome Betfair di un'altra `
+        + 'squadra: tradurrebbe quel nome nella squadra sbagliata');
+    }
   }
   for (const [squadra, pulito] of pulite) {
     if (pulito === '') delete _aliasDemo()[`${sorgente.id}:${squadra}`];

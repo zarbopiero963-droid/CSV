@@ -165,8 +165,8 @@ libreria #33) possiede la lista canonica dei nomi Betfair, salvata una volta —
 e' l'unica colonna che finira' nel CSV; ogni SORGENTE (nominata, rinominabile)
 e' una colonna di alias sopra quella stessa lista, UN alias per squadra per
 sorgente. Al primo login e' tutto vuoto. Isolamento come sempre: 404 sugli
-altrui, user_id dalla sessione. Il trasform a parse-time e il selettore nel
-parser arrivano col pezzo 3; la UI col pezzo 2.
+altrui, user_id dalla sessione. La UI e' il pezzo 2; il trasform e' il pezzo 3
+(vedi sotto, TRASFORM NEL PARSER).
 GET    /api/me/sorgenti-squadre                       le sorgenti dell'utente
 POST   /api/me/sorgenti-squadre                       body {"nome":"test 1"}
 PATCH  /api/me/sorgenti-squadre/ID                    rinomina, body {"nome":"..."}
@@ -190,6 +190,25 @@ Doppioni -> 409; campi vuoti o troppo lunghi -> 422; 401 prima del 422. Quote:
 MAX_SORGENTI_PER_UTENTE (20), MAX_COMPETIZIONI_PER_UTENTE (50),
 MAX_SQUADRE_PER_COMPETIZIONE (100), regolabili da variabile. Eliminare lo SPORT
 (#33) porta via a cascata anche competizioni, squadre e alias relativi.
+Lo stesso alias su due squadre della stessa sorgente -> 422 (deciso 17/08:
+a parse-time la ricerca corre su tutta la sorgente, l'ambiguita' non deve
+poter nascere); in un'altra sorgente lo stesso testo e' libero. Il confronto
+usa la chiave NORMALIZZATA del parser (spazi uniformi collassati). Stessa
+regola per l'alias che coincide col nome Betfair di un'ALTRA squadra
+dell'utente -> 422 (tradurrebbe un nome canonico nella squadra sbagliata);
+il nome della squadra stessa resta lecito.
+
+TRASFORM NEL PARSER (#34 pezzo 3)
+Il parser puo' portare nel config il riferimento "team_source" (id di una
+sorgente squadre): validato al salvataggio come "betfair" — inesistente,
+altrui o non intero -> 422. A parse-time (webhook E prova) la mappa della
+sorgente traduce le due meta' di EventName (spezzato sull'ULTIMO " - "):
+alias -> nome Betfair, e il nome Betfair scritto diretto passa senza avvisi
+(identita' in mappa). Squadra sconosciuta: nel feed va VERBATIM e il relay
+scrive "avviso: ..." in message_logs (e la prova lo restituisce nel campo
+"avvisi", accanto a "scarti" — avvisa, non blocca). Nessuna sorgente nel
+parser, o sorgente eliminata dopo: passthrough puro, niente traduzione e
+niente avvisi. POST /api/me/parsers/SLUG/test risponde ora anche "avvisi".
 
 QUOTE E TETTI PER-TENANT (il database e il volume Railway sono CONDIVISI)
 - massimo MAX_PARSER_PER_UTENTE parser per utente (default 20, si alza dalla

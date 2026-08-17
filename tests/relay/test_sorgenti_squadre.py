@@ -653,3 +653,216 @@ def test_il_travaso_porta_sorgenti_e_competizioni_senza_collisioni(tmp_path,
     assert len(nomi) == 2 and nomi[0] == 'test 1' and nomi[1] != 'test 1', (
         f'attesa la rinomina di chi arriva, trovato {nomi}')
     c.close()
+
+
+# --------------------------------------- alias ambiguo vietato (#34 pezzo 3)
+
+def test_lo_stesso_alias_su_due_squadre_della_stessa_sorgente_e_un_422(servizio, cookie_a):
+    """Deciso dal proprietario (17/08/2026), regola del pezzo 3: a parse-time la
+    ricerca alias->Betfair corre su TUTTA la sorgente, quindi lo stesso testo su
+    due squadre sarebbe ambiguo. L'ambiguita' non deve poter nascere: il PUT la
+    rifiuta al salvataggio, anche fra competizioni diverse, e il corpo che la
+    contiene non scrive niente (il no-commit del 422). Ribadire lo stesso alias
+    sulla stessa squadra resta l'upsert di sempre, e in un'ALTRA sorgente lo
+    stesso testo e' libero: la colonna di alias e' della sorgente.
+    """
+    sport = _sport(servizio, cookie_a, 'Dup')
+    cid = _competizione(servizio, cookie_a, sport, 'Serie Dup')
+    cid2 = _competizione(servizio, cookie_a, sport, 'Coppa Dup')
+    ju = _squadra(servizio, cookie_a, cid, 'Juventus')
+    mi = _squadra(servizio, cookie_a, cid, 'Milan')
+    inter = _squadra(servizio, cookie_a, cid2, 'Inter')
+    sid = _sorgente(servizio, cookie_a, 'dup 1')
+    sid2 = _sorgente(servizio, cookie_a, 'dup 2')
+    try:
+        _metti_alias(servizio, cookie_a, cid, sid, {str(ju): 'Juve'})
+        # Upsert sulla STESSA squadra: lecito, ieri come oggi.
+        _metti_alias(servizio, cookie_a, cid, sid, {str(ju): 'Juve'})
+        # Stessa sorgente, altra squadra: 422 col motivo, mappa intatta.
+        corpo = _metti_alias(servizio, cookie_a, cid, sid, {str(mi): 'Juve'},
+                             atteso=422)
+        motivo = corpo.decode('utf-8')
+        assert 'Juve' in motivo and 'altra squadra' in motivo, motivo
+        assert _leggi_alias(servizio, cookie_a, cid, sid)['Milan'] == ''
+        # Stessa sorgente, altra COMPETIZIONE: la ricerca e' su tutta la
+        # sorgente, quindi vietato anche qui.
+        _metti_alias(servizio, cookie_a, cid2, sid, {str(inter): 'Juve'},
+                     atteso=422)
+        # Un'ALTRA sorgente e' un'altra colonna: lo stesso testo e' libero.
+        _metti_alias(servizio, cookie_a, cid, sid2, {str(mi): 'Juve'})
+        # Duplicato DENTRO lo stesso corpo: 422 e nessuna coppia scritta,
+        # nemmeno la prima (senza commit non resta niente).
+        _metti_alias(servizio, cookie_a, cid, sid,
+                     {str(ju): 'Zebra', str(mi): 'Zebra'}, atteso=422)
+        assert _leggi_alias(servizio, cookie_a, cid, sid)['Juventus'] == 'Juve'
+        # L'ambiguita' si giudica con la chiave con cui il PARSER cerca
+        # (`_piatto`): 'Gemella  FC' (doppio spazio) e 'Gemella FC' sarebbero
+        # due alias al PUT e UNO a parse-time — la mappa ne perderebbe uno a
+        # caso. [REAL_FINDING] di GPT-5.5 sulla PR #67.
+        _metti_alias(servizio, cookie_a, cid, sid, {str(ju): 'Gemella  FC'})
+        _metti_alias(servizio, cookie_a, cid, sid, {str(mi): 'Gemella FC'},
+                     atteso=422)
+        # E un alias che OMBREGGIA il nome Betfair di un'ALTRA squadra e' la
+        # stessa ambiguita' ([REAL_FINDING] di Sol, PR #67): quel testo nel
+        # messaggio significherebbe due squadre, e l'alias vincerebbe
+        # sull'identita' — traducendo un nome canonico nella squadra
+        # sbagliata. 422, anche fra competizioni (l'identita' e' dell'utente).
+        _metti_alias(servizio, cookie_a, cid, sid, {str(ju): 'Milan'},
+                     atteso=422)
+        _metti_alias(servizio, cookie_a, cid, sid, {str(ju): 'Inter'},
+                     atteso=422)
+        # Il nome Betfair della squadra STESSA e' un'identita' innocua: lecito.
+        _metti_alias(servizio, cookie_a, cid, sid, {str(ju): 'Juventus'})
+        _metti_alias(servizio, cookie_a, cid, sid, {str(ju): 'Juve'})
+    finally:
+        for s in (sid, sid2):
+            _chiama(servizio, 'DELETE', f'/api/me/sorgenti-squadre/{s}',
+                    cookie=cookie_a)
+        _chiama(servizio, 'DELETE', f'/api/me/sports/{sport}', cookie=cookie_a)
+
+
+# ------------------------------ il parser con la sorgente (#34 pezzo 3)
+
+def _config_con_squadre(team_source=None):
+    """Una config vera del motore: EventName dalla riga col ' v ', tre costanti."""
+    config = {
+        'match': {'type': 'contains', 'value': 'P.Bet.'},
+        'columns': {
+            'EventName': {'source': 'line', 'anchor': ' v ', 'part': 'whole',
+                          'transforms': [
+                              {'op': 'replace_last', 'from': ' v ', 'to': ' - '},
+                              {'op': 'trim'}]},
+            'MarketType': {'source': 'constant', 'value': 'OVER_UNDER_15'},
+            'SelectionName': {'source': 'constant', 'value': 'Over 1,5'},
+            'BetType': {'source': 'constant', 'value': 'PUNTA'}}}
+    if team_source is not None:
+        config['team_source'] = team_source
+    return config
+
+
+def _parser(servizio, cookie, titolo, config, atteso=200):
+    stato, corpo, _ = _chiama(servizio, 'POST', '/api/me/parsers',
+                              corpo={'titolo': titolo, 'config': config},
+                              cookie=cookie)
+    assert stato == atteso, corpo
+    return _json(corpo)['slug'] if stato == 200 else corpo
+
+
+def _prova(servizio, cookie, slug, message):
+    stato, corpo, _ = _chiama(servizio, 'POST', f'/api/me/parsers/{slug}/test',
+                              corpo={'message': message}, cookie=cookie)
+    assert stato == 200, corpo
+    return _json(corpo)
+
+
+def test_il_parser_con_sorgente_traduce_nella_prova_e_avvisa(servizio, cookie_a):
+    """Il selettore del pezzo 3, dalla prova HTTP: alias tradotti, nome Betfair
+    diretto senza avviso (identita'), sconosciuta verbatim + avviso NON
+    bloccante, sorgente eliminata = passthrough puro."""
+    sport = _sport(servizio, cookie_a, 'Tr')
+    cid = _competizione(servizio, cookie_a, sport, 'Serie Tr')
+    ju = _squadra(servizio, cookie_a, cid, 'Juventus')
+    mi = _squadra(servizio, cookie_a, cid, 'AC Milan')
+    sid = _sorgente(servizio, cookie_a, 'canale tr')
+    slug = None
+    try:
+        _metti_alias(servizio, cookie_a, cid, sid,
+                     {str(ju): 'Juve', str(mi): 'Milan'})
+        slug = _parser(servizio, cookie_a, 'Con sorgente',
+                       _config_con_squadre(team_source=sid))
+        esito = _prova(servizio, cookie_a, slug, 'P.Bet.\nJuve v Milan')
+        assert esito['event'] == 'Juventus - AC Milan', esito
+        assert esito['avvisi'] == [] and esito['complete'] is True, esito
+        # Il nome Betfair scritto direttamente e' un'identita': zero avvisi.
+        esito = _prova(servizio, cookie_a, slug, 'P.Bet.\nAC Milan v Juve')
+        assert esito['event'] == 'AC Milan - Juventus', esito
+        assert esito['avvisi'] == [], esito
+        # La sconosciuta: verbatim nel feed, avviso che la nomina, NON blocca.
+        esito = _prova(servizio, cookie_a, slug, 'P.Bet.\nJuve v Fantasma')
+        assert esito['event'] == 'Juventus - Fantasma', esito
+        assert len(esito['avvisi']) == 1 and 'Fantasma' in esito['avvisi'][0], esito
+        assert esito['complete'] is True, esito
+        # Sorgente eliminata dopo il salvataggio del parser: passthrough puro,
+        # come «nessuna sorgente» — niente traduzione e niente avvisi.
+        _chiama(servizio, 'DELETE', f'/api/me/sorgenti-squadre/{sid}',
+                cookie=cookie_a)
+        esito = _prova(servizio, cookie_a, slug, 'P.Bet.\nJuve v Milan')
+        assert esito['event'] == 'Juve - Milan', esito
+        assert esito['avvisi'] == [], esito
+    finally:
+        if slug:
+            _chiama(servizio, 'DELETE', f'/api/me/parsers/{slug}', cookie=cookie_a)
+        _chiama(servizio, 'DELETE', f'/api/me/sorgenti-squadre/{sid}',
+                cookie=cookie_a)
+        _chiama(servizio, 'DELETE', f'/api/me/sports/{sport}', cookie=cookie_a)
+
+
+def test_team_source_altrui_inesistente_o_malformato_e_un_422(servizio, cookie_a,
+                                                              cookie_b):
+    """Il riferimento si valida al confine di scrittura, come `betfair` (#33):
+    la sorgente di un ALTRO utente e' indistinguibile da una inesistente."""
+    sid_b = _sorgente(servizio, cookie_b, 'di B tr')
+    try:
+        for finto in (sid_b, 999999, 'x', True):
+            corpo = _parser(servizio, cookie_a, 'Abusivo',
+                            _config_con_squadre(team_source=finto), atteso=422)
+            assert b'sorgente' in corpo or b'team_source' in corpo, corpo
+    finally:
+        _chiama(servizio, 'DELETE', f'/api/me/sorgenti-squadre/{sid_b}',
+                cookie=cookie_b)
+
+
+def test_il_webhook_traduce_e_scrive_l_avviso_nei_log(tmp_path, monkeypatch):
+    """End-to-end sul percorso VERO di produzione: Telegram → dispatch →
+    motore con la mappa → feed tradotto, e l'avviso della squadra sconosciuta
+    finisce in message_logs (e' l'unico posto dove il cliente lo vede)."""
+    import asyncio
+    import json as json_mod
+    import sqlite3
+
+    import main
+    from tests.dati import relay_in_processo
+    from tests.relay.test_webhook import BOT_FINTO, CHAT, RichiestaFinta
+
+    percorso = relay_in_processo(monkeypatch, tmp_path / 'squadre.db',
+                                 chat_ids=CHAT)
+    monkeypatch.setattr(main, 'SEGRETO_WEBHOOK', main.webhook_secret(BOT_FINTO))
+
+    c = sqlite3.connect(percorso)
+    utente = c.execute('SELECT user_id FROM parsers WHERE name=?',
+                       (main.DEFAULT_PARSER,)).fetchone()[0]
+    c.execute('INSERT INTO sports(user_id, nome, slug) VALUES (?,?,?)',
+              (utente, 'Calcio', 'calcio'))
+    sport_id = c.execute('SELECT id FROM sports WHERE user_id=? AND slug=?',
+                         (utente, 'calcio')).fetchone()[0]
+    c.execute('INSERT INTO competizioni(user_id, sport_id, nome) VALUES (?,?,?)',
+              (utente, sport_id, 'Serie A'))
+    cid = c.execute('SELECT id FROM competizioni WHERE user_id=?',
+                    (utente,)).fetchone()[0]
+    c.execute('INSERT INTO squadre_betfair(competizione_id, nome) VALUES (?,?)',
+              (cid, 'Juventus'))
+    ju = c.execute('SELECT id FROM squadre_betfair WHERE competizione_id=?',
+                   (cid,)).fetchone()[0]
+    c.execute('INSERT INTO sorgenti_squadre(user_id, nome) VALUES (?,?)',
+              (utente, 'canale'))
+    sid = c.execute('SELECT id FROM sorgenti_squadre WHERE user_id=?',
+                    (utente,)).fetchone()[0]
+    c.execute('INSERT INTO alias_squadre(sorgente_id, squadra_id, alias)'
+              ' VALUES (?,?,?)', (sid, ju, 'Juve'))
+    c.execute('UPDATE parsers SET config_json=? WHERE name=?',
+              (json_mod.dumps(_config_con_squadre(team_source=sid)),
+               main.DEFAULT_PARSER))
+    c.commit()
+    c.close()
+
+    payload = {'message': {'chat': {'id': int(CHAT)},
+                           'text': 'P.Bet.\nJuve v Fantasma'}}
+    risposta = asyncio.run(main.telegram_webhook(RichiestaFinta(
+        {'X-Telegram-Bot-Api-Secret-Token': main.webhook_secret(BOT_FINTO)},
+        payload)))
+    assert risposta.get('event') == 'Juventus - Fantasma', risposta
+
+    c = sqlite3.connect(percorso)
+    esiti = [r[0] for r in c.execute('SELECT esito FROM message_logs').fetchall()]
+    c.close()
+    assert any(e.startswith('avviso:') and 'Fantasma' in e for e in esiti), esiti

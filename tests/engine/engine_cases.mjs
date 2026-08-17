@@ -372,10 +372,31 @@ function casiConfronto() {
   // ombreggiarlo funzionava, ma una modifica futura qui dentro rischierebbe l-array
   // sbagliato. Segnalato da CodeRabbit sulla PR #28.
   const confronti = [];
-  const aggiungi = (nome, message, config) =>
-    confronti.push({ nome, message, config, atteso: runParser(message, config) });
+  // `aliasMap` e' il quarto argomento OPZIONALE (#34 pezzo 3): quando c'e',
+  // il gemello Python riceve la stessa mappa e deve produrre lo stesso
+  // EventName tradotto e gli stessi `avvisi`.
+  const aggiungi = (nome, message, config, aliasMap) =>
+    confronti.push({ nome, message, config, aliasMap,
+                     atteso: runParser(message, config, aliasMap) });
 
   const prod = configProduzione();
+  // --- Sorgente squadre (#34 pezzo 3): la traduzione deve essere identica ---
+  aggiungi('sorgente: entrambe le squadre tradotte', MSG_VALIDO, prod,
+    { 'Manchester City': 'Man City FC', 'Aston Villa': 'Aston Villa FC' });
+  aggiungi('sorgente: squadra sconosciuta → verbatim + stesso avviso',
+    MSG_VALIDO, prod, { 'Manchester City': 'Man City FC' });
+  aggiungi('sorgente: " v " dentro un nome squadra, mappa con identita\'',
+    `P.Bet. PREMACHT 0,5HT\n${VS} Man v City v Napoli\n@ 1.90`, prod,
+    { 'Man v City': 'Manchester City', Napoli: 'SSC Napoli' });
+  aggiungi('sorgente: mappa vuota → tutto verbatim con due avvisi',
+    MSG_VALIDO, prod, {});
+  // Chiavi che in JS vivono anche sul prototype: costruite con JSON.parse,
+  // che crea proprieta' PROPRIE anche per __proto__ — un literal {__proto__}
+  // imposterebbe il prototipo e la chiave sparirebbe (Sol, PR #67).
+  aggiungi('sorgente: chiavi da prototype (__proto__, toString) non ingannano',
+    MSG_VALIDO, prod,
+    JSON.parse('{"__proto__":"Ghost","toString":"X",'
+      + '"Manchester City":"Man City","Aston Villa":"Villa"}'));
   aggiungi('prod: messaggio valido → completo', MSG_VALIDO, prod);
   aggiungi('prod: " v " dentro un nome squadra → sostituita solo l-ultima',
     `P.Bet. PREMACHT 0,5HT\n${VS} Man v City v Napoli\n@ 1.90`, prod);
@@ -756,6 +777,45 @@ caso('verifica: un campo con l-emoji viene respinto', () => {
   eq(String(respinto).includes('EventName'), true, 'il motivo nomina la colonna');
   row[COLUMNS.indexOf('EventName')] = 'Juventus - Palermo';
   eq(E.verifyCsv(toCsv(row)), null, 'il nome normale passa');
+  return 'ok';
+});
+
+// La sorgente squadre (#34 pezzo 3, decisioni del proprietario 17/08/2026):
+// con la mappa alias→Betfair il motore traduce le due meta' di EventName
+// (spezzato sull'ULTIMO ' - '), AVVISA senza bloccare sulla squadra
+// sconosciuta (verbatim nel feed), e senza mappa non tocca niente.
+caso('sorgente squadre: tradotto, avviso non bloccante, verbatim senza mappa', () => {
+  const columns = {}; for (const c of COLUMNS) columns[c] = { source: 'empty' };
+  columns.EventName = { source: 'line', anchor: ' v ', part: 'whole',
+    transforms: [{ op: 'replace_last', from: ' v ', to: ' - ' }, { op: 'trim' }] };
+  columns.MarketType = { source: 'constant', value: 'OVER_UNDER_15' };
+  columns.SelectionName = { source: 'constant', value: 'Over 1,5' };
+  columns.BetType = { source: 'constant', value: 'PUNTA' };
+  const config = { match: { type: 'contains', value: 'P.Bet.' }, columns };
+  const msg = 'P.Bet.\nJuve v Milan';
+  const i = COLUMNS.indexOf('EventName');
+
+  const piena = runParser(msg, config, { Juve: 'Juventus', Milan: 'AC Milan' });
+  eq(piena.row[i], 'Juventus - AC Milan', 'entrambe tradotte');
+  eq(piena.avvisi.length, 0, 'nessun avviso quando tutto mappa');
+  eq(piena.complete, true, 'la traduzione non blocca');
+
+  const mezza = runParser(msg, config, { Juve: 'Juventus' });
+  eq(mezza.row[i], 'Juventus - Milan', 'la sconosciuta resta verbatim');
+  eq(mezza.avvisi.length, 1, 'un avviso per la sconosciuta');
+  eq(mezza.avvisi[0].includes('Milan'), true, 'l-avviso nomina la squadra');
+  eq(mezza.complete, true, 'l-avviso NON blocca: complete resta true');
+
+  const senza = runParser(msg, config);
+  eq(senza.row[i], 'Juve - Milan', 'senza mappa: verbatim');
+  eq(senza.avvisi.length, 0, 'senza mappa niente avvisi');
+
+  // Un nome squadra che contiene ' v ' non va spezzato: la sostituzione
+  // dell'ULTIMO ' v ' e' l'invariante storica, la traduzione la rispetta.
+  const interno = runParser('P.Bet.\nManchester v City v Napoli', config,
+    { 'Manchester v City': 'Man City', Napoli: 'Napoli' });
+  eq(interno.row[i], 'Man City - Napoli', 'il v interno non spezza il nome');
+  eq(interno.avvisi.length, 0, 'l-identita' + ' in mappa non produce avvisi');
   return 'ok';
 });
 

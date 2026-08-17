@@ -56,7 +56,8 @@ SINCRONE = {'me', 'settings', 'getParser', 'telegramAuthUrl', 'suggest',
             # La libreria mercati (#33): il wizard le legge dentro un render.
             'sports', 'mercatiOf',
             # Le sorgenti squadre (#34): stesse ragioni, stesse viste.
-            'competizioni', 'competizione', 'aliasOf'}
+            # `sorgenti` e' del pezzo 3: la legge la card del wizard.
+            'competizioni', 'competizione', 'aliasOf', 'sorgenti'}
 
 
 def test_la_cache_sincrona_resta_sincrona():

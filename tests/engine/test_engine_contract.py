@@ -187,7 +187,11 @@ def test_i_due_motori_producono_lo_STESSO_runParser(casi):
         nome = caso_confronto['nome']
         atteso = caso_confronto['atteso']
         try:
-            ottenuto = main.esegui_parser(caso_confronto['message'], caso_confronto['config'])
+            # `aliasMap` (#34 pezzo 3): assente nei casi storici, presente in
+            # quelli della sorgente squadre — la firma Python deve accettarla.
+            ottenuto = main.esegui_parser(caso_confronto['message'],
+                                          caso_confronto['config'],
+                                          caso_confronto.get('aliasMap'))
         except Exception as e:  # noqa: BLE001 - un'eccezione E' una divergenza
             divergenti.append(f'{nome}: Python SOLLEVA {type(e).__name__}: {e}')
             continue
@@ -195,7 +199,10 @@ def test_i_due_motori_producono_lo_STESSO_runParser(casi):
         # mostrato all'utente. Due motori che scartano lo stesso messaggio per
         # ragioni diverse manderebbero il cliente su due piste diverse — e' il
         # difetto del Bridge che la #39 ha deciso di non ereditare.
-        for campo in ('matched', 'row', 'missing', 'scarti', 'complete'):
+        # `avvisi` sta nel confronto (#34 pezzo 3): e' il motivo mostrato
+        # all'utente per la squadra senza alias, e due motori che avvisano
+        # diversamente manderebbero il cliente su piste diverse.
+        for campo in ('matched', 'row', 'missing', 'scarti', 'avvisi', 'complete'):
             if ottenuto[campo] != atteso[campo]:
                 divergenti.append(
                     f'{nome} · {campo}: JS={atteso[campo]!r} Python={ottenuto[campo]!r}')
