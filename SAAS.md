@@ -993,6 +993,45 @@ Regole, tutte vincolate da `tests/relay/test_parser_crud.py`:
 - Le rotte `/api/parsers*` (admin, token del feed) **restano** invariate: le usa il
   proprietario. `/api/me/parsers*` è la faccia per-utente, additiva.
 
+### I mercati Betfair per-utente (#33)
+
+La libreria **sport → mercato → selezioni**, tutta per-utente e a inserimento libero.
+**Nessun catalogo incorporato** — correzione del proprietario del 13/08/2026: questi
+dati li crea ogni utente, e al primo login la sezione è vuota. Tre tabelle
+(`sports`, `betfair_markets`, `betfair_selections`); `user_id` vive **solo** su
+`sports`, mercati e selezioni ereditano la proprietà per join. La riparazione di un
+account passa da `_trasferisci_sport` (gemello di `_trasferisci_parser`): stesso slug
+su due utenti è uno stato legale, e il travaso lo ri-disambigua invece di sollevare.
+
+```text
+GET/POST /api/me/sports                          sport dell'utente ({nome} → {slug, nome})
+DELETE   /api/me/sports/{slug}                   cascata esplicita su mercati e selezioni
+GET/POST /api/me/sports/{slug}/mercati           {marketType, marketName, selections[]}
+DELETE   /api/me/sports/{slug}/mercati/{mid}
+GET/POST /api/me/sports/{slug}/mercati/{mid}/selezioni      {selectionName}
+DELETE   /api/me/sports/{slug}/mercati/{mid}/selezioni/{sid}
+```
+
+Isolamento come i parser: sessione, `user_id` mai dal corpo, **404** sugli altrui,
+401 prima del 422, cookie rinnovato da ogni rotta. Validazione: campi non vuoti,
+massimo 120 caratteri, **niente emoji** nei tre campi che finiscono nel CSV (#42);
+doppione esatto → **409**; quote per-tenant `MAX_SPORT_PER_UTENTE` (20),
+`MAX_MERCATI_PER_SPORT` (200), `MAX_SELEZIONI_PER_MERCATO` (200), misurate dentro il
+write-lock come la quota parser.
+
+**Il riferimento `config.betfair`.** Il wizard, quando compila da libreria, salva
+nella config del parser `betfair: {market_id, selection_id}` accanto alle tre regole
+costanti. Alla scrittura (POST e PUT) il server verifica che la selezione esista fra
+quelle **dell'utente** per quel mercato e che le tre costanti coincidano **byte per
+byte** coi valori della libreria: una selezione arbitraria via HTTP → 422 (è il test
+che la #33 chiede per nome). Una selezione coi segnaposto `{HOME_TEAM}`/`{AWAY_TEAM}`
+si può **creare** (è un dato, la #34 la renderà spendibile) ma non usare nel parser:
+il token uscirebbe letterale nel CSV e XTrader scarterebbe in silenzio — 422 col
+motivo. Eliminare un mercato **non** rompe i parser già salvati: le regole sono
+costanti, la libreria è provenienza, non dipendenza viva — la validazione avviene
+solo alla scrittura. Il motore non cambia: `betfair` è un campo che
+`esegui_parser`/`runParser` ignorano, e il contratto CSV resta intatto.
+
 ## Autenticazione
 
 Telegram Login Widget come percorso principale: la firma HMAC-SHA256 del
@@ -1537,6 +1576,7 @@ senza doppio ruolo.
 | Fatto | **Aggancio web app → backend** (PR 8 del piano sincronizzato in #2, #32 · 3.3a): `web/api.js` parla col relay via `fetch` (login a password, login Telegram in modalità redirect di oauth.telegram.org costruito col `bot_id` di `GET /api/settings`, CRUD parser, prova sul server con gli `scarti`, token del feed a livello utente), il vecchio layer a `localStorage` vive in `web/api_finta.js` per la sola copia dimostrativa a file unico. Test browser end-to-end in `tests/web/` |
 | Fatto | **Schermate dell'accesso su approvazione** (PR 9, #7 lato cliente): il gate sugli stati in `render()`, le quattro schermate (registrato/in_attesa/scaduto/sospeso) con «Richiedi accesso» sul `POST` vero e il deep link del bot, la pillola gialla con 5 giorni o meno. Test browser con utenti seminati e cookie firmati in `tests/web/test_schermate_accesso.py` |
 | Fatto | **Pannello Richieste** (PR 10, #7 lato admin): la vista con l'elenco, «Attiva» col campo giorni libero e l'avviso Telegram fallito **visibile**, «Rifiuta» con conferma, il giro dei promemoria. Test browser end-to-end con decisioni verificate sul database in `tests/web/test_pannello_admin.py` |
+| Fatto | **Mercati Betfair per-utente** (PR 12, #33): la libreria sport → mercato → selezioni a inserimento libero (nessun catalogo incorporato), le rotte `/api/me/sports*` isolate, la vista «Mercati Betfair» e il wizard «Da mercati Betfair» a due passi con `config.betfair` validato alla scrittura. I segnaposto handicap restano fail-closed fino alla #34. Test in `tests/relay/test_mercati.py` e `tests/web/test_mercati_web.py` |
 | M3 | «Entra come» e lo storico di `admin_audit` nel pannello: servono rotte nuove lato server |
 | M4 | Log persistenti, sospensione, suggerimento AI lato server, abbonamenti |
 
@@ -1654,9 +1694,39 @@ Telegram: i due avvisi devono raccontare la stessa storia.
 
 ### Struttura
 
-Sidebar: «Dashboard», «Parser», «Feed CSV», «Chat Telegram», «Log messaggi»,
-«Impostazioni», più nome utente, profilo (slug) e «Esci». **Solo per
+Sidebar: «Dashboard», «Parser», «Mercati Betfair», «Feed CSV», «Chat Telegram»,
+«Log messaggi», «Impostazioni», più nome utente, profilo (slug) e «Esci». **Solo per
 l'amministratore** compare anche «Richieste», subito sotto la Dashboard.
+
+### La libreria «Mercati Betfair» (#33)
+
+Tre livelli, con la briciola in alto per risalire:
+
+- **Elenco sport** (`#/mercati`): parte **vuoto** — «Non hai ancora sport: si parte
+  da zero, come deve essere» — con «Nuovo sport» (modale col solo nome) e, per ogni
+  sport, il conteggio dei mercati e «× elimina» con conferma («I parser già salvati
+  non cambiano: le loro regole restano»).
+- **Mercati dello sport** (`#/mercati/{sport}`): «Crea mercato» apre la modale a
+  **inserimento libero** — «MarketType (codice)» e «MarketName (etichetta)»: «scrivi
+  il codice e il nome come li vuole XTrader. Le selezioni le aggiungi dopo, dentro il
+  mercato». Ogni riga mostra il MarketType (mono, cliccabile), il MarketName e il
+  conteggio selezioni, più «× elimina» con conferma.
+- **Selezioni del mercato** (`#/mercati/{sport}/{id}`): la lista con «×» per riga, il
+  campo «es. Over 0,5 goal» e «Aggiungi» — «crea tutte le selezioni che ti servono:
+  due per un Over/Under, tante per un Risultato esatto». Una selezione coi segnaposto
+  squadra porta la nota «spendibile nel parser quando arriverà la sorgente squadre
+  (#34)». L'errore del server (doppione, tetto) compare sotto il campo, verbatim.
+
+**Il wizard a due passi.** Sul passo `MarketType` compare il quarto tab «Da mercati
+Betfair»: ① «Scegli il mercato — MarketName si compila da solo» (lista delle righe
+`MarketType · MarketName` dell'utente, con la tendina Sport se ne ha più d'uno);
+② «Scegli il risultato — solo le selezioni che hai creato». La scelta compila
+MarketType, MarketName e SelectionName come costanti, salva il riferimento
+`betfair` nella config e lo dice col banner «Scelto dalla libreria…». Le selezioni
+coi segnaposto sono **spente** («— spendibile con la sorgente squadre (#34)»). Se
+l'utente riscrive a mano una delle tre colonne, il riferimento si toglie da solo al
+salvataggio (`coerenzaBetfair`): restano costanti libere, come sono sempre state.
+Libreria vuota → «Crea sport e mercati in Mercati Betfair, poi torna qui».
 
 ### Il pannello Richieste (#7, solo amministratore)
 

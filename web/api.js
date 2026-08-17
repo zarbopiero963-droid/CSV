@@ -304,3 +304,71 @@ export function feedUrl() {
 export function hasToken() {
   return Boolean(stato.me && stato.me.token_prefix);
 }
+
+/* -------------------------------------------------- mercati Betfair (#33) */
+
+// La libreria e' PER-UTENTE e vive sul server: qui c'e' solo la cache sincrona
+// che il wizard legge dentro un render (che non puo' aspettare la rete).
+// `sports()`/`mercatiOf()` restituiscono `null` finche' il rispettivo `load*`
+// non e' passato: e' il segnale «mostra Caricamento…», diverso da «vuoto».
+stato.sports = null;
+stato.mercati = {};   // slug sport -> lista mercati con selezioni annidate
+
+export async function loadSports() {
+  stato.sports = (await http('GET', '/api/me/sports')).sports;
+  return stato.sports;
+}
+
+export function sports() { return stato.sports; }
+
+export async function loadMercati(sport) {
+  const r = await http('GET', `/api/me/sports/${encodeURIComponent(sport)}/mercati`);
+  stato.mercati[sport] = r.mercati;
+  return r.mercati;
+}
+
+export function mercatiOf(sport) {
+  return Object.prototype.hasOwnProperty.call(stato.mercati, sport)
+    ? stato.mercati[sport] : null;
+}
+
+export async function createSport(nome) {
+  const sport = await http('POST', '/api/me/sports', { nome });
+  await loadSports();
+  return sport;
+}
+
+export async function deleteSport(slug) {
+  await http('DELETE', `/api/me/sports/${encodeURIComponent(slug)}`);
+  delete stato.mercati[slug];
+  await loadSports();
+}
+
+export async function createMercato(sport, dati) {
+  const mercato = await http(
+    'POST', `/api/me/sports/${encodeURIComponent(sport)}/mercati`, dati);
+  await loadMercati(sport);
+  return mercato;
+}
+
+export async function deleteMercato(sport, id) {
+  await http('DELETE',
+             `/api/me/sports/${encodeURIComponent(sport)}/mercati/${id}`);
+  await loadMercati(sport);
+}
+
+export async function createSelezione(sport, mercato, selectionName) {
+  const selezione = await http(
+    'POST',
+    `/api/me/sports/${encodeURIComponent(sport)}/mercati/${mercato}/selezioni`,
+    { selectionName });
+  await loadMercati(sport);
+  return selezione;
+}
+
+export async function deleteSelezione(sport, mercato, id) {
+  await http(
+    'DELETE',
+    `/api/me/sports/${encodeURIComponent(sport)}/mercati/${mercato}/selezioni/${id}`);
+  await loadMercati(sport);
+}

@@ -123,6 +123,29 @@ La config viene validata alla creazione (struttura + dry-run): una config storta
 422 col motivo. La prova (/test) e' a secco: non scrive nel feed di nessuno, e dice
 se la condizione ha combaciato e quali colonne obbligatorie mancano.
 
+MERCATI BETFAIR DELL'UTENTE (#33, SESSIONE)
+La libreria sport -> mercato (MarketType + MarketName) -> selezioni (SelectionName),
+tutta PER-UTENTE e a inserimento libero: NESSUN catalogo incorporato, al primo login
+e' vuota. Isolamento come i parser: 404 sugli altrui, user_id dalla sessione.
+GET    /api/me/sports                                 gli sport dell'utente
+POST   /api/me/sports                                 body {"nome":"Calcio"}
+DELETE /api/me/sports/SLUG                            elimina sport + mercati + selezioni
+GET    /api/me/sports/SLUG/mercati                    mercati con selezioni annidate
+POST   /api/me/sports/SLUG/mercati                    body {"marketType","marketName","selections":[...]}
+DELETE /api/me/sports/SLUG/mercati/ID
+GET    /api/me/sports/SLUG/mercati/ID/selezioni       la tendina del passo 2 del wizard
+POST   /api/me/sports/SLUG/mercati/ID/selezioni       body {"selectionName":"..."}
+DELETE /api/me/sports/SLUG/mercati/ID/selezioni/ID
+Campi obbligatori non vuoti, massimo 120 caratteri, niente emoji nei tre campi che
+finiscono nel CSV (#42); doppione esatto -> 409. Quote: MAX_SPORT_PER_UTENTE (20),
+MAX_MERCATI_PER_SPORT (200), MAX_SELEZIONI_PER_MERCATO (200), regolabili da variabile.
+Il wizard puo' salvare nel parser il riferimento config.betfair {market_id,
+selection_id}: il server verifica alla scrittura che la selezione esista fra quelle
+DELL'UTENTE e che le tre costanti coincidano coi valori della libreria (422 se no);
+una selezione coi segnaposto {HOME_TEAM}/{AWAY_TEAM} e' rifiutata finche' non esiste
+la sorgente squadre (#34). Eliminare un mercato NON rompe i parser gia' salvati: le
+regole sono costanti, la libreria e' provenienza, non dipendenza viva.
+
 QUOTE E TETTI PER-TENANT (il database e il volume Railway sono CONDIVISI)
 - massimo MAX_PARSER_PER_UTENTE parser per utente (default 20, si alza dalla
   variabile su Railway senza deploy): oltre, la creazione risponde 409 col limite.
