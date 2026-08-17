@@ -700,6 +700,14 @@ MAX_SPORT_PER_UTENTE = _intero_da_env('MAX_SPORT_PER_UTENTE', 20)
 MAX_MERCATI_PER_SPORT = _intero_da_env('MAX_MERCATI_PER_SPORT', 200)
 MAX_SELEZIONI_PER_MERCATO = _intero_da_env('MAX_SELEZIONI_PER_MERCATO', 200)
 MAX_CAMPO_MERCATO = 120
+# Sorgenti squadre (#34): stessi motivi, stessi ordini di grandezza. Le squadre
+# hanno un tetto PER COMPETIZIONE (un campionato reale ne ha ~20; 100 lascia
+# margine a chi archivia stagioni) e gli alias non hanno un tetto proprio:
+# esistono solo per squadre esistenti di sorgenti esistenti, quindi sono gia'
+# limitati da squadre x sorgenti.
+MAX_SORGENTI_PER_UTENTE = _intero_da_env('MAX_SORGENTI_PER_UTENTE', 20)
+MAX_COMPETIZIONI_PER_UTENTE = _intero_da_env('MAX_COMPETIZIONI_PER_UTENTE', 50)
+MAX_SQUADRE_PER_COMPETIZIONE = _intero_da_env('MAX_SQUADRE_PER_COMPETIZIONE', 100)
 # In BYTE, sul corpo HTTP grezzo: i tetti sui campi qui sopra si misurano solo DOPO la
 # deserializzazione, e a quel punto il corpo e' gia' tutto in RAM. 64 KiB lasciano oltre
 # 3x di margine a un corpo legittimo (config 20k + titolo 80, serializzati ASCII).
@@ -823,6 +831,29 @@ SCHEMA_MULTIUTENTE = (
     'CREATE TABLE IF NOT EXISTS betfair_selections (id INTEGER PRIMARY KEY AUTOINCREMENT,'
     ' market_id INTEGER NOT NULL, selection_name TEXT NOT NULL,'
     ' UNIQUE (market_id, selection_name))',
+    # Sorgenti squadre (#34, pezzo 1). La COMPETIZIONE (sport → «Serie A»)
+    # possiede la lista canonica dei nomi Betfair: salvata una volta, e' l'unica
+    # colonna che finira' nel CSV. La SORGENTE e' una colonna di alias sopra
+    # quella stessa lista: UNIQUE (sorgente, squadra) = un solo alias per
+    # squadra per sorgente (deciso dal proprietario). `alias_squadre` non ha
+    # user_id: la proprieta' si risolve per join dai due lati, sorgente e
+    # squadra→competizione, e le rotte verificano ENTRAMBI. Cascate esplicite
+    # nelle rotte, come per la libreria mercati qui sopra.
+    'CREATE TABLE IF NOT EXISTS competizioni (id INTEGER PRIMARY KEY AUTOINCREMENT,'
+    ' user_id INTEGER NOT NULL, sport_id INTEGER NOT NULL, nome TEXT NOT NULL,'
+    ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP,'
+    ' UNIQUE (user_id, sport_id, nome))',
+    'CREATE TABLE IF NOT EXISTS squadre_betfair (id INTEGER PRIMARY KEY AUTOINCREMENT,'
+    ' competizione_id INTEGER NOT NULL, nome TEXT NOT NULL,'
+    ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP,'
+    ' UNIQUE (competizione_id, nome))',
+    'CREATE TABLE IF NOT EXISTS sorgenti_squadre (id INTEGER PRIMARY KEY AUTOINCREMENT,'
+    ' user_id INTEGER NOT NULL, nome TEXT NOT NULL,'
+    ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP,'
+    ' UNIQUE (user_id, nome))',
+    'CREATE TABLE IF NOT EXISTS alias_squadre (id INTEGER PRIMARY KEY AUTOINCREMENT,'
+    ' sorgente_id INTEGER NOT NULL, squadra_id INTEGER NOT NULL, alias TEXT NOT NULL,'
+    ' UNIQUE (sorgente_id, squadra_id))',
     # Le migrazioni che vanno fatte UNA VOLTA SOLA per database, non a ogni avvio.
     # Nasce con la rimozione del seme (#25 lavoro E): il travaso dei link
     # `parser_chats` dai profili legacy e' una conversione di dati, e una
@@ -1535,6 +1566,7 @@ def riconcilia_su_utente(c, da_utente, a_utente):
                   (a_utente, da_utente))
     _trasferisci_parser(c, da_utente, a_utente)
     _trasferisci_sport(c, da_utente, a_utente)
+    _trasferisci_sorgenti_squadre(c, da_utente, a_utente)
     # `session_version` incrementata sulla riga svuotata: i cookie emessi per quell'account
     # restano altrimenti validi, e da quel momento aprono una sessione su un utente che non
     # possiede piu' niente. Appartengono comunque al proprietario, quindi non e' un buco di
@@ -1593,6 +1625,43 @@ def _trasferisci_sport(c, da_utente, a_utente):
             c.execute('UPDATE sports SET slug=? WHERE id=?',
                       (_slug_libero(slug, presi), sport_id))
         c.execute('UPDATE sports SET user_id=? WHERE id=?', (a_utente, sport_id))
+
+
+def _trasferisci_sorgenti_squadre(c, da_utente, a_utente):
+    """Passa sorgenti squadre e competizioni (#34) di un utente a un altro.
+
+    Stessa classe di `_trasferisci_parser`/`_trasferisci_sport`: `UNIQUE
+    (user_id, nome)` rende legale «test 1» su due utenti diversi, quindi il
+    travaso cieco collide e solleva — chi era gia' del destinatario tiene il
+    suo nome, chi arriva viene rinominato con un suffisso numerico. Le
+    competizioni riferiscono `sport_id`, che il travaso degli sport non cambia:
+    seguono i loro sport, ma il loro `user_id` va comunque riscritto o
+    resterebbero appese all'account svuotato. Squadre e alias riferiscono
+    `competizione_id`/`sorgente_id` e non si toccano. `competizioni.user_id` e
+    `sorgenti_squadre.user_id` sono percio' fuori da `RIFERIMENTI_UTENTE`,
+    come `sports.user_id`, e la guardia dello schema lo dichiara.
+    """
+    for sorgente_id, nome in c.execute(
+            'SELECT id, nome FROM sorgenti_squadre WHERE user_id=? ORDER BY id',
+            (da_utente,)).fetchall():
+        nuovo = nome
+        if c.execute('SELECT 1 FROM sorgenti_squadre WHERE user_id=? AND nome=?',
+                     (a_utente, nome)).fetchone():
+            presi = {r[0] for r in c.execute(
+                'SELECT nome FROM sorgenti_squadre').fetchall()}
+            progressivo = 2
+            while f'{nome} ({progressivo})' in presi:
+                progressivo += 1
+            nuovo = f'{nome} ({progressivo})'
+            c.execute('UPDATE sorgenti_squadre SET nome=? WHERE id=?',
+                      (nuovo, sorgente_id))
+        c.execute('UPDATE sorgenti_squadre SET user_id=? WHERE id=?',
+                  (a_utente, sorgente_id))
+    # Le competizioni non hanno lo stesso rischio di collisione: `UNIQUE
+    # (user_id, sport_id, nome)` include `sport_id`, e gli sport restano righe
+    # DISTINTE anche dopo il travaso (cambia il loro user_id, mai il loro id).
+    c.execute('UPDATE competizioni SET user_id=? WHERE user_id=?',
+              (a_utente, da_utente))
 
 
 def _completa_colonne_nuove(c, profilo_proprietario):
@@ -1695,6 +1764,7 @@ def _travasa_nel_multiutente(c):
                           (superstite, perdente))
             _trasferisci_parser(c, perdente, superstite)
             _trasferisci_sport(c, perdente, superstite)
+            _trasferisci_sorgenti_squadre(c, perdente, superstite)
             c.execute('UPDATE users SET origin_profile=NULL WHERE id=?', (perdente,))
     # `ORDER BY name` non e' decorazione: decide CHI vince quando due profili
     # rivendicano la stessa cosa — una chat o un parser. Senza, «il primo» significa
@@ -4992,6 +5062,16 @@ def elimina_sport_mio(slug: str, request: Request):
         c.execute('DELETE FROM betfair_selections WHERE market_id IN'
                   ' (SELECT id FROM betfair_markets WHERE sport_id=?)', (sport[0],))
         c.execute('DELETE FROM betfair_markets WHERE sport_id=?', (sport[0],))
+        # E le competizioni (#34), che vivono sotto lo sport: senza queste tre
+        # DELETE resterebbero righe orfane — invisibili alle API (la proprieta'
+        # si risolve passando dallo sport) e non piu' eliminabili. Le sorgenti
+        # NON si toccano: sono dell'utente, non dello sport.
+        c.execute('DELETE FROM alias_squadre WHERE squadra_id IN'
+                  ' (SELECT q.id FROM squadre_betfair q JOIN competizioni k'
+                  '  ON q.competizione_id = k.id WHERE k.sport_id=?)', (sport[0],))
+        c.execute('DELETE FROM squadre_betfair WHERE competizione_id IN'
+                  ' (SELECT id FROM competizioni WHERE sport_id=?)', (sport[0],))
+        c.execute('DELETE FROM competizioni WHERE sport_id=?', (sport[0],))
         c.execute('DELETE FROM sports WHERE id=?', (sport[0],))
         c.commit()
     finally:
@@ -5145,6 +5225,360 @@ def elimina_selezione_mia(slug: str, mid: str, sid: str, request: Request):
     finally:
         c.close()
     return _rispondi_con_sessione(utente['id'], utente['versione'], {'ok': True})
+
+
+# --------------------------------------------------- sorgenti squadre (#34)
+
+def _sorgente_o_404(c, user_id, sid):
+    """La sorgente DELL'UTENTE, o 404: un id altrui non esiste, per definizione."""
+    sid = _intero_o_404(sid, 'sorgente')
+    riga = c.execute('SELECT id, nome FROM sorgenti_squadre WHERE id=? AND user_id=?',
+                     (sid, user_id)).fetchone()
+    if not riga:
+        raise HTTPException(404, 'sorgente non trovata')
+    return riga
+
+
+def _competizione_o_404(c, user_id, cid):
+    cid = _intero_o_404(cid, 'competizione')
+    riga = c.execute(
+        'SELECT k.id, k.nome, s.slug FROM competizioni k JOIN sports s'
+        ' ON s.id = k.sport_id WHERE k.id=? AND k.user_id=?',
+        (cid, user_id)).fetchone()
+    if not riga:
+        raise HTTPException(404, 'competizione non trovata')
+    return riga
+
+
+def _inserisci_competizione(c, user_id, sport_id, nome):
+    """INSERT condizionato all'esistenza dello sport, in UNO statement.
+
+    Stessa classe TOCTOU di `_inserisci_mercato` ([REAL_FINDING] della PR #55),
+    applicata da subito: fra il controllo di proprieta' (una lettura) e l'INSERT
+    una DELETE concorrente dello sport puo' committare, e l'INSERT diretto
+    scriverebbe una competizione orfana — invisibile alle API e non piu'
+    eliminabile. None = sport sparito, il chiamante risponde 404.
+    """
+    c.execute('INSERT INTO competizioni(user_id, sport_id, nome)'
+              ' SELECT ?,?,? WHERE EXISTS (SELECT 1 FROM sports WHERE id=?)',
+              (user_id, sport_id, nome, sport_id))
+    if not c.execute('SELECT changes()').fetchone()[0]:
+        return None
+    return c.execute('SELECT last_insert_rowid()').fetchone()[0]
+
+
+def _inserisci_squadra(c, competizione_id, nome):
+    """Come `_inserisci_competizione`, per la squadra: il padre e' la competizione.
+
+    Copre anche lo sport eliminato nel frattempo: la sua DELETE porta via le
+    competizioni nella stessa transazione (vedi `elimina_sport_mio`), quindi la
+    competizione sparita e' il sintomo unico da controllare.
+    """
+    c.execute('INSERT INTO squadre_betfair(competizione_id, nome)'
+              ' SELECT ?,? WHERE EXISTS (SELECT 1 FROM competizioni WHERE id=?)',
+              (competizione_id, nome, competizione_id))
+    if not c.execute('SELECT changes()').fetchone()[0]:
+        return None
+    return c.execute('SELECT last_insert_rowid()').fetchone()[0]
+
+
+@app.get('/api/me/sorgenti-squadre')
+def sorgenti_mie(request: Request):
+    """Le sorgenti squadre dell'utente. Al primo login: VUOTO, per progetto."""
+    utente = _sessione_valida(request)
+    c = db()
+    try:
+        righe = c.execute('SELECT id, nome FROM sorgenti_squadre WHERE user_id=?'
+                          ' ORDER BY nome', (utente['id'],)).fetchall()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'], {'sorgenti': [
+        {'id': r[0], 'nome': r[1]} for r in righe]})
+
+
+@app.post('/api/me/sorgenti-squadre')
+async def crea_sorgente_mia(request: Request):
+    """Crea una sorgente. Il nome e' un'etichetta della UI: emoji libere."""
+    utente = _sessione_valida(request)
+    corpo = await _oggetto_dal_corpo(request, '{"nome": "..."}')
+    nome = _campo_mercato('nome', corpo.get('nome', ''), vieta_emoji=False)
+    c = db()
+    try:
+        try:
+            c.execute('INSERT INTO sorgenti_squadre(user_id, nome) VALUES (?,?)',
+                      (utente['id'], nome))
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, 'hai gia\' una sorgente con questo nome') from None
+        # Quota DOPO l'INSERT, dentro il suo write-lock: misurata prima, due
+        # POST concorrenti sull'ultimo posto la bucherebbero entrambi (stessa
+        # corsa della quota parser, PR #30). Il perdente riceve 409 e la close
+        # senza commit toglie la sua riga.
+        quante = c.execute('SELECT COUNT(*) FROM sorgenti_squadre WHERE user_id=?',
+                           (utente['id'],)).fetchone()[0]
+        if quante > MAX_SORGENTI_PER_UTENTE:
+            raise HTTPException(
+                409, f'quota sorgenti esaurita: massimo {MAX_SORGENTI_PER_UTENTE} per utente')
+        nuovo = c.execute('SELECT last_insert_rowid()').fetchone()[0]
+        c.commit()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'],
+                                  {'id': nuovo, 'nome': nome})
+
+
+@app.patch('/api/me/sorgenti-squadre/{sid}')
+async def rinomina_sorgente_mia(sid: str, request: Request):
+    """Rinomina una sorgente (decisione della issue: rinominabile, non solo eliminabile)."""
+    utente = _sessione_valida(request)
+    corpo = await _oggetto_dal_corpo(request, '{"nome": "..."}')
+    nome = _campo_mercato('nome', corpo.get('nome', ''), vieta_emoji=False)
+    c = db()
+    try:
+        sorgente = _sorgente_o_404(c, utente['id'], sid)
+        try:
+            c.execute('UPDATE sorgenti_squadre SET nome=? WHERE id=?',
+                      (nome, sorgente[0]))
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, 'hai gia\' una sorgente con questo nome') from None
+        c.commit()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'],
+                                  {'id': sorgente[0], 'nome': nome})
+
+
+@app.delete('/api/me/sorgenti-squadre/{sid}')
+def elimina_sorgente_mia(sid: str, request: Request):
+    """Elimina la sorgente e i SUOI alias. Le squadre Betfair restano: sono
+    della competizione, condivise da tutte le sorgenti (deciso, 13/08)."""
+    utente = _sessione_valida(request)
+    c = db()
+    try:
+        sorgente = _sorgente_o_404(c, utente['id'], sid)
+        c.execute('DELETE FROM alias_squadre WHERE sorgente_id=?', (sorgente[0],))
+        c.execute('DELETE FROM sorgenti_squadre WHERE id=?', (sorgente[0],))
+        c.commit()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'], {'ok': True})
+
+
+@app.get('/api/me/competizioni')
+def competizioni_mie(request: Request):
+    utente = _sessione_valida(request)
+    c = db()
+    try:
+        righe = c.execute(
+            'SELECT k.id, s.slug, s.nome, k.nome,'
+            ' (SELECT COUNT(*) FROM squadre_betfair q WHERE q.competizione_id = k.id)'
+            ' FROM competizioni k JOIN sports s ON s.id = k.sport_id'
+            ' WHERE k.user_id=? ORDER BY s.nome, k.nome', (utente['id'],)).fetchall()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'], {'competizioni': [
+        {'id': r[0], 'sport': r[1], 'sportNome': r[2], 'nome': r[3], 'squadre': r[4]}
+        for r in righe]})
+
+
+@app.post('/api/me/competizioni')
+async def crea_competizione_mia(request: Request):
+    """Crea una competizione sotto uno sport DELL'UTENTE (riferito per slug, #33)."""
+    utente = _sessione_valida(request)
+    corpo = await _oggetto_dal_corpo(request, '{"sport": "slug", "nome": "..."}')
+    nome = _campo_mercato('nome', corpo.get('nome', ''), vieta_emoji=False)
+    c = db()
+    try:
+        sport = _sport_o_404(c, utente['id'], str(corpo.get('sport', '')))
+        try:
+            nuovo = _inserisci_competizione(c, utente['id'], sport[0], nome)
+        except sqlite3.IntegrityError:
+            raise HTTPException(
+                409, 'hai gia\' una competizione con questo nome in questo sport') from None
+        if nuovo is None:
+            # Lo sport e' morto fra il controllo e l'INSERT.
+            raise HTTPException(404, 'sport non trovato')
+        quante = c.execute('SELECT COUNT(*) FROM competizioni WHERE user_id=?',
+                           (utente['id'],)).fetchone()[0]
+        if quante > MAX_COMPETIZIONI_PER_UTENTE:
+            raise HTTPException(
+                409, f'quota competizioni esaurita: massimo {MAX_COMPETIZIONI_PER_UTENTE} per utente')
+        c.commit()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'],
+                                  {'id': nuovo, 'sport': sport[1], 'nome': nome})
+
+
+@app.get('/api/me/competizioni/{cid}')
+def competizione_mia(cid: str, request: Request):
+    """Il dettaglio che il pezzo 2 disegna in una schermata: le squadre Betfair
+    della competizione e i pulsanti delle sorgenti col badge `compilati`
+    (quante squadre hanno gia' l'alias in quella sorgente)."""
+    utente = _sessione_valida(request)
+    c = db()
+    try:
+        competizione = _competizione_o_404(c, utente['id'], cid)
+        squadre = c.execute('SELECT id, nome FROM squadre_betfair'
+                            ' WHERE competizione_id=? ORDER BY nome',
+                            (competizione[0],)).fetchall()
+        sorgenti = c.execute(
+            'SELECT g.id, g.nome,'
+            ' (SELECT COUNT(*) FROM alias_squadre a JOIN squadre_betfair q'
+            "  ON q.id = a.squadra_id WHERE a.sorgente_id = g.id AND a.alias != ''"
+            '  AND q.competizione_id=?)'
+            ' FROM sorgenti_squadre g WHERE g.user_id=? ORDER BY g.nome',
+            (competizione[0], utente['id'])).fetchall()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'], {
+        'id': competizione[0], 'nome': competizione[1], 'sport': competizione[2],
+        'squadre': [{'id': r[0], 'nome': r[1]} for r in squadre],
+        'sorgenti': [{'id': r[0], 'nome': r[1], 'compilati': r[2]} for r in sorgenti]})
+
+
+@app.delete('/api/me/competizioni/{cid}')
+def elimina_competizione_mia(cid: str, request: Request):
+    """Elimina la competizione, le sue squadre e gli alias relativi in TUTTE le
+    sorgenti. Cascata esplicita in una transazione, come per gli sport."""
+    utente = _sessione_valida(request)
+    c = db()
+    try:
+        competizione = _competizione_o_404(c, utente['id'], cid)
+        c.execute('DELETE FROM alias_squadre WHERE squadra_id IN'
+                  ' (SELECT id FROM squadre_betfair WHERE competizione_id=?)',
+                  (competizione[0],))
+        c.execute('DELETE FROM squadre_betfair WHERE competizione_id=?',
+                  (competizione[0],))
+        c.execute('DELETE FROM competizioni WHERE id=?', (competizione[0],))
+        c.commit()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'], {'ok': True})
+
+
+@app.post('/api/me/competizioni/{cid}/squadre')
+async def crea_squadra_mia(cid: str, request: Request):
+    """Aggiunge un nome Betfair alla competizione. E' l'unica colonna che
+    finira' nel CSV (EventName): emoji VIETATA, come per i mercati (#42)."""
+    utente = _sessione_valida(request)
+    corpo = await _oggetto_dal_corpo(request, '{"nome": "..."}')
+    nome = _campo_mercato('nome', corpo.get('nome', ''))
+    c = db()
+    try:
+        competizione = _competizione_o_404(c, utente['id'], cid)
+        try:
+            nuovo = _inserisci_squadra(c, competizione[0], nome)
+        except sqlite3.IntegrityError:
+            raise HTTPException(
+                409, 'squadra gia\' presente in questa competizione') from None
+        if nuovo is None:
+            raise HTTPException(404, 'competizione non trovata')
+        quante = c.execute('SELECT COUNT(*) FROM squadre_betfair WHERE competizione_id=?',
+                           (competizione[0],)).fetchone()[0]
+        if quante > MAX_SQUADRE_PER_COMPETIZIONE:
+            raise HTTPException(
+                409, f'quota squadre esaurita: massimo {MAX_SQUADRE_PER_COMPETIZIONE} per competizione')
+        c.commit()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'],
+                                  {'id': nuovo, 'nome': nome})
+
+
+@app.delete('/api/me/competizioni/{cid}/squadre/{sid}')
+def elimina_squadra_mia(cid: str, sid: str, request: Request):
+    """«× squadra» (deciso 13/08): via dalla competizione e, a cascata, dai
+    suoi alias in TUTTE le sorgenti. E' l'azione condivisa — la conferma la
+    chiede la UI (pezzo 2), il server esegue."""
+    utente = _sessione_valida(request)
+    c = db()
+    try:
+        competizione = _competizione_o_404(c, utente['id'], cid)
+        sid = _intero_o_404(sid, 'squadra')
+        c.execute('DELETE FROM alias_squadre WHERE squadra_id IN'
+                  ' (SELECT id FROM squadre_betfair WHERE id=? AND competizione_id=?)',
+                  (sid, competizione[0]))
+        tolte = c.execute('DELETE FROM squadre_betfair WHERE id=? AND competizione_id=?',
+                          (sid, competizione[0])).rowcount
+        if not tolte:
+            raise HTTPException(404, 'squadra non trovata')
+        c.commit()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'], {'ok': True})
+
+
+@app.get('/api/me/competizioni/{cid}/alias/{sid}')
+def alias_miei(cid: str, sid: str, request: Request):
+    """La tabella a due colonne del pezzo 2: ogni squadra Betfair della
+    competizione con l'alias che QUESTA sorgente le da' (vuoto se non c'e')."""
+    utente = _sessione_valida(request)
+    c = db()
+    try:
+        competizione = _competizione_o_404(c, utente['id'], cid)
+        sorgente = _sorgente_o_404(c, utente['id'], sid)
+        righe = c.execute(
+            'SELECT q.id, q.nome, IFNULL(a.alias, \'\')'
+            ' FROM squadre_betfair q LEFT JOIN alias_squadre a'
+            ' ON a.squadra_id = q.id AND a.sorgente_id=?'
+            ' WHERE q.competizione_id=? ORDER BY q.nome',
+            (sorgente[0], competizione[0])).fetchall()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'], {'alias': [
+        {'squadra_id': r[0], 'squadra': r[1], 'alias': r[2]} for r in righe]})
+
+
+@app.put('/api/me/competizioni/{cid}/alias/{sid}')
+async def scrivi_alias_miei(cid: str, sid: str, request: Request):
+    """Scrive gli alias di una sorgente per una competizione, a coppie
+    `{squadra_id: alias}`. Tocca SOLO le coppie presenti nel corpo; alias
+    vuoto = «⌫ alias», svuota solo qui (la squadra resta, e resta altrove).
+    UN alias per squadra per sorgente: la scrittura successiva sostituisce.
+
+    La proprieta' si verifica su ENTRAMBI i lati — competizione E sorgente —
+    perche' `alias_squadre` non ha `user_id`: senza il secondo controllo un PUT
+    scriverebbe dentro la sorgente di un altro utente.
+    """
+    utente = _sessione_valida(request)
+    corpo = await _oggetto_dal_corpo(request, '{"alias": {"<squadra_id>": "..."}}')
+    coppie = corpo.get('alias')
+    if not isinstance(coppie, dict):
+        raise HTTPException(422, 'alias deve essere un oggetto {"<squadra_id>": "..."}')
+    c = db()
+    try:
+        competizione = _competizione_o_404(c, utente['id'], cid)
+        sorgente = _sorgente_o_404(c, utente['id'], sid)
+        valide = {r[0] for r in c.execute(
+            'SELECT id FROM squadre_betfair WHERE competizione_id=?',
+            (competizione[0],)).fetchall()}
+        scritte = 0
+        for chiave, valore in coppie.items():
+            try:
+                squadra = int(chiave)
+            except (TypeError, ValueError):
+                raise HTTPException(422, f'squadra_id non numerico: {chiave!r}') from None
+            if squadra not in valide:
+                raise HTTPException(422, f'squadra {squadra} non in questa competizione')
+            if not isinstance(valore, str):
+                raise HTTPException(422, 'ogni alias deve essere una stringa')
+            valore = valore.strip()
+            if valore == '':
+                c.execute('DELETE FROM alias_squadre WHERE sorgente_id=? AND squadra_id=?',
+                          (sorgente[0], squadra))
+            else:
+                if len(valore) > MAX_CAMPO_MERCATO:
+                    raise HTTPException(
+                        422, f'alias troppo lungo: massimo {MAX_CAMPO_MERCATO} caratteri')
+                c.execute('INSERT INTO alias_squadre(sorgente_id, squadra_id, alias)'
+                          ' VALUES (?,?,?) ON CONFLICT(sorgente_id, squadra_id)'
+                          ' DO UPDATE SET alias=excluded.alias',
+                          (sorgente[0], squadra, valore))
+            scritte += 1
+        c.commit()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'], {'scritte': scritte})
 
 
 def _valida_betfair(c, user_id, config):
