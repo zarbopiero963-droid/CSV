@@ -35,6 +35,10 @@ magazzino.set(CHIAVE, JSON.stringify({
     // Una versione vecchia: squadre presenti, `prossimoId` mai scritto.
     { id: 4, sport: 'calcio', sportNome: 'Calcio', nome: 'Vecchia',
       squadre: [{ id: 5, nome: 'Inter' }] },
+    // Un id manomesso: senza risanamento avvelena il massimo globale (NaN)
+    // e le chiavi alias di TUTte le competizioni (Fable, PR #66).
+    { id: 5, sport: 'calcio', sportNome: 'Calcio', nome: 'Manomessa',
+      squadre: [{ id: 'x', nome: 'Fantasma' }], prossimoId: 1 },
   ],
   sorgenti: [{ id: 1, nome: 'canale' }],
   alias: { '1:1': 'Juve' },
@@ -112,6 +116,16 @@ await caso('un `squadre` non-array viene risanato, non lasciato esplodere', () =
 await caso('una competizione vecchia senza prossimoId non riusa gli id', async () => {
   const creata = await api.createSquadra(4, 'Lazio');
   esigi(creata.id > 6, `id gia' visti riusati: ${creata.id}`);
+  esigi(Number.isInteger(creata.id), `id non intero: ${creata.id}`);
+});
+
+await caso('un id squadra manomesso viene scartato, non propagato come NaN', async () => {
+  // Il risanamento butta l'entrata invalida: la competizione risponde vuota...
+  esigi(api.competizione(5).squadre.length === 0,
+    `la squadra con id 'x' doveva sparire: ${JSON.stringify(api.competizione(5).squadre)}`);
+  // ...e il massimo globale resta un numero: la prossima squadra ha un id vero.
+  const creata = await api.createSquadra(5, 'Vera');
+  esigi(Number.isInteger(creata.id), `id avvelenato dal dato manomesso: ${creata.id}`);
 });
 
 await caso('id squadra GLOBALI: gli alias di due competizioni non collidono', async () => {
@@ -183,6 +197,9 @@ await caso('_campoDemo rifiuta un nome non-stringa come il server', async () => 
 });
 
 await caso('deleteSquadra() e deleteCompetizione() chiudono senza TypeError', async () => {
+  // Prerequisito esplicito: se il caso di createSquadra e' fallito, meglio
+  // dirlo che mascherarlo con un `deleteSquadra(1, null)` fuorviante (Fable).
+  esigi(idMilan !== null, 'prerequisito mancante: createSquadra non ha prodotto un id');
   await api.deleteSquadra(1, idMilan);
   await api.deleteCompetizione(1);
   esigi(api.competizione(1) === null, 'la competizione eliminata non deve tornare');

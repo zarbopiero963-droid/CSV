@@ -381,6 +381,13 @@ function _competizioniDemo() {
   // (Fable e GPT-5.5, PR #66; regola 3 — tests/web/api_finta_squadre.mjs).
   stato.dati.competizioni.forEach(k => {
     if (!Array.isArray(k.squadre)) k.squadre = [];
+    // E dentro l'array, un'entrata senza id intero avvelenerebbe TUTTI i
+    // consumatori — le chiavi alias `${sorgente}:${squadra}`, le ricerche
+    // per id, il massimo globale che diventa NaN (Fable, PR #66). Si scarta
+    // al risanamento, una volta, non con una guardia in ogni sito.
+    else if (k.squadre.some(q => !q || !Number.isInteger(q.id))) {
+      k.squadre = k.squadre.filter(q => q && Number.isInteger(q.id));
+    }
   });
   return stato.dati.competizioni;
 }
