@@ -385,7 +385,11 @@ def test_la_roba_di_un_utente_non_esiste_per_un_altro(servizio, cookie_a, cookie
         assert _leggi_alias(servizio, cookie_a, cid, sid) == {'Juventus': ''}
     finally:
         _chiama(servizio, 'DELETE', f'/api/me/sorgenti-squadre/{sid}', cookie=cookie_a)
-        _chiama(servizio, 'DELETE', f'/api/me/sports/privato', cookie=cookie_a)
+        # Lo slug RESTITUITO dal server, non quello immaginato: `crea_sport_mio`
+        # disambigua col retry, e «privato» potrebbe essere nato «privato-2»
+        # (CodeRabbit, PR #64). Una pulizia sullo slug sbagliato lascerebbe lo
+        # sport di prova vivo e farebbe fallire un test LONTANO, sulla quota.
+        _chiama(servizio, 'DELETE', f'/api/me/sports/{sport}', cookie=cookie_a)
 
 
 def test_la_sorgente_di_a_non_si_aggancia_alla_competizione_di_b(servizio, cookie_a,
@@ -403,7 +407,7 @@ def test_la_sorgente_di_a_non_si_aggancia_alla_competizione_di_b(servizio, cooki
     finally:
         _chiama(servizio, 'DELETE', f'/api/me/sorgenti-squadre/{sid_a}',
                 cookie=cookie_a)
-        _chiama(servizio, 'DELETE', f'/api/me/sports/b-incrocio', cookie=cookie_b)
+        _chiama(servizio, 'DELETE', f'/api/me/sports/{sport}', cookie=cookie_b)
 
 
 # ------------------------------------------------- gli errori prima dei dati
@@ -462,15 +466,34 @@ def test_l_inserimento_non_lascia_orfani_se_il_padre_sparisce(tmp_path, monkeypa
     cid = main._inserisci_competizione(c, utente, sport, 'Serie A')
     squadra = main._inserisci_squadra(c, cid, 'Juventus')
 
-    assert main._scrivi_alias(c, sorgente, squadra, 'Juve') is True
-    assert main._scrivi_alias(c, sorgente, squadra, 'JUV') is True, 'sovrascrittura'
+    assert main._scrivi_alias(c, sorgente, squadra, cid, 'Juve') is True
+    assert main._scrivi_alias(c, sorgente, squadra, cid, 'JUV') is True, \
+        'la sovrascrittura conta come cambiamento anche a valore identico'
     assert c.execute('SELECT alias FROM alias_squadre WHERE sorgente_id=?'
                      ' AND squadra_id=?', (sorgente, squadra)).fetchone()[0] == 'JUV'
+    assert main._scrivi_alias(c, sorgente, squadra, cid, 'JUV') is True, \
+        'valore identico: changes() deve contare comunque, o la rotta darebbe 404'
 
     squadra_sparita = squadra + 1000
-    assert main._scrivi_alias(c, sorgente, squadra_sparita, 'Orfano') is None
+    assert main._scrivi_alias(c, sorgente, squadra_sparita, cid, 'Orfano') is None
     assert c.execute('SELECT COUNT(*) FROM alias_squadre WHERE squadra_id=?',
                      (squadra_sparita,)).fetchone()[0] == 0, 'alias orfano scritto'
+
+    # La squadra di un'ALTRA competizione non si aggancia (nota di Fable sul
+    # riuso dei rowid): l'id esiste, ma non dentro QUESTA competizione.
+    altra = main._inserisci_competizione(c, utente, sport, 'Serie B')
+    assert main._scrivi_alias(c, sorgente, squadra, altra, 'X') is None, \
+        'squadra fuori dalla competizione del percorso: non va scritta'
+
+    # E la SORGENTE sparita (GPT-5.5, PR #64): senza la guardia sul secondo
+    # padre una DELETE concorrente della sorgente lascerebbe una riga con
+    # sorgente_id pendente — mai letta e non piu' eliminabile, perche' la
+    # cascata della sorgente e' gia' passata.
+    sorgente_sparita = sorgente + 1000
+    assert main._scrivi_alias(c, sorgente_sparita, squadra, cid, 'Orfano') is None
+    assert c.execute('SELECT COUNT(*) FROM alias_squadre WHERE sorgente_id=?',
+                     (sorgente_sparita,)).fetchone()[0] == 0, \
+        'alias con sorgente pendente scritto'
     c.close()
 
 

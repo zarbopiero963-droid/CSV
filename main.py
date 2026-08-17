@@ -854,6 +854,12 @@ SCHEMA_MULTIUTENTE = (
     'CREATE TABLE IF NOT EXISTS alias_squadre (id INTEGER PRIMARY KEY AUTOINCREMENT,'
     ' sorgente_id INTEGER NOT NULL, squadra_id INTEGER NOT NULL, alias TEXT NOT NULL,'
     ' UNIQUE (sorgente_id, squadra_id))',
+    # Gli indici che le cascate usano davvero (CodeRabbit, PR #64): gli UNIQUE
+    # qui sopra hanno user_id/sorgente_id come colonna piu' a sinistra, quindi
+    # `DELETE ... WHERE sport_id=?` e `DELETE ... WHERE squadra_id IN (...)`
+    # non li possono usare. Additivi e idempotenti come le tabelle.
+    'CREATE INDEX IF NOT EXISTS competizioni_per_sport ON competizioni (sport_id)',
+    'CREATE INDEX IF NOT EXISTS alias_per_squadra ON alias_squadre (squadra_id)',
     # Le migrazioni che vanno fatte UNA VOLTA SOLA per database, non a ogni avvio.
     # Nasce con la rimozione del seme (#25 lavoro E): il travaso dei link
     # `parser_chats` dai profili legacy e' una conversione di dati, e una
@@ -5282,8 +5288,8 @@ def _inserisci_squadra(c, competizione_id, nome):
     return c.execute('SELECT last_insert_rowid()').fetchone()[0]
 
 
-def _scrivi_alias(c, sorgente_id, squadra_id, alias):
-    """Upsert dell'alias CONDIZIONATO all'esistenza della squadra, in UNO statement.
+def _scrivi_alias(c, sorgente_id, squadra_id, competizione_id, alias):
+    """Upsert dell'alias CONDIZIONATO ai suoi DUE padri, in UNO statement.
 
     Il TERZO sito della classe TOCTOU della PR #55, mancato al primo giro di
     questa PR e trovato da Claude Fable 5 ([REAL_FINDING], PR #64): fra la
@@ -5291,14 +5297,28 @@ def _scrivi_alias(c, sorgente_id, squadra_id, alias):
     concorrente della squadra (o dello sport, con la sua cascata) puo'
     committare — l'upsert diretto scriveva un alias orfano, invisibile alle
     letture (che joinano `squadre_betfair`) e rimovibile solo eliminando la
-    sorgente. Il `WHERE EXISTS` gira dentro il write-lock dell'INSERT e vede lo
-    stato vero. La sovrascrittura passa dall'`ON CONFLICT`, quindi conta
-    comunque come cambiamento: None SOLO se la squadra non esiste piu'.
+    sorgente. Le guardie girano dentro il write-lock dell'INSERT e vedono lo
+    stato vero. Sono TRE, dal giro di review successivo:
+
+    - la squadra deve esistere **dentro questa competizione** (`competizione_id`
+      nella subquery): l'esistenza del solo id non basta, perche' i rowid di
+      sqlite si riusano dopo una DELETE e l'id potrebbe rinascere come squadra
+      di un'altra competizione — anche di un altro utente (nota di Fable);
+    - la sorgente deve esistere ancora (GPT-5.5): la sua DELETE concorrente
+      lascerebbe una riga con `sorgente_id` pendente, mai letta e non piu'
+      eliminabile, perche' la cascata della sorgente e' gia' passata.
+
+    La sovrascrittura passa dall'`ON CONFLICT` e conta come cambiamento anche a
+    valore identico (misurato, e vincolato dal test): None significa SOLO che
+    uno dei due padri non esiste piu'.
     """
     c.execute('INSERT INTO alias_squadre(sorgente_id, squadra_id, alias)'
-              ' SELECT ?,?,? WHERE EXISTS (SELECT 1 FROM squadre_betfair WHERE id=?)'
+              ' SELECT ?,?,? WHERE EXISTS (SELECT 1 FROM squadre_betfair'
+              '  WHERE id=? AND competizione_id=?)'
+              ' AND EXISTS (SELECT 1 FROM sorgenti_squadre WHERE id=?)'
               ' ON CONFLICT(sorgente_id, squadra_id) DO UPDATE SET alias=excluded.alias',
-              (sorgente_id, squadra_id, alias, squadra_id))
+              (sorgente_id, squadra_id, alias, squadra_id, competizione_id,
+               sorgente_id))
     if not c.execute('SELECT changes()').fetchone()[0]:
         return None
     return True
@@ -5592,9 +5612,10 @@ async def scrivi_alias_miei(cid: str, sid: str, request: Request):
                 if len(valore) > MAX_CAMPO_MERCATO:
                     raise HTTPException(
                         422, f'alias troppo lungo: massimo {MAX_CAMPO_MERCATO} caratteri')
-                if _scrivi_alias(c, sorgente[0], squadra, valore) is None:
-                    # La squadra e' morta fra la lettura di `valide` e la
-                    # scrittura: 404 come se la DELETE fosse arrivata prima.
+                if _scrivi_alias(c, sorgente[0], squadra, competizione[0],
+                                 valore) is None:
+                    # Un padre e' morto fra la lettura e la scrittura: 404
+                    # come se la DELETE fosse arrivata prima.
                     raise HTTPException(404, 'squadra non trovata')
             scritte += 1
         c.commit()
