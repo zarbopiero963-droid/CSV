@@ -111,6 +111,30 @@ def test_la_riga_rotta_non_ferma_le_altre_e_lascia_il_motivo(tmp_path, monkeypat
         f'il motivo della riga rotta deve stare nei log: {esiti}')
 
 
+def test_la_riga_con_obbligatoria_mancante_lascia_il_motivo_nei_log(tmp_path, monkeypatch):
+    """Una riga puo' fallire per `missing`, senza scarti: anche quel motivo va
+    nei log del k/N, o la riga sparisce in silenzio (rischio segnalato da
+    GPT-5.5 sulla PR #69). Base SENZA selezione: i mercati la portano, la
+    MultiSelection che non la sovrascrive eredita il vuoto e cade per
+    missing, non per una guardia."""
+    config = _config_multi()
+    del config['columns']['SelectionName']
+    config['multi'] = {
+        'markets': [
+            {'market_type': 'OVER_UNDER_25', 'selection_name': 'Over 2,5'}],
+        'selections': [{'bet_type': 'BANCA'}]}
+    percorso, risposta = _webhook(monkeypatch, tmp_path, config)
+    assert risposta.get('event') == 'Juve - Milan', risposta
+    c = sqlite3.connect(percorso)
+    documenti = [r[0] for r in c.execute('SELECT csv FROM signals').fetchall()]
+    esiti = [r[0] for r in c.execute('SELECT esito FROM message_logs').fetchall()]
+    c.close()
+    assert len(documenti) == 1, f'solo la riga col mercato: {len(documenti)}'
+    assert any(e.startswith('avviso:') and 'riga 2' in e
+               and 'SelectionName' in e for e in esiti), (
+        f'la riga caduta per missing deve lasciare il motivo nei log: {esiti}')
+
+
 def test_nessuna_riga_completa_e_nessun_segnale(tmp_path, monkeypatch):
     """Tutte le righe rotte → niente nel feed, motivo nei log, non un 500."""
     config = _config_multi()
@@ -143,6 +167,13 @@ def test_la_config_multi_storta_e_respinta_alla_scrittura():
 
     rotta = dict(buona, multi={'markets': {}})
     assert 'markets' in _respinta(rotta)
+
+    # Chiave inventata al livello di multi: `markes` verrebbe ignorata dal
+    # motore — righe salvate, zero generate, nessun messaggio. Stesso caso
+    # muto delle chiavi di riga (segnalato da CodeRabbit sulla PR #69).
+    rotta = dict(buona, multi={'markes': []})
+    dettaglio = _respinta(rotta)
+    assert 'markes' in dettaglio and 'markets' in dettaglio, dettaglio
 
     rotta = dict(buona, multi={'markets': ['x']})
     assert 'oggetto' in _respinta(rotta)

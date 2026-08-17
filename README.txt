@@ -78,8 +78,12 @@ sempre) e' il modello, ogni riga di multi.markets/multi.selections dice solo
 cosa cambia e il resto eredita. Somma, non prodotto; enabled=false non
 genera; ogni riga e' giudicata DA SOLA, quindi una rotta non ferma le altre:
 il segnale esce con le k buone su N e gli scarti delle altre finiscono nei
-log messaggi come "riga N: motivo". Selezione vuota + delimitatori = una
-riga per punteggio N-N trovato, solo su CORRECT_SCORE/HALF_TIME_SCORE. Il
+log messaggi come "riga N: motivo" (anche quando cade per obbligatorie
+mancanti). Selezione vuota + delimitatori = una riga per punteggio N-N
+trovato, solo su CORRECT_SCORE/HALF_TIME_SCORE e con un tetto di 36
+punteggi per riga (0-0..5-5): oltre, la riga e' un errore di config
+segnalato, non migliaia di documenti nel feed. Una voce di multi e' una
+riga solo se e' un oggetto non vuoto. Il
 gate "solo costanti" (#41) vale per riga: le colonne sovrascritte non
 contano come estratte. La forma sbagliata di config.multi viene respinta al
 salvataggio con 422; MAX_RIGHE_MULTI (default 20, si alza da variabile su

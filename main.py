@@ -2842,6 +2842,26 @@ def _segmento(message, dopo, prima):
     return message[inizio:fine]
 
 
+# Tetto dei punteggi ESTRATTI da una riga: 36 copre 0-0..5-5, cioe' ogni
+# mercato dei risultati reale. Oltre non e' un mercato: sono delimitatori che
+# prendono mezzo messaggio, e senza tetto un messaggio pieno di N-N per 20
+# righe genererebbe migliaia di documenti nel feed — lo storage e' condiviso
+# (#31). Bloccante di Claude Fable 5 sulla PR #69. Il caso e' segnalato come
+# errore di config della riga, non troncato in silenzio.
+MAX_PUNTEGGI_RIGA = 36
+
+
+def _riga_multi(voce):
+    """Vero se la voce di `multi.markets`/`multi.selections` e' una RIGA.
+
+    Solo un oggetto NON vuoto: `{}` (e qualunque altra cosa) non genera un
+    clone della base. In Python `{}` e' falsy e in JS truthy: senza questo
+    predicato comune i due motori divergevano — misurato: 2 righe in JS, 1 in
+    Python, dalla stessa config. Gemella di `rigaMulti` in engine.js.
+    """
+    return isinstance(voce, dict) and bool(voce)
+
+
 def _genera_righe(message, config, matched, base):
     """Le righe GENERATE dal parser (#35 pezzo 2), come `generaRighe` in JS.
 
@@ -2859,14 +2879,18 @@ def _genera_righe(message, config, matched, base):
         return []
     multi = config.get('multi') if isinstance(config.get('multi'), dict) else {}
     attive = []
-    for m in (multi.get('markets') or []):
-        riga = m if isinstance(m, dict) else {}
-        if m and riga.get('enabled') is not False:
-            attive.append((riga, True))
-    for s in (multi.get('selections') or []):
-        riga = s if isinstance(s, dict) else {}
-        if s and riga.get('enabled') is not False:
-            attive.append((riga, False))
+    # `isinstance(..., list)`, non `or []`: un `markets` non-lista qui veniva
+    # ITERATO (le chiavi di un dict, i caratteri di una stringa) mentre in JS
+    # il for..of sollevava — due esiti diversi dalla stessa config. Non-lista
+    # = nessuna riga, in entrambi (segnalato da CodeRabbit sulla PR #69).
+    mercati = multi.get('markets')
+    selezioni = multi.get('selections')
+    for m in (mercati if isinstance(mercati, list) else []):
+        if _riga_multi(m) and m.get('enabled') is not False:
+            attive.append((m, True))
+    for s in (selezioni if isinstance(selezioni, list) else []):
+        if _riga_multi(s) and s.get('enabled') is not False:
+            attive.append((s, False))
     if not attive:
         return [base]
     i_sel = HEADERS.index('SelectionName')
@@ -2914,6 +2938,12 @@ def _genera_righe(message, config, matched, base):
                 righe.append({'row': derivata, 'missing': [], 'scarti': [
                     'SelectionName: nessun punteggio N-N fra i delimitatori '
                     'della riga.'], 'complete': False})
+                continue
+            if len(punteggi) > MAX_PUNTEGGI_RIGA:
+                righe.append({'row': derivata, 'missing': [], 'scarti': [
+                    'SelectionName: troppi punteggi fra i delimitatori della '
+                    f'riga ({len(punteggi)}, massimo {MAX_PUNTEGGI_RIGA}): '
+                    'controlla i delimitatori.'], 'complete': False})
                 continue
             for punteggio in punteggi:
                 per_punteggio = list(derivata)
@@ -3076,8 +3106,20 @@ def esito_messaggio(message, cfg, risolvi_mappa=None):
         # cambiano); piu' righe = la LISTA, il contratto d'ingresso di
         # `store_signal` dal #35 pezzo 1.
         csv_riga = documenti[0] if len(documenti) == 1 else documenti
-        avvisi_righe = [f'riga {i}: {s}' for i, r in enumerate(righe, 1)
-                        if not r['complete'] for s in (r.get('scarti') or [])]
+        # Ogni riga NON piazzabile di un segnale scritto lascia il SUO motivo:
+        # gli scarti delle guardie, oppure — quando cade per `missing`, che
+        # scarti non produce — le obbligatorie mancanti. Senza il secondo
+        # ramo la riga spariva in silenzio (rischio segnalato da GPT-5.5
+        # sulla PR #69).
+        avvisi_righe = []
+        for i, r in enumerate(righe, 1):
+            if r['complete']:
+                continue
+            avvisi_righe.extend(f'riga {i}: {s}' for s in (r.get('scarti') or []))
+            if not (r.get('scarti') or []) and (r.get('missing') or []):
+                avvisi_righe.append(
+                    f'riga {i}: colonne obbligatorie mancanti: '
+                    + ', '.join(r['missing']))
     except Exception:  # noqa: BLE001 - fail-safe deliberato, vedi commento sopra
         logging.getLogger('xtrader.relay').warning(
             'config parser non elaborabile: nessun segnale prodotto')
@@ -4890,6 +4932,17 @@ def _valida_config_multi(multi):
         return
     if not isinstance(multi, dict):
         raise HTTPException(422, 'config.multi deve essere un oggetto')
+    # Anche il LIVELLO di multi rifiuta le chiavi sconosciute: `markes` con
+    # un refuso passerebbe e il motore la ignorerebbe — righe salvate, zero
+    # generate, nessun messaggio (segnalato da CodeRabbit sulla PR #69).
+    elenchi = ('markets', 'selections')
+    for chiave in multi:
+        if chiave not in elenchi:
+            vicine = difflib.get_close_matches(str(chiave), elenchi, n=1)
+            suggerimento = f' Forse intendevi {vicine[0]!r}?' if vicine else ''
+            raise HTTPException(
+                422, f'{chiave!r} non e\' un elenco di config.multi.'
+                + suggerimento)
     ammesse = set(CAMPI_MULTI) | {'enabled', 'start_after', 'end_before'}
     totale = 0
     for elenco in ('markets', 'selections'):

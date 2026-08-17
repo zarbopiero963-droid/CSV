@@ -438,7 +438,14 @@ parità col gemello Python:
   `end_before`, `enabled`. Le righe di `selections` **ignorano**
   `market_type`/`market_name`: restano sul mercato della base — per le
   combinazioni si elencano righe in `markets`.
-- `enabled: false` resta salvata e **non genera** la riga.
+- `enabled: false` resta salvata e **non genera** la riga. Una voce è una riga
+  solo se è un **oggetto non vuoto** (`rigaMulti`/`_riga_multi`): `{}` non
+  genera un clone della base — `{}` è falsy in Python e truthy in JS, e senza
+  il predicato comune i due motori divergevano (misurato sulla PR #69: 2
+  righe in JS, 1 in Python, dalla stessa config). Un `markets`/`selections`
+  **non-lista** non genera righe, in entrambi i motori: prima JS sollevava
+  sul `for..of` e Python iterava le chiavi — due esiti diversi dalla stessa
+  config (CodeRabbit, PR #69).
 - Ogni riga è **giudicata da sola** (`giudicaRiga`/`_giudica_riga`, la stessa
   fonte unica della base): una riga rotta non ferma le altre — il segnale esce
   con le k buone su N, e gli scarti delle altre restano visibili (sotto).
@@ -446,14 +453,20 @@ parità col gemello Python:
   del messaggio la **quota** della riga. Con `selection_name` **vuota**:
   estraggono i **punteggi** (`N-N`, una riga per punteggio trovato), ammesso
   **solo** su `CORRECT_SCORE`/`HALF_TIME_SCORE` — altrove è un errore di
-  config segnalato come scarto della riga, non una riga.
+  config segnalato come scarto della riga, non una riga. I punteggi estratti
+  hanno un **tetto per riga** (`MAX_PUNTEGGI_RIGA`, 36 = 0-0..5-5): oltre non
+  è un mercato ma delimitatori che prendono mezzo messaggio, e la riga è un
+  errore di config segnalato, **non troncato in silenzio** — senza tetto un
+  messaggio pieno di `N-N` per 20 righe genererebbe migliaia di documenti
+  nello storage condiviso (bloccante di Claude Fable 5 sulla PR #69).
 - Il **gate di contenuto (#41) vale per riga**: le colonne sovrascritte dalla
   riga sono costanti e non contano come estratte. Base tutta costante + una
   riga di override resta scartata — senza questa regola `multi` sarebbe la
   porta sul retro del gate. Le righe dei punteggi sono esenti: il punteggio
   viene dal messaggio per costruzione.
 - **Confine di scrittura** (`_valida_config_multi`): forma sbagliata, chiave
-  col refuso (con suggerimento), `enabled` non booleano o valore non scalare
+  col refuso (con suggerimento — sia nelle righe sia al livello di `multi`,
+  dove `markes` passerebbe muto), `enabled` non booleano o valore non scalare
   danno **422** al salvataggio; il tetto `MAX_RIGHE_MULTI` (default 20,
   regolabile da variabile) conta tutte le righe dichiarate, anche le spente.
 
@@ -462,7 +475,9 @@ autorità — il segnale c'è se almeno una è piazzabile; `csv` è la stringa d
 sempre con una riga sola, la **lista** dei documenti con più righe (il
 contratto d'ingresso di `store_signal`, #35 pezzo 1). Gli scarti delle righe
 non piazzabili di un segnale scritto viaggiano negli `avvisi` come
-`riga N: …` e finiscono in `message_logs`; se **nessuna** riga è piazzabile i
+`riga N: …` e finiscono in `message_logs` — e una riga caduta per `missing`
+(che scarti non produce) lascia `riga N: colonne obbligatorie mancanti: …`,
+così nessuna riga sparisce muta; se **nessuna** riga è piazzabile i
 motivi arrivano al dispatch con lo stesso prefisso (senza prefisso nel caso
 storico della sola base, dove il testo dei log non si muove). La rotta di
 prova risponde `righe` (per ciascuna: `row`, `missing`, `scarti`, `complete`)

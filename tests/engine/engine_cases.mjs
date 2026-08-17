@@ -456,6 +456,30 @@ function casiConfronto() {
       { market_type: 'OVER_UNDER_25', selection_name: 'Over 9,9' }],
       selections: [{ bet_type: 'BANCA' }] },
   });
+  aggiungi('multi: markets non-lista = nessuna riga di override, nei due motori',
+    MSG_MULTI, {
+    ...multiBase, multi: { markets: { a: 1 }, selections: [
+      { selection_name: 'Under 1,5', bet_type: 'BANCA' }] },
+  });
+  aggiungi('multi: la riga vuota non genera, in NESSUNO dei due motori',
+    MSG_MULTI, {
+    ...multiBase, multi: { markets: [
+      {}, { market_type: 'OVER_UNDER_25', selection_name: 'Over 2,5' }],
+      selections: [] },
+  });
+  aggiungi('multi: troppi punteggi = stesso scarto del tetto nei due motori',
+    'P.Bet.\nJuve v Milan\nRisultati: '
+      + Array.from({ length: 40 }, (_, i) => `${i}-${i}`).join(' ') + '; fine', {
+    ...multiBase, multi: { markets: [
+      { market_type: 'CORRECT_SCORE', selection_name: '',
+        start_after: 'Risultati:', end_before: ';' }], selections: [] },
+  });
+  aggiungi('multi: le cifre unicode NON sono punteggi, in nessuno dei due',
+    'P.Bet.\nJuve v Milan\nRisultati: ١-٢ 2-1; fine', {
+    ...multiBase, multi: { markets: [
+      { market_type: 'CORRECT_SCORE', selection_name: '',
+        start_after: 'Risultati:', end_before: ';' }], selections: [] },
+  });
   aggiungi('multi: delimitatori CON selezione estraggono la quota',
     'P.Bet.\nJuve v Milan\nquota: 2.10 fine', {
     ...multiBase, multi: { markets: [
@@ -994,6 +1018,48 @@ caso('multi: somma, eredita, enabled, riga rotta isolata, punteggi dinamici', ()
   eq(s.righe[0].complete, false, 'ma non genera niente di piazzabile');
   eq(s.righe[0].scarti.some(x => x.includes('CORRECT_SCORE')), true,
     'il motivo dice DOVE la selezione vuota e- ammessa');
+  return 'ok';
+});
+
+caso('multi: riga attiva = oggetto NON vuoto; i punteggi hanno un tetto', () => {
+  const columns = {}; for (const c of COLUMNS) columns[c] = { source: 'empty' };
+  columns.EventName = { source: 'line', anchor: ' v ', part: 'whole',
+    transforms: [{ op: 'replace_last', from: ' v ', to: ' - ' }, { op: 'trim' }] };
+  columns.MarketType = { source: 'constant', value: 'OVER_UNDER_15' };
+  columns.SelectionName = { source: 'constant', value: 'Over 1,5' };
+  columns.BetType = { source: 'constant', value: 'PUNTA' };
+  const base = { match: { type: 'contains', value: 'P.Bet.' }, columns };
+
+  // Una riga VUOTA ({}) non e' una riga: non genera un clone della base.
+  // Era la divergenza misurata sul relay: {} e' falsy in Python e truthy in
+  // JS, quindi JS generava 2 righe e Python 1 dalla stessa config.
+  const conVuota = runParser('P.Bet.\nJuve v Milan', { ...base, multi: {
+    markets: [{}, { market_type: 'X_MKT', selection_name: 'S' }],
+    selections: [] } });
+  eq(conVuota.righe.length, 1, 'la riga vuota non genera; resta la sola piena');
+  eq(conVuota.righe[0].row[COLUMNS.indexOf('MarketType')], 'X_MKT',
+    'ed e- quella con i campi');
+
+  // I punteggi dinamici hanno un TETTO per riga: oltre, la riga e' un errore
+  // di config segnalato (delimitatori che prendono troppo), non migliaia di
+  // documenti nel feed. Bloccante di Claude Fable 5 sulla PR #69.
+  const troppi = Array.from({ length: 40 }, (_, i) => `${i}-${i}`).join(' ');
+  const capped = runParser(`P.Bet.\nJuve v Milan\nRisultati: ${troppi}; fine`, {
+    ...base, multi: { markets: [
+      { market_type: 'CORRECT_SCORE', selection_name: '',
+        start_after: 'Risultati:', end_before: ';' }], selections: [] } });
+  eq(capped.righe.length, 1, 'una riga di errore, non 40 righe');
+  eq(capped.righe[0].complete, false, 'e non e- piazzabile');
+  eq(capped.righe[0].scarti.some(x => x.includes('massimo')), true,
+    'il motivo dice il tetto');
+
+  // Sotto il tetto tutto invariato: 36 punteggi = 36 righe.
+  const giusti = Array.from({ length: 36 }, (_, i) => `${i}-${i}`).join(' ');
+  const ok = runParser(`P.Bet.\nJuve v Milan\nRisultati: ${giusti}; fine`, {
+    ...base, multi: { markets: [
+      { market_type: 'CORRECT_SCORE', selection_name: '',
+        start_after: 'Risultati:', end_before: ';' }], selections: [] } });
+  eq(ok.righe.length, 36, 'al tetto esatto si genera tutto');
   return 'ok';
 });
 

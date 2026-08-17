@@ -439,6 +439,24 @@ const MULTI_CAMPI = {
 // I soli mercati dove la selezione VUOTA + delimitatori estrae i punteggi.
 const MERCATI_PUNTEGGI = ['CORRECT_SCORE', 'HALF_TIME_SCORE'];
 
+// Tetto dei punteggi ESTRATTI da una riga: 36 copre 0-0..5-5, cioe' ogni
+// mercato dei risultati reale. Oltre non e' un mercato: sono delimitatori che
+// prendono mezzo messaggio, e senza tetto un messaggio pieno di N-N per 20
+// righe genererebbe migliaia di documenti nel feed — lo storage e' condiviso
+// (#31). Bloccante di Claude Fable 5 sulla PR #69. Il caso e' segnalato come
+// errore di config della riga, non troncato in silenzio.
+const MAX_PUNTEGGI_RIGA = 36;
+
+// Una voce di multi.markets/multi.selections e' una RIGA solo se e' un
+// oggetto NON vuoto: {} (e qualunque altra cosa) non genera un clone della
+// base. In Python {} e' falsy e in JS truthy: senza questo predicato comune
+// i due motori divergevano — misurato: 2 righe in JS, 1 in Python, dalla
+// stessa config. Gemella di `_riga_multi` in main.py.
+function rigaMulti(voce) {
+  return Boolean(voce) && typeof voce === 'object' && !Array.isArray(voce)
+    && Object.keys(voce).length > 0;
+}
+
 // Il testo del messaggio fra i due delimitatori della riga. Delimitatore
 // assente = dal principio / fino alla fine; delimitatore NON TROVATO = ''.
 // Gemella di `_segmento` in main.py.
@@ -470,11 +488,15 @@ function generaRighe(message, config, matched, base) {
   if (!matched) return [];
   const multi = config.multi || {};
   const attive = [];
-  for (const m of multi.markets || []) {
-    if (m && m.enabled !== false) attive.push({ riga: m, mercato: true });
+  // `Array.isArray`, non `|| []`: un `markets` non-lista faceva SOLLEVARE il
+  // for..of qui (config non eseguibile) mentre Python iterava le chiavi —
+  // due esiti diversi dalla stessa config. Non-lista = nessuna riga, in
+  // entrambi (segnalato da CodeRabbit sulla PR #69).
+  for (const m of (Array.isArray(multi.markets) ? multi.markets : [])) {
+    if (rigaMulti(m) && m.enabled !== false) attive.push({ riga: m, mercato: true });
   }
-  for (const s of multi.selections || []) {
-    if (s && s.enabled !== false) attive.push({ riga: s, mercato: false });
+  for (const s of (Array.isArray(multi.selections) ? multi.selections : [])) {
+    if (rigaMulti(s) && s.enabled !== false) attive.push({ riga: s, mercato: false });
   }
   if (!attive.length) return [base];
   const iSel = COLUMNS.indexOf('SelectionName');
@@ -514,12 +536,22 @@ function generaRighe(message, config, matched, base) {
           + 'questa riga non genera nulla.'], complete: false });
         continue;
       }
+      // `[0-9]`, come nel gemello Python: in JS `\d` E' gia' solo ASCII, ma
+      // il contratto a due implementazioni si legge meglio quando i due testi
+      // coincidono — e la parita' sulle cifre unicode lo blinda.
       const punteggi = segmento(message, riga.start_after, riga.end_before)
-        .match(/\d+-\d+/g) || [];
+        .match(/[0-9]+-[0-9]+/g) || [];
       if (!punteggi.length) {
         righe.push({ row: derivata, missing: [], scarti: [
           'SelectionName: nessun punteggio N-N fra i delimitatori della riga.'],
           complete: false });
+        continue;
+      }
+      if (punteggi.length > MAX_PUNTEGGI_RIGA) {
+        righe.push({ row: derivata, missing: [], scarti: [
+          'SelectionName: troppi punteggi fra i delimitatori della riga ('
+          + punteggi.length + ', massimo ' + MAX_PUNTEGGI_RIGA + '): '
+          + 'controlla i delimitatori.'], complete: false });
         continue;
       }
       for (const punteggio of punteggi) {
