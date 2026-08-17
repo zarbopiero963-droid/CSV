@@ -216,6 +216,14 @@ const BORDI_UNIFORMI = new RegExp('^[' + SPAZI_CLASSE + ']+|[' + SPAZI_CLASSE + 
 // Claude Fable 5 e GPT-5.6 Sol al gate finale della PR #47.
 const piatto = t => String(t).replace(SPAZI_UNIFORMI, ' ').trim();
 
+// La stessa normalizzazione, ESPORTATA per chi costruisce le mappe della
+// sorgente squadre (#34 pezzo 3): le chiavi devono passare dalla stessa
+// classe di spazi con cui `runParser` cerca, o un nome con uno spazio doppio
+// matcherebbe sul server (`_piatto`) e non nella demo. `export function` e
+// non `export const`: il generatore del file unico ricostruisce il namespace
+// leggendo le righe `export function`.
+export function normalizzaNome(testo) { return piatto(testo); }
+
 const readable = x => String(x);
 
 // `null` se il valore e' accettabile per quella colonna, altrimenti il MOTIVO.

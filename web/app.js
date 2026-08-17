@@ -734,6 +734,9 @@ function initWiz(p) {
   // conserva: riaprire il parser non deve far perdere il riferimento che il
   // server ha gia' validato.
   if (p.config.betfair) draft.betfair = p.config.betfair;
+  // Il riferimento «Sorgente squadre» (#34 pezzo 3) viaggia come `betfair`:
+  // riaprire il parser non deve far perdere la scelta gia' validata.
+  if (p.config.team_source !== undefined) draft.team_source = p.config.team_source;
   wiz = {
     parserId: p.slug,
     step: campione ? (configured ? 15 : 0) : 0,
@@ -1126,6 +1129,7 @@ function stepReview() {
         ? `${wiz.draft.match.type === 'regex' ? 'regex' : 'contiene'} "${esc(wiz.draft.match.value)}"`
         : '<span style="color:var(--err)">non impostata: il parser non riconoscerà nulla</span>'}</div>
     </div>
+    ${cardTeamSource()}
     <div class="tbl-scroll" style="margin-top:14px"><table class="map-table">
       <thead><tr><th>Colonna</th><th>Regola</th><th>Valore</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
@@ -1149,6 +1153,9 @@ function stepReview() {
         ${(t.scarti || []).length ? `<div class="banner warn" id="test-scarti">
           ${t.scarti.map(esc).join('<br>')}
         </div>` : ''}
+        ${(t.avvisi || []).length ? `<div class="banner warn" id="test-avvisi">
+          ${t.avvisi.map(esc).join('<br>')}
+        </div>` : ''}
         ${t.matched && !t.complete && (t.missing || []).length ? `<div class="banner warn">
           Nessuna riga scritta nel feed: senza
           <span class="mono">${esc((t.missing || []).join(', '))}</span>
@@ -1158,6 +1165,47 @@ function stepReview() {
           <pre class="csv-out" id="test-csv">${esc(t.csv || headerOnlyCsv())}</pre></div>
       </div>` : ''}
     </div>`;
+}
+
+// La card «Sorgente squadre» del riepilogo (#34 pezzo 3): una tendina con le
+// sorgenti dell'utente piu' «Nessuna». La scelta si LEGGE al salvataggio e
+// alla prova (leggiTeamSource), come il messaggio di prova: niente handler di
+// change. Finche' l'elenco non e' caricato la tendina NON si disegna — un
+// select vuoto letto al salvataggio cancellerebbe una scelta gia' salvata.
+function cardTeamSource() {
+  const fonti = api.sorgenti();
+  if (fonti === null && !wiz.fontiChieste) {
+    wiz.fontiChieste = true;
+    api.loadSorgenti().then(() => render()).catch(() => {});
+  }
+  const rif = wiz.draft.team_source;
+  return `
+    <div class="card" style="margin-top:14px">
+      <div class="row" style="margin-bottom:6px">
+        <strong class="small">Sorgente squadre</strong>
+      </div>
+      ${fonti === null ? '<div class="small dim">Caricamento sorgenti…</div>' : `
+      <div class="row wrap">
+        <select id="wiz-team-source">
+          <option value=""${rif === undefined || rif === null ? ' selected' : ''}>Nessuna — i nomi squadra passano come scritti</option>
+          ${fonti.map(s => `<option value="${s.id}"${rif === s.id ? ' selected' : ''}>${esc(s.nome)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="small dim" style="margin-top:6px">
+        Con una sorgente scelta, gli alias diventano i nomi Betfair dentro
+        EventName. Una squadra senza alias passa come scritta, con un avviso
+        qui nella prova e nei log dei messaggi.
+      </div>`}
+    </div>`;
+}
+
+// La scelta della tendina entra nel draft SOLO se la tendina e' a schermo:
+// letta qui e non in un handler, come il messaggio di prova.
+function leggiTeamSource() {
+  const tendina = document.getElementById('wiz-team-source');
+  if (!tendina) return;
+  if (tendina.value === '') delete wiz.draft.team_source;
+  else wiz.draft.team_source = Number(tendina.value);
 }
 
 function stepPaste() {
@@ -1681,6 +1729,7 @@ const actions = {
     const msg = document.getElementById('test-msg')?.value ?? wiz.message;
     api.saveSampleMessage(wiz.parserId, msg);
     coerenzaBetfair();
+    leggiTeamSource();
     try { await api.updateParser(wiz.parserId, { config: wiz.draft }); }
     catch (e) { fallita(e); return; }
     toast('Configurazione salvata sul server.');
@@ -1691,6 +1740,7 @@ const actions = {
     wiz.message = msg;
     api.saveSampleMessage(wiz.parserId, msg);
     coerenzaBetfair();
+    leggiTeamSource();
     // Prima si salva la config, poi si prova: la prova gira sul server, che
     // conosce solo cio' che e' stato salvato — provare un draft non salvato
     // mostrerebbe l'esito di un'altra configurazione.

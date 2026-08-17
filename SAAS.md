@@ -1071,6 +1071,33 @@ righe orfane: tutto come i mercati. Il selettore nel parser, il separatore
 squadre e il trasform nei due motori sono i pezzi 2-3 della #34: **il motore e
 il contratto CSV in questo pezzo non cambiano**.
 
+### Il trasform nel parser (#34, pezzo 3: selettore sorgente + traduzione)
+
+Le tre decisioni del proprietario (17/08/2026): squadra **non mappata = verbatim
++ avviso** non bloccante; la traduzione tocca **solo `EventName`**; lo stesso
+alias su **due squadre della stessa sorgente è vietato al salvataggio** — il PUT
+alias risponde 422 (`alias «X» gia' usato per un'altra squadra in questa
+sorgente`), controllato sullo **stato finale** (mappa della sorgente col corpo
+sovrapposto), così spostare un alias fra due squadre in un solo PUT resta lecito.
+
+Il parser porta il riferimento nel config: `team_source` (id della sorgente),
+validato al confine di scrittura come `betfair` — inesistente, altrui o non
+intero = 422, e quella altrui è indistinguibile da una inesistente. La mappa si
+risolve a parse-time (`_mappa_team_source`): **identità Betfair→Betfair di tutte
+le squadre dell'utente** (chi scrive già il nome Betfair non mappa niente e non
+riceve avvisi) sotto gli **alias della sorgente**, chiavi normalizzate con
+`_piatto`. Sorgente eliminata = passthrough puro, come «nessuna sorgente».
+
+I due motori (`esegui_parser` / `runParser`) accettano la mappa come argomento
+opzionale e traducono il valore **finale** di `EventName`, spezzato
+sull'**ultimo** ` - ` (il separatore del transform del wizard), con confronto
+esatto dopo `_piatto`/`piatto`. Il nuovo campo **`avvisi`** (accanto a `scarti`,
+ma NON blocca: `complete` resta vero) nomina la squadra senza alias; la parità
+è vincolata dai casi in `engine_cases.mjs` col campo `avvisi` nel confronto.
+La prova (`POST /api/me/parsers/{slug}/test`) risolve la stessa mappa e
+restituisce `avvisi`; sul traffico vero il dispatch scrive una riga
+`avviso: …` in `message_logs` per ogni squadra non mappata del segnale scritto.
+
 ## Autenticazione
 
 Telegram Login Widget come percorso principale: la firma HMAC-SHA256 del
@@ -1626,7 +1653,8 @@ senza doppio ruolo.
 | Fatto | **Mercati Betfair per-utente** (PR 12, #33): la libreria sport → mercato → selezioni a inserimento libero (nessun catalogo incorporato), le rotte `/api/me/sports*` isolate, la vista «Mercati Betfair» e il wizard «Da mercati Betfair» a due passi con `config.betfair` validato alla scrittura. I segnaposto handicap restano fail-closed fino alla #34. Test in `tests/relay/test_mercati.py` e `tests/web/test_mercati_web.py` |
 | Fatto | **Il file scaricato si chiama betrelay** (#60): `Content-Disposition: attachment` sulle risposte CSV — `betrelay.csv`, `betrelay-{slug}.csv`, `betrelay-{p}.csv` — con nome ripulito e fonte unica `_intestazioni_feed()`. URL e byte del corpo intatti. Test in `tests/relay/test_nome_download.py` |
 | Fatto | **Sorgenti squadre, pezzo 1** (#34): modello dati e rotte `/api/me/sorgenti-squadre*` + `/api/me/competizioni*` — competizioni con lista Betfair condivisa, sorgenti rinominabili, alias per (sorgente, squadra), azioni «⌫ alias»/«× squadra», cascate esplicite (sport compreso), travaso alla riconciliazione. Test in `tests/relay/test_sorgenti_squadre.py` |
-| Fatto | **Sorgenti squadre, pezzo 2** (#34): la sezione web «Sorgenti squadre» — elenco competizioni, squadre Betfair salvate una volta, pulsanti sorgente col badge `compilati`, tabella a due colonne con ⌫/×, Rinomina/Elimina — su `api.js`/`api_finta.js` in parità. Test browser in `tests/web/test_squadre_web.py`. Pezzo 3 (trasform nei due motori) a seguire |
+| Fatto | **Sorgenti squadre, pezzo 2** (#34): la sezione web «Sorgenti squadre» — elenco competizioni, squadre Betfair salvate una volta, pulsanti sorgente col badge `compilati`, tabella a due colonne con ⌫/×, Rinomina/Elimina — su `api.js`/`api_finta.js` in parità. Test browser in `tests/web/test_squadre_web.py` |
+| Fatto | **Sorgenti squadre, pezzo 3** (#34): selettore «Sorgente squadre» nel wizard + trasform alias→Betfair a parse-time in **entrambi** i motori (parità vincolata, campo `avvisi`), identità Betfair→Betfair nella mappa, `team_source` validato al confine di scrittura, avvisi nella prova e in `message_logs`, alias ambiguo vietato al salvataggio. Chiude la #34 e, col wizard «Da mercati Betfair» della #33, la coppia di issue gemelle |
 | M3 | «Entra come» e lo storico di `admin_audit` nel pannello: servono rotte nuove lato server |
 | M4 | Log persistenti, sospensione, suggerimento AI lato server, abbonamenti |
 
@@ -1827,7 +1855,23 @@ Tre livelli sugli sketch approvati (13/08), con la briciola per risalire:
 
 Le invarianti che la UI racconta: la colonna Betfair non si ridigita mai per
 sorgente; ⌫ = locale e senza conferma, × = condivisa e con conferma; eliminare
-una sorgente non tocca le squadre. La traduzione nel parser è il pezzo 3.
+una sorgente non tocca le squadre.
+
+### Il selettore «Sorgente squadre» nel wizard del parser (#34, pezzo 3)
+
+Nel **riepilogo** del wizard, fra la condizione di riconoscimento e la tabella
+delle colonne, la card **«Sorgente squadre»**: una tendina con l'opzione
+**«Nessuna — i nomi squadra passano come scritti»** più le sorgenti dell'utente,
+e la microcopy verbatim: «Con una sorgente scelta, gli alias diventano i nomi
+Betfair dentro EventName. Una squadra senza alias passa come scritta, con un
+avviso qui nella prova e nei log dei messaggi.» Finché l'elenco non è arrivato
+dal server la card mostra «Caricamento sorgenti…» e la tendina **non** si
+disegna (una tendina vuota letta al salvataggio cancellerebbe una scelta già
+salvata). La scelta si legge al **salvataggio** e alla **prova** — come il
+messaggio di prova, niente salvataggio implicito al change — e riaprire il
+parser la ritrova selezionata. Nella prova, gli **avvisi** delle squadre senza
+alias compaiono in un banner giallo (`#test-avvisi`) accanto a quello degli
+scarti: avvisano, non bloccano — il CSV c'è comunque.
 
 ### Il pannello Richieste (#7, solo amministratore)
 

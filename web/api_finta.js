@@ -11,7 +11,7 @@
 // leggendo le RIGHE `export function` / `export async function` — qui non si
 // esportano costanti, e le funzioni si dichiarano una per riga.
 
-import { COLUMNS, EMOJI, runParser, toCsv, suggestConfig } from './engine.js';
+import { COLUMNS, EMOJI, normalizzaNome, runParser, toCsv, suggestConfig } from './engine.js';
 
 const CHIAVE = 'xtrelay:demo';
 
@@ -139,7 +139,18 @@ export async function updateParser(slug, patch) {
   const p = getParser(slug);
   if (!p) throw new Error('parser non trovato');
   if (patch.titolo !== undefined) p.titolo = patch.titolo;
-  if (patch.config !== undefined) p.config = patch.config;
+  if (patch.config !== undefined) {
+    // Il riferimento «Sorgente squadre» (#34 pezzo 3) si valida al confine
+    // di scrittura come sul server: una sorgente che non esiste = 422.
+    const rif = patch.config && patch.config.team_source;
+    if (rif !== undefined && rif !== null
+        && !_sorgentiDemo().some(g => g.id === Number(rif))) {
+      const errore = new Error('sorgente squadre inesistente');
+      errore.status = 422;
+      throw errore;
+    }
+    p.config = patch.config;
+  }
   if (patch.active !== undefined) p.active = patch.active;
   salva();
   return p;
@@ -153,18 +164,42 @@ export async function deleteParser(slug) {
 // Stessa forma della risposta del server: matched, missing, scarti, complete,
 // e — se completo — csv ed event. Qui gira il motore JS, che per contratto
 // produce gli stessi byte di quello Python (test_engine_contract.py).
+// La mappa della sorgente per i motori, come `_mappa_team_source` del relay:
+// identita' Betfair→Betfair di TUTTE le squadre sotto gli alias della
+// sorgente, chiavi normalizzate con la stessa classe di spazi del motore.
+// null se la sorgente non esiste (piu'): passthrough puro, non una mezza
+// traduzione di sole identita'.
+function _mappaSorgenteDemo(sorgenteId) {
+  if (!_sorgentiDemo().some(g => g.id === Number(sorgenteId))) return null;
+  const mappa = {};
+  _competizioniDemo().forEach(k => k.squadre.forEach(q => {
+    const chiave = normalizzaNome(q.nome);
+    if (chiave) mappa[chiave] = q.nome;
+  }));
+  _competizioniDemo().forEach(k => k.squadre.forEach(q => {
+    const alias = _aliasDemo()[`${Number(sorgenteId)}:${q.id}`];
+    const chiave = alias ? normalizzaNome(alias) : '';
+    if (chiave) mappa[chiave] = q.nome;
+  }));
+  return mappa;
+}
+
 export async function testParser(slug, message) {
   const p = getParser(slug);
   if (!p) throw new Error('parser non trovato');
   let r;
   try {
-    r = runParser(message, p.config);
+    let mappa = null;
+    const rif = p.config && p.config.team_source;
+    if (rif !== undefined && rif !== null) mappa = _mappaSorgenteDemo(rif);
+    r = runParser(message, p.config, mappa);
   } catch {
     return { matched: false, missing: [], scarti: [], complete: false,
              errore: 'config non eseguibile' };
   }
   const corpo = { matched: r.matched, missing: r.missing,
-                  scarti: r.scarti || [], complete: r.complete };
+                  scarti: r.scarti || [], avvisi: r.avvisi || [],
+                  complete: r.complete };
   if (r.complete) {
     corpo.event = r.row[COLUMNS.indexOf('EventName')];
     corpo.csv = toCsv(r.row);
@@ -410,6 +445,12 @@ function _competizioneODemo(cid) {
     throw errore;
   }
   return trovata;
+}
+
+export async function loadSorgenti() { return sorgenti(); }
+
+export function sorgenti() {
+  return _sorgentiDemo().map(g => ({ id: g.id, nome: g.nome }));
 }
 
 function _sorgenteODemo(id) {

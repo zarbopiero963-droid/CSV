@@ -148,6 +148,92 @@ with sync_playwright() as pw:
     pg.wait_for_selector('a.src-btn:has-text("test 1")')
     assert '2/2' in pg.inner_text('a.src-btn:has-text("test 1")')
 
+    # --------------- il selettore «Sorgente squadre» nel parser (#34 pezzo 3)
+    # Il percorso del cliente: parser nuovo, suggerimento dal messaggio col
+    # marcatore, le due costanti mancanti, poi la tendina della sorgente.
+    # La prova gira SUL SERVER: la traduzione che si legge e' quella del
+    # webhook, non un'anteprima locale.
+    pg.goto(BASE + '#/')
+    pg.wait_for_selector('[data-act="new-parser"]')
+    pg.click('[data-act="new-parser"]')
+    pg.fill('#np-name', 'Con sorgente')
+    pg.click('[data-act="create-parser"]')
+    pg.wait_for_selector('#paste-msg')
+    MSG_SORGENTE = 'P.Bet. PREMACHT 0,5HT\n\U0001F19A Juve v Milan\n@ 1.42'
+    pg.fill('#paste-msg', MSG_SORGENTE)
+    pg.click('[data-act="ai-suggest"]')
+    pg.wait_for_selector('.map-table', timeout=8000)
+
+    def _colonna_corrente():
+        return pg.inner_text('.bubble.ai strong.mono')
+
+    def _avanti():
+        prima = _colonna_corrente()
+        pg.click('[data-act="wiz-next"]')
+        pg.wait_for_function(
+            "p => { const e = document.querySelector('.bubble.ai strong.mono');"
+            " return e && e.textContent !== p; }", arg=prima)
+
+    # Le due obbligatorie che il suggeritore lascia vuote (misurato in node):
+    # costanti, come farebbe il cliente dal riepilogo.
+    pg.click('[data-act="wiz-goto"][data-i="5"]')       # MarketType
+    pg.wait_for_selector('[data-act="wiz-mode"][data-mode="constant"]')
+    pg.click('[data-act="wiz-mode"][data-mode="constant"]')
+    pg.fill('#rule-const', 'OVER_UNDER_15')
+    _avanti()                                           # SelectionId
+    _avanti()                                           # SelectionName
+    pg.click('[data-act="wiz-mode"][data-mode="constant"]')
+    pg.fill('#rule-const', 'Over 1,5')
+    for _ in range(6):                                  # Handicap..Points
+        _avanti()
+    pg.click('[data-act="wiz-next"]')                   # -> riepilogo
+    pg.wait_for_selector('#test-msg')
+
+    # La tendina compare quando l'elenco sorgenti e' arrivato dal server.
+    pg.wait_for_selector('#wiz-team-source')
+    pg.select_option('#wiz-team-source', label='test 1')
+    pg.click('[data-act="run-test"]')
+    pg.wait_for_selector('#test-csv')
+    tradotto = pg.inner_text('#test-csv')
+    assert 'Juventus - AC Milan' in tradotto, f'atteso l\'evento tradotto: {tradotto!r}'
+    assert pg.locator('#test-avvisi').count() == 0, 'tutto mappato: niente avvisi'
+    shot(pg, 'squadre-parser-tradotto')
+
+    # La squadra sconosciuta: verbatim nel CSV + avviso VISIBILE, non bloccante.
+    pg.fill('#test-msg', 'P.Bet. PREMACHT 0,5HT\n\U0001F19A Juve v Fantasma\n@ 1.42')
+    pg.click('[data-act="run-test"]')
+    pg.wait_for_selector('#test-avvisi')
+    assert 'Fantasma' in pg.inner_text('#test-avvisi')
+    assert 'Juventus - Fantasma' in pg.inner_text('#test-csv')
+    shot(pg, 'squadre-parser-avviso')
+
+    # «Nessuna»: passthrough verbatim, zero avvisi.
+    pg.select_option('#wiz-team-source', label='Nessuna — i nomi squadra passano come scritti')
+    pg.fill('#test-msg', MSG_SORGENTE)
+    pg.click('[data-act="run-test"]')
+    pg.wait_for_function(
+        "document.querySelector('#test-csv')"
+        " && document.querySelector('#test-csv').innerText.includes('Juve - Milan')")
+    assert pg.locator('#test-avvisi').count() == 0, 'senza sorgente niente avvisi'
+
+    # La scelta sopravvive al salvataggio e alla riapertura del wizard.
+    pg.select_option('#wiz-team-source', label='test 1')
+    pg.click('[data-act="wiz-save"]')
+    pg.wait_for_selector('.toast:has-text("salvata")')
+    pg.goto(BASE + '#/')
+    pg.wait_for_selector('[data-act="new-parser"]')
+    pg.click('a.name:has-text("Con sorgente")')
+    pg.wait_for_selector('#wiz-team-source')
+    assert pg.eval_on_selector(
+        '#wiz-team-source', 'e => e.options[e.selectedIndex].textContent') == 'test 1', \
+        'la sorgente scelta deve riaprirsi selezionata'
+
+    # Torna alla competizione per il resto del flusso.
+    pg.click('nav a[href="#/squadre"]')
+    pg.wait_for_selector('a.name:has-text("Serie A")')
+    pg.click('a.name:has-text("Serie A")')
+    pg.wait_for_selector('[data-act="src-new"]')
+
     # ------------------------- la seconda sorgente RIUSA la lista Betfair
     pg.click('[data-act="src-new"]')
     pg.fill('#nsrc-nome', 'fonte B')
