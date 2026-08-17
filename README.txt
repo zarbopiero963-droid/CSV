@@ -84,6 +84,17 @@ ENDPOINT PUBBLICO CSV
 GET /xtrader.csv?token=TOKEN
 Restituisce l'ultimo segnale ricevuto. Se non ci sono segnali restituisce la sola intestazione.
 
+IL NOME DEL FILE SCARICATO (#60)
+Chi incolla l'URL del feed in un browser scarica un file, e quel file si
+chiama betrelay, non xtrader: le risposte CSV portano
+Content-Disposition: attachment con filename betrelay.csv (/xtrader.csv),
+betrelay-SLUG.csv (/feed/SLUG.csv) e betrelay-NOME.csv (/profiles/NOME.csv).
+E' SOLO il nome del download: URL, status, content-type e byte del corpo non
+cambiano — XTrader legge il corpo e ignora l'intestazione. Il nome viene
+ripulito a [A-Za-z0-9._-] prima di entrare nell'header (un nome profilo con
+virgolette o caratteri non-ASCII non deve rompere la consegna). Fonte unica:
+_intestazioni_feed() in main.py, vincolata da tests/relay/test_nome_download.py.
+
 IL FEED PER UTENTE (il percorso nuovo; /xtrader.csv resta l'alias del profilo PIERO)
 GET /feed/SLUG.csv?token=xt_...
 E' il feed di UN utente, autenticato dal SUO token, non da CSV_ACCESS_TOKEN.

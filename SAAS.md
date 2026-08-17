@@ -1067,6 +1067,14 @@ passare inosservata.
 | `POST /api/me/token` | conia (o rigenera) il token del feed; il token in chiaro esiste solo qui | `401` senza sessione |
 | `GET /feed/{slug}.csv` | il feed dell'utente, autenticato dal **suo** token (`?token=xt_…`) | **`404` uniforme**: slug inesistente, token assente, sbagliato o altrui — un `401` su uno slug esistente direbbe a chi enumera che quel cliente esiste |
 
+Le risposte CSV dei feed (`/feed/{slug}.csv`, `/xtrader.csv`, `/profiles/{p}.csv`)
+portano `Content-Disposition: attachment` con nome `betrelay-{slug}.csv`,
+`betrelay.csv` e `betrelay-{p}.csv` (#60): chi incolla l'URL in un browser scarica
+un file che si chiama betrelay, non xtrader. Solo il nome del download — URL,
+status e byte del corpo identici; XTrader legge il corpo e ignora l'intestazione.
+Fonte unica `_intestazioni_feed()` in `main.py`, nome ripulito a `[A-Za-z0-9._-]`,
+test in `tests/relay/test_nome_download.py`.
+
 `POST /api/logout` è pubblica **per scelta**, non per dimenticanza: cancella un cookie
 e non legge nulla. Metterle una serratura significherebbe che chi ha un cookie
 malformato non riesce a liberarsene, cioè resta incastrato in uno stato da cui
@@ -1577,6 +1585,7 @@ senza doppio ruolo.
 | Fatto | **Schermate dell'accesso su approvazione** (PR 9, #7 lato cliente): il gate sugli stati in `render()`, le quattro schermate (registrato/in_attesa/scaduto/sospeso) con «Richiedi accesso» sul `POST` vero e il deep link del bot, la pillola gialla con 5 giorni o meno. Test browser con utenti seminati e cookie firmati in `tests/web/test_schermate_accesso.py` |
 | Fatto | **Pannello Richieste** (PR 10, #7 lato admin): la vista con l'elenco, «Attiva» col campo giorni libero e l'avviso Telegram fallito **visibile**, «Rifiuta» con conferma, il giro dei promemoria. Test browser end-to-end con decisioni verificate sul database in `tests/web/test_pannello_admin.py` |
 | Fatto | **Mercati Betfair per-utente** (PR 12, #33): la libreria sport → mercato → selezioni a inserimento libero (nessun catalogo incorporato), le rotte `/api/me/sports*` isolate, la vista «Mercati Betfair» e il wizard «Da mercati Betfair» a due passi con `config.betfair` validato alla scrittura. I segnaposto handicap restano fail-closed fino alla #34. Test in `tests/relay/test_mercati.py` e `tests/web/test_mercati_web.py` |
+| Fatto | **Il file scaricato si chiama betrelay** (#60): `Content-Disposition: attachment` sulle risposte CSV — `betrelay.csv`, `betrelay-{slug}.csv`, `betrelay-{p}.csv` — con nome ripulito e fonte unica `_intestazioni_feed()`. URL e byte del corpo intatti. Test in `tests/relay/test_nome_download.py` |
 | M3 | «Entra come» e lo storico di `admin_audit` nel pannello: servono rotte nuove lato server |
 | M4 | Log persistenti, sospensione, suggerimento AI lato server, abbonamenti |
 

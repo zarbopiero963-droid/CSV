@@ -2940,7 +2940,33 @@ def _registra_scarto(profile, csv_scartato, motivo):
     return riga_nuova
 
 
-def profile_csv(profile, token):
+def _intestazioni_feed(nome_scaricato):
+    """Le intestazioni della consegna CSV: niente cache, e il nome del download.
+
+    `Content-Disposition: attachment; filename=…` decide SOLO come un browser
+    chiama il file salvato (#60: betrelay, non xtrader): XTrader interroga
+    l'URL e legge i byte del corpo, un header in piu' non gli cambia niente —
+    URL, status, content-type e corpo restano identici, vincolati dai test.
+
+    Il nome viene RIPULITO a `[A-Za-z0-9._-]` prima di entrare nell'header, e
+    non e' pignoleria: il valore viaggia in latin-1, e un nome profilo con
+    virgolette, CRLF o caratteri non-ASCII produrrebbe un header rotto — o un
+    500 proprio sul percorso di consegna che XTrader interroga a raffica.
+    Fonte unica (regola 3) per i quattro siti di risposta del feed: due qui
+    sotto in `profile_csv`, due in `feed_utente_csv`.
+    """
+    pulito = re.sub(r'[^A-Za-z0-9._-]+', '-', nome_scaricato)
+    return {'Cache-Control': 'no-store',
+            'Content-Disposition': f'attachment; filename="{pulito}"'}
+
+
+def profile_csv(profile, token, nome_scaricato=None):
+    """Il feed di un profilo. `nome_scaricato` e' il nome che un browser da' al
+    file (#60): lo passa la rotta, perche' `/xtrader.csv` scarica `betrelay.csv`
+    mentre `/profiles/{p}.csv` scarica `betrelay-{p}.csv` — stessa funzione,
+    nomi diversi. Il default copre i chiamanti che non se ne curano."""
+    if nome_scaricato is None:
+        nome_scaricato = f'betrelay-{profile}.csv'
     auth(token)
     c = db()
     get_profile(c, profile)
@@ -2953,7 +2979,7 @@ def profile_csv(profile, token):
     if bloccato:
         c.close()
         return Response(empty_csv(), media_type='text/csv',
-                        headers={'Cache-Control': 'no-store'})
+                        headers=_intestazioni_feed(nome_scaricato))
     # Stessa forma del feed per utente, per la stessa ragione (regola 2): il poll
     # e' una lettura, il TTL sta nel filtro, la pulizia la fa `store_signal` alla
     # scrittura successiva. Prima qui c'era DELETE + commit a ogni interrogazione.
@@ -2986,7 +3012,8 @@ def profile_csv(profile, token):
                 logging.getLogger('xtrader.relay').warning(
                     'feed del profilo %s degradato a sola intestazione: %s', profile, e)
             body = empty_csv()
-    return Response(body, media_type='text/csv', headers={'Cache-Control': 'no-store'})
+    return Response(body, media_type='text/csv',
+                    headers=_intestazioni_feed(nome_scaricato))
 
 
 @app.get('/', include_in_schema=False)
@@ -3135,11 +3162,13 @@ def health():
 
 @app.get('/xtrader.csv')
 def xtrader_csv(token: str | None = Query(None)):
-    return profile_csv(PIERO_PROFILE, token)
+    # Il nome del download e' `betrelay.csv` senza suffisso (#60): questo alias
+    # E' il feed storico del servizio, non «il profilo PIERO visto da un URL».
+    return profile_csv(PIERO_PROFILE, token, nome_scaricato='betrelay.csv')
 
 @app.get('/profiles/{profile}.csv')
 def named_profile_csv(profile: str, token: str | None = Query(None)):
-    return profile_csv(profile, token)
+    return profile_csv(profile, token, nome_scaricato=f'betrelay-{profile}.csv')
 
 
 def hash_token_feed(token):
@@ -3199,7 +3228,7 @@ def feed_utente_csv(slug: str, token: str | None = Query(None)):
         # la stessa `_blocco_della_riga` — qui l'utente C'E', non serve il ponte.
         if _blocco_della_riga(status, scadenza, admin):
             return Response(empty_csv(), media_type='text/csv',
-                            headers={'Cache-Control': 'no-store'})
+                            headers=_intestazioni_feed(f'betrelay-{slug}.csv'))
         # La consegna e' una LETTURA: il TTL vive nel filtro, non in una DELETE.
         # La prima versione cancellava le righe scadute qui, come `profile_csv` di
         # allora — cioe' una transazione di SCRITTURA per ogni poll, anche a vuoto,
@@ -3227,7 +3256,8 @@ def feed_utente_csv(slug: str, token: str | None = Query(None)):
                 logging.getLogger('xtrader.relay').warning(
                     'feed dell\'utente %s degradato a sola intestazione: %s', slug, e)
             body = empty_csv()
-    return Response(body, media_type='text/csv', headers={'Cache-Control': 'no-store'})
+    return Response(body, media_type='text/csv',
+                    headers=_intestazioni_feed(f'betrelay-{slug}.csv'))
 
 # Il nome del cookie di sessione, in un posto solo perche' lo leggono in quattro.
 NOME_COOKIE = 'betrelay_sessione'
