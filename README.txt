@@ -159,6 +159,38 @@ una selezione coi segnaposto {HOME_TEAM}/{AWAY_TEAM} e' rifiutata finche' non es
 la sorgente squadre (#34). Eliminare un mercato NON rompe i parser gia' salvati: le
 regole sono costanti, la libreria e' provenienza, non dipendenza viva.
 
+SORGENTI SQUADRE DELL'UTENTE (#34 pezzo 1, SESSIONE)
+La normalizzazione dei nomi squadra: la COMPETIZIONE (sotto uno sport della
+libreria #33) possiede la lista canonica dei nomi Betfair, salvata una volta —
+e' l'unica colonna che finira' nel CSV; ogni SORGENTE (nominata, rinominabile)
+e' una colonna di alias sopra quella stessa lista, UN alias per squadra per
+sorgente. Al primo login e' tutto vuoto. Isolamento come sempre: 404 sugli
+altrui, user_id dalla sessione. Il trasform a parse-time e il selettore nel
+parser arrivano col pezzo 3; la UI col pezzo 2.
+GET    /api/me/sorgenti-squadre                       le sorgenti dell'utente
+POST   /api/me/sorgenti-squadre                       body {"nome":"test 1"}
+PATCH  /api/me/sorgenti-squadre/ID                    rinomina, body {"nome":"..."}
+DELETE /api/me/sorgenti-squadre/ID                    elimina sorgente + i SUOI alias
+                                                      (le squadre Betfair restano)
+GET    /api/me/competizioni                           con sport e conteggio squadre
+POST   /api/me/competizioni                           body {"sport":"SLUG","nome":"Serie A"}
+GET    /api/me/competizioni/ID                        squadre + sorgenti col badge
+                                                      "compilati" (alias non vuoti)
+DELETE /api/me/competizioni/ID                        cascata: squadre + alias
+POST   /api/me/competizioni/ID/squadre                body {"nome":"Juventus"} — nel
+                                                      CSV: niente emoji (#42)
+DELETE /api/me/competizioni/ID/squadre/ID             la "x squadra": via dalla
+                                                      competizione e dagli alias di
+                                                      TUTTE le sorgenti
+GET    /api/me/competizioni/ID/alias/ID_SORGENTE      la tabella Betfair <-> alias
+PUT    /api/me/competizioni/ID/alias/ID_SORGENTE      body {"alias":{"ID_SQUADRA":"Juve"}}
+                                                      tocca solo le coppie presenti;
+                                                      alias vuoto = svuota SOLO qui
+Doppioni -> 409; campi vuoti o troppo lunghi -> 422; 401 prima del 422. Quote:
+MAX_SORGENTI_PER_UTENTE (20), MAX_COMPETIZIONI_PER_UTENTE (50),
+MAX_SQUADRE_PER_COMPETIZIONE (100), regolabili da variabile. Eliminare lo SPORT
+(#33) porta via a cascata anche competizioni, squadre e alias relativi.
+
 QUOTE E TETTI PER-TENANT (il database e il volume Railway sono CONDIVISI)
 - massimo MAX_PARSER_PER_UTENTE parser per utente (default 20, si alza dalla
   variabile su Railway senza deploy): oltre, la creazione risponde 409 col limite.

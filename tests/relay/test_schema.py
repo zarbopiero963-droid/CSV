@@ -1658,10 +1658,13 @@ def test_RIFERIMENTI_UTENTE_elenca_ogni_colonna_che_riferisce_un_utente(tmp_path
                if r[1] in main.NOMI_DI_RIFERIMENTO_UTENTE}
     c.close()
 
-    # `parsers.user_id` e `sports.user_id` sono gestite a parte, e la loro omissione
-    # dalla lista e- voluta: passano da `_trasferisci_parser` / `_trasferisci_sport`,
-    # che devono anche ri-disambiguare lo slug (`UNIQUE (user_id, slug)`).
-    attese = trovate - {('parsers', 'user_id'), ('sports', 'user_id')}
+    # `parsers.user_id`, `sports.user_id`, `sorgenti_squadre.user_id` e
+    # `competizioni.user_id` sono gestite a parte, e la loro omissione dalla
+    # lista e- voluta: passano da `_trasferisci_parser` / `_trasferisci_sport` /
+    # `_trasferisci_sorgenti_squadre`, che devono anche ri-disambiguare cio-
+    # che i vincoli UNIQUE per-utente renderebbero collidente (slug, nome).
+    attese = trovate - {('parsers', 'user_id'), ('sports', 'user_id'),
+                        ('sorgenti_squadre', 'user_id'), ('competizioni', 'user_id')}
     elencate = set(main.RIFERIMENTI_UTENTE)
     assert attese == elencate, (
         f'RIFERIMENTI_UTENTE non descrive piu- lo schema.\n'

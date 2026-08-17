@@ -136,6 +136,20 @@ ROTTE_CON_AUTENTICAZIONE_PROPRIA = {
     ('GET', '/api/me/sports/{slug}/mercati/{mid}/selezioni'): 401,
     ('POST', '/api/me/sports/{slug}/mercati/{mid}/selezioni'): 401,
     ('DELETE', '/api/me/sports/{slug}/mercati/{mid}/selezioni/{sid}'): 401,
+    # Le sorgenti squadre (#34, pezzo 1): sessione come mercati e parser, corpo
+    # letto a mano DOPO il controllo (401 prima del 422, stessa guardia).
+    ('GET', '/api/me/sorgenti-squadre'): 401,
+    ('POST', '/api/me/sorgenti-squadre'): 401,
+    ('PATCH', '/api/me/sorgenti-squadre/{sid}'): 401,
+    ('DELETE', '/api/me/sorgenti-squadre/{sid}'): 401,
+    ('GET', '/api/me/competizioni'): 401,
+    ('POST', '/api/me/competizioni'): 401,
+    ('GET', '/api/me/competizioni/{cid}'): 401,
+    ('DELETE', '/api/me/competizioni/{cid}'): 401,
+    ('POST', '/api/me/competizioni/{cid}/squadre'): 401,
+    ('DELETE', '/api/me/competizioni/{cid}/squadre/{sid}'): 401,
+    ('GET', '/api/me/competizioni/{cid}/alias/{sid}'): 401,
+    ('PUT', '/api/me/competizioni/{cid}/alias/{sid}'): 401,
 }
 
 # I MOUNT sono un'altra cosa dalle rotte, e vanno dichiarati a parte: non hanno

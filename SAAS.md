@@ -1032,6 +1032,45 @@ costanti, la libreria è provenienza, non dipendenza viva — la validazione avv
 solo alla scrittura. Il motore non cambia: `betfair` è un campo che
 `esegui_parser`/`runParser` ignorano, e il contratto CSV resta intatto.
 
+### Le sorgenti squadre per-utente (#34, pezzo 1: modello dati + rotte)
+
+La normalizzazione dei nomi squadra (alias sorgente → nome Betfair), gemella della
+libreria mercati. Il modello congelato dal proprietario (13-14/08): la
+**competizione** (sotto uno sport della libreria #33: Calcio → «Serie A») possiede
+la **lista canonica dei nomi Betfair**, salvata una volta — è l'unica colonna che
+finirà nel CSV; ogni **sorgente** (nominata, **rinominabile**) è una colonna di
+alias sopra quella stessa lista, **un alias per squadra per sorgente**
+(`UNIQUE (sorgente, squadra)`). Le competizioni organizzano; la ricerca del
+trasform (pezzo 3) sarà su tutta la sorgente. Quattro tabelle: `competizioni`
+(con `user_id` e `sport_id`), `squadre_betfair`, `sorgenti_squadre` (con
+`user_id`), `alias_squadre` — quest'ultima senza `user_id`: la proprietà si
+risolve per join dai **due** lati, e le rotte alias verificano **entrambi**
+(competizione E sorgente), o un PUT scriverebbe nella sorgente di un altro.
+La riparazione di un account passa da `_trasferisci_sorgenti_squadre`: stesso
+nome di sorgente su due utenti è legale, il travaso rinomina chi arriva.
+
+```text
+GET/POST     /api/me/sorgenti-squadre              {nome} → {id, nome}
+PATCH/DELETE /api/me/sorgenti-squadre/{sid}        rinomina · elimina coi SUOI alias
+GET/POST     /api/me/competizioni                  {sport: slug, nome} → {id, ...}
+GET/DELETE   /api/me/competizioni/{cid}            dettaglio (squadre + sorgenti col
+                                                   badge `compilati`) · cascata
+POST         /api/me/competizioni/{cid}/squadre    {nome} — finirà nel CSV: no emoji
+DELETE       /api/me/competizioni/{cid}/squadre/{sid}   «× squadra»: via da TUTTE le sorgenti
+GET/PUT      /api/me/competizioni/{cid}/alias/{srcId}   {alias: {squadra_id: "Juve"}}
+```
+
+Semantica delle azioni di riga (decisa il 13/08): **⌫ alias** = alias vuoto nel
+PUT, svuota solo quella sorgente, la squadra resta ovunque; **× squadra** = la
+DELETE qui sopra, cascata su tutte le sorgenti. Il PUT tocca **solo** le coppie
+presenti nel corpo. Eliminare lo **sport** (#33) ora cascata anche su
+competizioni, squadre e alias. Isolamento, 401-prima-del-422, cookie rinnovato,
+quote nel write-lock (`MAX_SORGENTI_PER_UTENTE` 20, `MAX_COMPETIZIONI_PER_UTENTE`
+50, `MAX_SQUADRE_PER_COMPETIZIONE` 100) e inserimenti `WHERE EXISTS` contro le
+righe orfane: tutto come i mercati. Il selettore nel parser, il separatore
+squadre e il trasform nei due motori sono i pezzi 2-3 della #34: **il motore e
+il contratto CSV in questo pezzo non cambiano**.
+
 ## Autenticazione
 
 Telegram Login Widget come percorso principale: la firma HMAC-SHA256 del
@@ -1586,6 +1625,7 @@ senza doppio ruolo.
 | Fatto | **Pannello Richieste** (PR 10, #7 lato admin): la vista con l'elenco, «Attiva» col campo giorni libero e l'avviso Telegram fallito **visibile**, «Rifiuta» con conferma, il giro dei promemoria. Test browser end-to-end con decisioni verificate sul database in `tests/web/test_pannello_admin.py` |
 | Fatto | **Mercati Betfair per-utente** (PR 12, #33): la libreria sport → mercato → selezioni a inserimento libero (nessun catalogo incorporato), le rotte `/api/me/sports*` isolate, la vista «Mercati Betfair» e il wizard «Da mercati Betfair» a due passi con `config.betfair` validato alla scrittura. I segnaposto handicap restano fail-closed fino alla #34. Test in `tests/relay/test_mercati.py` e `tests/web/test_mercati_web.py` |
 | Fatto | **Il file scaricato si chiama betrelay** (#60): `Content-Disposition: attachment` sulle risposte CSV — `betrelay.csv`, `betrelay-{slug}.csv`, `betrelay-{p}.csv` — con nome ripulito e fonte unica `_intestazioni_feed()`. URL e byte del corpo intatti. Test in `tests/relay/test_nome_download.py` |
+| Fatto | **Sorgenti squadre, pezzo 1** (#34): modello dati e rotte `/api/me/sorgenti-squadre*` + `/api/me/competizioni*` — competizioni con lista Betfair condivisa, sorgenti rinominabili, alias per (sorgente, squadra), azioni «⌫ alias»/«× squadra», cascate esplicite (sport compreso), travaso alla riconciliazione. Test in `tests/relay/test_sorgenti_squadre.py`. Pezzi 2 (UI) e 3 (trasform nei due motori) a seguire |
 | M3 | «Entra come» e lo storico di `admin_audit` nel pannello: servono rotte nuove lato server |
 | M4 | Log persistenti, sospensione, suggerimento AI lato server, abbonamenti |
 
