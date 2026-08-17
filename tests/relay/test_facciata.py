@@ -199,9 +199,22 @@ def test_la_facciata_mostra_la_famiglia_XTrader_first(servizio):
     """
     testo = _prendi(f'{servizio}/')[2].decode('utf-8')
     assert 'Oggi la guida copre XTrader' in testo
-    for prodotto in ('BETTINGTOOLKIT.COM', 'BETTINGTOOLKIT.ES', 'BETTINGTOOLKIT.LAT'):
-        assert prodotto in testo, f'manca il prodotto {prodotto} nella famiglia'
-    assert 'In arrivo' in testo and 'Attivo' in testo
+
+    # L'associazione scheda -> stato, non due substring sull'intera pagina:
+    # con le pillole SCAMBIATE (XTrader «In arrivo», Toolkit «Attivo») un
+    # controllo globale resterebbe verde. Le schede sono i blocchi
+    # `<div class="prod">`: ognuna deve contenere il SUO stato e non l'altro.
+    # Segnalato da CodeRabbit sulla PR #54.
+    schede = testo.split('<div class="prod">')[1:]
+    assert len(schede) == 4, f'attese 4 schede prodotto, trovate {len(schede)}'
+    attesi = {'XTrader': 'Attivo', 'BETTINGTOOLKIT.COM': 'In arrivo',
+              'BETTINGTOOLKIT.ES': 'In arrivo', 'BETTINGTOOLKIT.LAT': 'In arrivo'}
+    for nome, stato in attesi.items():
+        scheda = next((s for s in schede if nome in s), None)
+        assert scheda is not None, f'manca la scheda del prodotto {nome}'
+        assert stato in scheda, f'{nome}: la scheda non dice «{stato}»'
+        altro = 'In arrivo' if stato == 'Attivo' else 'Attivo'
+        assert altro not in scheda, f'{nome}: la scheda dice anche «{altro}»'
 
 
 def test_la_facciata_dichiara_cosa_NON_fa_e_il_disclaimer(servizio):
@@ -225,8 +238,15 @@ def test_la_facciata_ha_la_card_di_flusso(servizio):
     quella card contiene.
     """
     testo = _prendi(f'{servizio}/')[2].decode('utf-8')
-    for nodo in ('Custom Parser', 'segnali.csv', 'mai segnali vecchi'):
-        assert nodo in testo, f'manca il nodo {nodo!r} della card di flusso'
+    # I nodi si cercano DENTRO la card (`class="flow"` fino alla sezione
+    # successiva), non nell'intera pagina: «Custom Parser» compare anche
+    # altrove, e un test globale non direbbe niente sulla card. Segnalato da
+    # CodeRabbit sulla PR #54.
+    assert 'class="flow"' in testo, 'manca la card di flusso'
+    card = testo[testo.index('class="flow"'):testo.index('<section id="come"')]
+    for nodo in ('Telegram', 'Custom Parser', 'segnali.csv',
+                 'XTrader / Betting Toolkit', 'CSV pulito — mai segnali vecchi'):
+        assert nodo in card, f'manca il nodo {nodo!r} nella card di flusso'
 
 
 # ------------------------------------------------- e adesso: niente catch-all

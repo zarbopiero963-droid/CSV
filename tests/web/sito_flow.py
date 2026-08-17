@@ -102,15 +102,19 @@ def _dentro_i_margini(pagina, dove):
     """
     larghezza = pagina.evaluate('innerWidth')
     for scelta in BLOCCHI:
-        elemento = pagina.query_selector(scelta)
-        assert elemento is not None, f'{dove}: manca {scelta}'
-        sinistra, destra = elemento.evaluate(
-            'e => { const b = e.getBoundingClientRect();'
-            '       return [Math.round(b.left), Math.round(b.right)]; }')
-        assert sinistra >= GUARDIA_PX, \
-            f'{dove}: {scelta} tocca il bordo sinistro (left={sinistra})'
-        assert destra <= larghezza - GUARDIA_PX, \
-            f'{dove}: {scelta} tocca il bordo destro (right={destra} di {larghezza})'
+        # TUTTE le occorrenze, non la prima: con quattro schede `.prod` nella
+        # stessa griglia, `query_selector` misurava solo la prima e un overflow
+        # delle altre tre passava. Segnalato da CodeRabbit sulla PR #54.
+        elementi = pagina.query_selector_all(scelta)
+        assert elementi, f'{dove}: manca {scelta}'
+        for indice, elemento in enumerate(elementi):
+            sinistra, destra = elemento.evaluate(
+                'e => { const b = e.getBoundingClientRect();'
+                '       return [Math.round(b.left), Math.round(b.right)]; }')
+            assert sinistra >= GUARDIA_PX, \
+                f'{dove}: {scelta}[{indice}] tocca il bordo sinistro (left={sinistra})'
+            assert destra <= larghezza - GUARDIA_PX, \
+                f'{dove}: {scelta}[{indice}] tocca il bordo destro (right={destra} di {larghezza})'
 
 
 def _senza_scorrimento(pagina, dove):
