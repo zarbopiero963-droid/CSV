@@ -38,7 +38,16 @@ def esiti() -> list[dict]:
             f'api_finta_squadre.mjs non ha prodotto output.\n'
             f'exit={proc.returncode}\nstderr:\n{proc.stderr[-2000:]}'
         )
-    return json.loads(proc.stdout)
+    esiti = json.loads(proc.stdout)
+    # L'exit code va guardato ANCHE con un JSON valido in mano (GPT-5.5,
+    # PR #66): un crash di node dopo la stampa, con tutti i casi verdi,
+    # passerebbe in silenzio.
+    if proc.returncode != 0 and all(c['ok'] for c in esiti):
+        raise AssertionError(
+            f'node e\' uscito {proc.returncode} ma i casi si dichiarano tutti '
+            f'verdi.\nstderr:\n{proc.stderr[-2000:]}'
+        )
+    return esiti
 
 
 def test_i_casi_girano_e_ne_esistono_abbastanza(esiti):

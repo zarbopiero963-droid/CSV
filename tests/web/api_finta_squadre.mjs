@@ -30,6 +30,11 @@ magazzino.set(CHIAVE, JSON.stringify({
     { id: 1, sport: 'calcio', sportNome: 'Calcio', nome: 'Rotta' },
     { id: 2, sport: 'calcio', sportNome: 'Calcio', nome: 'Sana',
       squadre: [{ id: 1, nome: 'Juventus' }], prossimoId: 2 },
+    // `squadre` truthy ma NON array: `|| []` non basta (GPT-5.5, PR #66).
+    { id: 3, sport: 'calcio', sportNome: 'Calcio', nome: 'Corrotta', squadre: {} },
+    // Una versione vecchia: squadre presenti, `prossimoId` mai scritto.
+    { id: 4, sport: 'calcio', sportNome: 'Calcio', nome: 'Vecchia',
+      squadre: [{ id: 5, nome: 'Inter' }] },
   ],
   sorgenti: [{ id: 1, nome: 'canale' }],
   alias: { '1:1': 'Juve' },
@@ -86,10 +91,43 @@ await caso('saveAlias() con coppie fuori competizione RIFIUTA senza TypeError', 
   esigi(rifiutata, 'una squadra inesistente deve essere rifiutata');
 });
 
+let idMilan = null;
+
 await caso('createSquadra() ripara e scrive nella competizione senza array', async () => {
   const squadra = await api.createSquadra(1, 'AC Milan');
-  esigi(squadra.id === 1, `atteso id 1, ho ${squadra.id}`);
+  // L'id e' GLOBALE come l'AUTOINCREMENT del server: sopra Juventus (1) e
+  // Inter (5), quindi 6 — non un contatore per-competizione ripartito da 1.
+  esigi(squadra.id === 6, `atteso id globale 6, ho ${squadra.id}`);
   esigi(api.competizione(1).squadre.length === 1, 'la squadra deve comparire nel dettaglio');
+  idMilan = squadra.id;
+});
+
+await caso('un `squadre` non-array viene risanato, non lasciato esplodere', () => {
+  const corrotta = api.competizioni().find(k => k.id === 3);
+  esigi(corrotta && corrotta.squadre === 0,
+    `atteso {} risanato in [], ho ${JSON.stringify(corrotta)}`);
+  esigi(api.competizione(3).squadre.length === 0, 'il dettaglio deve rispondere');
+});
+
+await caso('una competizione vecchia senza prossimoId non riusa gli id', async () => {
+  const creata = await api.createSquadra(4, 'Lazio');
+  esigi(creata.id > 6, `id gia' visti riusati: ${creata.id}`);
+});
+
+await caso('id squadra GLOBALI: gli alias di due competizioni non collidono', async () => {
+  // Con id per-competizione ripartiti da 1, due squadre in competizioni
+  // diverse condividerebbero la chiave alias `${sorgente}:1` e l'alias
+  // scritto in una comparirebbe nell'altra. Il server non puo': AUTOINCREMENT.
+  const a = await api.createCompetizione('calcio', 'Comp A');
+  const b = await api.createCompetizione('calcio', 'Comp B');
+  const qa = await api.createSquadra(a.id, 'Alfa');
+  const qb = await api.createSquadra(b.id, 'Beta');
+  esigi(qa.id !== qb.id, `id squadra riusato fra competizioni: ${qa.id}`);
+  await api.saveAlias(a.id, 1, { [qa.id]: 'SOLO-A' });
+  const inB = api.aliasOf(b.id, 1).find(r => r.squadra_id === qb.id);
+  esigi(inB.alias === '', `l'alias di A e' trapelato in B: ${inB.alias}`);
+  await api.deleteCompetizione(a.id);
+  await api.deleteCompetizione(b.id);
 });
 
 // --- parita' di validazione col relay vero (CodeRabbit + regola 2, PR #66):
@@ -145,7 +183,7 @@ await caso('_campoDemo rifiuta un nome non-stringa come il server', async () => 
 });
 
 await caso('deleteSquadra() e deleteCompetizione() chiudono senza TypeError', async () => {
-  await api.deleteSquadra(1, 1);
+  await api.deleteSquadra(1, idMilan);
   await api.deleteCompetizione(1);
   esigi(api.competizione(1) === null, 'la competizione eliminata non deve tornare');
 });

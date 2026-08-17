@@ -375,10 +375,13 @@ export async function deleteSelezione(sportSlug, mercatoId, id) {
 function _competizioniDemo() {
   stato.dati.competizioni = stato.dati.competizioni || [];
   // Un localStorage vecchio o ritoccato a mano potrebbe non avere l'array
-  // delle squadre, e NESSUN consumatore deve morire di TypeError. Normalizzato
-  // QUI, una volta, invece che con `|| []` in dieci posti (Fable e GPT-5.5,
-  // PR #66; regola 3 — vincolato da tests/web/api_finta_squadre.mjs).
-  stato.dati.competizioni.forEach(k => { k.squadre = k.squadre || []; });
+  // delle squadre — o avere un `squadre` truthy che array non e' (`{}`), che
+  // un semplice `|| []` lascerebbe passare. NESSUN consumatore deve morire di
+  // TypeError: normalizzato QUI, una volta, invece che in dieci posti
+  // (Fable e GPT-5.5, PR #66; regola 3 — tests/web/api_finta_squadre.mjs).
+  stato.dati.competizioni.forEach(k => {
+    if (!Array.isArray(k.squadre)) k.squadre = [];
+  });
   return stato.dati.competizioni;
 }
 
@@ -482,7 +485,16 @@ export async function createSquadra(cid, nome) {
     errore.status = 409;
     throw errore;
   }
-  const squadra = { id: k.prossimoId || 1, nome: pulito };
+  // L'id e' GLOBALE su tutte le competizioni, come l'AUTOINCREMENT del
+  // server: la chiave degli alias e' `${sorgente}:${squadra}` SENZA la
+  // competizione, quindi id per-competizione ripartiti da 1 farebbero
+  // collidere gli alias di due competizioni (trovato inseguendo il finding
+  // di GPT-5.5 sul `prossimoId` mancante, PR #66). `prossimoId` resta come
+  // memoria monotona della competizione, con guardia sui dati corrotti.
+  const globale = _competizioniDemo().reduce(
+    (m, x) => x.squadre.reduce((mm, q) => Math.max(mm, q.id), m), 0);
+  const memoria = Number.isInteger(k.prossimoId) ? k.prossimoId - 1 : 0;
+  const squadra = { id: Math.max(globale, memoria) + 1, nome: pulito };
   k.prossimoId = squadra.id + 1;
   k.squadre.push(squadra);
   salva();
