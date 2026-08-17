@@ -297,7 +297,9 @@ export async function deleteSport(slug) {
   // (CodeRabbit, PR #66).
   const orfane = _competizioniDemo().filter(k => k.sport === slug);
   orfane.forEach(k => {
-    k.squadre.forEach(q => {
+    // `|| []`: un localStorage vecchio o ritoccato a mano potrebbe non avere
+    // l'array, e la cascata non deve morire di TypeError (Fable, PR #66).
+    (k.squadre || []).forEach(q => {
       _sorgentiDemo().forEach(g => { delete _aliasDemo()[`${g.id}:${q.id}`]; });
     });
   });
@@ -526,23 +528,27 @@ export async function saveAlias(cid, sorgenteId, coppie) {
   const k = _competizioneODemo(cid);
   const sorgente = _sorgenteODemo(sorgenteId);
   const valide = new Set(k.squadre.map(q => q.id));
+  // PRIMA tutta la validazione, POI le scritture (Fable, PR #66): mutando nel
+  // loop, una coppia invalida a meta' lasciava in memoria le coppie gia'
+  // applicate — il server invece chiude senza commit e non scrive niente.
+  const pulite = [];
   for (const [chiave, valore] of Object.entries(coppie || {})) {
     const squadra = Number(chiave);
     if (!valide.has(squadra)) {
       throw new Error(`squadra ${chiave} non in questa competizione`);
     }
     const pulito = String(valore || '').trim();
-    if (pulito === '') {
-      delete _aliasDemo()[`${sorgente.id}:${squadra}`];
-    } else {
-      // RIFIUTATO come dal server (422), non troncato: uno slice a meta' di
-      // una coppia surrogata lascerebbe un lone surrogate nel localStorage
-      // (CodeRabbit, PR #66). Stesso messaggio del relay vero.
-      if (pulito.length > 120) {
-        throw new Error('alias troppo lungo: massimo 120 caratteri');
-      }
-      _aliasDemo()[`${sorgente.id}:${squadra}`] = pulito;
+    // RIFIUTATO come dal server (422), non troncato: uno slice a meta' di una
+    // coppia surrogata lascerebbe un lone surrogate nel localStorage
+    // (CodeRabbit, PR #66). Stesso messaggio del relay vero.
+    if (pulito.length > 120) {
+      throw new Error('alias troppo lungo: massimo 120 caratteri');
     }
+    pulite.push([squadra, pulito]);
+  }
+  for (const [squadra, pulito] of pulite) {
+    if (pulito === '') delete _aliasDemo()[`${sorgente.id}:${squadra}`];
+    else _aliasDemo()[`${sorgente.id}:${squadra}`] = pulito;
   }
   salva();
 }

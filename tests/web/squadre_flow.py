@@ -144,7 +144,7 @@ with sync_playwright() as pw:
     shot(pg, 'squadre-alias')
 
     # Il badge si aggiorna: 2/2.
-    pg.click('a:has-text("Serie A")')
+    pg.click('.crumb a:has-text("Serie A")')
     pg.wait_for_selector('a.src-btn:has-text("test 1")')
     assert '2/2' in pg.inner_text('a.src-btn:has-text("test 1")')
 
@@ -162,7 +162,7 @@ with sync_playwright() as pw:
     pg.wait_for_selector('.toast:has-text("Alias salvati")')
 
     # ------------------------------------ ⌫ alias: svuota SOLO una sorgente
-    pg.click('a:has-text("Serie A")')
+    pg.click('.crumb a:has-text("Serie A")')
     pg.wait_for_selector('a.src-btn:has-text("test 1")')
     pg.click('a.src-btn:has-text("test 1")')
     pg.wait_for_selector('[data-act="alias-save"]')
@@ -170,7 +170,7 @@ with sync_playwright() as pw:
     pg.wait_for_selector('[data-nome="Juventus"][data-vuoto="1"]')
     assert alias_visibili(pg)['Juventus'] == ''
     assert alias_visibili(pg)['AC Milan'] == 'Milan', 'le altre righe non si muovono'
-    pg.click('a:has-text("Serie A")')
+    pg.click('.crumb a:has-text("Serie A")')
     pg.wait_for_selector('a.src-btn:has-text("fonte B")')
     pg.click('a.src-btn:has-text("fonte B")')
     pg.wait_for_selector('[data-act="alias-save"]')
@@ -184,7 +184,7 @@ with sync_playwright() as pw:
     pg.wait_for_selector('.crumb:has-text("canale X")')
 
     # ------------------------- × squadra: via da TUTTE le sorgenti, conferma
-    pg.click('a:has-text("Serie A")')
+    pg.click('.crumb a:has-text("Serie A")')
     pg.wait_for_selector('.list-item .name:text-is("Juventus")')
     pg.click('[data-act="sq-del"][data-nome="Juventus"]')
     pg.wait_for_selector('.modal:has-text("tutte le sorgenti")')

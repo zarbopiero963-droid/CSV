@@ -1820,8 +1820,10 @@ Tre livelli sugli sketch approvati (13/08), con la briciola per risalire:
   squadre Betfair restano dove sono.»); poi una riga per squadra Betfair con
   l'input dell'alias accanto e la **«⌫»** che svuota l'alias **solo in questa
   sorgente**, subito e senza conferma (azione locale — la conferma è della «×»,
-  che è condivisa). «Salva alias» scrive le coppie e mostra il toast «Alias
-  salvati.»; il badge nel livello sopra si aggiorna.
+  che è condivisa). La ⌫ salva la tabella **come la vedi**: le altre righe,
+  anche se digitate e non ancora salvate, restano quello che mostrano (deciso
+  al giro di review della PR #66). «Salva alias» scrive le coppie e mostra il
+  toast «Alias salvati.»; il badge nel livello sopra si aggiorna.
 
 Le invarianti che la UI racconta: la colonna Betfair non si ridigita mai per
 sorgente; ⌫ = locale e senza conferma, × = condivisa e con conferma; eliminare
