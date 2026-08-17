@@ -5794,6 +5794,28 @@ async def scrivi_alias_miei(cid: str, sid: str, request: Request):
                     422, f"alias «{valore}» gia' usato per un'altra squadra "
                          'in questa sorgente')
             occupanti[chiave] = squadra
+        # E l'alias non puo' OMBREGGIARE il nome Betfair di un'ALTRA squadra
+        # dell'utente (qualunque competizione: l'identita' e' sua, non della
+        # competizione): l'alias vince sull'identita' nella mappa, quindi quel
+        # testo tradurrebbe un nome canonico nella squadra sbagliata — dentro
+        # EventName, cioe' dentro il CSV. Stessa classe dell'ambiguita' qui
+        # sopra, stessa cura: non deve poter nascere. Il nome della squadra
+        # STESSA resta lecito: e' un'identita' innocua.
+        # [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #67.
+        nomi_betfair = {}
+        for id_q, nome_q in c.execute(
+                'SELECT q.id, q.nome FROM squadre_betfair q'
+                ' JOIN competizioni k ON k.id = q.competizione_id'
+                ' WHERE k.user_id=? ORDER BY q.id',
+                (utente['id'],)).fetchall():
+            chiave_q = _piatto(nome_q)
+            if chiave_q:
+                nomi_betfair.setdefault(chiave_q, id_q)
+        for chiave, squadra in occupanti.items():
+            if chiave in nomi_betfair and nomi_betfair[chiave] != squadra:
+                raise HTTPException(
+                    422, f"alias «{chiave}» e' il nome Betfair di un'altra "
+                         'squadra: tradurrebbe quel nome nella squadra sbagliata')
         scritte = 0
         for squadra, valore in pulite:
             if valore == '':

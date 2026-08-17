@@ -390,6 +390,13 @@ function casiConfronto() {
     { 'Man v City': 'Manchester City', Napoli: 'SSC Napoli' });
   aggiungi('sorgente: mappa vuota → tutto verbatim con due avvisi',
     MSG_VALIDO, prod, {});
+  // Chiavi che in JS vivono anche sul prototype: costruite con JSON.parse,
+  // che crea proprieta' PROPRIE anche per __proto__ — un literal {__proto__}
+  // imposterebbe il prototipo e la chiave sparirebbe (Sol, PR #67).
+  aggiungi('sorgente: chiavi da prototype (__proto__, toString) non ingannano',
+    MSG_VALIDO, prod,
+    JSON.parse('{"__proto__":"Ghost","toString":"X",'
+      + '"Manchester City":"Man City","Aston Villa":"Villa"}'));
   aggiungi('prod: messaggio valido → completo', MSG_VALIDO, prod);
   aggiungi('prod: " v " dentro un nome squadra → sostituita solo l-ultima',
     `P.Bet. PREMACHT 0,5HT\n${VS} Man v City v Napoli\n@ 1.90`, prod);

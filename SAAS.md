@@ -1079,6 +1079,12 @@ alias su **due squadre della stessa sorgente è vietato al salvataggio** — il 
 alias risponde 422 (`alias «X» gia' usato per un'altra squadra in questa
 sorgente`), controllato sullo **stato finale** (mappa della sorgente col corpo
 sovrapposto), così spostare un alias fra due squadre in un solo PUT resta lecito.
+La chiave del confronto è quella **normalizzata** (`_piatto`), la stessa con cui
+il parser cerca. E la stessa classe copre l'**ombra dell'identità**: un alias che
+coincide col nome Betfair di un'**altra** squadra dell'utente (qualunque
+competizione) è 422 — nella mappa l'alias vince sull'identità e quel testo
+tradurrebbe un nome canonico nella squadra sbagliata, dentro il CSV. Il nome
+della squadra stessa resta lecito (identità innocua).
 
 Il parser porta il riferimento nel config: `team_source` (id della sorgente),
 validato al confine di scrittura come `betfair` — inesistente, altrui o non

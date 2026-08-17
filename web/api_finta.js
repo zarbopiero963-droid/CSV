@@ -171,7 +171,11 @@ export async function deleteParser(slug) {
 // traduzione di sole identita'.
 function _mappaSorgenteDemo(sorgenteId) {
   if (!_sorgentiDemo().some(g => g.id === Number(sorgenteId))) return null;
-  const mappa = {};
+  // `Object.create(null)`: un nome o un alias `__proto__`/`toString` deve
+  // diventare una chiave VERA della mappa, non sparire nel prototype
+  // ([REAL_FINDING] di GPT-5.6 Sol, PR #67). `runParser` cerca con
+  // `hasOwnProperty.call`, che su un oggetto senza prototype funziona uguale.
+  const mappa = Object.create(null);
   _competizioniDemo().forEach(k => k.squadre.forEach(q => {
     const chiave = normalizzaNome(q.nome);
     if (chiave) mappa[chiave] = q.nome;
@@ -637,7 +641,10 @@ export async function saveAlias(cid, sorgenteId, coppie) {
     if (pulito === '') delete finale[squadra];
     else finale[squadra] = pulito;
   }
-  const occupanti = {};
+  // `Object.create(null)`, non `{}`: un alias legittimo chiamato `toString`
+  // o `__proto__` non deve inciampare nelle proprieta' ereditate dal
+  // prototype ([REAL_FINDING] di GPT-5.6 Sol, PR #67).
+  const occupanti = Object.create(null);
   for (const [squadra, testo] of Object.entries(finale)) {
     // La chiave dell'ambiguita' e' quella con cui il motore cerca
     // (`normalizzaNome`), come sul server (GPT-5.5, PR #67).
@@ -647,6 +654,20 @@ export async function saveAlias(cid, sorgenteId, coppie) {
       throw new Error(`alias «${testo}» gia' usato per un'altra squadra in questa sorgente`);
     }
     occupanti[chiave] = squadra;
+  }
+  // E l'alias non puo' ombreggiare il nome Betfair di un'ALTRA squadra
+  // dell'utente: nella mappa l'alias vince sull'identita', e quel testo
+  // tradurrebbe un nome canonico nella squadra sbagliata (Sol, PR #67).
+  const nomiBetfair = Object.create(null);
+  _competizioniDemo().forEach(k2 => k2.squadre.forEach(q => {
+    const chiaveQ = normalizzaNome(q.nome);
+    if (chiaveQ && !(chiaveQ in nomiBetfair)) nomiBetfair[chiaveQ] = q.id;
+  }));
+  for (const [chiave, squadra] of Object.entries(occupanti)) {
+    if (chiave in nomiBetfair && nomiBetfair[chiave] !== Number(squadra)) {
+      throw new Error(`alias «${chiave}» e' il nome Betfair di un'altra `
+        + 'squadra: tradurrebbe quel nome nella squadra sbagliata');
+    }
   }
   for (const [squadra, pulito] of pulite) {
     if (pulito === '') delete _aliasDemo()[`${sorgente.id}:${squadra}`];

@@ -192,7 +192,11 @@ MAX_SQUADRE_PER_COMPETIZIONE (100), regolabili da variabile. Eliminare lo SPORT
 (#33) porta via a cascata anche competizioni, squadre e alias relativi.
 Lo stesso alias su due squadre della stessa sorgente -> 422 (deciso 17/08:
 a parse-time la ricerca corre su tutta la sorgente, l'ambiguita' non deve
-poter nascere); in un'altra sorgente lo stesso testo e' libero.
+poter nascere); in un'altra sorgente lo stesso testo e' libero. Il confronto
+usa la chiave NORMALIZZATA del parser (spazi uniformi collassati). Stessa
+regola per l'alias che coincide col nome Betfair di un'ALTRA squadra
+dell'utente -> 422 (tradurrebbe un nome canonico nella squadra sbagliata);
+il nome della squadra stessa resta lecito.
 
 TRASFORM NEL PARSER (#34 pezzo 3)
 Il parser puo' portare nel config il riferimento "team_source" (id di una

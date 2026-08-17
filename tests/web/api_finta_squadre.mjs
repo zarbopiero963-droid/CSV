@@ -185,6 +185,18 @@ await caso('saveAlias() rifiuta lo stesso alias su due squadre della sorgente', 
   esigi(errore && errore.message.includes("gia' usato"),
     `il doppione normalizzato deve fallire: ${errore && errore.message}`);
   await api.saveAlias(2, 1, { [seconda.id]: 'Spazi Tripli' });   // diverso: libero
+  // Un alias che OMBREGGIA il nome Betfair di un'ALTRA squadra e' la stessa
+  // ambiguita' (Sol, PR #67): 'Inter' e' una squadra della competizione 4.
+  errore = null;
+  try { await api.saveAlias(2, 1, { 1: 'Inter' }); } catch (e) { errore = e; }
+  esigi(errore && errore.message.includes('altra squadra'),
+    `l'ombra del nome Betfair altrui deve fallire: ${errore && errore.message}`);
+  await api.saveAlias(2, 1, { 1: 'Juventus' });   // il PROPRIO nome: identita' innocua
+  // E le mappe demo non devono inciampare nel prototype (Sol, PR #67):
+  // 'toString' e' un alias legittimo, non una proprieta' ereditata.
+  await api.saveAlias(2, 1, { 1: 'toString' });
+  esigi(api.aliasOf(2, 1).find(r => r.squadra_id === 1).alias === 'toString',
+    'un alias chiamato toString deve sopravvivere');
   await api.saveAlias(2, 1, { [seconda.id]: '', 1: 'Doppione' });
   // Lo SPOSTAMENTO in un solo salvataggio resta lecito, in qualunque ordine.
   await api.saveAlias(2, 1, { [seconda.id]: 'Doppione', 1: '' });

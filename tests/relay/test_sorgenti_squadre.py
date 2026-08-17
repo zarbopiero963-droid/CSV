@@ -702,6 +702,18 @@ def test_lo_stesso_alias_su_due_squadre_della_stessa_sorgente_e_un_422(servizio,
         _metti_alias(servizio, cookie_a, cid, sid, {str(ju): 'Gemella  FC'})
         _metti_alias(servizio, cookie_a, cid, sid, {str(mi): 'Gemella FC'},
                      atteso=422)
+        # E un alias che OMBREGGIA il nome Betfair di un'ALTRA squadra e' la
+        # stessa ambiguita' ([REAL_FINDING] di Sol, PR #67): quel testo nel
+        # messaggio significherebbe due squadre, e l'alias vincerebbe
+        # sull'identita' — traducendo un nome canonico nella squadra
+        # sbagliata. 422, anche fra competizioni (l'identita' e' dell'utente).
+        _metti_alias(servizio, cookie_a, cid, sid, {str(ju): 'Milan'},
+                     atteso=422)
+        _metti_alias(servizio, cookie_a, cid, sid, {str(ju): 'Inter'},
+                     atteso=422)
+        # Il nome Betfair della squadra STESSA e' un'identita' innocua: lecito.
+        _metti_alias(servizio, cookie_a, cid, sid, {str(ju): 'Juventus'})
+        _metti_alias(servizio, cookie_a, cid, sid, {str(ju): 'Juve'})
     finally:
         for s in (sid, sid2):
             _chiama(servizio, 'DELETE', f'/api/me/sorgenti-squadre/{s}',
