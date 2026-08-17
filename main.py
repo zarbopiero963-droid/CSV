@@ -5065,27 +5065,13 @@ def elimina_sport_mio(slug: str, request: Request):
     c = db()
     try:
         sport = _sport_o_404(c, utente['id'], slug)
-        c.execute('DELETE FROM betfair_selections WHERE market_id IN'
-                  ' (SELECT id FROM betfair_markets WHERE sport_id=?)', (sport[0],))
-        c.execute('DELETE FROM betfair_markets WHERE sport_id=?', (sport[0],))
-        # E le competizioni (#34), che vivono sotto lo sport: senza queste tre
-        # DELETE resterebbero righe orfane — invisibili alle API (la proprieta'
-        # si risolve passando dallo sport) e non piu' eliminabili. Le sorgenti
-        # NON si toccano: sono dell'utente, non dello sport. Il vincolo
-        # `user_id` dentro ogni statement e' il [REAL_FINDING] di Sol sulla
-        # PR #64: la proprieta' letta da `_sport_o_404` puo' invecchiare prima
-        # del write-lock, quindi la si ripete dove la scrittura avviene.
-        c.execute('DELETE FROM alias_squadre WHERE squadra_id IN'
-                  ' (SELECT q.id FROM squadre_betfair q JOIN competizioni k'
-                  '  ON q.competizione_id = k.id WHERE k.sport_id=? AND k.user_id=?)',
-                  (sport[0], utente['id']))
-        c.execute('DELETE FROM squadre_betfair WHERE competizione_id IN'
-                  ' (SELECT id FROM competizioni WHERE sport_id=? AND user_id=?)',
-                  (sport[0], utente['id']))
-        c.execute('DELETE FROM competizioni WHERE sport_id=? AND user_id=?',
-                  (sport[0], utente['id']))
-        c.execute('DELETE FROM sports WHERE id=? AND user_id=?',
-                  (sport[0], utente['id']))
+        # La cascata intera — mercati, selezioni, competizioni (#34), squadre,
+        # alias, sport — vive in `_elimina_sport`, con OGNI statement vincolato
+        # al proprietario: la proprieta' letta qui sopra e' una lettura e puo'
+        # invecchiare prima del write-lock (gate di Sol, PR #64). Le sorgenti
+        # NON si toccano: sono dell'utente, non dello sport.
+        if _elimina_sport(c, utente['id'], sport[0]) is None:
+            raise HTTPException(404, 'sport non trovato')
         c.commit()
     finally:
         c.close()
@@ -5350,6 +5336,50 @@ def _rinomina_sorgente(c, user_id, sorgente_id, nome):
     toccate = c.execute('UPDATE sorgenti_squadre SET nome=? WHERE id=? AND user_id=?',
                         (nome, sorgente_id, user_id)).rowcount
     return True if toccate else None
+
+
+def _cancella_alias(c, user_id, sorgente_id, squadra_id):
+    """La «⌫ alias», vincolata nel write-lock (secondo gate di Sol, PR #64).
+
+    La DELETE diretta filtrava solo per (sorgente, squadra): una richiesta
+    invecchiata da un travaso concorrente avrebbe cancellato l'alias del nuovo
+    proprietario. Col vincolo, per il proprietario sbagliato e' un no-op — e
+    il no-op e' il contratto anche per l'alias gia' assente: svuotare il vuoto
+    non e' un errore.
+    """
+    return c.execute('DELETE FROM alias_squadre WHERE squadra_id=?'
+                     ' AND sorgente_id IN'
+                     ' (SELECT id FROM sorgenti_squadre WHERE id=? AND user_id=?)',
+                     (squadra_id, sorgente_id, user_id)).rowcount
+
+
+def _elimina_sport(c, user_id, sport_id):
+    """La cascata INTERA dello sport, ogni statement vincolato al proprietario.
+
+    Mercati e selezioni (#33) compresi: filtravano solo per `sport_id`, e al
+    secondo gate della PR #64 Sol ha mostrato la conseguenza — una richiesta
+    invecchiata da un travaso concorrente avrebbe distrutto i mercati ormai
+    del nuovo proprietario, mentre il resto della funzione era gia' vincolato.
+    None = per QUESTO utente non c'e' nessuno sport da eliminare.
+    """
+    del_sport_mio = '(SELECT id FROM sports WHERE id=? AND user_id=?)'
+    c.execute('DELETE FROM betfair_selections WHERE market_id IN'
+              ' (SELECT id FROM betfair_markets WHERE sport_id IN ' + del_sport_mio + ')',
+              (sport_id, user_id))
+    c.execute('DELETE FROM betfair_markets WHERE sport_id IN ' + del_sport_mio,
+              (sport_id, user_id))
+    c.execute('DELETE FROM alias_squadre WHERE squadra_id IN'
+              ' (SELECT q.id FROM squadre_betfair q JOIN competizioni k'
+              '  ON q.competizione_id = k.id WHERE k.sport_id=? AND k.user_id=?)',
+              (sport_id, user_id))
+    c.execute('DELETE FROM squadre_betfair WHERE competizione_id IN'
+              ' (SELECT id FROM competizioni WHERE sport_id=? AND user_id=?)',
+              (sport_id, user_id))
+    c.execute('DELETE FROM competizioni WHERE sport_id=? AND user_id=?',
+              (sport_id, user_id))
+    tolte = c.execute('DELETE FROM sports WHERE id=? AND user_id=?',
+                      (sport_id, user_id)).rowcount
+    return True if tolte else None
 
 
 def _scrivi_alias(c, user_id, sorgente_id, squadra_id, competizione_id, alias):
@@ -5666,8 +5696,7 @@ async def scrivi_alias_miei(cid: str, sid: str, request: Request):
                 raise HTTPException(422, 'ogni alias deve essere una stringa')
             valore = valore.strip()
             if valore == '':
-                c.execute('DELETE FROM alias_squadre WHERE sorgente_id=? AND squadra_id=?',
-                          (sorgente[0], squadra))
+                _cancella_alias(c, utente['id'], sorgente[0], squadra)
             else:
                 if len(valore) > MAX_CAMPO_MERCATO:
                     raise HTTPException(

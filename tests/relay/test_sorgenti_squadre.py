@@ -562,13 +562,39 @@ def test_le_scritture_sono_vincolate_al_proprietario_anche_nel_write_lock(
     assert main._inserisci_competizione(c, utenti['altrui'], sport, 'Abuso') is None
     assert main._inserisci_squadra(c, utenti['altrui'], cid, 'Abuso') is None
 
+    # «⌫ alias» (secondo gate di Sol): la cancellazione del solo alias e'
+    # anch'essa vincolata nel write-lock — il proprietario sbagliato non
+    # cancella l'alias del nuovo proprietario, e per lui e' un no-op.
+    assert main._cancella_alias(c, utenti['altrui'], sorgente, squadra) == 0
+    assert c.execute('SELECT COUNT(*) FROM alias_squadre').fetchone()[0] == 1
+    assert main._cancella_alias(c, utenti['mio'], sorgente, squadra) == 1
+    assert c.execute('SELECT COUNT(*) FROM alias_squadre').fetchone()[0] == 0
+    assert main._scrivi_alias(c, utenti['mio'], sorgente, squadra, cid, 'Juve') is True
+
+    # E lo SPORT intero (secondo gate di Sol): la cascata comprende anche
+    # mercati e selezioni (#33), e nessun pezzo si muove col proprietario
+    # sbagliato — prima della correzione quei due DELETE filtravano solo per
+    # sport_id, e una richiesta invecchiata avrebbe distrutto i mercati
+    # travasati al nuovo proprietario.
+    c.execute('INSERT INTO betfair_markets(sport_id, market_type, market_name)'
+              ' VALUES (?,?,?)', (sport, 'OVER_UNDER_15', 'Over/Under 1,5 gol'))
+    mercato = c.execute('SELECT id FROM betfair_markets').fetchone()[0]
+    c.execute('INSERT INTO betfair_selections(market_id, selection_name)'
+              ' VALUES (?,?)', (mercato, 'Over 1,5 goal'))
+    assert main._elimina_sport(c, utenti['altrui'], sport) is None
+    assert c.execute('SELECT COUNT(*) FROM betfair_markets').fetchone()[0] == 1
+    assert c.execute('SELECT COUNT(*) FROM sports').fetchone()[0] == 1
+    assert c.execute('SELECT COUNT(*) FROM competizioni').fetchone()[0] == 1
+
     # Il proprietario vero fa tutto, nell'ordine inverso delle guardie.
     assert main._rinomina_sorgente(c, utenti['mio'], sorgente, 'fonte B') is True
     assert main._elimina_squadra(c, utenti['mio'], cid, squadra) is True
     assert main._elimina_competizione(c, utenti['mio'], cid) is True
     assert main._elimina_sorgente(c, utenti['mio'], sorgente) is True
+    assert main._elimina_sport(c, utenti['mio'], sport) is True
     for tabella in ('squadre_betfair', 'competizioni', 'alias_squadre',
-                    'sorgenti_squadre'):
+                    'sorgenti_squadre', 'betfair_markets', 'betfair_selections',
+                    'sports'):
         assert c.execute(f'SELECT COUNT(*) FROM {tabella}').fetchone()[0] == 0, tabella
     c.close()
 
