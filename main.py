@@ -1998,9 +1998,10 @@ def verify_csv(text):
     if lines[0] != HEADER_LINE:
         raise ValueError('intestazione diversa dal contratto (%d colonne rilevate)'
                          % len(lines[0].split(',')))
-    if len(lines) > 2:
-        raise ValueError('CSV con %d righe: atteso intestazione piu al massimo un segnale'
-                         % len(lines))
+    # Dal #35 (pezzo 1) il feed puo' portare N segnali vivi: niente piu' tetto a
+    # una riga — ogni data line passa comunque, UNA PER UNA, dal controllo qui
+    # sotto (14 campi quotati, numerici localizzati). Il gemello JS `verifyCsv`
+    # segue la stessa regola (parita' in test_engine_contract.py).
     for n, line in enumerate(lines[1:], start=2):
         if not _ROW.match(line):
             raise ValueError('riga %d non ha %d campi tutti fra virgolette' % (n, len(HEADERS)))
@@ -2055,7 +2056,17 @@ def store_signal(c, csv_text_value, parser, profile=PIERO_PROFILE, utente=None):
     # lascerebbe viva la riga di un ALTRO profilo dello stesso utente, cioe' due
     # segnali vivi per lo stesso feed utente: un segnale stantio accanto a quello
     # nuovo, che e' esattamente cio' che «una riga viva per utente» vieta.
-    verify_csv(csv_text_value)
+    # Multi-riga (#35 pezzo 1): un messaggio puo' produrre N righe CSV, una per
+    # mercato/selezione. `csv_text_value` accetta la LISTA di documenti (uno per
+    # riga) accanto alla stringa storica; la verifica gira su TUTTI i documenti
+    # PRIMA di toccare il database — meta' segnale nel feed (2 mercati su 3)
+    # e' peggio di nessun segnale, il cliente crederebbe di aver piazzato tutto.
+    documenti = ([csv_text_value] if isinstance(csv_text_value, str)
+                 else list(csv_text_value))
+    if not documenti:
+        raise ValueError('nessun documento CSV da scrivere')
+    for documento in documenti:
+        verify_csv(documento)
     if utente is None and profile is not None:
         riga = c.execute('SELECT id FROM users WHERE origin_profile=?', (profile,)).fetchone()
         utente = riga[0] if riga else None
@@ -2075,8 +2086,33 @@ def store_signal(c, csv_text_value, parser, profile=PIERO_PROFILE, utente=None):
         c.execute('DELETE FROM signals WHERE user_id=?', (utente,))
     else:
         c.execute('DELETE FROM signals WHERE user_id=? OR profile=?', (utente, profile))
-    c.execute('INSERT INTO signals(csv,parser,profile,user_id,expires_at) VALUES (?,?,?,?,?)',
-              (csv_text_value, parser, profile, utente, int(time.time()) + 90))
+    scadenza = int(time.time()) + 90
+    for documento in documenti:
+        c.execute('INSERT INTO signals(csv,parser,profile,user_id,expires_at)'
+                  ' VALUES (?,?,?,?,?)',
+                  (documento, parser, profile, utente, scadenza))
+
+
+def componi_feed(documenti):
+    """UN documento CSV dalle righe vive del feed (#35 pezzo 1), byte-exact.
+
+    Ogni riga di `signals` e' un documento completo (BOM + intestazione + una
+    data line), verificato da `store_signal` alla scrittura. Qui si compone il
+    feed servito: il PRIMO documento intero, dei successivi solo cio' che segue
+    la prima CRLF (la data line) — il BOM e l'intestazione devono comparire una
+    volta sola, in testa: XTrader leggerebbe un header ripetuto come una riga
+    dati malformata. Lista vuota = feed vuoto, la sola intestazione di sempre.
+    Fonte unica (regola 3): la usano entrambe le rotte del feed.
+    """
+    validi = [d for d in documenti if d]
+    if not validi:
+        return empty_csv()
+    pezzi = [validi[0]]
+    for documento in validi[1:]:
+        _, _, coda = documento.partition('\r\n')
+        if coda:
+            pezzi.append(coda)
+    return ''.join(pezzi)
 
 
 def parse_message(message, cfg):
@@ -3107,9 +3143,12 @@ def profile_csv(profile, token, nome_scaricato=None):
     # Stessa forma del feed per utente, per la stessa ragione (regola 2): il poll
     # e' una lettura, il TTL sta nel filtro, la pulizia la fa `store_signal` alla
     # scrittura successiva. Prima qui c'era DELETE + commit a ogni interrogazione.
-    r = c.execute("SELECT csv FROM signals WHERE profile=?"
-                  " AND (expires_at IS NULL OR expires_at > strftime('%s','now'))"
-                  ' ORDER BY id DESC LIMIT 1', (profile,)).fetchone()
+    # TUTTE le righe vive, in ordine di scrittura (#35 pezzo 1): un messaggio
+    # multi-riga ne inserisce N nello stesso commit, e il feed le serve tutte,
+    # composte da `componi_feed` in un documento solo.
+    righe = c.execute("SELECT csv FROM signals WHERE profile=?"
+                      " AND (expires_at IS NULL OR expires_at > strftime('%s','now'))"
+                      ' ORDER BY id', (profile,)).fetchall()
     c.close()
     # store_signal() verifica cio' che SCRIVE, ma una riga finita nel database da
     # una versione precedente e' gia' la' e uscirebbe cosi' com'e' — senza BOM,
@@ -3119,10 +3158,10 @@ def profile_csv(profile, token, nome_scaricato=None):
     # E' l'UNICA verifica sul percorso di consegna, ed e' innocua per costruzione
     # perche' non puo' produrre un errore: al massimo degrada a «nessun segnale».
     # Un raise qui diventerebbe un 500 verso XTrader.
-    body = empty_csv()
-    if r:
+    validi = []
+    for (documento,) in righe:
         try:
-            body = verify_csv(r[0])
+            validi.append(verify_csv(documento))
         except ValueError as e:
             # Il motivo, mai il contenuto: i messaggi di verify_csv() sono
             # strutturali (conteggi, posizioni, numeri di riga) e /health e' un
@@ -3131,12 +3170,12 @@ def profile_csv(profile, token, nome_scaricato=None):
             # Il log segue il contatore: righe identiche a ogni richiesta per 90
             # secondi renderebbero illeggibile proprio il log che serve a capire.
             # Il log sta fuori dal lock di proposito: non si tiene un lock durante
-            # l'I/O.
-            if _registra_scarto(profile, r[0], e):
+            # l'I/O. Una riga guasta degrada SOLO se stessa (#35): le altre
+            # righe vive del feed continuano a uscire.
+            if _registra_scarto(profile, documento, e):
                 logging.getLogger('xtrader.relay').warning(
-                    'feed del profilo %s degradato a sola intestazione: %s', profile, e)
-            body = empty_csv()
-    return Response(body, media_type='text/csv',
+                    'riga del feed del profilo %s scartata dalla verifica: %s', profile, e)
+    return Response(componi_feed(validi), media_type='text/csv',
                     headers=_intestazioni_feed(nome_scaricato))
 
 

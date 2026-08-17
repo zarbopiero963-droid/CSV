@@ -796,3 +796,89 @@ def test_health_riporta_l_esito_del_verificatore(servizio):
     dati = json.loads(corpo)
     assert 'csv' in dati, f'/health non dice niente sul formato CSV: {dati}'
     assert dati['csv'] == 'ok', dati
+
+
+# ------------------------------ il feed a N righe attive (#35 pezzo 1)
+
+def test_un_messaggio_multi_riga_esce_con_UN_bom_e_UNA_intestazione(tmp_path, monkeypatch):
+    """Il contratto del pezzo 1 della #35, asserito sui BYTE della risposta.
+
+    `store_signal` accetta una LISTA di documenti (uno per riga CSV prodotta
+    dallo stesso messaggio) e il feed li compone in UN documento: BOM unico in
+    testa, intestazione unica, poi le data line nell'ordine di scrittura,
+    ciascuna col suo CRLF. Niente header ripetuti in mezzo al feed: XTrader
+    li leggerebbe come una riga dati malformata.
+    """
+    relay_in_processo(monkeypatch, tmp_path / 'multi.db')
+    prima = list(RIGA_VALIDA)
+    seconda = list(RIGA_VALIDA)
+    seconda[main.HEADERS.index('MarketType')] = 'OVER_UNDER_25'
+    seconda[main.HEADERS.index('SelectionName')] = 'Over 2,5 goal'
+    d1, d2 = main.make_csv(prima), main.make_csv(seconda)
+    c = main.db()
+    try:
+        main.store_signal(c, [d1, d2], 'parser-finto', 'PIERO')
+        c.commit()
+    finally:
+        c.close()
+    corpo = _feed().body.decode('utf-8')
+    atteso = d1 + d2.split('\r\n', 1)[1]
+    assert corpo == atteso, (
+        f'composizione multi-riga sbagliata:\n  atteso  {atteso!r}\n  servito {corpo!r}')
+    assert corpo.count('﻿') == 1, 'il BOM deve comparire UNA volta, in testa'
+    assert corpo.count('"Provider"') == 1, 'intestazione ripetuta nel feed'
+    assert main.verify_csv(corpo) is None or True  # non deve sollevare
+
+
+def test_alla_scadenza_di_UNA_riga_il_feed_perde_solo_quella(tmp_path, monkeypatch):
+    """«Ciascuna col proprio TTL»: il filtro di lettura e' per riga."""
+    relay_in_processo(monkeypatch, tmp_path / 'ttl.db')
+    prima = list(RIGA_VALIDA)
+    seconda = list(RIGA_VALIDA)
+    seconda[main.HEADERS.index('MarketType')] = 'OVER_UNDER_25'
+    d1, d2 = main.make_csv(prima), main.make_csv(seconda)
+    c = main.db()
+    try:
+        main.store_signal(c, [d1, d2], 'parser-finto', 'PIERO')
+        # La prima riga scade, la seconda no: seed diretto, come farebbe il tempo.
+        c.execute('UPDATE signals SET expires_at=? WHERE csv=?',
+                  (int(time.time()) - 1, d1))
+        c.commit()
+    finally:
+        c.close()
+    corpo = _feed().body.decode('utf-8')
+    assert corpo == d2, (
+        f'doveva restare SOLO la seconda riga:\n  atteso  {d2!r}\n  servito {corpo!r}')
+
+
+def test_una_lista_con_un_documento_rotto_non_scrive_NIENTE(tmp_path, monkeypatch):
+    """Fail-closed atomico: o tutte le righe del messaggio, o nessuna.
+
+    Meta' segnale nel feed (2 mercati su 3) e' peggio di nessun segnale: il
+    cliente crede di aver piazzato tutto. E il segnale precedente resta intatto.
+    """
+    relay_in_processo(monkeypatch, tmp_path / 'atomico.db')
+    buono = main.make_csv(RIGA_VALIDA)
+    c = main.db()
+    try:
+        main.store_signal(c, buono, 'parser-finto', 'PIERO')
+        with pytest.raises(ValueError):
+            main.store_signal(c, [buono, 'Provider,EventId\r\n'], 'parser-finto', 'PIERO')
+        righe = [r[0] for r in c.execute(
+            'SELECT csv FROM signals WHERE profile=?', ('PIERO',)).fetchall()]
+        assert righe == [buono], f'il feed doveva restare al segnale precedente: {righe!r}'
+    finally:
+        c.close()
+
+
+def test_la_stringa_singola_resta_il_caso_storico(tmp_path, monkeypatch):
+    """Retrocompatibilita': i chiamanti a documento singolo non cambiano di un byte."""
+    relay_in_processo(monkeypatch, tmp_path / 'retro.db')
+    buono = main.make_csv(RIGA_VALIDA)
+    c = main.db()
+    try:
+        main.store_signal(c, buono, 'parser-finto', 'PIERO')
+        c.commit()
+    finally:
+        c.close()
+    assert _feed().body.decode('utf-8') == buono
