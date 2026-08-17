@@ -5395,8 +5395,10 @@ def _scrivi_alias(c, user_id, sorgente_id, squadra_id, competizione_id, alias):
     lo stato vero, e ognuna vincola piu' del semplice «l'id esiste»:
 
     - la squadra deve esistere **dentro questa competizione**
-      (`competizione_id` nella subquery — la forma di CodeRabbit), che la rotta
-      ha gia' verificato essere dell'utente;
+      (`competizione_id` nella subquery — la forma di CodeRabbit), e la
+      competizione dev'essere ANCORA dell'utente (il JOIN su
+      `competizioni.user_id`, dal terzo gate di Fable): il controllo della
+      rotta e' una lettura, e un travaso concorrente puo' invecchiarla;
     - la sorgente deve esistere ancora (GPT-5.5: la sua DELETE concorrente
       lascerebbe una riga con `sorgente_id` pendente, mai letta e non piu'
       eliminabile) **ed essere dell'utente** (`user_id` nella subquery).
@@ -5412,11 +5414,12 @@ def _scrivi_alias(c, user_id, sorgente_id, squadra_id, competizione_id, alias):
     uno dei due padri non esiste piu' — o non e' dell'utente.
     """
     c.execute('INSERT INTO alias_squadre(sorgente_id, squadra_id, alias)'
-              ' SELECT ?,?,? WHERE EXISTS (SELECT 1 FROM squadre_betfair'
-              '  WHERE id=? AND competizione_id=?)'
+              ' SELECT ?,?,? WHERE EXISTS (SELECT 1 FROM squadre_betfair q'
+              '  JOIN competizioni k ON k.id = q.competizione_id'
+              '  WHERE q.id=? AND q.competizione_id=? AND k.user_id=?)'
               ' AND EXISTS (SELECT 1 FROM sorgenti_squadre WHERE id=? AND user_id=?)'
               ' ON CONFLICT(sorgente_id, squadra_id) DO UPDATE SET alias=excluded.alias',
-              (sorgente_id, squadra_id, alias, squadra_id, competizione_id,
+              (sorgente_id, squadra_id, alias, squadra_id, competizione_id, user_id,
                sorgente_id, user_id))
     if not c.execute('SELECT changes()').fetchone()[0]:
         return None

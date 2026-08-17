@@ -497,6 +497,17 @@ def test_l_inserimento_non_lascia_orfani_se_il_padre_sparisce(tmp_path, monkeypa
                      (sorgente_sparita,)).fetchone()[0] == 0, \
         'alias con sorgente pendente scritto'
 
+    # E la COMPETIZIONE travasata a un altro utente (terzo gate di Fable): la
+    # squadra esiste ancora dentro quella competizione, la sorgente e' ancora
+    # mia, ma la competizione non lo e' piu' — l'alias non si scrive. Simula
+    # il travaso committato fra la lettura della rotta e il write-lock.
+    c.execute("INSERT INTO users(slug, first_name, status) VALUES ('terzo', 'Terzo', 'attivo')")
+    terzo = c.execute("SELECT id FROM users WHERE slug='terzo'").fetchone()[0]
+    c.execute('UPDATE competizioni SET user_id=? WHERE id=?', (terzo, cid))
+    assert main._scrivi_alias(c, utente, sorgente, squadra, cid, 'Tardi') is None, \
+        'la competizione travasata non deve piu' + "' accettare alias dal vecchio conto"
+    c.execute('UPDATE competizioni SET user_id=? WHERE id=?', (utente, cid))
+
     # E la sorgente di un ALTRO utente (hardening dal secondo giro di Fable):
     # l'id e' vivo ma non e' del chiamante — non si scrive. Con AUTOINCREMENT
     # gli id non si riusano mai (misurato), quindi il vincolo e' difesa in
