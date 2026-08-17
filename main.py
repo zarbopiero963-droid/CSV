@@ -5288,7 +5288,7 @@ def _inserisci_squadra(c, competizione_id, nome):
     return c.execute('SELECT last_insert_rowid()').fetchone()[0]
 
 
-def _scrivi_alias(c, sorgente_id, squadra_id, competizione_id, alias):
+def _scrivi_alias(c, user_id, sorgente_id, squadra_id, competizione_id, alias):
     """Upsert dell'alias CONDIZIONATO ai suoi DUE padri, in UNO statement.
 
     Il TERZO sito della classe TOCTOU della PR #55, mancato al primo giro di
@@ -5297,28 +5297,33 @@ def _scrivi_alias(c, sorgente_id, squadra_id, competizione_id, alias):
     concorrente della squadra (o dello sport, con la sua cascata) puo'
     committare — l'upsert diretto scriveva un alias orfano, invisibile alle
     letture (che joinano `squadre_betfair`) e rimovibile solo eliminando la
-    sorgente. Le guardie girano dentro il write-lock dell'INSERT e vedono lo
-    stato vero. Sono TRE, dal giro di review successivo:
+    sorgente. Le DUE guardie girano dentro il write-lock dell'INSERT e vedono
+    lo stato vero, e ognuna vincola piu' del semplice «l'id esiste»:
 
-    - la squadra deve esistere **dentro questa competizione** (`competizione_id`
-      nella subquery): l'esistenza del solo id non basta, perche' i rowid di
-      sqlite si riusano dopo una DELETE e l'id potrebbe rinascere come squadra
-      di un'altra competizione — anche di un altro utente (nota di Fable);
-    - la sorgente deve esistere ancora (GPT-5.5): la sua DELETE concorrente
+    - la squadra deve esistere **dentro questa competizione**
+      (`competizione_id` nella subquery — la forma di CodeRabbit), che la rotta
+      ha gia' verificato essere dell'utente;
+    - la sorgente deve esistere ancora (GPT-5.5: la sua DELETE concorrente
       lascerebbe una riga con `sorgente_id` pendente, mai letta e non piu'
-      eliminabile, perche' la cascata della sorgente e' gia' passata.
+      eliminabile) **ed essere dell'utente** (`user_id` nella subquery).
+
+    Il vincolo di proprieta' e' difesa in profondita', non la chiusura di una
+    falla viva: le tabelle usano AUTOINCREMENT e sqlite NON riusa mai quegli id
+    dopo una DELETE (misurato, secondo giro di Fable sulla PR #64) — ma cosi'
+    l'isolamento non dipende da quella proprieta' sottile dello schema, che un
+    ALTER futuro potrebbe perdere in silenzio.
 
     La sovrascrittura passa dall'`ON CONFLICT` e conta come cambiamento anche a
     valore identico (misurato, e vincolato dal test): None significa SOLO che
-    uno dei due padri non esiste piu'.
+    uno dei due padri non esiste piu' — o non e' dell'utente.
     """
     c.execute('INSERT INTO alias_squadre(sorgente_id, squadra_id, alias)'
               ' SELECT ?,?,? WHERE EXISTS (SELECT 1 FROM squadre_betfair'
               '  WHERE id=? AND competizione_id=?)'
-              ' AND EXISTS (SELECT 1 FROM sorgenti_squadre WHERE id=?)'
+              ' AND EXISTS (SELECT 1 FROM sorgenti_squadre WHERE id=? AND user_id=?)'
               ' ON CONFLICT(sorgente_id, squadra_id) DO UPDATE SET alias=excluded.alias',
               (sorgente_id, squadra_id, alias, squadra_id, competizione_id,
-               sorgente_id))
+               sorgente_id, user_id))
     if not c.execute('SELECT changes()').fetchone()[0]:
         return None
     return True
@@ -5612,8 +5617,8 @@ async def scrivi_alias_miei(cid: str, sid: str, request: Request):
                 if len(valore) > MAX_CAMPO_MERCATO:
                     raise HTTPException(
                         422, f'alias troppo lungo: massimo {MAX_CAMPO_MERCATO} caratteri')
-                if _scrivi_alias(c, sorgente[0], squadra, competizione[0],
-                                 valore) is None:
+                if _scrivi_alias(c, utente['id'], sorgente[0], squadra,
+                                 competizione[0], valore) is None:
                     # Un padre e' morto fra la lettura e la scrittura: 404
                     # come se la DELETE fosse arrivata prima.
                     raise HTTPException(404, 'squadra non trovata')

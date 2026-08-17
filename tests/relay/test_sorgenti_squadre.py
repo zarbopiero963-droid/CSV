@@ -466,23 +466,24 @@ def test_l_inserimento_non_lascia_orfani_se_il_padre_sparisce(tmp_path, monkeypa
     cid = main._inserisci_competizione(c, utente, sport, 'Serie A')
     squadra = main._inserisci_squadra(c, cid, 'Juventus')
 
-    assert main._scrivi_alias(c, sorgente, squadra, cid, 'Juve') is True
-    assert main._scrivi_alias(c, sorgente, squadra, cid, 'JUV') is True, \
+    assert main._scrivi_alias(c, utente, sorgente, squadra, cid, 'Juve') is True
+    assert main._scrivi_alias(c, utente, sorgente, squadra, cid, 'JUV') is True, \
         'la sovrascrittura conta come cambiamento anche a valore identico'
     assert c.execute('SELECT alias FROM alias_squadre WHERE sorgente_id=?'
                      ' AND squadra_id=?', (sorgente, squadra)).fetchone()[0] == 'JUV'
-    assert main._scrivi_alias(c, sorgente, squadra, cid, 'JUV') is True, \
+    assert main._scrivi_alias(c, utente, sorgente, squadra, cid, 'JUV') is True, \
         'valore identico: changes() deve contare comunque, o la rotta darebbe 404'
 
     squadra_sparita = squadra + 1000
-    assert main._scrivi_alias(c, sorgente, squadra_sparita, cid, 'Orfano') is None
+    assert main._scrivi_alias(c, utente, sorgente, squadra_sparita, cid,
+                              'Orfano') is None
     assert c.execute('SELECT COUNT(*) FROM alias_squadre WHERE squadra_id=?',
                      (squadra_sparita,)).fetchone()[0] == 0, 'alias orfano scritto'
 
-    # La squadra di un'ALTRA competizione non si aggancia (nota di Fable sul
-    # riuso dei rowid): l'id esiste, ma non dentro QUESTA competizione.
+    # La squadra di un'ALTRA competizione non si aggancia: l'id esiste, ma non
+    # dentro QUESTA competizione.
     altra = main._inserisci_competizione(c, utente, sport, 'Serie B')
-    assert main._scrivi_alias(c, sorgente, squadra, altra, 'X') is None, \
+    assert main._scrivi_alias(c, utente, sorgente, squadra, altra, 'X') is None, \
         'squadra fuori dalla competizione del percorso: non va scritta'
 
     # E la SORGENTE sparita (GPT-5.5, PR #64): senza la guardia sul secondo
@@ -490,10 +491,28 @@ def test_l_inserimento_non_lascia_orfani_se_il_padre_sparisce(tmp_path, monkeypa
     # sorgente_id pendente — mai letta e non piu' eliminabile, perche' la
     # cascata della sorgente e' gia' passata.
     sorgente_sparita = sorgente + 1000
-    assert main._scrivi_alias(c, sorgente_sparita, squadra, cid, 'Orfano') is None
+    assert main._scrivi_alias(c, utente, sorgente_sparita, squadra, cid,
+                              'Orfano') is None
     assert c.execute('SELECT COUNT(*) FROM alias_squadre WHERE sorgente_id=?',
                      (sorgente_sparita,)).fetchone()[0] == 0, \
         'alias con sorgente pendente scritto'
+
+    # E la sorgente di un ALTRO utente (hardening dal secondo giro di Fable):
+    # l'id e' vivo ma non e' del chiamante — non si scrive. Con AUTOINCREMENT
+    # gli id non si riusano mai (misurato), quindi il vincolo e' difesa in
+    # profondita', non la chiusura di una falla viva: l'invariante smette di
+    # dipendere da una proprieta' sottile dello schema.
+    c.execute("INSERT INTO users(slug, first_name, status) VALUES ('altro', 'Altro', 'attivo')")
+    altro = c.execute("SELECT id FROM users WHERE slug='altro'").fetchone()[0]
+    c.execute('INSERT INTO sorgenti_squadre(user_id, nome) VALUES (?, ?)',
+              (altro, 'sorgente altrui'))
+    sorgente_altrui = c.execute('SELECT id FROM sorgenti_squadre WHERE user_id=?',
+                                (altro,)).fetchone()[0]
+    assert main._scrivi_alias(c, utente, sorgente_altrui, squadra, cid,
+                              'Abuso') is None, \
+        'la sorgente di un altro utente non deve accettare alias'
+    assert c.execute('SELECT COUNT(*) FROM alias_squadre WHERE sorgente_id=?',
+                     (sorgente_altrui,)).fetchone()[0] == 0
     c.close()
 
 
