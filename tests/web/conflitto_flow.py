@@ -277,6 +277,18 @@ with sync_playwright() as pw:
     # La modale si e' chiusa: si riferiva a una riga che non esiste piu'.
     assert pg.query_selector('.veil') is None, \
         'la modale di conferma e- rimasta aperta su un parser che non c-e- piu-'
+    # E l'app resta VIVA e coerente dopo il conflitto: `render()` gira su una
+    # cache in cui quello slug ha cambiato identita', ed e' il punto dove un
+    # riallineamento fatto male si vedrebbe come schermata rotta. La scheda del
+    # parser si ridisegna, con i suoi comandi al loro posto. (Chiesto da GPT-5.5:
+    # «assertare lo stato UI post-conflitto». Il wizard resta agganciato allo
+    # slug ed e' voluto — lo slug esiste ancora, e il draft dell'utente si
+    # conserva come nel conflitto della PUT: buttarlo via contraddirebbe il
+    # toast che dice «le tue modifiche sono ancora qui».)
+    assert pg.query_selector('[data-act="del-parser"]') is not None, \
+        'dopo il conflitto la scheda del parser non si e- ridisegnata'
+    assert pg.query_selector('#test-msg') is not None, \
+        'il wizard e- sparito: il draft dell-utente non deve essere buttato via'
     shot(pg, '06-delete-stantia')
 
     b.close()
