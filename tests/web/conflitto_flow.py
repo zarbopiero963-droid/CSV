@@ -189,6 +189,13 @@ with sync_playwright() as pw:
     # scheda» e' la coppia DELETE+POST via fetch, indistinguibile al server.
     pg.reload()
     pg.wait_for_selector('#test-msg')
+    # Il ricreato porta un valore DIVERSO da quello della scheda rimasta aperta
+    # (che dopo la reload ha in draft `CONFIG_BASE`, cioe' 'P.Bet.'). Non e' un
+    # dettaglio: con lo stesso valore su entrambi, il server direbbe 'P.Bet.'
+    # sia che l'overwrite avvenga sia che no, e l'asserzione qui sotto
+    # passerebbe senza dimostrare niente.
+    config_ricreato = dict(CONFIG_BASE)
+    config_ricreato['match'] = {'type': 'contains', 'value': 'RICREATO'}
     esito = pg.evaluate(
         """async ([slug, config]) => {
              const d = await fetch(`/api/me/parsers/${slug}`, {method: 'DELETE'});
@@ -198,7 +205,7 @@ with sync_playwright() as pw:
                body: JSON.stringify({titolo: 'Conteso', config, active: true})});
              const nuovo = await c.json();
              return [d.status, c.status, nuovo.slug, nuovo.uid];
-           }""", [slug, CONFIG_BASE])
+           }""", [slug, config_ricreato])
     assert esito[0] == 200 and esito[1] == 200, esito
     assert esito[2] == slug, f'il ricreato deve riprendere lo slug: {esito}'
 
@@ -209,9 +216,29 @@ with sync_playwright() as pw:
     assert 'Eliminato e ricreato altrove' in toast, \
         f'il conflitto di IDENTITA- va detto diverso da quello di versione: {toast!r}'
     salvata = config_sul_server(pg, slug)
-    assert salvata['match']['value'] == 'P.Bet.', \
+    assert salvata['match']['value'] == 'RICREATO', \
         f'il parser ricreato e- stato sovrascritto: {json.dumps(salvata)[:120]}'
     shot(pg, '04-eliminato-e-ricreato')
+
+    # ---------------- il RESIDUO, fotografato: il SECONDO salvataggio passa
+    # `conflittoOFallita` riallinea la cache (serve: senza, ogni salvataggio
+    # successivo fallirebbe per sempre — il bug del toggle, CodeRabbit PR #71),
+    # quindi il click dopo il 409 porta l'uid NUOVO e sovrascrive il parser
+    # ricreato. Il primo salvataggio non e' piu' silenzioso — c'e' il 409 e il
+    # toast che dice di guardare quello nuovo — ma il secondo e' a un click.
+    # Segnalato da Claude Fable 5 sulla PR #76 e registrato come issue: chiuderlo
+    # vuole una conferma esplicita, cioe' UI nuova, non un filtro.
+    # Questo test NON approva il comportamento: lo inchioda, come quello della
+    # #74 che fotografava la finestra client. Il giorno in cui la conferma
+    # arriva, questo diventa rosso — ed e' esattamente il punto.
+    pg.click('[data-act="wiz-save"]')
+    pg.wait_for_selector('.toast:has-text("Configurazione salvata")')
+    salvata = config_sul_server(pg, slug)
+    assert salvata['match']['value'] == 'P.Bet.', \
+        ('residuo cambiato: il secondo salvataggio NON sovrascrive piu-. '
+         'Se e- arrivata la conferma esplicita, invertire questo test: '
+         f'{json.dumps(salvata)[:120]}')
+    shot(pg, '05-residuo-secondo-salvataggio')
 
     b.close()
 

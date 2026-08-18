@@ -1111,7 +1111,19 @@ che l'utente ha già visto, ed è una scelta legittima; nel secondo cancellerebb
 il lavoro appena fatto nell'altra scheda, quindi il testo **non** invita a
 farlo. `app.js` distingue i due sul `detail` del 409, e il flusso in browser
 (`tests/web/conflitto_flow.py`) verifica che il toast giusto compaia nel caso
-giusto.
+giusto — accoppiamento fra codice e copy che è **inchiodato**, non fragile:
+cambiare il testo del 409 in `main.py` rende rosso quel flusso, misurato per
+mutazione sulla PR #76.
+
+**Cosa il toast NON impedisce, e va detto.** Dopo il 409 la cache viene
+riallineata (senza, ogni salvataggio successivo fallirebbe per sempre — il bug
+del toggle, CodeRabbit PR #71), quindi un **secondo** click su Salva porta
+l'`uid` nuovo e sovrascrive il parser ricreato. Il salvataggio silenzioso è
+chiuso — c'è il 409 e c'è l'avviso — ma la sovrascrittura resta a un click, e
+chiuderla vuole una **conferma esplicita**, cioè UI nuova. Segnalato da Claude
+Fable 5 sulla PR #76, fotografato dal flusso in browser (che diventerà rosso il
+giorno in cui la conferma arriva) e registrato come issue per la decisione del
+proprietario.
 
 **L'identità della riga: `uid` (#73).** `versione` risponde alla domanda «è
 cambiato mentre lo modificavo?». Ne esiste una seconda, diversa: «è ancora lo
@@ -1160,10 +1172,16 @@ Non è un segreto: è un identificatore opaco delle **proprie** righe, che la
 sessione già autorizza a leggere e modificare. Restano interni `name` (identità
 globale fra tutti gli utenti) e `user_id`.
 
-`uid` è identità **interna**: non compare nella vista del parser né nell'API,
-come `name` e `user_id`. La migrazione lo assegna alle righe già esistenti con
-un valore distinto per riga, una volta sola (`WHERE uid IS NULL`): rigenerarlo a
-ogni avvio renderebbe stantio a ogni deploy ogni riferimento in volo.
+La migrazione lo assegna alle righe già esistenti con un valore distinto per
+riga, una volta sola (`WHERE uid IS NULL`): rigenerarlo a ogni avvio renderebbe
+stantio a ogni deploy ogni riferimento in volo.
+
+*Storia, perché non si ripeta:* fino alla #75 qui sotto restava la frase della
+#73 — «`uid` è identità **interna**: non compare nella vista del parser né
+nell'API» — accanto al paragrafo che documentava il contrario. Due affermazioni
+opposte sullo stesso campo, a cinque righe di distanza: la documentazione del
+cambiamento aggiunta senza togliere quella del comportamento precedente, che è
+la stessa forma dell'errore del BOM. Segnalata da Claude Fable 5 sulla PR #76.
 
 La scelta è del proprietario (18/08): `AUTOINCREMENT` avrebbe chiuso lo stesso
 caso, ma non si aggiunge con un `ALTER` — andrebbe ricreata la tabella che porta
