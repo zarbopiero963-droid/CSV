@@ -963,3 +963,59 @@ def test_l_uid_e_unico_e_le_righe_esistenti_lo_ricevono_dalla_migrazione(
     dopo = dict(c.execute('SELECT name, uid FROM parsers').fetchall())
     assert prima == dopo, f'la migrazione ha riscritto gli uid: {prima} -> {dopo}'
     c.close()
+
+
+def test_NESSUN_percorso_di_creazione_lascia_un_parser_senza_uid(tmp_path, monkeypatch):
+    """Rischio segnalato da GPT-5.5 sulla PR #74, verificato invece che dedotto.
+
+    `uid` e' nullable — `ALTER TABLE ADD COLUMN NOT NULL` esige un default
+    costante, e un uid costante su tutte le righe sarebbe l'esatto contrario di
+    un'identita'. In sqlite un indice UNIQUE tollera piu' NULL, quindi lo schema
+    da solo non basta: un parser con `uid IS NULL` sarebbe **visibile ma
+    immortale**, perche' ne' `uid=?` della PUT ne' quello della DELETE
+    combaciano mai con NULL. La garanzia deve venire dai percorsi di scrittura,
+    ed e' qui che va misurata.
+
+    I percorsi che inseriscono in `parsers` sono DUE (grep `INSERT INTO parsers`
+    su `main.py`):
+
+    - `_crea_parser_utente`, la rotta del cliente: nomina `uid` nell'INSERT;
+    - `save_parser`, la rotta admin `POST /api/parsers`: **non** lo nomina, ma
+      chiama `_completa_colonne_nuove` nello stesso commit, che riempie gli uid
+      mancanti. E' coperto per conseguenza, non per costruzione — e questo test
+      e' cio' che lo tiene vero: se un domani quella chiamata sparisse, o
+      nascesse un terzo percorso senza ne' l'una ne' l'altra cosa, qui diventa
+      rosso invece di produrre un parser immortale in silenzio.
+    """
+    import sqlite3
+    from tests.dati import relay_in_processo
+    percorso = relay_in_processo(monkeypatch, tmp_path / 'senza_uid.db')
+    c = sqlite3.connect(percorso)
+    senza = "SELECT COUNT(*) FROM parsers WHERE uid IS NULL"
+
+    # 1) La riga legacy della produzione simulata, riempita dalla migrazione.
+    assert c.execute(senza).fetchone()[0] == 0, 'la migrazione ha lasciato un uid NULL'
+
+    # 2) Il percorso del cliente.
+    c.execute("INSERT INTO users(slug, first_name, status) VALUES ('u','U','attivo')")
+    utente = c.execute("SELECT id FROM users WHERE slug='u'").fetchone()[0]
+    main._crea_parser_utente(c, utente, 'Del cliente', {}, True)
+    c.commit()
+    assert c.execute(senza).fetchone()[0] == 0, \
+        'la creazione dal cliente ha lasciato un parser senza uid'
+
+    # 3) Il percorso ADMIN, che non nomina `uid` nel suo INSERT: si esercita la
+    #    funzione vera della rotta, non una sua imitazione.
+    campi = {campo: '' for campo in main.ParserIn.model_fields}
+    campi.update(name='parser-admin', header='INTESTAZIONE')
+    # `auth()` esige il token del relay: la fixture in processo lo azzera per non
+    # dipendere dalla macchina, quindi qui se ne mette uno finto e si passa QUELLO.
+    monkeypatch.setattr(main, 'TOKEN', 'token-di-prova-per-la-rotta-admin')
+    main.save_parser(main.ParserIn(**campi), main.TOKEN)
+    c2 = sqlite3.connect(percorso)
+    assert c2.execute(senza).fetchone()[0] == 0, \
+        'la creazione dall\'admin ha lasciato un parser senza uid'
+    assert c2.execute('SELECT COUNT(*) FROM parsers WHERE name=?',
+                      ('parser-admin',)).fetchone()[0] == 1, 'il parser admin non c\'e\''
+    c2.close()
+    c.close()
