@@ -761,9 +761,11 @@ def test_l_eliminazione_stantia_NON_colpisce_un_parser_ricreato_stesso_slug(
     `(user_id, slug)`: fra la lettura dell'id e il write-lock un elimina+ricrea
     concorrente dello STESSO slug (stesso utente) fa divergere le due — la
     richiesta stantia cancellava il parser RICREATO, i cui link non erano
-    stati toccati (la cascata puntava all'id vecchio): link orfani permanenti
-    (AUTOINCREMENT non riusa gli id, come per i mercati della PR #55) e un
+    stati toccati (la cascata puntava all'id vecchio): link orfani e un
     parser sparito sotto i piedi di chi l'aveva appena ricreato, con `ok: true`.
+    `parsers` non ha AUTOINCREMENT (CodeRabbit sulla PR #72, e misurato dal
+    secondo scenario): sqlite riusa il rowid massimo, quindi la sentinella
+    qui sotto lo tiene occupato per ottenere due id davvero distinti.
 
     Misurato sul codice precedente: la richiesta stantia restituiva True, il
     parser ricreato spariva e il suo link restava orfano. Con l'`id` anche
@@ -833,7 +835,9 @@ def test_l_eliminazione_stantia_NON_colpisce_un_parser_ricreato_stesso_slug(
     c.execute('DELETE FROM parsers WHERE id=?', (vecchio2,))
     nuovo2 = crea('u-a-riuso-2')             # sqlite riusa il massimo: id uguale
     assert nuovo2 == vecchio2, \
-        'lo scenario esige il riuso del rowid (parsers e\' senza AUTOINCREMENT)'
+        ('lo scenario esige il riuso del rowid: se questa riga fallisce lo'
+         ' schema di `parsers` e\' cambiato (AUTOINCREMENT aggiunto) e il caso'
+         ' qui sotto non esiste piu\' — va riconsiderato, non silenziato')
     c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id) VALUES (?,?)',
               ('-100777', uid))
     chat2 = c.execute('SELECT last_insert_rowid()').fetchone()[0]

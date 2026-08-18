@@ -905,4 +905,25 @@ def test_anche_le_letture_sono_vincolate_al_proprietario_nello_statement(
         (squadra, 'Juventus', 'Juve')]
     assert main._squadre_di(c, utenti['altrui'], cid) == []
     assert main._alias_di(c, utenti['altrui'], cid, sorgente) == []
+    # E il ramo sulla SORGENTE del predicato (CodeRabbit sulla PR #72): la
+    # competizione e' mia, ma la sorgente e' di un ALTRO utente — il LEFT
+    # JOIN e' vincolato anche sul secondo padre, quindi la squadra resta e
+    # l'alias e' vuoto: la tabella non mostra mai gli alias altrui.
+    #
+    # L'alias altrui va SCRITTO, o il test non prova niente: senza una riga da
+    # nascondere il LEFT JOIN non trova nulla comunque, e la stessa asserzione
+    # passa anche togliendo il vincolo. Misurato per mutazione — tolto il
+    # vincolo sulla sorgente, la versione senza questa INSERT restava verde;
+    # con la riga presente diventa rossa, che e' il solo modo in cui il test
+    # vincola qualcosa. La coppia (sorgente altrui, squadra mia) e' proprio lo
+    # stato che un travaso della sola sorgente lascia dietro di se'.
+    c.execute('INSERT INTO sorgenti_squadre(user_id, nome) VALUES (?, ?)',
+              (utenti['altrui'], 'fonte altrui'))
+    sorgente_altrui = c.execute('SELECT id FROM sorgenti_squadre WHERE user_id=?',
+                                (utenti['altrui'],)).fetchone()[0]
+    c.execute('INSERT INTO alias_squadre(sorgente_id, squadra_id, alias)'
+              ' VALUES (?,?,?)', (sorgente_altrui, squadra, 'Vecchia Signora'))
+    assert main._alias_di(c, utenti['mio'], cid, sorgente_altrui) == [
+        (squadra, 'Juventus', '')], \
+        'l\'alias della sorgente altrui non deve comparire nella mia tabella'
     c.close()
