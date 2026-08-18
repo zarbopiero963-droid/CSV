@@ -751,3 +751,69 @@ def test_l_eliminazione_del_parser_e_vincolata_anche_nel_write_lock(tmp_path,
     assert c.execute('SELECT COUNT(*) FROM parser_chats WHERE parser_id=?',
                      (pid,)).fetchone()[0] == 0
     c.close()
+
+
+def test_l_eliminazione_stantia_NON_colpisce_un_parser_ricreato_stesso_slug(
+        tmp_path, monkeypatch):
+    """[REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #72: la race ABA.
+
+    La cascata dei link e' vincolata per `id`, ma la DELETE del parser era per
+    `(user_id, slug)`: fra la lettura dell'id e il write-lock un elimina+ricrea
+    concorrente dello STESSO slug (stesso utente) fa divergere le due — la
+    richiesta stantia cancellava il parser RICREATO, i cui link non erano
+    stati toccati (la cascata puntava all'id vecchio): link orfani permanenti
+    (AUTOINCREMENT non riusa gli id, come per i mercati della PR #55) e un
+    parser sparito sotto i piedi di chi l'aveva appena ricreato, con `ok: true`.
+
+    Misurato sul codice precedente: la richiesta stantia restituiva True, il
+    parser ricreato spariva e il suo link restava orfano. Con l'`id` anche
+    nella DELETE del parser: None (la rotta risponde 404, come se il parser
+    letto fosse gia' sparito), il ricreato e il suo link intatti.
+    """
+    import sqlite3
+    from tests.dati import relay_in_processo
+    percorso = relay_in_processo(monkeypatch, tmp_path / 'aba65.db')
+    c = sqlite3.connect(percorso)
+    c.execute("INSERT INTO users(slug, first_name, status) VALUES ('solo', 'Solo', 'attivo')")
+    uid = c.execute("SELECT id FROM users WHERE slug='solo'").fetchone()[0]
+
+    def crea(nome):
+        c.execute('INSERT INTO parsers(name, header, user_id, slug, titolo,'
+                  " config_json, active, ordine) VALUES (?, '', ?, 'rifatto',"
+                  " 'Rifatto', '{}', 1, 0)", (nome, uid))
+        c.execute('UPDATE parsers SET id=rowid WHERE name=?', (nome,))
+        return c.execute('SELECT id FROM parsers WHERE name=?', (nome,)).fetchone()[0]
+
+    vecchio = crea('u-a-rifatto')
+    # `parsers` e' la tabella originale, SENZA AUTOINCREMENT: se il parser
+    # eliminato detiene il rowid massimo, sqlite lo riusa e il ricreato
+    # sarebbe la STESSA identita' di riga (id uguale) — cascata e DELETE
+    # coerenti per costruzione. La sentinella tiene occupato il massimo,
+    # cosi' il ricreato prende un id NUOVO: lo scenario della race.
+    c.execute("INSERT INTO parsers(name, header, user_id, slug, titolo,"
+              " config_json, active, ordine) VALUES ('u-a-sentinella', '', ?,"
+              " 'sentinella', 'Sentinella', '{}', 1, 1)", (uid,))
+    # La richiesta stantia ha letto `vecchio`; ADESSO l'elimina+ricrea
+    # concorrente committa: stesso slug, riga nuova (name diverso: e' PK).
+    c.execute('DELETE FROM parser_chats WHERE parser_id=?', (vecchio,))
+    c.execute('DELETE FROM parsers WHERE id=?', (vecchio,))
+    nuovo = crea('u-a-rifatto-2')
+    assert nuovo != vecchio, 'lo scenario esige due identita\' distinte'
+    c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id) VALUES (?,?)',
+              ('-100888', uid))
+    chat = c.execute('SELECT last_insert_rowid()').fetchone()[0]
+    c.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (?,?)',
+              (nuovo, chat))
+
+    # ...e la richiesta stantia prosegue con l'id vecchio: non deve toccare niente.
+    assert main._elimina_parser(c, uid, vecchio, 'rifatto') is None
+    assert c.execute('SELECT COUNT(*) FROM parsers WHERE id=?',
+                     (nuovo,)).fetchone()[0] == 1, \
+        'il parser ricreato non si tocca: la richiesta stantia parlava di un altro'
+    assert c.execute('SELECT COUNT(*) FROM parser_chats WHERE parser_id=?',
+                     (nuovo,)).fetchone()[0] == 1
+    # E per il proprietario col dato FRESCO tutto funziona come sempre.
+    assert main._elimina_parser(c, uid, nuovo, 'rifatto') is True
+    assert c.execute('SELECT COUNT(*) FROM parser_chats').fetchone()[0] == 0, \
+        'nessun link orfano: la cascata e la DELETE colpiscono lo stesso id'
+    c.close()

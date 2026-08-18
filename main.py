@@ -5236,12 +5236,26 @@ def _elimina_parser(c, user_id, parser_id, slug):
     smetteva di ricevere dalla sua chat — mentre il parser sopravviveva e la
     rotta rispondeva `ok: true`. None = per QUESTO utente non c'e' nessun
     parser da eliminare → la rotta risponde 404.
+
+    L'`id` sta anche nella DELETE del parser, non solo in quella dei link
+    ([REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #72, race ABA):
+    con la sola coppia `(user_id, slug)` un elimina+ricrea concorrente dello
+    stesso slug faceva divergere i due statement — la cascata puntava all'id
+    vecchio (no-op), la DELETE colpiva il parser RICREATO, e i suoi link
+    restavano orfani. E `parsers` e' la tabella originale SENZA AUTOINCREMENT
+    (misurato dal test della race): sqlite riusa il rowid massimo, quindi un
+    link orfano puo' venire EREDITATO da un parser futuro che riceve quello
+    stesso id — segnali della chat altrui nel suo feed, peggio di una riga
+    morta. I due statement devono parlare dello STESSO parser: quello che la
+    rotta ha letto. (Se il rowid del parser eliminato viene riusato dal
+    ricreato, id uguale = stessa identita' di riga: cascata e DELETE restano
+    coerenti fra loro per costruzione.)
     """
     c.execute('DELETE FROM parser_chats WHERE parser_id IN'
               ' (SELECT id FROM parsers WHERE id=? AND user_id=?)',
               (parser_id, user_id))
-    tolte = c.execute('DELETE FROM parsers WHERE user_id=? AND slug=?',
-                      (user_id, slug)).rowcount
+    tolte = c.execute('DELETE FROM parsers WHERE id=? AND user_id=? AND slug=?',
+                      (parser_id, user_id, slug)).rowcount
     return True if tolte else None
 
 
