@@ -273,6 +273,22 @@ veda.
    i documenti prima di scrivere (uno rotto = niente scritto).
 7. Stesso messaggio, stessa chat, parser diversi: due elaborazioni indipendenti e
    due CSV distinti. Chi non riconosce il messaggio lo ignora senza toccare nulla.
+8. **La proprietà si ripete DENTRO ogni statement** (PR #64, estesa dalla #65 a
+   parser, mercati e letture). Il controllo di proprietà delle rotte (`*_o_404`)
+   è una lettura, e può invecchiare prima del write-lock: una riconciliazione
+   concorrente (`riconcilia_su_utente`) travasa il padre fra il check e lo
+   statement, e uno statement che filtra solo per id atterrerebbe sui dati ormai
+   dell'account superstite. Perciò ogni INSERT/UPDATE/DELETE **e ogni SELECT dei
+   dati** ripete il vincolo `user_id` nella stessa istruzione (JOIN/EXISTS fino a
+   `sports.user_id`/`competizioni.user_id`/`parsers.user_id`): per il
+   proprietario sbagliato zero righe toccate, `None`/lista vuota al chiamante,
+   404 dalla rotta. Portata: il travaso avviene solo fra account della **stessa
+   persona** (merge/riparazione) — è difesa in profondità, non una falla
+   cross-persona. Restano fuori, per decisione da prendere dal proprietario, gli
+   INSERT per-utente legati all'id di sessione (`crea_sport_mio`,
+   `crea_sorgente_mia`, `crea_parser`, conio token): vincolarli a
+   `users.session_version` dentro lo statement è un cambio architetturale
+   (issue #65, terzo punto).
 
 ## Scadenza dell'accesso
 

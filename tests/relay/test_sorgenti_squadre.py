@@ -866,3 +866,43 @@ def test_il_webhook_traduce_e_scrive_l_avviso_nei_log(tmp_path, monkeypatch):
     esiti = [r[0] for r in c.execute('SELECT esito FROM message_logs').fetchall()]
     c.close()
     assert any(e.startswith('avviso:') and 'Fantasma' in e for e in esiti), esiti
+
+
+def test_anche_le_letture_sono_vincolate_al_proprietario_nello_statement(
+        tmp_path, monkeypatch):
+    """Variante della #65 (quarto gate della PR #64, Sol): la classe sul lato
+    LETTURA. Dopo il check di proprieta', le SELECT dei dati filtravano solo
+    per id del padre: una riconciliazione concorrente travasa la competizione
+    fra il check e la SELECT, e la richiesta in volo legge le squadre e gli
+    alias ormai dell'account superstite (misurato sul codice precedente:
+    `_selezioni_di` leggeva 1 selezione altrui, attese 0 — stessa forma qui).
+
+    `_squadre_di` e `_alias_di` ripetono il vincolo dentro la stessa SELECT:
+    per il proprietario sbagliato la lista e' VUOTA, come se il travaso fosse
+    arrivato prima della richiesta.
+    """
+    import sqlite3
+    percorso = relay_in_processo(monkeypatch, tmp_path / 'letture.db')
+    c = sqlite3.connect(percorso)
+    utenti = {}
+    for slug in ('mio', 'altrui'):
+        c.execute("INSERT INTO users(slug, first_name, status) VALUES (?, ?, 'attivo')",
+                  (slug, slug.capitalize()))
+        utenti[slug] = c.execute('SELECT id FROM users WHERE slug=?',
+                                 (slug,)).fetchone()[0]
+    c.execute('INSERT INTO sports(user_id, slug, nome) VALUES (?, ?, ?)',
+              (utenti['mio'], 'calcio', 'Calcio'))
+    sport = c.execute("SELECT id FROM sports WHERE slug='calcio'").fetchone()[0]
+    cid = main._inserisci_competizione(c, utenti['mio'], sport, 'Serie A')
+    squadra = main._inserisci_squadra(c, utenti['mio'], cid, 'Juventus')
+    c.execute('INSERT INTO sorgenti_squadre(user_id, nome) VALUES (?, ?)',
+              (utenti['mio'], 'fonte'))
+    sorgente = c.execute('SELECT id FROM sorgenti_squadre').fetchone()[0]
+    assert main._scrivi_alias(c, utenti['mio'], sorgente, squadra, cid, 'Juve') is True
+
+    assert main._squadre_di(c, utenti['mio'], cid) == [(squadra, 'Juventus')]
+    assert main._alias_di(c, utenti['mio'], cid, sorgente) == [
+        (squadra, 'Juventus', 'Juve')]
+    assert main._squadre_di(c, utenti['altrui'], cid) == []
+    assert main._alias_di(c, utenti['altrui'], cid, sorgente) == []
+    c.close()

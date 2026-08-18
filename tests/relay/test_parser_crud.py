@@ -696,3 +696,58 @@ def test_config_con_NaN_o_Infinity_da_422_e_non_viene_MAI_scritta(servizio):
     # E nessun parser e' stato scritto: la lista dell'utente resta vuota.
     assert json.loads(_chiama(servizio, 'GET', '/api/me/parsers', cookie=cookie)[1]) == [], (
         'una config non-finita e- stata scritta comunque: la lista non e- vuota')
+
+
+def test_l_eliminazione_del_parser_e_vincolata_anche_nel_write_lock(tmp_path,
+                                                                    monkeypatch):
+    """Issue #65: la DELETE dei parser dopo un travaso concorrente.
+
+    La rotta leggeva `parsers.id` (proprieta' verificata: una LETTURA), poi
+    eseguiva `DELETE FROM parser_chats WHERE parser_id=?` SENZA vincolo di
+    proprieta'. Misurato sul codice precedente, col travaso gia' committato
+    quando gli statement partono: il parser — ormai dell'account superstite —
+    sopravviveva alla sua DELETE (che filtra per user_id e slug), ma i suoi
+    LINK chat→parser venivano distrutti, e la rotta rispondeva `ok: true`:
+    il parser del superstite smetteva di ricevere dalla sua chat, in silenzio.
+
+    `_elimina_parser` ripete il vincolo dentro ENTRAMBI gli statement: per il
+    proprietario sbagliato zero righe toccate e None al chiamante (la rotta
+    risponde 404); per quello vero via il parser E i suoi link.
+    """
+    import sqlite3
+    from tests.dati import relay_in_processo
+    percorso = relay_in_processo(monkeypatch, tmp_path / 'parser65.db')
+    c = sqlite3.connect(percorso)
+    utenti = {}
+    for slug in ('svuotato', 'superstite'):
+        c.execute("INSERT INTO users(slug, first_name, status) VALUES (?, ?, 'attivo')",
+                  (slug, slug.capitalize()))
+        utenti[slug] = c.execute('SELECT id FROM users WHERE slug=?',
+                                 (slug,)).fetchone()[0]
+    # Il parser e la sua chat come li lascia il travaso: gia' del superstite.
+    c.execute("INSERT INTO parsers(name, header, user_id, slug, titolo,"
+              " config_json, active, ordine) VALUES ('u-b-conteso', '', ?,"
+              " 'conteso', 'Conteso', '{}', 1, 0)", (utenti['superstite'],))
+    c.execute("UPDATE parsers SET id=rowid WHERE name='u-b-conteso'")
+    pid = c.execute("SELECT id FROM parsers WHERE name='u-b-conteso'").fetchone()[0]
+    c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id) VALUES (?,?)',
+              ('-100999', utenti['superstite']))
+    chat = c.execute('SELECT last_insert_rowid()').fetchone()[0]
+    c.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (?,?)', (pid, chat))
+
+    # La richiesta stantia dell'account svuotato, che aveva letto `pid` quando
+    # il parser era suo: zero righe toccate, None al chiamante.
+    assert main._elimina_parser(c, utenti['svuotato'], pid, 'conteso') is None
+    assert c.execute('SELECT COUNT(*) FROM parsers WHERE id=?',
+                     (pid,)).fetchone()[0] == 1
+    assert c.execute('SELECT COUNT(*) FROM parser_chats WHERE parser_id=?',
+                     (pid,)).fetchone()[0] == 1, \
+        'i link del proprietario superstite non si toccano'
+
+    # Il proprietario vero: via il parser E i suoi link.
+    assert main._elimina_parser(c, utenti['superstite'], pid, 'conteso') is True
+    assert c.execute('SELECT COUNT(*) FROM parsers WHERE id=?',
+                     (pid,)).fetchone()[0] == 0
+    assert c.execute('SELECT COUNT(*) FROM parser_chats WHERE parser_id=?',
+                     (pid,)).fetchone()[0] == 0
+    c.close()

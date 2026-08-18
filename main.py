@@ -5223,6 +5223,28 @@ async def modifica_parser_mio(slug: str, request: Request):
     return _rispondi_con_sessione(utente['id'], utente['versione'], _vista_parser(nuova))
 
 
+def _elimina_parser(c, user_id, parser_id, slug):
+    """La cascata del parser (link chat→parser → riga), col proprietario
+    ripetuto DENTRO ogni statement (issue #65, stesso pattern della PR #64).
+
+    Le associazioni chat→parser puntano a `parsers.id`: si rimuovono col
+    parser, o resterebbero orfane e il dispatch per-utente le seguirebbe
+    (segnalato da GPT-5.5 e Claude Fable 5 sulla PR #30). Misurato prima
+    della correzione: il check di proprieta' della rotta e' una lettura, e
+    con un travaso concorrente gia' committato la DELETE dei link per solo
+    `parser_id` distruggeva i link dell'account superstite — il suo parser
+    smetteva di ricevere dalla sua chat — mentre il parser sopravviveva e la
+    rotta rispondeva `ok: true`. None = per QUESTO utente non c'e' nessun
+    parser da eliminare → la rotta risponde 404.
+    """
+    c.execute('DELETE FROM parser_chats WHERE parser_id IN'
+              ' (SELECT id FROM parsers WHERE id=? AND user_id=?)',
+              (parser_id, user_id))
+    tolte = c.execute('DELETE FROM parsers WHERE user_id=? AND slug=?',
+                      (user_id, slug)).rowcount
+    return True if tolte else None
+
+
 @app.delete('/api/me/parsers/{slug}')
 def elimina_parser_mio(slug: str, request: Request):
     """Elimina un proprio parser. **404** se non e' dell'utente."""
@@ -5233,13 +5255,10 @@ def elimina_parser_mio(slug: str, request: Request):
                          (utente['id'], slug)).fetchone()
         if not riga:
             raise HTTPException(404, 'parser non trovato')
-        # Le associazioni chat→parser puntano a `parsers.id`: si rimuovono col parser,
-        # o resterebbero orfane e il dispatch per-utente (PR successivo) le seguirebbe.
-        # Oggi `parser_chats` e' vuota (nessun codice la scrive ancora), quindi qui non
-        # cancella niente; c'e' perche' sia corretta quando quel PR la popolera'.
-        # Segnalato da GPT-5.5 e Claude Fable 5 sulla PR #30.
-        c.execute('DELETE FROM parser_chats WHERE parser_id=?', (riga[0],))
-        c.execute('DELETE FROM parsers WHERE user_id=? AND slug=?', (utente['id'], slug))
+        if _elimina_parser(c, utente['id'], riga[0], slug) is None:
+            # Il parser e' sparito (DELETE o travaso concorrente) fra la
+            # lettura e il write-lock: 404, come se fosse successo prima.
+            raise HTTPException(404, 'parser non trovato')
         c.commit()
     finally:
         c.close()
@@ -5375,14 +5394,33 @@ def _mercato_o_404(c, sport_id, mid):
     return riga
 
 
-def _selezioni_di(c, market_id):
+def _mercati_di(c, user_id, sport_id):
+    """I mercati di uno sport, col proprietario ripetuto NELLA stessa SELECT.
+
+    Il check di proprieta' della rotta e' una lettura che puo' invecchiare
+    (issue #65, variante lettura): un travaso concorrente sposta lo sport fra
+    il check e questa SELECT, e filtrare per solo `sport_id` farebbe leggere
+    alla richiesta in volo i mercati ormai dell'account superstite.
+    """
+    return c.execute('SELECT m.id, m.market_type, m.market_name'
+                     ' FROM betfair_markets m JOIN sports s ON s.id = m.sport_id'
+                     ' WHERE m.sport_id=? AND s.user_id=?'
+                     ' ORDER BY m.market_type, m.market_name',
+                     (sport_id, user_id)).fetchall()
+
+
+def _selezioni_di(c, user_id, market_id):
+    """Le selezioni di un mercato, vincolate al proprietario come `_mercati_di`."""
     return [{'id': r[0], 'selectionName': r[1]} for r in c.execute(
-        'SELECT id, selection_name FROM betfair_selections WHERE market_id=?'
-        ' ORDER BY id', (market_id,)).fetchall()]
+        'SELECT b.id, b.selection_name FROM betfair_selections b'
+        ' JOIN betfair_markets m ON m.id = b.market_id'
+        ' JOIN sports s ON s.id = m.sport_id'
+        ' WHERE b.market_id=? AND s.user_id=? ORDER BY b.id',
+        (market_id, user_id)).fetchall()]
 
 
-def _inserisci_mercato(c, sport_id, tipo, nome):
-    """INSERT del mercato CONDIZIONATO all'esistenza dello sport, in UNO statement.
+def _inserisci_mercato(c, user_id, sport_id, tipo, nome):
+    """INSERT del mercato CONDIZIONATO allo sport ANCORA dell'utente, in UNO statement.
 
     Il controllo di proprieta' delle rotte e' una LETTURA, e fra quella lettura e
     l'INSERT una DELETE concorrente dello sport puo' committare: l'INSERT diretto
@@ -5394,30 +5432,67 @@ def _inserisci_mercato(c, sport_id, tipo, nome):
     [REAL_FINDING] di Claude Fable 5 sulla PR #55; misurato prima di correggere:
     1 riga orfana con l'INSERT diretto.
 
-    Restituisce l'id del mercato, o None se lo sport non esiste piu'. Un
-    doppione solleva `sqlite3.IntegrityError`, come l'INSERT diretto.
+    Il `user_id` nella subquery e' l'estensione della #65: la stessa lettura
+    puo' invecchiare per un TRAVASO concorrente (`riconcilia_su_utente`), e
+    l'EXISTS sul solo id avrebbe scritto nella libreria dell'account
+    superstite (misurato prima di correggere: riga scritta).
+
+    Restituisce l'id del mercato, o None se lo sport non esiste piu' o non e'
+    (piu') dell'utente. Un doppione solleva `sqlite3.IntegrityError`, come
+    l'INSERT diretto.
     """
     c.execute('INSERT INTO betfair_markets(sport_id, market_type, market_name)'
-              ' SELECT ?,?,? WHERE EXISTS (SELECT 1 FROM sports WHERE id=?)',
-              (sport_id, tipo, nome, sport_id))
+              ' SELECT ?,?,? WHERE EXISTS'
+              ' (SELECT 1 FROM sports WHERE id=? AND user_id=?)',
+              (sport_id, tipo, nome, sport_id, user_id))
     if not c.execute('SELECT changes()').fetchone()[0]:
         return None
     return c.execute('SELECT last_insert_rowid()').fetchone()[0]
 
 
-def _inserisci_selezione(c, market_id, selezione):
+def _inserisci_selezione(c, user_id, market_id, selezione):
     """Come `_inserisci_mercato`, per la selezione: il padre e' il mercato.
 
     Copre anche lo sport eliminato nel frattempo: la sua DELETE porta via i
     mercati nella stessa transazione, quindi il mercato sparito e' il sintomo
-    unico da controllare. Stessa classe, stesso rimedio (regola 2).
+    unico da controllare. Stessa classe, stesso rimedio (regola 2). Il JOIN su
+    `sports.user_id` copre il travaso concorrente (#65), come sopra.
     """
     c.execute('INSERT INTO betfair_selections(market_id, selection_name)'
-              ' SELECT ?,? WHERE EXISTS (SELECT 1 FROM betfair_markets WHERE id=?)',
-              (market_id, selezione, market_id))
+              ' SELECT ?,? WHERE EXISTS'
+              ' (SELECT 1 FROM betfair_markets m JOIN sports s ON s.id = m.sport_id'
+              '  WHERE m.id=? AND s.user_id=?)',
+              (market_id, selezione, market_id, user_id))
     if not c.execute('SELECT changes()').fetchone()[0]:
         return None
     return c.execute('SELECT last_insert_rowid()').fetchone()[0]
+
+
+def _elimina_mercato(c, user_id, market_id):
+    """La cascata del mercato (selezioni → riga), vincolata al proprietario
+    DENTRO ogni statement, come `_elimina_competizione` (PR #64).
+
+    Misurato prima della correzione (#65): col travaso gia' committato, i due
+    DELETE per solo id distruggevano mercato e selezioni ormai dell'account
+    superstite. None = per QUESTO utente non c'e' niente da eliminare → 404.
+    """
+    c.execute('DELETE FROM betfair_selections WHERE market_id IN'
+              ' (SELECT m.id FROM betfair_markets m JOIN sports s'
+              '  ON s.id = m.sport_id WHERE m.id=? AND s.user_id=?)',
+              (market_id, user_id))
+    tolte = c.execute('DELETE FROM betfair_markets WHERE id=? AND sport_id IN'
+                      ' (SELECT id FROM sports WHERE user_id=?)',
+                      (market_id, user_id)).rowcount
+    return True if tolte else None
+
+
+def _elimina_selezione(c, user_id, market_id, selezione_id):
+    """La singola selezione, vincolata come sopra. None = niente da eliminare."""
+    tolte = c.execute('DELETE FROM betfair_selections WHERE id=? AND market_id IN'
+                      ' (SELECT m.id FROM betfair_markets m JOIN sports s'
+                      '  ON s.id = m.sport_id WHERE m.id=? AND s.user_id=?)',
+                      (selezione_id, market_id, user_id)).rowcount
+    return True if tolte else None
 
 
 async def _oggetto_dal_corpo(request, forma):
@@ -5521,11 +5596,9 @@ def mercati_miei(slug: str, request: Request):
     try:
         sport = _sport_o_404(c, utente['id'], slug)
         mercati = []
-        for r in c.execute('SELECT id, market_type, market_name FROM betfair_markets'
-                           ' WHERE sport_id=? ORDER BY market_type, market_name',
-                           (sport[0],)).fetchall():
+        for r in _mercati_di(c, utente['id'], sport[0]):
             mercati.append({'id': r[0], 'marketType': r[1], 'marketName': r[2],
-                            'selezioni': _selezioni_di(c, r[0])})
+                            'selezioni': _selezioni_di(c, utente['id'], r[0])})
     finally:
         c.close()
     return _rispondi_con_sessione(utente['id'], utente['versione'], {'mercati': mercati})
@@ -5550,7 +5623,7 @@ async def crea_mercato_mio(slug: str, request: Request):
     try:
         sport = _sport_o_404(c, utente['id'], slug)
         try:
-            mid = _inserisci_mercato(c, sport[0], tipo, nome)
+            mid = _inserisci_mercato(c, utente['id'], sport[0], tipo, nome)
         except sqlite3.IntegrityError:
             raise HTTPException(409, 'mercato gia\' presente in questo sport') from None
         if mid is None:
@@ -5572,7 +5645,7 @@ async def crea_mercato_mio(slug: str, request: Request):
                     409, f'selezione duplicata: {selezione!r}') from None
         c.commit()
         creato = {'id': mid, 'marketType': tipo, 'marketName': nome,
-                  'selezioni': _selezioni_di(c, mid)}
+                  'selezioni': _selezioni_di(c, utente['id'], mid)}
     finally:
         c.close()
     return _rispondi_con_sessione(utente['id'], utente['versione'], creato)
@@ -5585,8 +5658,11 @@ def elimina_mercato_mio(slug: str, mid: str, request: Request):
     try:
         sport = _sport_o_404(c, utente['id'], slug)
         mercato = _mercato_o_404(c, sport[0], mid)
-        c.execute('DELETE FROM betfair_selections WHERE market_id=?', (mercato[0],))
-        c.execute('DELETE FROM betfair_markets WHERE id=?', (mercato[0],))
+        # Il vincolo di proprieta' si ripete DENTRO gli statement (#65): il
+        # check qui sopra e' una lettura, e un travaso concorrente puo'
+        # invecchiarla prima del write-lock.
+        if _elimina_mercato(c, utente['id'], mercato[0]) is None:
+            raise HTTPException(404, 'mercato non trovato')
         c.commit()
     finally:
         c.close()
@@ -5607,7 +5683,7 @@ def selezioni_mie(slug: str, mid: str, request: Request):
     try:
         sport = _sport_o_404(c, utente['id'], slug)
         mercato = _mercato_o_404(c, sport[0], mid)
-        selezioni = _selezioni_di(c, mercato[0])
+        selezioni = _selezioni_di(c, utente['id'], mercato[0])
     finally:
         c.close()
     return _rispondi_con_sessione(utente['id'], utente['versione'],
@@ -5625,7 +5701,7 @@ async def crea_selezione_mia(slug: str, mid: str, request: Request):
         sport = _sport_o_404(c, utente['id'], slug)
         mercato = _mercato_o_404(c, sport[0], mid)
         try:
-            sid = _inserisci_selezione(c, mercato[0], selezione)
+            sid = _inserisci_selezione(c, utente['id'], mercato[0], selezione)
         except sqlite3.IntegrityError:
             raise HTTPException(409, 'selezione gia\' presente in questo mercato') from None
         if sid is None:
@@ -5651,9 +5727,9 @@ def elimina_selezione_mia(slug: str, mid: str, sid: str, request: Request):
         sport = _sport_o_404(c, utente['id'], slug)
         mercato = _mercato_o_404(c, sport[0], mid)
         sid = _intero_o_404(sid, 'selezione')
-        tolte = c.execute('DELETE FROM betfair_selections WHERE id=? AND market_id=?',
-                          (sid, mercato[0])).rowcount
-        if not tolte:
+        # `user_id` DENTRO lo statement (#65): la proprieta' letta sopra puo'
+        # invecchiare per un travaso concorrente prima del write-lock.
+        if _elimina_selezione(c, utente['id'], mercato[0], sid) is None:
             raise HTTPException(404, 'selezione non trovata')
         c.commit()
     finally:
@@ -5861,6 +5937,32 @@ def _scrivi_alias(c, user_id, sorgente_id, squadra_id, competizione_id, alias):
     return True
 
 
+def _squadre_di(c, user_id, competizione_id):
+    """Le squadre Betfair della competizione, col proprietario ripetuto NELLA
+    stessa SELECT (issue #65, variante lettura — quarto gate della PR #64):
+    il check di proprieta' della rotta e' una lettura che puo' invecchiare, e
+    filtrare per solo `competizione_id` farebbe leggere alla richiesta in volo
+    le squadre ormai dell'account superstite dopo un travaso concorrente.
+    """
+    return c.execute('SELECT q.id, q.nome FROM squadre_betfair q'
+                     ' JOIN competizioni k ON k.id = q.competizione_id'
+                     ' WHERE q.competizione_id=? AND k.user_id=?'
+                     ' ORDER BY q.nome', (competizione_id, user_id)).fetchall()
+
+
+def _alias_di(c, user_id, competizione_id, sorgente_id):
+    """La tabella squadra→alias di una sorgente, vincolata come `_squadre_di`
+    su ENTRAMBI i padri: competizione e sorgente."""
+    return c.execute(
+        'SELECT q.id, q.nome, IFNULL(a.alias, \'\')'
+        ' FROM squadre_betfair q'
+        ' JOIN competizioni k ON k.id = q.competizione_id'
+        ' LEFT JOIN alias_squadre a ON a.squadra_id = q.id AND a.sorgente_id IN'
+        '  (SELECT id FROM sorgenti_squadre WHERE id=? AND user_id=?)'
+        ' WHERE q.competizione_id=? AND k.user_id=? ORDER BY q.nome',
+        (sorgente_id, user_id, competizione_id, user_id)).fetchall()
+
+
 @app.get('/api/me/sorgenti-squadre')
 def sorgenti_mie(request: Request):
     """Le sorgenti squadre dell'utente. Al primo login: VUOTO, per progetto."""
@@ -5997,9 +6099,7 @@ def competizione_mia(cid: str, request: Request):
     c = db()
     try:
         competizione = _competizione_o_404(c, utente['id'], cid)
-        squadre = c.execute('SELECT id, nome FROM squadre_betfair'
-                            ' WHERE competizione_id=? ORDER BY nome',
-                            (competizione[0],)).fetchall()
+        squadre = _squadre_di(c, utente['id'], competizione[0])
         sorgenti = c.execute(
             'SELECT g.id, g.nome,'
             ' (SELECT COUNT(*) FROM alias_squadre a JOIN squadre_betfair q'
@@ -6087,12 +6187,7 @@ def alias_miei(cid: str, sid: str, request: Request):
     try:
         competizione = _competizione_o_404(c, utente['id'], cid)
         sorgente = _sorgente_o_404(c, utente['id'], sid)
-        righe = c.execute(
-            'SELECT q.id, q.nome, IFNULL(a.alias, \'\')'
-            ' FROM squadre_betfair q LEFT JOIN alias_squadre a'
-            ' ON a.squadra_id = q.id AND a.sorgente_id=?'
-            ' WHERE q.competizione_id=? ORDER BY q.nome',
-            (sorgente[0], competizione[0])).fetchall()
+        righe = _alias_di(c, utente['id'], competizione[0], sorgente[0])
     finally:
         c.close()
     return _rispondi_con_sessione(utente['id'], utente['versione'], {'alias': [
