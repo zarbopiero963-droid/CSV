@@ -747,6 +747,15 @@ class ParserMioIn(BaseModel):
     # valore, il salvataggio riesce solo se il parser e' ancora a quella
     # versione — altrimenti 409, e il lost update diventa visibile.
     versione: int | None = None
+    # L'altra precondizione (#75): l'IDENTITA' della riga che il client ha letto.
+    # `versione` chiede «e' cambiato mentre lo modificavo?», `uid` chiede «e'
+    # ancora lo STESSO parser?» — e sono domande diverse, perche' un
+    # elimina+ricrea dello stesso slug produce una riga nuova che riparte da
+    # `versione = 1`, cioe' proprio il valore che la scheda vecchia porta con
+    # se'. Misurato sulla PR #74: senza `uid` la scheda vecchia sovrascriveva
+    # `config_json` del parser ricreato, e con esso le regole che generano il
+    # CSV. `None` = incondizionata, come per `versione`.
+    uid: str | None = None
 
 
 # Le tre tabelle con cui il servizio e' nato. Restano con QUESTI nomi e questa
@@ -4866,13 +4875,17 @@ def _slugifica(testo):
 def _vista_parser(riga):
     """La vista pubblica di un parser: mai il `name` interno, mai `user_id`.
 
-    `riga` = (id, slug, titolo, active, config_json, ordine, versione).
+    `riga` = (id, slug, titolo, active, config_json, ordine, versione, uid).
     `versione` e' la precondizione della PUT (#51): il client la rimanda al
     salvataggio e chi ce l'ha vecchia riceve 409 invece di sovrascrivere.
+    `uid` e' l'altra precondizione (#75): l'identita' della RIGA, che il client
+    rimanda su PUT e DELETE — senza, una scheda rimasta aperta sovrascriveva un
+    parser eliminato e ricreato con lo stesso slug, perche' il ricreato riparte
+    da `versione = 1` e il contatore da solo non li distingue.
     """
     return {'id': riga[0], 'slug': riga[1], 'titolo': riga[2], 'active': bool(riga[3]),
             'config': json.loads(riga[4]) if riga[4] else {}, 'ordine': riga[5],
-            'versione': riga[6]}
+            'versione': riga[6], 'uid': riga[7]}
 
 
 def _valida_tetti_parser(titolo, config):
@@ -5096,7 +5109,7 @@ def _crea_parser_utente(c, user_id, titolo, config, active):
     # `id` = `rowid`, come fa la migrazione: e' il surrogato stabile a cui punta
     # `parser_chats.parser_id` (dispatch per-utente, PR successivo).
     c.execute('UPDATE parsers SET id=rowid WHERE name=? AND id IS NULL', (nome,))
-    riga = c.execute('SELECT id, slug, titolo, active, config_json, ordine, versione'
+    riga = c.execute('SELECT id, slug, titolo, active, config_json, ordine, versione, uid'
                      ' FROM parsers WHERE name=?', (nome,)).fetchone()
     return _vista_parser(riga)
 
@@ -5107,7 +5120,8 @@ def lista_parser_miei(request: Request):
     utente = _sessione_valida(request)
     c = db()
     righe = c.execute(
-        'SELECT id, slug, titolo, active, config_json, ordine, versione FROM parsers'
+        'SELECT id, slug, titolo, active, config_json, ordine, versione, uid'
+        ' FROM parsers'
         ' WHERE user_id=? ORDER BY ordine, slug', (utente['id'],)).fetchall()
     c.close()
     return _rispondi_con_sessione(utente['id'], utente['versione'],
@@ -5222,6 +5236,14 @@ async def modifica_parser_mio(slug: str, request: Request):
                          (utente['id'], slug)).fetchone()
         if not riga:
             raise HTTPException(404, 'parser non trovato')
+        # La precondizione di IDENTITA' (#75): il client rimanda l'`uid` che ha
+        # letto, e se lo slug ora appartiene a un'ALTRA riga il salvataggio si
+        # ferma qui. E' il caso delle due schede — una elimina e ricrea, l'altra
+        # salva — che `versione` non intercetta, perche' il ricreato riparte da
+        # 1. Il 409 dice «ricreato» e non «modificato altrove»: sono due cose
+        # diverse per l'utente, e il rimedio e' lo stesso (ricarica), ma la
+        # ragione va detta giusta.
+        _controlla_identita(dati.uid, riga[1])
         # Stessa guardia della creazione (regola 3, fonte unica): un PUT che
         # spendesse una selezione altrui aggirerebbe il confine del POST.
         _valida_betfair(c, utente['id'], dati.config)
@@ -5248,7 +5270,7 @@ async def modifica_parser_mio(slug: str, request: Request):
             if ancora:
                 raise HTTPException(
                     409, "ricarica il parser: e' stato modificato altrove")
-        nuova = c.execute('SELECT id, slug, titolo, active, config_json, ordine, versione'
+        nuova = c.execute('SELECT id, slug, titolo, active, config_json, ordine, versione, uid'
                           ' FROM parsers WHERE user_id=? AND uid=?',
                           (utente['id'], riga[1])).fetchone()
         if nuova is None:
@@ -5263,6 +5285,23 @@ async def modifica_parser_mio(slug: str, request: Request):
     finally:
         c.close()
     return _rispondi_con_sessione(utente['id'], utente['versione'], _vista_parser(nuova))
+
+
+def _controlla_identita(atteso, effettivo):
+    """La precondizione di identita' di PUT e DELETE (#75).
+
+    `atteso` e' l'`uid` che il client ha letto, `effettivo` quello che lo slug
+    identifica adesso. Se differiscono, quello slug e' passato a un'altra riga:
+    il parser che il client intendeva e' stato eliminato, e ne esiste un altro
+    con lo stesso nome. Non e' un 404 — un parser con quel nome c'e' — ed e'
+    diverso dal 409 di `versione`, che invece dice «la stessa riga e' cambiata».
+
+    `atteso` None = richiesta incondizionata, come per `versione`: i chiamanti
+    storici e le rotte chiamate a mano continuano a funzionare.
+    """
+    if atteso is not None and atteso != effettivo:
+        raise HTTPException(
+            409, "ricarica il parser: e' stato eliminato e ricreato altrove")
 
 
 def _aggiorna_parser(c, user_id, uid, slug, titolo, config_json, active, versione):
@@ -5350,8 +5389,15 @@ def _elimina_parser(c, user_id, uid):
 
 
 @app.delete('/api/me/parsers/{slug}')
-def elimina_parser_mio(slug: str, request: Request):
-    """Elimina un proprio parser. **404** se non e' dell'utente."""
+def elimina_parser_mio(slug: str, request: Request, uid: str | None = None):
+    """Elimina un proprio parser. **404** se non e' dell'utente.
+
+    `?uid=` e' la precondizione di identita' (#75), come il campo omonimo nel
+    corpo della PUT: sta nella query perche' una DELETE non porta corpo. Con un
+    valore, l'eliminazione riesce solo se lo slug identifica ANCORA quella riga
+    — altrimenti **409**, e la scheda rimasta aperta non porta via il parser che
+    l'utente ha appena ricreato. Senza, incondizionata come prima.
+    """
     utente = _sessione_valida(request)
     c = db()
     try:
@@ -5359,6 +5405,7 @@ def elimina_parser_mio(slug: str, request: Request):
                          (utente['id'], slug)).fetchone()
         if not riga:
             raise HTTPException(404, 'parser non trovato')
+        _controlla_identita(uid, riga[0])
         if _elimina_parser(c, utente['id'], riga[0]) is None:
             # Il parser e' sparito (DELETE o travaso concorrente), oppure e'
             # stato sostituito da un omonimo ricreato — che ha un `uid` nuovo e

@@ -182,6 +182,37 @@ with sync_playwright() as pw:
     pg.wait_for_selector('.pill.off')
     shot(pg, '03-toggle-dopo-conflitto')
 
+    # ---------------- le DUE SCHEDE: eliminato e ricreato mentre ero aperto (#75)
+    # Il caso che la #74 aveva misurato e lasciato aperto: la scheda rimasta
+    # indietro non deve sovrascrivere il parser NUOVO che porta lo stesso nome.
+    # Qui la scheda vecchia e' il browser (cache con l'uid vecchio), e «l'altra
+    # scheda» e' la coppia DELETE+POST via fetch, indistinguibile al server.
+    pg.reload()
+    pg.wait_for_selector('#test-msg')
+    esito = pg.evaluate(
+        """async ([slug, config]) => {
+             const d = await fetch(`/api/me/parsers/${slug}`, {method: 'DELETE'});
+             const c = await fetch('/api/me/parsers', {
+               method: 'POST',
+               headers: {'Content-Type': 'application/json'},
+               body: JSON.stringify({titolo: 'Conteso', config, active: true})});
+             const nuovo = await c.json();
+             return [d.status, c.status, nuovo.slug, nuovo.uid];
+           }""", [slug, CONFIG_BASE])
+    assert esito[0] == 200 and esito[1] == 200, esito
+    assert esito[2] == slug, f'il ricreato deve riprendere lo slug: {esito}'
+
+    # La scheda vecchia salva: deve perdere, e con il motivo GIUSTO.
+    pg.click('[data-act="wiz-save"]')
+    pg.wait_for_selector('.toast')
+    toast = pg.inner_text('.toast')
+    assert 'Eliminato e ricreato altrove' in toast, \
+        f'il conflitto di IDENTITA- va detto diverso da quello di versione: {toast!r}'
+    salvata = config_sul_server(pg, slug)
+    assert salvata['match']['value'] == 'P.Bet.', \
+        f'il parser ricreato e- stato sovrascritto: {json.dumps(salvata)[:120]}'
+    shot(pg, '04-eliminato-e-ricreato')
+
     b.close()
 
 if errors:
