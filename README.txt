@@ -62,15 +62,35 @@ nuovo se la riga resta nel feed per tutti i 90 secondi: e' XTrader a evitare la 
 scommessa, non lo svuotamento.
 
 FEED A N RIGHE ATTIVE (#35 pezzo 1)
-Un messaggio puo' produrre N righe CSV (multi-mercato/multi-selezione, in arrivo
-coi pezzi 2-3): il feed le serve TUTTE, composte in un documento solo — BOM e
-intestazione UNA volta in testa, poi le data line nell'ordine di scrittura,
-ciascuna con CRLF. store_signal accetta la lista di documenti e li verifica
-TUTTI prima di scrivere (uno rotto = niente scritto: mai mezzo segnale nel
-feed). Il TTL resta 90 secondi ed e' PER RIGA nel filtro di lettura: alla
-scadenza di una riga il feed perde solo quella. Una riga guasta nel database
-degrada solo se stessa, le altre continuano a uscire. Feed vuoto = la sola
-intestazione, come sempre.
+Un messaggio puo' produrre N righe CSV (multi-mercato/multi-selezione): il
+feed le serve TUTTE, composte in un documento solo — BOM e intestazione UNA
+volta in testa, poi le data line nell'ordine di scrittura, ciascuna con CRLF.
+store_signal accetta la lista di documenti e li verifica TUTTI prima di
+scrivere (uno rotto = niente scritto: mai mezzo segnale nel feed). Il TTL
+resta 90 secondi ed e' PER RIGA nel filtro di lettura: alla scadenza di una
+riga il feed perde solo quella. Una riga guasta nel database degrada solo se
+stessa, le altre continuano a uscire. Feed vuoto = la sola intestazione,
+come sempre.
+
+IL MOTORE MULTI-RIGA (#35 pezzo 2)
+Le N righe le genera config.multi del parser: la riga BASE (le 14 regole di
+sempre) e' il modello, ogni riga di multi.markets/multi.selections dice solo
+cosa cambia e il resto eredita. Somma, non prodotto; enabled=false non
+genera; ogni riga e' giudicata DA SOLA, quindi una rotta non ferma le altre:
+il segnale esce con le k buone su N e gli scarti delle altre finiscono nei
+log messaggi come "riga N: motivo" (anche quando cade per obbligatorie
+mancanti). Selezione vuota + delimitatori = una riga per punteggio N-N
+trovato, solo su CORRECT_SCORE/HALF_TIME_SCORE e con un tetto di 36
+punteggi per riga (0-0..5-5): oltre, la riga e' un errore di config
+segnalato, non migliaia di documenti nel feed. Una voce di multi e' una
+riga solo se e' un oggetto non vuoto. Il
+gate "solo costanti" (#41) vale per riga: le colonne sovrascritte non
+contano come estratte. La forma sbagliata di config.multi viene respinta al
+salvataggio con 422; MAX_RIGHE_MULTI (default 20, si alza da variabile su
+Railway) limita le righe dichiarate, anche le spente. La prova del parser
+risponde le righe col loro esito e il CSV composto delle sole complete —
+gli stessi byte che scriverebbe il webhook. Specifica: SAAS.md, «Il
+multi-riga».
 
 FORME LOCALIZZATE DEL CSV
 Tre cose dipendono dalla lingua del prodotto che legge il feed, e oggi ne serviamo una.

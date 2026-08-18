@@ -42,6 +42,7 @@ Il merge resta sempre manuale del repository owner.
 | Test del relay: autenticazione, webhook, parser | `tests/relay/test_autenticazione.py`, `tests/relay/test_webhook.py`, `tests/relay/test_parse_message.py` |
 | Test del relay: libreria mercati Betfair (#33) | `tests/relay/test_mercati.py` |
 | Test del relay: sorgenti squadre, modello e rotte (#34 pezzo 1) | `tests/relay/test_sorgenti_squadre.py` |
+| Test del relay: multi-riga dal messaggio al feed (#35 pezzo 2) | `tests/relay/test_multiriga.py` |
 | Schema multiutente e migrazione idempotente | `migra()` in `main.py`, `tests/relay/test_schema.py` |
 | Test del motore e del contratto CSV (casi eseguiti in node) | `tests/engine/engine_cases.mjs`, `tests/engine/test_engine_contract.py` |
 | Test della web app in browser, end-to-end sul relay vero (Playwright/Chromium) | `tests/web/prototype_flow.py`, `tests/web/mobile_layout.py`, `tests/web/mercati_flow.py`, `tests/web/squadre_flow.py`, `tests/web/test_prototype_flow.py`, `tests/web/test_file_unico.py`, `tests/web/test_api_parita.py`, `tests/web/test_schermate_accesso.py`, `tests/web/test_pannello_admin.py`, `tests/web/test_mercati_web.py`, `tests/web/test_squadre_web.py`, `tests/web/test_api_finta_squadre.py` (demo in node su localStorage rotto) |

@@ -410,6 +410,81 @@ le trasformazioni non hanno piu' l'ultima parola: il **confine di scrittura**
 `comma_to_dot` resta legale ma superfluo su quelle colonne — il suggeritore ha
 smesso di proporlo su `Price`.
 
+### Il multi-riga: base + override (#35, pezzo 2)
+
+Un messaggio può generare **N righe** dallo stesso parser. La riga **base** — le
+14 regole di `columns` — è il modello; `config.multi` elenca le righe di
+override, ciascuna delle quali dice **solo cosa cambia** e per il resto eredita
+dalla base (campo vuoto o assente = eredita, mai «azzera»):
+
+```json
+{
+  "multi": {
+    "markets":    [ { "market_type": "OVER_UNDER_25", "selection_name": "Over 2,5",
+                      "price": "1.20" } ],
+    "selections": [ { "selection_name": "Under 1,5", "bet_type": "BANCA" } ]
+  }
+}
+```
+
+Regole, tutte vincolate dai casi in `tests/engine/engine_cases.mjs` e dalla
+parità col gemello Python:
+
+- **Somma, non prodotto**: le righe generate sono i mercati attivi più le
+  selezioni attive. Con `multi` assente o senza righe attive la lista è la sola
+  base — il comportamento storico, byte per byte.
+- Campi di una riga: `market_type`, `market_name`, `selection_name`, `price`,
+  `min_price`, `max_price`, `bet_type`, `handicap`, `points`, `start_after`,
+  `end_before`, `enabled`. Le righe di `selections` **ignorano**
+  `market_type`/`market_name`: restano sul mercato della base — per le
+  combinazioni si elencano righe in `markets`.
+- `enabled: false` resta salvata e **non genera** la riga. Una voce è una riga
+  solo se è un **oggetto non vuoto** (`rigaMulti`/`_riga_multi`): `{}` non
+  genera un clone della base — `{}` è falsy in Python e truthy in JS, e senza
+  il predicato comune i due motori divergevano (misurato sulla PR #69: 2
+  righe in JS, 1 in Python, dalla stessa config). Un `markets`/`selections`
+  **non-lista** non genera righe, in entrambi i motori: prima JS sollevava
+  sul `for..of` e Python iterava le chiavi — due esiti diversi dalla stessa
+  config (CodeRabbit, PR #69).
+- Ogni riga è **giudicata da sola** (`giudicaRiga`/`_giudica_riga`, la stessa
+  fonte unica della base): una riga rotta non ferma le altre — il segnale esce
+  con le k buone su N, e gli scarti delle altre restano visibili (sotto).
+- `start_after`/`end_before` **con** `selection_name`: estraggono dal segmento
+  del messaggio la **quota** della riga. Con `selection_name` **vuota**:
+  estraggono i **punteggi** (`N-N`, una riga per punteggio trovato), ammesso
+  **solo** su `CORRECT_SCORE`/`HALF_TIME_SCORE` — altrove è un errore di
+  config segnalato come scarto della riga, non una riga. I punteggi estratti
+  hanno un **tetto per riga** (`MAX_PUNTEGGI_RIGA`, 36 = 0-0..5-5): oltre non
+  è un mercato ma delimitatori che prendono mezzo messaggio, e la riga è un
+  errore di config segnalato, **non troncato in silenzio** — senza tetto un
+  messaggio pieno di `N-N` per 20 righe genererebbe migliaia di documenti
+  nello storage condiviso (bloccante di Claude Fable 5 sulla PR #69).
+- Il **gate di contenuto (#41) vale per riga**: le colonne sovrascritte dalla
+  riga sono costanti e non contano come estratte. Base tutta costante + una
+  riga di override resta scartata — senza questa regola `multi` sarebbe la
+  porta sul retro del gate. Le righe dei punteggi sono esenti: il punteggio
+  viene dal messaggio per costruzione.
+- **Confine di scrittura** (`_valida_config_multi`): forma sbagliata, chiave
+  col refuso (con suggerimento — sia nelle righe sia al livello di `multi`,
+  dove `markes` passerebbe muto), `enabled` non booleano o valore non scalare
+  danno **422** al salvataggio; il tetto `MAX_RIGHE_MULTI` (default 20,
+  regolabile da variabile) conta tutte le righe dichiarate, anche le spente.
+
+Sul percorso vivo: `esito_messaggio` prende le righe **generate** come
+autorità — il segnale c'è se almeno una è piazzabile; `csv` è la stringa di
+sempre con una riga sola, la **lista** dei documenti con più righe (il
+contratto d'ingresso di `store_signal`, #35 pezzo 1). Gli scarti delle righe
+non piazzabili di un segnale scritto viaggiano negli `avvisi` come
+`riga N: …` e finiscono in `message_logs` — e una riga caduta per `missing`
+(che scarti non produce) lascia `riga N: colonne obbligatorie mancanti: …`,
+così nessuna riga sparisce muta; se **nessuna** riga è piazzabile i
+motivi arrivano al dispatch con lo stesso prefisso (senza prefisso nel caso
+storico della sola base, dove il testo dei log non si muove). La rotta di
+prova risponde `righe` (per ciascuna: `row`, `missing`, `scarti`, `complete`)
+con `complete` vero se almeno una è piazzabile, e `csv` **composto** delle
+sole complete — `componiFeed` in JS e `componi_feed` in Python sono lo stesso
+contratto, byte per byte (`tests/engine/test_engine_contract.py`).
+
 ### Guardie sui valori estratti e sulla config (#39 + #41)
 
 Il motore controlla il **senso** di alcuni valori, non solo la loro presenza:
@@ -947,6 +1022,11 @@ PUT    /api/me/parsers/{slug}          { titolo, config, active? } aggiorna il p
 DELETE /api/me/parsers/{slug}          elimina il proprio
 POST   /api/me/parsers/{slug}/test     { message } → { matched, missing, complete, event?, csv? }
 ```
+
+Dal #35 (pezzo 2) la risposta della prova porta anche `righe` — per ogni riga
+generata: `row`, `missing`, `scarti`, `complete` — con `complete` al livello
+alto vero se **almeno una** riga è piazzabile e `csv` composto delle sole
+complete (vedi «Il multi-riga» sopra).
 
 **Quote e tetti per-tenant** (#31 B2, PR 3 della sequenza #2 — vincolati da
 `tests/relay/test_quote_parser.py`): il database e il volume Railway sono

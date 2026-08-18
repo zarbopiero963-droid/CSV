@@ -11,7 +11,7 @@
 // leggendo le RIGHE `export function` / `export async function` — qui non si
 // esportano costanti, e le funzioni si dichiarano una per riga.
 
-import { COLUMNS, EMOJI, normalizzaNome, runParser, toCsv, suggestConfig } from './engine.js';
+import { COLUMNS, EMOJI, componiFeed, normalizzaNome, runParser, toCsv, suggestConfig } from './engine.js';
 
 const CHIAVE = 'xtrelay:demo';
 
@@ -201,12 +201,25 @@ export async function testParser(slug, message) {
     return { matched: false, missing: [], scarti: [], complete: false,
              errore: 'config non eseguibile' };
   }
+  // Il multi-riga (#35 pezzo 2), come `prova_parser_mio` sul server: le
+  // righe generate col LORO esito (k su N), `complete` se almeno una e'
+  // piazzabile, e il CSV composto delle sole complete — `componiFeed` di un
+  // documento e' il documento, quindi senza `config.multi` i byte sono
+  // quelli di sempre.
+  const righe = r.righe || [];
+  const complete = righe.filter(x => x.complete);
   const corpo = { matched: r.matched, missing: r.missing,
                   scarti: r.scarti || [], avvisi: r.avvisi || [],
-                  complete: r.complete };
-  if (r.complete) {
-    corpo.event = r.row[COLUMNS.indexOf('EventName')];
-    corpo.csv = toCsv(r.row);
+                  complete: complete.length > 0,
+                  // La forma CANONICA dei valori (`String`), come
+                  // `_testo_canonico` nella rotta del server: gli stessi byte.
+                  righe: righe.map(x => ({ row: x.row.map(v => String(v ?? '')),
+                                           missing: x.missing,
+                                           scarti: x.scarti,
+                                           complete: x.complete })) };
+  if (complete.length) {
+    corpo.event = complete[0].row[COLUMNS.indexOf('EventName')];
+    corpo.csv = componiFeed(complete.map(x => toCsv(x.row)));
   }
   return corpo;
 }

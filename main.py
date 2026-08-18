@@ -696,6 +696,10 @@ MAX_CONFIG_PARSER = 20_000
 # La libreria mercati Betfair (#33) e' per-utente e a inserimento libero: i tetti
 # esistono perche' un utente non deve poter gonfiare lo storage condiviso
 # (hardening per-tenant, #31). Regolabili da variabile su Railway senza deploy.
+# Le righe di override del multi-riga (#35 pezzo 2): il tetto e' sul TOTALE
+# dichiarato in config (mercati + selezioni, anche spente) — ogni riga attiva
+# diventa un documento nel feed a ogni segnale.
+MAX_RIGHE_MULTI = _intero_da_env('MAX_RIGHE_MULTI', 20)
 MAX_SPORT_PER_UTENTE = _intero_da_env('MAX_SPORT_PER_UTENTE', 20)
 MAX_MERCATI_PER_SPORT = _intero_da_env('MAX_MERCATI_PER_SPORT', 200)
 MAX_SELEZIONI_PER_MERCATO = _intero_da_env('MAX_SELEZIONI_PER_MERCATO', 200)
@@ -2700,24 +2704,6 @@ def esegui_parser(message, config, mappa_alias=None):
     colonne = config.get('columns') or {}
     matched = condizione_soddisfatta(message, config.get('match'), scadenza)
     row = [_estrai_valore(message, colonne.get(c), scadenza) for c in HEADERS]
-    # Le colonne NUMERICHE viaggiano nella forma su cui la guardia da' il
-    # verdetto (`_piatto` del testo canonico): un Price BOM+`2` e' una quota
-    # valida — i bordi uniformi sono perdonati — ma il CSV emetteva il valore
-    # grezzo, BOM compreso: XTrader riceveva il byte che la guardia aveva
-    # perdonato solo ai fini del giudizio. Stessa riga in `runParser`, o i due
-    # motori scriverebbero feed diversi. [REAL_FINDING] di GPT-5.6 Sol al gate
-    # finale della PR #47.
-    for colonna in INTERVALLI_NUMERICI:
-        indice = HEADERS.index(colonna)
-        row[indice] = _piatto(_testo_canonico(row[indice]))
-    # `None`→'' e basta, NON `or ''`: JS usa `String(v ?? '')`, che sostituisce
-    # solo null/undefined. Con `or ''` una costante `0` o `False` (JSON validi)
-    # sarebbe letta come vuota qui e valorizzata in JS — i due motori
-    # divergerebbero su `missing` e `complete`, cioe' l-utente vedrebbe «completo»
-    # nel browser e feed vuoto in produzione. Segnalato da CodeRabbit, PR #28.
-    # `_piatto`, non `strip()`: l'emptiness ha la stessa coppia divergente del
-    # verdetto numerico — una obbligatoria di solo BOM era «mancante» in JS e
-    # «valorizzata» in Python (stessa classe del [REAL_FINDING] dei gate, PR #47).
     # La sorgente squadre (#34 pezzo 3): con una mappa alias→Betfair l'evento
     # si traduce QUI, sul valore finale di EventName — spezzato sull'ULTIMO
     # ' - ' (il separatore che il transform del wizard produce), ogni meta'
@@ -2752,28 +2738,58 @@ def esegui_parser(message, config, mappa_alias=None):
                 tradotte.append(nome)
             row[i_evento] = ' - '.join(tradotte)
 
+    giudizio = _giudica_riga(row, matched)
+    row = giudizio['row']
+    mancanti = giudizio['missing']
+    scarti = giudizio['scarti']
+    # Il gate di CONTENUTO (#41): almeno una colonna obbligatoria deve venire da
+    # un'estrazione REALE che ha prodotto qualcosa. Un parser con tutte e quattro
+    # le obbligatorie costanti produce una riga piazzabile per QUALSIASI messaggio
+    # che soddisfi la condizione — misurato: «ciao a tutti» e «oggi partita»
+    # davano `complete=True`. Oggi va bene per accidente, perche' nell'uso normale
+    # almeno `EventName` si estrae; il caso reale e' chi prova il parser con valori
+    # fissi per vedere il CSV uscire e poi lo lascia attivo.
+    if matched and not mancanti:
+        gate = _scarto_estrazione(colonne, row)
+        if gate:
+            scarti.append(gate)
+    completo = matched and not mancanti and not scarti
+    # Il multi-riga (#35 pezzo 2): `righe` e' l'elenco delle righe GENERATE —
+    # senza `config.multi` e' la sola base (comportamento storico), con le
+    # righe di override e' la loro somma. I campi storici continuano a
+    # descrivere la BASE: i consumatori esistenti non cambiano.
+    righe = _genera_righe(message, config, matched,
+                          {'row': row, 'missing': mancanti, 'scarti': scarti,
+                           'complete': completo})
+    return {'matched': matched, 'row': row, 'missing': mancanti, 'scarti': scarti,
+            'avvisi': avvisi, 'righe': righe, 'complete': completo}
+
+
+def _giudica_riga(row_grezza, matched):
+    """Giudica UNA riga gia' estratta, come `giudicaRiga` in engine.js.
+
+    Appiattisce i numerici (`_piatto` del testo canonico — il CSV non deve
+    emettere il byte che la guardia ha solo perdonato, PR #47), calcola le
+    obbligatorie mancanti (`None`→'' e basta, NON `or ''`: una costante `0`
+    e' valorizzata, PR #28), gli scarti (guardie numeriche + emoji #42, solo
+    a messaggio riconosciuto, PR #47) e localizza gli accettati (#40, la
+    virgola di XTrader; i rifiutati restano in forma giudicata). Fonte unica
+    (#35 pezzo 2): la usano la riga base e ogni riga generata dagli override —
+    un giudizio scritto due volte sarebbe due giudizi.
+    """
+    row = list(row_grezza)
+    for colonna in INTERVALLI_NUMERICI:
+        indice = HEADERS.index(colonna)
+        row[indice] = _piatto(_testo_canonico(row[indice]))
+
     def _vuota(valore):
         return not _piatto(str('' if valore is None else valore))
 
     mancanti = [c for c in COLONNE_OBBLIGATORIE if _vuota(row[HEADERS.index(c)])]
-    # Il motivo per colonna serve DUE volte: per gli scarti e per decidere quali
-    # valori localizzare al confine di scrittura (solo quelli accettati).
     motivi_numerici = {c: motivo_valore_numerico(c, row[HEADERS.index(c)])
                        for c in INTERVALLI_NUMERICI}
-    # Nessuno scarto senza riconoscimento: un parser la cui condizione non e'
-    # soddisfatta ma con una costante numerica invalida produrrebbe motivi per
-    # QUALUNQUE messaggio della chat, e il dispatch li archivierebbe come
-    # «scartato» sotto un parser che non c'entra, conservando testo estraneo.
-    # [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #47.
     scarti = [m for m in motivi_numerici.values() if m] if matched else []
     if matched:
-        # Niente emoji nei valori (#42): il feed uscirebbe formalmente valido
-        # — 14 colonne, virgolette, CRLF, BOM — e XTrader lo scarterebbe in
-        # silenzio, icona rossa e nessun errore. Il caso reale e' la regola
-        # «riga intera» su una riga che comincia col marcatore. Si scarta
-        # (regola della #39: un valore che il consumatore rifiuta non e' un
-        # valore); le colonne numeriche sono escluse perche' li' un'emoji e'
-        # gia' «non un numero», col motivo giusto. Stesso blocco in `runParser`.
         for colonna in HEADERS:
             if colonna in INTERVALLI_NUMERICI:
                 continue
@@ -2788,37 +2804,191 @@ def esegui_parser(message, config, mappa_alias=None):
                     'XTrader marcherebbe il segnale non valido, senza nessun '
                     'errore di ritorno: estrai il testo DOPO il marcatore, '
                     'non la riga intera.')
-    # Il gate di CONTENUTO (#41): almeno una colonna obbligatoria deve venire da
-    # un'estrazione REALE che ha prodotto qualcosa. Un parser con tutte e quattro
-    # le obbligatorie costanti produce una riga piazzabile per QUALSIASI messaggio
-    # che soddisfi la condizione — misurato: «ciao a tutti» e «oggi partita»
-    # davano `complete=True`. Oggi va bene per accidente, perche' nell'uso normale
-    # almeno `EventName` si estrae; il caso reale e' chi prova il parser con valori
-    # fissi per vedere il CSV uscire e poi lo lascia attivo.
-    if matched and not mancanti and not _estrazione_reale(colonne, row):
-        scarti.append(
-            'nessuna colonna obbligatoria viene estratta dal messaggio: con soli '
-            'valori fissi questo parser scriverebbe la stessa scommessa per '
-            'qualunque messaggio. Almeno una fra '
-            + ', '.join(COLONNE_OBBLIGATORIE) + ' deve leggere dal messaggio.')
-    # Il confine di scrittura (#40): i valori numerici ACCETTATI escono nella
-    # forma localizzata — per XTrader la virgola, misurato tre volte (guida
-    # ufficiale p.169 `"1,23"`, il Bridge in produzione, conferma del
-    # proprietario). Prima il separatore era un incidente: usciva cio' che la
-    # regola produceva, e `"1.85"` in contesto italiano rischia la lettura come
-    # migliaia — quota 185, dentro i tetti della #39, invisibile a ogni
-    # guardia. La localizzazione sta QUI e non in `make_csv` (condiviso col
-    # legacy di PIERO, che non deve cambiare di un byte) ne' nei chiamanti (tre
-    # siti JS, due Python: uno che dimentica = anteprima e feed diversi). I
-    # valori RIFIUTATI restano in forma giudicata: non vengono mai scritti, e
-    # il motivo li cita cosi' come la guardia li ha visti.
     for colonna, motivo in motivi_numerici.items():
         indice = HEADERS.index(colonna)
         if motivo is None and row[indice]:
             row[indice] = row[indice].replace('.', SEPARATORE_DECIMALE, 1)
-    return {'matched': matched, 'row': row, 'missing': mancanti, 'scarti': scarti,
-            'avvisi': avvisi,
-            'complete': matched and not mancanti and not scarti}
+    return {'row': row, 'missing': mancanti, 'scarti': scarti}
+
+
+# Gli override del multi-riga (#35): campo della riga → colonna del CSV.
+CAMPI_MULTI = {
+    'market_type': 'MarketType', 'market_name': 'MarketName',
+    'selection_name': 'SelectionName', 'price': 'Price',
+    'min_price': 'MinPrice', 'max_price': 'MaxPrice', 'bet_type': 'BetType',
+    'handicap': 'Handicap', 'points': 'Points',
+}
+
+# I soli mercati dove la selezione VUOTA + delimitatori estrae i punteggi.
+MERCATI_PUNTEGGI = ('CORRECT_SCORE', 'HALF_TIME_SCORE')
+
+
+def _segmento(message, dopo, prima):
+    """Il testo del messaggio fra i due delimitatori della riga, come
+    `segmento` in engine.js: delimitatore assente = dal principio / fino alla
+    fine; delimitatore NON TROVATO = ''."""
+    inizio = 0
+    fine = len(message)
+    if dopo:
+        i = message.find(dopo)
+        if i < 0:
+            return ''
+        inizio = i + len(dopo)
+    if prima:
+        j = message.find(prima, inizio)
+        if j < 0:
+            return ''
+        fine = j
+    return message[inizio:fine]
+
+
+# Tetto dei punteggi ESTRATTI da una riga: 36 copre 0-0..5-5, cioe' ogni
+# mercato dei risultati reale. Oltre non e' un mercato: sono delimitatori che
+# prendono mezzo messaggio, e senza tetto un messaggio pieno di N-N per 20
+# righe genererebbe migliaia di documenti nel feed — lo storage e' condiviso
+# (#31). Bloccante di Claude Fable 5 sulla PR #69. Il caso e' segnalato come
+# errore di config della riga, non troncato in silenzio.
+MAX_PUNTEGGI_RIGA = 36
+
+
+def _riga_multi(voce):
+    """Vero se la voce di `multi.markets`/`multi.selections` e' una RIGA.
+
+    Solo un oggetto NON vuoto: `{}` (e qualunque altra cosa) non genera un
+    clone della base. In Python `{}` e' falsy e in JS truthy: senza questo
+    predicato comune i due motori divergevano — misurato: 2 righe in JS, 1 in
+    Python, dalla stessa config. Gemella di `rigaMulti` in engine.js.
+    """
+    return isinstance(voce, dict) and bool(voce)
+
+
+def _genera_righe(message, config, matched, base):
+    """Le righe GENERATE dal parser (#35 pezzo 2), come `generaRighe` in JS.
+
+    La base e' il modello; ogni riga di `config.multi` dice solo cosa cambia e
+    il resto EREDITA (tranello 3: campo vuoto = quello della base, mai
+    «nessuno»). Somma, non prodotto: mercati attivi + selezioni attive.
+    `enabled: false` resta salvata e non genera (tranello 2). Ogni riga e'
+    giudicata DA SOLA: una rotta non ferma le altre (tranello 1). Le
+    MultiSelection restano sul mercato base per contratto: un loro
+    `market_type` viene ignorato. Selezione VUOTA + delimitatori = punteggi
+    dinamici, SOLO su CORRECT_SCORE/HALF_TIME_SCORE (tranello 4): altrove e'
+    un errore di config segnalato, non una riga.
+    """
+    if not matched:
+        return []
+    multi = config.get('multi') if isinstance(config.get('multi'), dict) else {}
+    attive = []
+    # `isinstance(..., list)`, non `or []`: un `markets` non-lista qui veniva
+    # ITERATO (le chiavi di un dict, i caratteri di una stringa) mentre in JS
+    # il for..of sollevava — due esiti diversi dalla stessa config. Non-lista
+    # = nessuna riga, in entrambi (segnalato da CodeRabbit sulla PR #69).
+    mercati = multi.get('markets')
+    selezioni = multi.get('selections')
+    for m in (mercati if isinstance(mercati, list) else []):
+        if _riga_multi(m) and m.get('enabled') is not False:
+            attive.append((m, True))
+    for s in (selezioni if isinstance(selezioni, list) else []):
+        if _riga_multi(s) and s.get('enabled') is not False:
+            attive.append((s, False))
+    if not attive:
+        return [base]
+    i_sel = HEADERS.index('SelectionName')
+    i_prezzo = HEADERS.index('Price')
+    i_mercato = HEADERS.index('MarketType')
+    righe = []
+    for riga, mercato in attive:
+        derivata = list(base['row'])
+        # Le colonne SOVRASCRITTE dalla riga: per il gate #41 non contano come
+        # estratte — il valore che portano e' una costante della riga,
+        # qualunque cosa dica la regola della base.
+        sovrascritte = []
+        for campo, colonna in CAMPI_MULTI.items():
+            # Le MultiSelection non toccano il mercato: e' il contratto della
+            # somma — per le combinazioni si elencano righe MultiMarket.
+            if not mercato and campo in ('market_type', 'market_name'):
+                continue
+            valore = riga.get(campo)
+            if valore is not None and _testo_canonico(valore) != '':
+                derivata[HEADERS.index(colonna)] = _testo_canonico(valore)
+                sovrascritte.append(colonna)
+        sel = riga.get('selection_name')
+        sel_esplicita = _piatto(_testo_canonico('' if sel is None else sel))
+        dopo_grezzo = riga.get('start_after')
+        prima_grezzo = riga.get('end_before')
+        con_delimitatori = bool(dopo_grezzo or prima_grezzo)
+        dopo = _testo_canonico(dopo_grezzo) if dopo_grezzo else ''
+        prima = _testo_canonico(prima_grezzo) if prima_grezzo else ''
+        if con_delimitatori and sel_esplicita:
+            # Delimitatori con selezione: estraggono la QUOTA propria della riga.
+            derivata[i_prezzo] = _segmento(message, dopo, prima)
+        if con_delimitatori and not sel_esplicita:
+            if derivata[i_mercato] not in MERCATI_PUNTEGGI:
+                righe.append({'row': derivata, 'missing': [], 'scarti': [
+                    'SelectionName: la selezione vuota con i delimitatori '
+                    'estrae i punteggi ed e\' ammessa solo su CORRECT_SCORE e '
+                    'HALF_TIME_SCORE: questa riga non genera nulla.'],
+                    'complete': False})
+                continue
+            # `[0-9]`, non `\\d`: in JS `\\d` e' solo ASCII, in Python
+            # prenderebbe anche le cifre unicode — i due motori divergerebbero.
+            punteggi = re.findall(r'[0-9]+-[0-9]+',
+                                  _segmento(message, dopo, prima))
+            if not punteggi:
+                righe.append({'row': derivata, 'missing': [], 'scarti': [
+                    'SelectionName: nessun punteggio N-N fra i delimitatori '
+                    'della riga.'], 'complete': False})
+                continue
+            if len(punteggi) > MAX_PUNTEGGI_RIGA:
+                righe.append({'row': derivata, 'missing': [], 'scarti': [
+                    'SelectionName: troppi punteggi fra i delimitatori della '
+                    f'riga ({len(punteggi)}, massimo {MAX_PUNTEGGI_RIGA}): '
+                    'controlla i delimitatori.'], 'complete': False})
+                continue
+            for punteggio in punteggi:
+                per_punteggio = list(derivata)
+                per_punteggio[i_sel] = punteggio
+                # Niente gate #41 qui: il punteggio VIENE dal messaggio per
+                # costruzione, quindi la riga varia col messaggio.
+                giudizio = _giudica_riga(per_punteggio, True)
+                righe.append({'row': giudizio['row'],
+                              'missing': giudizio['missing'],
+                              'scarti': giudizio['scarti'],
+                              'complete': (not giudizio['missing']
+                                           and not giudizio['scarti'])})
+            continue
+        giudizio = _giudica_riga(derivata, True)
+        if not giudizio['missing']:
+            # Il gate #41 vale PER RIGA: le colonne sovrascritte non contano
+            # come estratte, quindi la regola della base si toglie dal conto.
+            colonne = dict(config.get('columns') or {})
+            for colonna in sovrascritte:
+                colonne.pop(colonna, None)
+            gate = _scarto_estrazione(colonne, giudizio['row'])
+            if gate:
+                giudizio['scarti'].append(gate)
+        righe.append({'row': giudizio['row'], 'missing': giudizio['missing'],
+                      'scarti': giudizio['scarti'],
+                      'complete': (not giudizio['missing']
+                                   and not giudizio['scarti'])})
+    return righe
+
+
+def _scarto_estrazione(colonne, row):
+    """Il gate di CONTENUTO (#41) come fonte unica: None o il testo dello scarto.
+
+    Lo usano la riga base e ogni riga di override (#35 pezzo 2): senza il
+    secondo uso, `config.multi` era la porta sul retro del gate — base tutta
+    costante, una riga di override, e la stessa scommessa fissa usciva per
+    qualunque messaggio riconosciuto. Gemella di `scartoEstrazione` in
+    engine.js.
+    """
+    if _estrazione_reale(colonne, row):
+        return None
+    return ('nessuna colonna obbligatoria viene estratta dal messaggio: con soli '
+            'valori fissi questo parser scriverebbe la stessa scommessa per '
+            'qualunque messaggio. Almeno una fra '
+            + ', '.join(COLONNE_OBBLIGATORIE) + ' deve leggere dal messaggio.')
 
 
 def _estrazione_reale(colonne, row):
@@ -2858,7 +3028,9 @@ def elabora_messaggio(message, cfg):
     Restituisce `{'event', 'csv'}` come `parse_message`, oppure None quando non
     c'e' segnale: condizione non soddisfatta, obbligatoria mancante, o
     `config_json` non decodificabile. None non solleva: e' l'`ignored:
-    parser_no_match` dell'handler, non un 500.
+    parser_no_match` dell'handler, non un 500. Dal #35 pezzo 2 `csv` puo'
+    essere la LISTA dei documenti (piu' righe generate da `config.multi`):
+    ogni chiamante la passa a `store_signal`, che accetta entrambe le forme.
     """
     return esito_messaggio(message, cfg)[0]
 
@@ -2898,8 +3070,24 @@ def esito_messaggio(message, cfg, risolvi_mappa=None):
         if riferimento is not None and risolvi_mappa is not None:
             mappa = risolvi_mappa(riferimento)
         risultato = esegui_parser(message, config, mappa)
-        if not risultato['complete']:
-            return None, list(risultato.get('scarti') or [])
+        # Il multi-riga (#35 pezzo 2): l'autorita' sono le righe GENERATE, non
+        # la base — senza `config.multi` la lista E' la base (una riga) e il
+        # percorso resta byte per byte quello storico. Il segnale c'e' se
+        # almeno una riga e' piazzabile; le rotte con lo scarto non lo
+        # fermano (tranello 1) e il loro motivo viaggia negli avvisi, che il
+        # dispatch scrive in `message_logs` — k su N, con la causa visibile.
+        righe = risultato.get('righe') or []
+        complete = [r for r in righe if r['complete']]
+        if not complete:
+            # Legacy (la sola base): i motivi sono i suoi scarti, senza
+            # prefisso — il testo dei log non si muove. Con le righe di
+            # override il motivo dice QUALE riga, o la diagnosi manderebbe
+            # a correggere la regola sbagliata.
+            motivi = list(risultato.get('scarti') or [])
+            if not (len(righe) == 1 and (righe[0].get('scarti') or []) == motivi):
+                motivi = [f'riga {i}: {s}' for i, r in enumerate(righe, 1)
+                          for s in (r.get('scarti') or [])]
+            return None, motivi
         # `esegui_parser` puo' lasciare valori non-stringa nella riga (una costante
         # JSON `0`/`False`): nel CSV vanno nella forma CANONICA (`_testo_canonico`,
         # cioe' come li scrive `String()` in `toCsv`), non con `str()` di Python —
@@ -2908,9 +3096,30 @@ def esito_messaggio(message, cfg, risolvi_mappa=None):
         # feed, il cliente giudica l'anteprima, e i byte devono coincidere.
         # E' anche il testo su cui la guardia numerica ha dato il verdetto.
         # [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #47.
-        row = [_testo_canonico(v) for v in risultato['row']]
-        csv_riga = make_csv(row)
-        evento = row[HEADERS.index('EventName')]
+        documenti = []
+        for r in complete:
+            row = [_testo_canonico(v) for v in r['row']]
+            documenti.append(make_csv(row))
+        evento = ([_testo_canonico(v) for v in complete[0]['row']]
+                  [HEADERS.index('EventName')])
+        # Una riga sola = la stringa di sempre (i consumatori storici non
+        # cambiano); piu' righe = la LISTA, il contratto d'ingresso di
+        # `store_signal` dal #35 pezzo 1.
+        csv_riga = documenti[0] if len(documenti) == 1 else documenti
+        # Ogni riga NON piazzabile di un segnale scritto lascia il SUO motivo:
+        # gli scarti delle guardie, oppure — quando cade per `missing`, che
+        # scarti non produce — le obbligatorie mancanti. Senza il secondo
+        # ramo la riga spariva in silenzio (rischio segnalato da GPT-5.5
+        # sulla PR #69).
+        avvisi_righe = []
+        for i, r in enumerate(righe, 1):
+            if r['complete']:
+                continue
+            avvisi_righe.extend(f'riga {i}: {s}' for s in (r.get('scarti') or []))
+            if not (r.get('scarti') or []) and (r.get('missing') or []):
+                avvisi_righe.append(
+                    f'riga {i}: colonne obbligatorie mancanti: '
+                    + ', '.join(r['missing']))
     except Exception:  # noqa: BLE001 - fail-safe deliberato, vedi commento sopra
         logging.getLogger('xtrader.relay').warning(
             'config parser non elaborabile: nessun segnale prodotto')
@@ -2933,9 +3142,11 @@ def esito_messaggio(message, cfg, risolvi_mappa=None):
         return None, (['config non eseguibile'] if riconosciuto else [])
     # `avvisi` viaggia nel segnale (#34 pezzo 3): e' il «verbatim + avviso»
     # della squadra senza alias, e il dispatch lo scrive in `message_logs` —
-    # l'unico posto dove il cliente lo vede sul traffico vero.
+    # l'unico posto dove il cliente lo vede sul traffico vero. Dal #35
+    # pezzo 2 porta anche le righe SCARTATE di un segnale scritto (k su N):
+    # il feed esce con le k buone, e le altre non spariscono in silenzio.
     return {'event': evento, 'csv': csv_riga,
-            'avvisi': list(risultato.get('avvisi') or [])}, []
+            'avvisi': list(risultato.get('avvisi') or []) + avvisi_righe}, []
 
 
 def auth(token):
@@ -4684,6 +4895,7 @@ def _valida_config_parser(config):
             suggerimento = f' Forse intendevi {vicine[0]!r}?' if vicine else ''
             raise HTTPException(
                 422, f'{nome!r} non e\' una colonna del CSV.{suggerimento}')
+    _valida_config_multi(config.get('multi'))
     # Numeri JSON non-finiti (`NaN`, `Infinity`): `request.json()` li accetta e
     # `json.dumps` di default li serializza come JSON NON standard. Verrebbero scritti,
     # ma `JSONResponse` li rifiuta quando riserializza `config` a ogni lista/creazione:
@@ -4703,6 +4915,67 @@ def _valida_config_parser(config):
         raise
     except Exception:
         raise HTTPException(422, 'config non eseguibile: controlla la condizione e le regole delle colonne') from None
+
+
+def _valida_config_multi(multi):
+    """`config.multi` al confine di scrittura (#35 pezzo 2): 422 col motivo.
+
+    La forma sbagliata non deve arrivare al motore, dove diventerebbe un
+    comportamento MUTO: una chiave col refuso (`pricce`) verrebbe ignorata e
+    la riga uscirebbe senza la modifica voluta — il caso `Prcie` della #41,
+    identico sulle righe. E `enabled` non-booleano e' il piu' subdolo:
+    `'false' !== false` in JS, quindi la riga resterebbe ATTIVA, l'opposto di
+    cio' che l'utente credeva di scrivere. Il tetto conta TUTTE le righe
+    dichiarate, anche le spente: sono storage e superficie, non solo feed.
+    """
+    if multi is None:
+        return
+    if not isinstance(multi, dict):
+        raise HTTPException(422, 'config.multi deve essere un oggetto')
+    # Anche il LIVELLO di multi rifiuta le chiavi sconosciute: `markes` con
+    # un refuso passerebbe e il motore la ignorerebbe — righe salvate, zero
+    # generate, nessun messaggio (segnalato da CodeRabbit sulla PR #69).
+    elenchi = ('markets', 'selections')
+    for chiave in multi:
+        if chiave not in elenchi:
+            vicine = difflib.get_close_matches(str(chiave), elenchi, n=1)
+            suggerimento = f' Forse intendevi {vicine[0]!r}?' if vicine else ''
+            raise HTTPException(
+                422, f'{chiave!r} non e\' un elenco di config.multi.'
+                + suggerimento)
+    ammesse = set(CAMPI_MULTI) | {'enabled', 'start_after', 'end_before'}
+    totale = 0
+    for elenco in ('markets', 'selections'):
+        righe = multi.get(elenco)
+        if righe is None:
+            continue
+        if not isinstance(righe, list):
+            raise HTTPException(422, f'config.multi.{elenco} deve essere una lista')
+        for riga in righe:
+            if not isinstance(riga, dict):
+                raise HTTPException(
+                    422, f'ogni riga di config.multi.{elenco} deve essere un oggetto')
+            totale += 1
+            for chiave, valore in riga.items():
+                if chiave not in ammesse:
+                    vicine = difflib.get_close_matches(
+                        str(chiave), sorted(ammesse), n=1)
+                    suggerimento = f' Forse intendevi {vicine[0]!r}?' if vicine else ''
+                    raise HTTPException(
+                        422, f'{chiave!r} non e\' un campo delle righe multi.'
+                        + suggerimento)
+                if chiave == 'enabled':
+                    if not isinstance(valore, bool):
+                        raise HTTPException(
+                            422, 'enabled deve essere true o false')
+                elif not (valore is None
+                          or isinstance(valore, (str, int, float, bool))):
+                    raise HTTPException(
+                        422, f'{chiave} deve essere un testo o un numero')
+    if totale > MAX_RIGHE_MULTI:
+        raise HTTPException(
+            422, f'troppe righe multi: massimo {MAX_RIGHE_MULTI} fra mercati '
+            'e selezioni')
 
 
 def _crea_parser_utente(c, user_id, titolo, config, active):
@@ -4989,16 +5262,28 @@ async def prova_parser_mio(slug: str, request: Request):
     # PERCHE' il messaggio non produce riga, e senza di essa la prova mostrerebbe
     # «non completo» con `missing` vuota — cioe' il sintomo senza la causa, che e'
     # il difetto che la #39 e la #41 esistono per chiudere.
+    # Il multi-riga (#35 pezzo 2): la prova mostra il «k su N» del tranello 1 —
+    # ogni riga generata col SUO esito, e il CSV composto delle sole complete,
+    # gli stessi byte che scriverebbe il webhook. Senza `config.multi` la
+    # lista porta la sola base e `csv` resta la riga di sempre
+    # (`componi_feed` di un documento e' il documento).
+    righe = risultato.get('righe') or []
+    complete = [r for r in righe if r['complete']]
     corpo = {'matched': risultato['matched'], 'missing': risultato['missing'],
              'scarti': risultato.get('scarti') or [],
              'avvisi': risultato.get('avvisi') or [],
-             'complete': risultato['complete']}
-    if risultato['complete']:
+             'complete': bool(complete),
+             'righe': [{'row': [_testo_canonico(v) for v in r['row']],
+                        'missing': r['missing'], 'scarti': r['scarti'],
+                        'complete': r['complete']} for r in righe]}
+    if complete:
         # `_testo_canonico` come nel webhook (`esito_messaggio`): l'anteprima
         # della prova deve mostrare gli STESSI byte che uscirebbero nel feed.
-        row = [_testo_canonico(v) for v in risultato['row']]
-        corpo['event'] = row[HEADERS.index('EventName')]
-        corpo['csv'] = make_csv(row)
+        documenti = [make_csv([_testo_canonico(v) for v in r['row']])
+                     for r in complete]
+        corpo['event'] = ([_testo_canonico(v) for v in complete[0]['row']]
+                          [HEADERS.index('EventName')])
+        corpo['csv'] = componi_feed(documenti)
     return _rispondi_con_sessione(utente['id'], utente['versione'], corpo)
 
 
