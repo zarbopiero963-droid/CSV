@@ -250,9 +250,15 @@ veda.
    preso dalla sessione, mai da un parametro della richiesta. Dal PR 6 quella
    sessione esiste, e il solo posto da cui leggerla è `utente_dalla_sessione()`
    in `main.py` — vedi «Il cookie di sessione».
-2. Ogni endpoint che riceve un `parser_id` verifica la proprietà prima di leggere
-   o scrivere. Un parser di un altro utente risponde 404, non 403: non si rivela
-   nemmeno l'esistenza.
+2. Ogni endpoint che riceve un `parser_id` (o uno slug) verifica la proprietà
+   prima di leggere o scrivere. Un parser di un altro utente risponde 404, non
+   403: non si rivela nemmeno l'esistenza. **Vale per la risorsa singola** —
+   `PUT`, `DELETE`, `POST …/test`, che nominano un parser preciso. Una rotta di
+   **elenco** non può rispondere 404 perché non nomina niente: filtra per
+   `user_id` e restituisce 200 con la lista dei soli parser propri, vuota
+   compresa. Le due forme non si contraddicono, e la regola 8 dice la stessa
+   cosa per tutte le altre tabelle (segnalato da CodeRabbit sulla PR #72, dove
+   questa riga sembrava promettere 404 anche per gli elenchi).
 3. **Una chat appartiene a un solo utente**, ma può essere assegnata a più parser
    di quell'utente. L'unicità sta su `chats.telegram_chat_id`, non su
    `parser_chats`. Senza questo vincolo due account potrebbero leggere i segnali
@@ -273,6 +279,38 @@ veda.
    i documenti prima di scrivere (uno rotto = niente scritto).
 7. Stesso messaggio, stessa chat, parser diversi: due elaborazioni indipendenti e
    due CSV distinti. Chi non riconosce il messaggio lo ignora senza toccare nulla.
+8. **La proprietà si ripete DENTRO ogni statement** (PR #64, estesa dalla #65 a
+   parser, mercati e letture). Il controllo di proprietà delle rotte (`*_o_404`)
+   è una lettura, e può invecchiare prima del write-lock: una riconciliazione
+   concorrente (`riconcilia_su_utente`) travasa il padre fra il check e lo
+   statement, e uno statement che filtra solo per id atterrerebbe sui dati ormai
+   dell'account superstite. Perciò ogni INSERT/UPDATE/DELETE **e ogni SELECT dei
+   dati** ripete il vincolo `user_id` nella stessa istruzione (JOIN/EXISTS fino a
+   `sports.user_id`/`competizioni.user_id`/`parsers.user_id`). L'esito per il
+   proprietario sbagliato **non è lo stesso sui due lati**, e la differenza è
+   deliberata:
+
+   - **scritture** (INSERT/UPDATE/DELETE): zero righe toccate, `None` al
+     chiamante, **404** dalla rotta — come se il travaso fosse arrivato prima
+     della richiesta;
+   - **letture** (le SELECT dei dati): **lista vuota**, e la rotta risponde
+     **200** con quella lista. Non un 404: una lista vuota è già il risultato
+     legittimo di un padre che non ha figli, e distinguere «vuoto perché non è
+     più mio» da «vuoto perché non c'è niente» richiederebbe una seconda
+     lettura, che avrebbe la stessa finestra della prima. Quel che conta — ed è
+     ciò che il vincolo garantisce — è che **nessun dato di un altro account
+     compaia mai** nella risposta. (Segnalato da Claude Fable 5 al gate finale
+     della PR #72: la versione precedente di questa regola diceva «404 dalla
+     rotta» per tutti e due i lati, ed era il testo a essere sbagliato, non il
+     codice.)
+
+   Portata: il travaso avviene solo fra account della **stessa
+   persona** (merge/riparazione) — è difesa in profondità, non una falla
+   cross-persona. Restano fuori, per decisione da prendere dal proprietario, gli
+   INSERT per-utente legati all'id di sessione (`crea_sport_mio`,
+   `crea_sorgente_mia`, `crea_parser`, conio token): vincolarli a
+   `users.session_version` dentro lo statement è un cambio architetturale
+   (issue #65, terzo punto).
 
 ## Scadenza dell'accesso
 

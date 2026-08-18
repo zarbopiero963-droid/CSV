@@ -556,7 +556,7 @@ def test_l_INSERT_e_condizionato_al_padre_e_non_lascia_orfani(tmp_path, monkeypa
               (uid,))
     sport_id = c.execute('SELECT last_insert_rowid()').fetchone()[0]
     c.execute('DELETE FROM sports WHERE id=?', (sport_id,))
-    assert main._inserisci_mercato(c, sport_id, 'MATCH_ODDS', 'Match Odds') is None
+    assert main._inserisci_mercato(c, uid, sport_id, 'MATCH_ODDS', 'Match Odds') is None
     assert c.execute('SELECT COUNT(*) FROM betfair_markets').fetchone()[0] == 0, \
         'l\'INSERT ha scritto un mercato orfano'
 
@@ -569,14 +569,14 @@ def test_l_INSERT_e_condizionato_al_padre_e_non_lascia_orfani(tmp_path, monkeypa
               " VALUES (?, 'MATCH_ODDS', 'Match Odds')", (sport_id,))
     market_id = c.execute('SELECT last_insert_rowid()').fetchone()[0]
     c.execute('DELETE FROM betfair_markets WHERE id=?', (market_id,))
-    assert main._inserisci_selezione(c, market_id, 'Casa') is None
+    assert main._inserisci_selezione(c, uid, market_id, 'Casa') is None
     assert c.execute('SELECT COUNT(*) FROM betfair_selections').fetchone()[0] == 0, \
         'l\'INSERT ha scritto una selezione orfana'
 
     # E il caso normale resta normale: padre vivo → id vero, riga scritta.
-    mid = main._inserisci_mercato(c, sport_id, 'OVER_UNDER_05', 'Over/Under 0.5')
+    mid = main._inserisci_mercato(c, uid, sport_id, 'OVER_UNDER_05', 'Over/Under 0.5')
     assert isinstance(mid, int)
-    assert main._inserisci_selezione(c, mid, 'Over 0,5 goal') is not None
+    assert main._inserisci_selezione(c, uid, mid, 'Over 0,5 goal') is not None
     c.close()
 
 
@@ -622,4 +622,72 @@ def test_la_riconciliazione_travasa_gli_sport_e_ridisambigua_gli_slug(tmp_path,
     assert arrivato == sport_perdente
     assert c.execute('SELECT COUNT(*) FROM betfair_markets WHERE sport_id=?',
                      (sport_perdente,)).fetchone()[0] == 1
+    c.close()
+
+
+def test_la_proprieta_si_ripete_dentro_OGNI_statement_dei_mercati(tmp_path,
+                                                                  monkeypatch):
+    """Issue #65: la classe della PR #64 estesa alle rotte mercati (#33).
+
+    La proprieta' verificata dalle `*_o_404` e' una LETTURA e puo' invecchiare
+    prima del write-lock: un travaso concorrente (`riconcilia_su_utente`)
+    sposta lo sport fra il check e lo statement, e uno statement che filtra
+    solo per id atterra su dati ormai dell'account superstite. Misurato sul
+    codice PRECEDENTE, con il travaso gia' committato quando gli statement
+    partono: `elimina_mercato_mio` distruggeva mercato e selezioni del nuovo
+    proprietario (0 righe rimaste, attese 1 e 1), `_inserisci_mercato`
+    scriveva nella sua libreria, `_selezioni_di` leggeva le sue selezioni.
+
+    Qui ogni helper ripete il vincolo `user_id` DENTRO lo statement
+    (JOIN/EXISTS fino a `sports.user_id`): col proprietario sbagliato zero
+    righe toccate, None (o lista vuota) al chiamante, e la rotta risponde 404
+    come se il travaso fosse arrivato prima della richiesta.
+    """
+    import sqlite3
+    from tests.dati import relay_in_processo
+    percorso = relay_in_processo(monkeypatch, tmp_path / 'proprietario.db')
+    c = sqlite3.connect(percorso)
+    utenti = {}
+    for slug in ('mio', 'altrui'):
+        c.execute("INSERT INTO users(slug, first_name, status) VALUES (?, ?, 'attivo')",
+                  (slug, slug.capitalize()))
+        utenti[slug] = c.execute('SELECT id FROM users WHERE slug=?',
+                                 (slug,)).fetchone()[0]
+    c.execute('INSERT INTO sports(user_id, slug, nome) VALUES (?, ?, ?)',
+              (utenti['mio'], 'calcio', 'Calcio'))
+    sport = c.execute("SELECT id FROM sports WHERE slug='calcio'").fetchone()[0]
+
+    # Gli INSERT: il padre dev'essere ANCORA dell'utente, non solo esistere.
+    mid = main._inserisci_mercato(c, utenti['mio'], sport, 'MATCH_ODDS', 'Match Odds')
+    assert isinstance(mid, int)
+    sid = main._inserisci_selezione(c, utenti['mio'], mid, 'Casa')
+    assert isinstance(sid, int)
+    assert main._inserisci_mercato(c, utenti['altrui'], sport,
+                                   'OVER_UNDER_15', 'Abuso') is None
+    assert main._inserisci_selezione(c, utenti['altrui'], mid, 'Abuso') is None
+    assert c.execute('SELECT COUNT(*) FROM betfair_markets').fetchone()[0] == 1
+    assert c.execute('SELECT COUNT(*) FROM betfair_selections').fetchone()[0] == 1
+
+    # Le LETTURE (variante del commento della #65): stessa forma, stesso vincolo.
+    assert [m[0] for m in main._mercati_di(c, utenti['mio'], sport)] == [mid]
+    assert main._selezioni_di(c, utenti['mio'], mid) == [
+        {'id': sid, 'selectionName': 'Casa'}]
+    assert main._mercati_di(c, utenti['altrui'], sport) == []
+    assert main._selezioni_di(c, utenti['altrui'], mid) == []
+
+    # Le DELETE: il proprietario sbagliato non tocca niente, nemmeno con gli id.
+    assert main._elimina_selezione(c, utenti['altrui'], mid, sid) is None
+    assert main._elimina_mercato(c, utenti['altrui'], mid) is None
+    assert c.execute('SELECT COUNT(*) FROM betfair_markets').fetchone()[0] == 1
+    assert c.execute('SELECT COUNT(*) FROM betfair_selections').fetchone()[0] == 1
+
+    # Il proprietario vero fa tutto: la selezione da sola, poi la cascata.
+    assert main._elimina_selezione(c, utenti['mio'], mid, sid) is True
+    assert c.execute('SELECT COUNT(*) FROM betfair_selections').fetchone()[0] == 0
+    sid2 = main._inserisci_selezione(c, utenti['mio'], mid, 'Ospite')
+    assert isinstance(sid2, int)
+    assert main._elimina_mercato(c, utenti['mio'], mid) is True
+    assert c.execute('SELECT COUNT(*) FROM betfair_markets').fetchone()[0] == 0
+    assert c.execute('SELECT COUNT(*) FROM betfair_selections').fetchone()[0] == 0, \
+        'la cascata del mercato deve portare via le sue selezioni'
     c.close()

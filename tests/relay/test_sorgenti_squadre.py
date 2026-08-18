@@ -866,3 +866,77 @@ def test_il_webhook_traduce_e_scrive_l_avviso_nei_log(tmp_path, monkeypatch):
     esiti = [r[0] for r in c.execute('SELECT esito FROM message_logs').fetchall()]
     c.close()
     assert any(e.startswith('avviso:') and 'Fantasma' in e for e in esiti), esiti
+
+
+def test_anche_le_letture_sono_vincolate_al_proprietario_nello_statement(
+        tmp_path, monkeypatch):
+    """Variante della #65 (quarto gate della PR #64, Sol): la classe sul lato
+    LETTURA. Dopo il check di proprieta', le SELECT dei dati filtravano solo
+    per id del padre: una riconciliazione concorrente travasa la competizione
+    fra il check e la SELECT, e la richiesta in volo legge le squadre e gli
+    alias ormai dell'account superstite (misurato sul codice precedente:
+    `_selezioni_di` leggeva 1 selezione altrui, attese 0 — stessa forma qui).
+
+    `_squadre_di` e `_alias_di` ripetono il vincolo dentro la stessa SELECT:
+    per il proprietario sbagliato la lista e' VUOTA, come se il travaso fosse
+    arrivato prima della richiesta.
+    """
+    import sqlite3
+    percorso = relay_in_processo(monkeypatch, tmp_path / 'letture.db')
+    c = sqlite3.connect(percorso)
+    utenti = {}
+    for slug in ('mio', 'altrui'):
+        c.execute("INSERT INTO users(slug, first_name, status) VALUES (?, ?, 'attivo')",
+                  (slug, slug.capitalize()))
+        utenti[slug] = c.execute('SELECT id FROM users WHERE slug=?',
+                                 (slug,)).fetchone()[0]
+    c.execute('INSERT INTO sports(user_id, slug, nome) VALUES (?, ?, ?)',
+              (utenti['mio'], 'calcio', 'Calcio'))
+    sport = c.execute("SELECT id FROM sports WHERE slug='calcio'").fetchone()[0]
+    cid = main._inserisci_competizione(c, utenti['mio'], sport, 'Serie A')
+    squadra = main._inserisci_squadra(c, utenti['mio'], cid, 'Juventus')
+    c.execute('INSERT INTO sorgenti_squadre(user_id, nome) VALUES (?, ?)',
+              (utenti['mio'], 'fonte'))
+    sorgente = c.execute('SELECT id FROM sorgenti_squadre').fetchone()[0]
+    assert main._scrivi_alias(c, utenti['mio'], sorgente, squadra, cid, 'Juve') is True
+
+    assert main._squadre_di(c, utenti['mio'], cid) == [(squadra, 'Juventus')]
+    assert main._alias_di(c, utenti['mio'], cid, sorgente) == [
+        (squadra, 'Juventus', 'Juve')]
+    assert main._squadre_di(c, utenti['altrui'], cid) == []
+    assert main._alias_di(c, utenti['altrui'], cid, sorgente) == []
+    # E il ramo sulla SORGENTE del predicato (CodeRabbit sulla PR #72): la
+    # competizione e' mia, ma la sorgente e' di un ALTRO utente — il LEFT
+    # JOIN e' vincolato anche sul secondo padre, quindi la squadra resta e
+    # l'alias e' vuoto: la tabella non mostra mai gli alias altrui.
+    #
+    # L'alias altrui va SCRITTO, o il test non prova niente: senza una riga da
+    # nascondere il LEFT JOIN non trova nulla comunque, e la stessa asserzione
+    # passa anche togliendo il vincolo. Misurato per mutazione — tolto il
+    # vincolo sulla sorgente, la versione senza questa INSERT restava verde;
+    # con la riga presente diventa rossa, che e' il solo modo in cui il test
+    # vincola qualcosa. La coppia (sorgente altrui, squadra mia) e' proprio lo
+    # stato che un travaso della sola sorgente lascia dietro di se'.
+    c.execute('INSERT INTO sorgenti_squadre(user_id, nome) VALUES (?, ?)',
+              (utenti['altrui'], 'fonte altrui'))
+    # `last_insert_rowid()` e non un SELECT per user_id: quello prenderebbe una
+    # sorgente qualsiasi di quell'utente se la fixture ne portasse altre, e il
+    # test aggancerebbe la riga sbagliata senza dirlo (GPT-5.5 sulla PR #72).
+    sorgente_altrui = c.execute('SELECT last_insert_rowid()').fetchone()[0]
+    c.execute('INSERT INTO alias_squadre(sorgente_id, squadra_id, alias)'
+              ' VALUES (?,?,?)', (sorgente_altrui, squadra, 'Vecchia Signora'))
+    assert main._alias_di(c, utenti['mio'], cid, sorgente_altrui) == [
+        (squadra, 'Juventus', '')], \
+        'l\'alias della sorgente altrui non deve comparire nella mia tabella'
+
+    # E il BADGE `compilati` della schermata competizione, che e' un'altra
+    # lettura della stessa classe ([REAL_FINDING] di GPT-5.6 Sol al gate finale
+    # della PR #72): contava gli alias per sola `competizione_id`, quindi dopo
+    # un travaso della competizione il numero continuava a contare squadre
+    # ormai dell'altro account — e nella STESSA risposta l'elenco squadre era
+    # gia' vuoto per il vincolo di `_squadre_di`. Un badge che dice «3» sopra
+    # una lista vuota.
+    assert main._compilati_di(c, utenti['mio'], cid, sorgente) == 1
+    assert main._compilati_di(c, utenti['altrui'], cid, sorgente) == 0, \
+        'il badge non conta squadre di una competizione che non e\' piu\' mia'
+    c.close()

@@ -696,3 +696,156 @@ def test_config_con_NaN_o_Infinity_da_422_e_non_viene_MAI_scritta(servizio):
     # E nessun parser e' stato scritto: la lista dell'utente resta vuota.
     assert json.loads(_chiama(servizio, 'GET', '/api/me/parsers', cookie=cookie)[1]) == [], (
         'una config non-finita e- stata scritta comunque: la lista non e- vuota')
+
+
+def test_l_eliminazione_del_parser_e_vincolata_anche_nel_write_lock(tmp_path,
+                                                                    monkeypatch):
+    """Issue #65: la DELETE dei parser dopo un travaso concorrente.
+
+    La rotta leggeva `parsers.id` (proprieta' verificata: una LETTURA), poi
+    eseguiva `DELETE FROM parser_chats WHERE parser_id=?` SENZA vincolo di
+    proprieta'. Misurato sul codice precedente, col travaso gia' committato
+    quando gli statement partono: il parser — ormai dell'account superstite —
+    sopravviveva alla sua DELETE (che filtra per user_id e slug), ma i suoi
+    LINK chat→parser venivano distrutti, e la rotta rispondeva `ok: true`:
+    il parser del superstite smetteva di ricevere dalla sua chat, in silenzio.
+
+    `_elimina_parser` ripete il vincolo dentro ENTRAMBI gli statement: per il
+    proprietario sbagliato zero righe toccate e None al chiamante (la rotta
+    risponde 404); per quello vero via il parser E i suoi link.
+    """
+    import sqlite3
+    from tests.dati import relay_in_processo
+    percorso = relay_in_processo(monkeypatch, tmp_path / 'parser65.db')
+    c = sqlite3.connect(percorso)
+    utenti = {}
+    for slug in ('svuotato', 'superstite'):
+        c.execute("INSERT INTO users(slug, first_name, status) VALUES (?, ?, 'attivo')",
+                  (slug, slug.capitalize()))
+        utenti[slug] = c.execute('SELECT id FROM users WHERE slug=?',
+                                 (slug,)).fetchone()[0]
+    # Il parser e la sua chat come li lascia il travaso: gia' del superstite.
+    c.execute("INSERT INTO parsers(name, header, user_id, slug, titolo,"
+              " config_json, active, ordine) VALUES ('u-b-conteso', '', ?,"
+              " 'conteso', 'Conteso', '{}', 1, 0)", (utenti['superstite'],))
+    c.execute("UPDATE parsers SET id=rowid WHERE name='u-b-conteso'")
+    pid = c.execute("SELECT id FROM parsers WHERE name='u-b-conteso'").fetchone()[0]
+    c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id) VALUES (?,?)',
+              ('-100999', utenti['superstite']))
+    chat = c.execute('SELECT last_insert_rowid()').fetchone()[0]
+    c.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (?,?)', (pid, chat))
+
+    # La richiesta stantia dell'account svuotato, che aveva letto `pid` quando
+    # il parser era suo: zero righe toccate, None al chiamante.
+    assert main._elimina_parser(c, utenti['svuotato'], pid, 'conteso') is None
+    assert c.execute('SELECT COUNT(*) FROM parsers WHERE id=?',
+                     (pid,)).fetchone()[0] == 1
+    assert c.execute('SELECT COUNT(*) FROM parser_chats WHERE parser_id=?',
+                     (pid,)).fetchone()[0] == 1, \
+        'i link del proprietario superstite non si toccano'
+
+    # Il proprietario vero: via il parser E i suoi link.
+    assert main._elimina_parser(c, utenti['superstite'], pid, 'conteso') is True
+    assert c.execute('SELECT COUNT(*) FROM parsers WHERE id=?',
+                     (pid,)).fetchone()[0] == 0
+    assert c.execute('SELECT COUNT(*) FROM parser_chats WHERE parser_id=?',
+                     (pid,)).fetchone()[0] == 0
+    c.close()
+
+
+def test_l_eliminazione_stantia_NON_colpisce_un_parser_ricreato_stesso_slug(
+        tmp_path, monkeypatch):
+    """[REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #72: la race ABA.
+
+    La cascata dei link e' vincolata per `id`, ma la DELETE del parser era per
+    `(user_id, slug)`: fra la lettura dell'id e il write-lock un elimina+ricrea
+    concorrente dello STESSO slug (stesso utente) fa divergere le due — la
+    richiesta stantia cancellava il parser RICREATO, i cui link non erano
+    stati toccati (la cascata puntava all'id vecchio): link orfani e un
+    parser sparito sotto i piedi di chi l'aveva appena ricreato, con `ok: true`.
+    `parsers` non ha AUTOINCREMENT (CodeRabbit sulla PR #72, e misurato dal
+    secondo scenario): sqlite riusa il rowid massimo, quindi la sentinella
+    qui sotto lo tiene occupato per ottenere due id davvero distinti.
+
+    Misurato sul codice precedente: la richiesta stantia restituiva True, il
+    parser ricreato spariva e il suo link restava orfano. Con l'`id` anche
+    nella DELETE del parser: None (la rotta risponde 404, come se il parser
+    letto fosse gia' sparito), il ricreato e il suo link intatti.
+    """
+    import sqlite3
+    from tests.dati import relay_in_processo
+    percorso = relay_in_processo(monkeypatch, tmp_path / 'aba65.db')
+    c = sqlite3.connect(percorso)
+    c.execute("INSERT INTO users(slug, first_name, status) VALUES ('solo', 'Solo', 'attivo')")
+    uid = c.execute("SELECT id FROM users WHERE slug='solo'").fetchone()[0]
+
+    def crea(nome):
+        c.execute('INSERT INTO parsers(name, header, user_id, slug, titolo,'
+                  " config_json, active, ordine) VALUES (?, '', ?, 'rifatto',"
+                  " 'Rifatto', '{}', 1, 0)", (nome, uid))
+        c.execute('UPDATE parsers SET id=rowid WHERE name=?', (nome,))
+        return c.execute('SELECT id FROM parsers WHERE name=?', (nome,)).fetchone()[0]
+
+    vecchio = crea('u-a-rifatto')
+    # `parsers` e' la tabella originale, SENZA AUTOINCREMENT: se il parser
+    # eliminato detiene il rowid massimo, sqlite lo riusa e il ricreato
+    # sarebbe la STESSA identita' di riga (id uguale) — cascata e DELETE
+    # coerenti per costruzione. La sentinella tiene occupato il massimo,
+    # cosi' il ricreato prende un id NUOVO: lo scenario della race.
+    c.execute("INSERT INTO parsers(name, header, user_id, slug, titolo,"
+              " config_json, active, ordine) VALUES ('u-a-sentinella', '', ?,"
+              " 'sentinella', 'Sentinella', '{}', 1, 1)", (uid,))
+    # La richiesta stantia ha letto `vecchio`; ADESSO l'elimina+ricrea
+    # concorrente committa: stesso slug, riga nuova (name diverso: e' PK).
+    c.execute('DELETE FROM parser_chats WHERE parser_id=?', (vecchio,))
+    c.execute('DELETE FROM parsers WHERE id=?', (vecchio,))
+    nuovo = crea('u-a-rifatto-2')
+    assert nuovo != vecchio, 'lo scenario esige due identita\' distinte'
+    c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id) VALUES (?,?)',
+              ('-100888', uid))
+    chat = c.execute('SELECT last_insert_rowid()').fetchone()[0]
+    c.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (?,?)',
+              (nuovo, chat))
+
+    # ...e la richiesta stantia prosegue con l'id vecchio: non deve toccare niente.
+    assert main._elimina_parser(c, uid, vecchio, 'rifatto') is None
+    assert c.execute('SELECT COUNT(*) FROM parsers WHERE id=?',
+                     (nuovo,)).fetchone()[0] == 1, \
+        'il parser ricreato non si tocca: la richiesta stantia parlava di un altro'
+    assert c.execute('SELECT COUNT(*) FROM parser_chats WHERE parser_id=?',
+                     (nuovo,)).fetchone()[0] == 1
+    # E per il proprietario col dato FRESCO tutto funziona come sempre.
+    assert main._elimina_parser(c, uid, nuovo, 'rifatto') is True
+    assert c.execute('SELECT COUNT(*) FROM parser_chats').fetchone()[0] == 0, \
+        'nessun link orfano: la cascata e la DELETE colpiscono lo stesso id'
+
+    # Secondo scenario (bloccante 2 di GPT-5.5 sul fix): il parser eliminato
+    # detiene il rowid MASSIMO — sqlite lo riusa e il ricreato ha lo STESSO
+    # id. Le due righe sono indistinguibili per costruzione (senza
+    # AUTOINCREMENT anche il `name` liberato puo' tornare identico), quindi
+    # nessun filtro puo' separarle; ma l'esito e' una SERIALIZZAZIONE LEGALE
+    # delle richieste dello stesso utente — equivale a «la DELETE e' arrivata
+    # per ultima»: parser ricreato e i SUOI link spariscono INSIEME, zero
+    # orfani, zero divergenza fra i due statement. Il test vincola questa
+    # coerenza; con un utente DIVERSO sull'id riusato resta il no-op del
+    # vincolo user_id (primo scenario del test qui sopra, PR #64).
+    c.execute("DELETE FROM parsers WHERE name='u-a-sentinella'")
+    vecchio2 = crea('u-a-riuso')             # ora detiene il rowid massimo
+    c.execute('DELETE FROM parser_chats WHERE parser_id=?', (vecchio2,))
+    c.execute('DELETE FROM parsers WHERE id=?', (vecchio2,))
+    nuovo2 = crea('u-a-riuso-2')             # sqlite riusa il massimo: id uguale
+    assert nuovo2 == vecchio2, \
+        ('lo scenario esige il riuso del rowid: se questa riga fallisce lo'
+         ' schema di `parsers` e\' cambiato (AUTOINCREMENT aggiunto) e il caso'
+         ' qui sotto non esiste piu\' — va riconsiderato, non silenziato')
+    c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id) VALUES (?,?)',
+              ('-100777', uid))
+    chat2 = c.execute('SELECT last_insert_rowid()').fetchone()[0]
+    c.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (?,?)',
+              (nuovo2, chat2))
+    assert main._elimina_parser(c, uid, vecchio2, 'rifatto') is True
+    assert c.execute('SELECT COUNT(*) FROM parsers WHERE slug=?',
+                     ('rifatto',)).fetchone()[0] == 0
+    assert c.execute('SELECT COUNT(*) FROM parser_chats').fetchone()[0] == 0, \
+        'id riusato: parser e link spariscono insieme, mai link orfani'
+    c.close()
