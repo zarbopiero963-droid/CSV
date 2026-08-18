@@ -2055,6 +2055,14 @@ document.addEventListener('click', e => {
   if (!el) return;
   const fn = actions[el.dataset.act];
   if (!fn) return;
+  // Le righe della card «Output e condizioni» si catturano PRIMA di
+  // QUALUNQUE azione: un'azione fuori dalla card («Sospendi») ridisegna il
+  // riepilogo e cancellava in silenzio gli input digitati e non salvati
+  // (Fable, PR #70). Qui e non in `render()`: il render arriva DOPO che
+  // un'azione ha mutato il draft (multi-add), e leggere allora il DOM
+  // vecchio disferebbe la mutazione. `leggiMulti` e' un no-op quando la
+  // card non e' a schermo o il wizard non c'e'.
+  if (wiz) leggiMulti();
   // I checkbox gestiscono lo stato da sé: non impedirne il click nativo.
   if (el.tagName !== 'INPUT') e.preventDefault();
   fn(el);

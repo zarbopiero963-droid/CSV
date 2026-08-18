@@ -1983,11 +1983,12 @@ una riga per punteggio N-N, solo su CORRECT_SCORE e HALF_TIME_SCORE.»
   delimitatori sono etichettati «Quota/punteggi da (testo dopo)» e «fino a
   (testo prima)». Al tetto (20, il default del server) i pulsanti si
   disabilitano.
-- Le righe si **leggono dal DOM** al salvataggio, alla prova, all'aggiunta/
-  rimozione e al ritorno verso una colonna (`leggiMulti`) — come il messaggio
-  di prova, niente salvataggio implicito al change — e riaprire il parser le
-  ritrova (la config.multi viaggia nel draft come `betfair`/`team_source`:
-  senza, riaprire e salvare la cancellerebbe).
+- Le righe si **leggono dal DOM prima di ogni azione** (`leggiMulti` nel
+  dispatcher dei click: anche «Sospendi» o un'altra azione fuori dalla card
+  ridisegnano il riepilogo, e senza la cattura cancellavano gli input non
+  salvati — Fable, PR #70) — niente salvataggio implicito al change — e
+  riaprire il parser le ritrova (la config.multi viaggia nel draft come
+  `betfair`/`team_source`: senza, riaprire e salvare la cancellerebbe).
 - **La prova col k su N**: col multi **attivo** (almeno una riga non vuota e
   non spenta — anche una sola: una riga singola rotta non deve nascondere il
   suo motivo, segnalato da CodeRabbit sulla PR #70) la pillola d'esito dice

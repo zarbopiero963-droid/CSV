@@ -188,6 +188,19 @@ with sync_playwright() as pw:
     assert len(righe_card(pg)) == 2, 'la riga rimossa deve restare rimossa'
     shot(pg, '06-riga-rimossa')
 
+    # ------------------------------------ un re-render QUALUNQUE non deve
+    # perdere le righe digitate e non salvate (Fable, PR #70): «Sospendi»
+    # ridisegna il riepilogo senza passare dalle azioni della card.
+    pg.fill('[data-mrow="markets:0"] [data-mfield="market_name"]', 'Over/Under 2.5')
+    pg.click('[data-act="toggle-active"]')
+    pg.wait_for_selector('.pill.off')          # sospeso: la vista si e' ridisegnata
+    valore = pg.input_value('[data-mrow="markets:0"] [data-mfield="market_name"]')
+    assert valore == 'Over/Under 2.5', \
+        f'un re-render fuori dalla card non deve perdere gli input: {valore!r}'
+    pg.click('[data-act="toggle-active"]')     # riattivo per i passi successivi
+    pg.wait_for_selector('.pill.on')
+    shot(pg, '06b-rerender-non-perde')
+
     # ------------------------------------ UNA sola riga attiva, rotta: il
     # motivo NON deve sparire (CodeRabbit, PR #70): il k/N si mostra anche
     # con una riga sola quando il multi e' attivo.
