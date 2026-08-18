@@ -919,8 +919,10 @@ def test_anche_le_letture_sono_vincolate_al_proprietario_nello_statement(
     # stato che un travaso della sola sorgente lascia dietro di se'.
     c.execute('INSERT INTO sorgenti_squadre(user_id, nome) VALUES (?, ?)',
               (utenti['altrui'], 'fonte altrui'))
-    sorgente_altrui = c.execute('SELECT id FROM sorgenti_squadre WHERE user_id=?',
-                                (utenti['altrui'],)).fetchone()[0]
+    # `last_insert_rowid()` e non un SELECT per user_id: quello prenderebbe una
+    # sorgente qualsiasi di quell'utente se la fixture ne portasse altre, e il
+    # test aggancerebbe la riga sbagliata senza dirlo (GPT-5.5 sulla PR #72).
+    sorgente_altrui = c.execute('SELECT last_insert_rowid()').fetchone()[0]
     c.execute('INSERT INTO alias_squadre(sorgente_id, squadra_id, alias)'
               ' VALUES (?,?,?)', (sorgente_altrui, squadra, 'Vecchia Signora'))
     assert main._alias_di(c, utenti['mio'], cid, sorgente_altrui) == [
