@@ -291,6 +291,26 @@ with sync_playwright() as pw:
         'il wizard e- sparito: il draft dell-utente non deve essere buttato via'
     shot(pg, '06-delete-stantia')
 
+    # E la prova che il riallineamento ha funzionato DAVVERO, non solo che la
+    # pagina e' sopravvissuta: la stessa conferma, rifatta subito, adesso deve
+    # RIUSCIRE — perche' la cache porta ormai l'uid del parser ricreato. Se
+    # `conflittoOFallita` non avesse riallineato, questa seconda DELETE
+    # ripeterebbe il 409 all'infinito: e' il bug del toggle della PR #71, nella
+    # sua forma per la DELETE. (GPT-5.5 sulla PR #76: le asserzioni di sola
+    # presenza dicono che la UI non e' rotta, non che lo stato sia giusto.)
+    pg.wait_for_selector('.toast', state='detached')
+    pg.click('[data-act="del-parser"]')
+    pg.click('[data-act="del-parser-ok"]')
+    pg.wait_for_selector('[data-act="new-parser"]')      # tornati alla lista
+    rimasti = pg.evaluate(
+        "async () => (await (await fetch('/api/me/parsers')).json()).map(p => p.slug)")
+    # Solo lo slug conteso: l'utente ha anche il parser legacy del seme, che non
+    # c'entra e deve restare (la prima stesura asseriva la lista VUOTA ed e'
+    # diventata rossa proprio per lui — assert sbagliato, non codice sbagliato).
+    assert slug not in rimasti, \
+        f'la DELETE con l-uid riallineato non ha eliminato il parser: {rimasti}'
+    shot(pg, '07-delete-dopo-riallineamento')
+
     b.close()
 
 if errors:
