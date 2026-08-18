@@ -61,10 +61,26 @@ users
 parsers            ← tabella PREESISTENTE, estesa con ALTER additivo
   name (primary key), header, market_name, market_type, selection_name,
   handicap, bet_type,                       ← le colonne del formato originale
-  user_id, slug, config_json, active, ordine, created_at, id
-  unique (user_id, slug)   come indice: su una tabella esistente UNIQUE non si
-  unique (id)              aggiunge con ALTER, e un PRIMARY KEY nemmeno. `id` è
-                           riempito dal `rowid`, che `parser_chats` può riferire
+  user_id, slug, config_json, titolo, active, ordine, created_at, id,
+  versione, uid
+  unique (user_id, slug), unique (id), unique (uid)
+                           tutti e tre come indice: su una tabella esistente
+                           UNIQUE non si aggiunge con ALTER, e un PRIMARY KEY
+                           nemmeno.
+                           `id` è riempito dal `rowid`, ed è quello che
+                           `parser_chats` riferisce.
+                           `titolo` è il nome che il cliente sceglie (`name`
+                           resta l'identità interna, unica fra TUTTI gli utenti).
+                           `versione` è la precondizione della PUT (#51).
+                           `uid` è l'identità non riusabile di PUT e DELETE
+                           (#73), e **non** viene dal `rowid`: proprio perché
+                           sqlite il `rowid` lo RIUSA, e quindi `id` non
+                           identifica una riga nel tempo. È un valore casuale a
+                           128 bit, ed è nullable perché `ALTER ADD COLUMN NOT
+                           NULL` esigerebbe un default costante — cioè lo stesso
+                           «identificatore» per tutte le righe. A riempirlo sono
+                           la migrazione e i percorsi di creazione; che nessuno
+                           lo dimentichi è vincolato da un test
 
 chats
   id, telegram_chat_id, message_thread_id, title, type, owner_user_id, verified_at
@@ -1080,6 +1096,53 @@ versione letta; sul 409 la web app **non** butta le modifiche: `ricaricaParser`
 riallinea la cache e il toast dice verbatim «Modificato altrove: le tue
 modifiche sono ancora qui — ricontrolla e salva di nuovo per sovrascrivere» —
 il secondo salvataggio è una sovrascrittura deliberata, non un incidente.
+
+**L'identità della riga: `uid` (#73).** `versione` risponde alla domanda «è
+cambiato mentre lo modificavo?». Ne esiste una seconda, diversa: «è ancora lo
+**stesso** parser?». Lo `slug` torna libero appena il parser viene eliminato, e
+`id` viene dal `rowid` che sqlite **riusa** (`parsers` è la tabella originale,
+senza `AUTOINCREMENT`): un elimina+ricrea dello stesso slug produce una riga
+nuova identica alla vecchia in ogni colonna che la identifichi. Una richiesta
+rimasta in volo colpiva quella nuova — misurato: la DELETE la cancellava, e la
+PUT le **sovrascriveva `config_json`**, cioè le regole che generano il CSV,
+senza nessun sintomo visibile.
+
+`parsers.uid` è un identificatore casuale a 128 bit assegnato alla creazione e
+**mai riusato**. La DELETE e l'UPDATE della PUT lo vincolano entrambi, insieme a
+`user_id`: la richiesta stantia porta un `uid` che non esiste più, tocca zero
+righe e la rotta risponde **404** — come se la sostituzione fosse arrivata
+prima. Le due guardie **convivono e non si sostituiscono**: `versione` non
+copre questo caso, perché parte da 1 e il parser ricreato ha 1, cioè proprio il
+valore che la richiesta stantia porta con sé.
+
+**Quale finestra chiude, e quale no.** La distinzione conta, ed è stata scritta
+male al primo giro (bloccante di GPT-5.6 Sol al gate della PR #74, verificato
+via HTTP prima di accoglierlo):
+
+- **chiusa** — la finestra *dentro* la richiesta: fra il `SELECT` con cui la
+  rotta legge il parser e la scrittura che ne segue. È lì che il write-lock e la
+  concorrenza del threadpool mettono un elimina+ricrea, ed è lì che `uid` fa la
+  differenza;
+- **aperta** — la finestra *client→server*: due schede aperte, l'utente elimina
+  e ricrea il parser in una, e l'altra salva. Quella richiesta arriva **dopo**,
+  quindi la rotta legge l'`uid` nuovo e scrive sul parser ricreato. Misurato via
+  HTTP: `PUT` con `versione: 1` → **200**, titolo e `config_json` del ricreato
+  sovrascritti con quelli della scheda vecchia. Il #51 non protegge qui perché
+  il ricreato riparte da `versione = 1`.
+
+Chiuderla richiede che sia il **client** a dire quale riga intende modificare —
+cioè esporre `uid` nella vista del parser e accettarlo come precondizione, che è
+un cambio di contratto API e del client web. Non è stato fatto in questa PR:
+resta registrato, con la misura, per la decisione del proprietario.
+
+`uid` è identità **interna**: non compare nella vista del parser né nell'API,
+come `name` e `user_id`. La migrazione lo assegna alle righe già esistenti con
+un valore distinto per riga, una volta sola (`WHERE uid IS NULL`): rigenerarlo a
+ogni avvio renderebbe stantio a ogni deploy ogni riferimento in volo.
+
+La scelta è del proprietario (18/08): `AUTOINCREMENT` avrebbe chiuso lo stesso
+caso, ma non si aggiunge con un `ALTER` — andrebbe ricreata la tabella che porta
+i parser di produzione.
 Vincolata da `tests/relay/test_parser_crud.py` (due PUT dalla stessa base) e
 `tests/web/test_conflitto_web.py` (il conflitto visto dal browser).
 

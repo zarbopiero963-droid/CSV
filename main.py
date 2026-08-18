@@ -955,6 +955,18 @@ COLONNE_MULTIUTENTE = (
     # che smaschera il lost update fra due sessioni dello stesso account. Le
     # righe esistenti partono da 1 col DEFAULT dell'ALTER.
     ('parsers', 'versione', 'INTEGER NOT NULL DEFAULT 1'),
+    # L'identita' NON RIUSABILE della riga (issue #73). `id` viene dal `rowid`, e
+    # `parsers` e' la tabella originale SENZA AUTOINCREMENT: sqlite riusa il rowid
+    # massimo, quindi un parser eliminato e ricreato con lo stesso slug produce una
+    # riga indistinguibile dalla vecchia — stesso id, stesso user_id, stesso slug,
+    # stesso name. Una richiesta rimasta in volo colpiva quella nuova: misurato, la
+    # DELETE la cancellava e la PUT le SOVRASCRIVEVA `config_json`, cioe' le regole
+    # che generano il CSV, senza nessun sintomo. `uid` non si riusa mai, quindi la
+    # richiesta stantia non trova niente e la rotta risponde 404.
+    # AUTOINCREMENT avrebbe chiuso lo stesso caso ma non si aggiunge con un ALTER:
+    # andrebbe ricreata la tabella che porta i parser di produzione. Deciso dal
+    # proprietario il 18/08: colonna, come gia' fatto per `id`.
+    ('parsers', 'uid', 'TEXT'),
     # Le DUE colonne legacy, e stanno qui perche' le avevo PERSE riscrivendo la
     # migrazione. Il codice precedente le aggiungeva con due `try/except` e il commento
     # «Migrate databases created before profile support»: su un database creato prima
@@ -1711,6 +1723,13 @@ def _completa_colonne_nuove(c, profilo_proprietario):
     # `id` dal `rowid`, in una colonna vera: il `rowid` puo' cambiare con un VACUUM,
     # quindi memorizzarlo e' l'unico modo perche' un riferimento resti valido.
     c.execute('UPDATE parsers SET id=rowid WHERE id IS NULL')
+    # `uid`, l'identita' non riusabile (#73): un valore DISTINTO per riga, non un
+    # default costante — con lo stesso uid su tutti i parser la colonna non
+    # distinguerebbe niente, che e' il difetto che esiste per chiudere. `randomblob`
+    # e' valutato per riga da sqlite (misurato dal test sull'unicita'). Solo le
+    # righe a NULL: la migrazione gira a ogni avvio e non deve ribattere gli uid
+    # gia' assegnati, o un riferimento in volo diventerebbe stantio a ogni deploy.
+    c.execute("UPDATE parsers SET uid = lower(hex(randomblob(16))) WHERE uid IS NULL")
     # `titolo` retrocompilato dal `name` per le righe legacy (schema pre-`titolo`): la
     # colonna e' additiva e nullable, ma il contratto API dichiara `titolo: str` e il
     # proprietario loggato vedrebbe `titolo: null` sul parser PIERO di default. Il `name`
@@ -1851,6 +1870,9 @@ def _travasa_nel_multiutente(c):
     c.execute('CREATE UNIQUE INDEX IF NOT EXISTS parsers_utente_slug'
               ' ON parsers (user_id, slug)')
     c.execute('CREATE UNIQUE INDEX IF NOT EXISTS parsers_id ON parsers (id)')
+    # `uid` e' UNIQUE come `id`, e per lo stesso motivo: e' un identificatore, e un
+    # duplicato lo renderebbe ambiguo proprio dove serve non esserlo (#73).
+    c.execute('CREATE UNIQUE INDEX IF NOT EXISTS parsers_uid ON parsers (uid)')
     # I link chat→parser, travasati dai profili UNA VOLTA SOLA. Sta DOPO
     # `_completa_colonne_nuove` perche' ha bisogno di `parsers.id`, che e' quella
     # funzione a riempire. Il marcatore evita che il travaso diventi un seme: da
@@ -4990,6 +5012,23 @@ def _valida_config_multi(multi):
             'e selezioni')
 
 
+def _uid_parser(c):
+    """Un identificatore di riga NON RIUSABILE per un parser (#73).
+
+    Lo conia sqlite con `randomblob(16)`, la stessa fonte con cui la migrazione
+    riempie le righe esistenti: una funzione sola perche' i due percorsi non
+    possano divergere (regola 3). Sono 128 bit — la collisione e' fuori scala, e
+    se accadesse l'indice UNIQUE `parsers_uid` la fermerebbe con un
+    `IntegrityError`, che il retry della creazione tratta come una qualunque
+    contesa sullo slug.
+
+    Non e' `id`: `id` viene dal `rowid` e sqlite lo RIUSA (la tabella e' quella
+    originale, senza AUTOINCREMENT), quindi non identifica una riga nel tempo —
+    solo adesso.
+    """
+    return c.execute('SELECT lower(hex(randomblob(16)))').fetchone()[0]
+
+
 def _crea_parser_utente(c, user_id, titolo, config, active):
     """Crea un parser di proprieta' di `user_id` e ne restituisce la vista pubblica.
 
@@ -5021,11 +5060,12 @@ def _crea_parser_utente(c, user_id, titolo, config, active):
             # sottoquery gira dentro il lock di scrittura dell'INSERT, quindi e'
             # atomica. Segnalato da GPT-5.6 Sol sulla PR #30.
             c.execute(
-                'INSERT INTO parsers(name, header, user_id, slug, titolo, config_json, active, ordine)'
+                'INSERT INTO parsers(name, header, user_id, slug, titolo, config_json,'
+                ' active, ordine, uid)'
                 ' VALUES (?,?,?,?,?,?,?,'
-                ' (SELECT COALESCE(MAX(ordine), -1) + 1 FROM parsers WHERE user_id=?))',
+                ' (SELECT COALESCE(MAX(ordine), -1) + 1 FROM parsers WHERE user_id=?), ?)',
                 (candidato, '', user_id, slug, titolo, json.dumps(config),
-                 1 if active else 0, user_id))
+                 1 if active else 0, user_id, _uid_parser(c)))
             nome = candidato
             break
         except sqlite3.IntegrityError:
@@ -5175,7 +5215,10 @@ async def modifica_parser_mio(slug: str, request: Request):
     _valida_config_parser(dati.config)
     c = db()
     try:
-        riga = c.execute('SELECT id FROM parsers WHERE user_id=? AND slug=?',
+        # `uid` oltre a `id`: e' l'identita' NON RIUSABILE della riga (#73), ed
+        # e' cio' che l'UPDATE usera' per essere sicuro di scrivere su QUESTO
+        # parser e non su un omonimo ricreato nel frattempo.
+        riga = c.execute('SELECT id, uid FROM parsers WHERE user_id=? AND slug=?',
                          (utente['id'], slug)).fetchone()
         if not riga:
             raise HTTPException(404, 'parser non trovato')
@@ -5188,34 +5231,33 @@ async def modifica_parser_mio(slug: str, request: Request):
         # niente TOCTOU — il controllo client-side puo' solo restringere la
         # finestra, questo la chiude. `versione` avanza a OGNI scrittura,
         # anche incondizionata: e' cio' che fa perdere in modo visibile la
-        # sessione rimasta indietro.
-        parametri = [titolo, json.dumps(dati.config), 1 if dati.active else 0,
-                     utente['id'], slug]
-        condizione = ''
-        if dati.versione is not None:
-            condizione = ' AND versione=?'
-            parametri.append(dati.versione)
-        esito = c.execute('UPDATE parsers SET titolo=?, config_json=?, active=?,'
-                          ' versione=versione+1 WHERE user_id=? AND slug=?' + condizione,
-                          parametri)
-        if esito.rowcount == 0 and dati.versione is not None:
+        # sessione rimasta indietro. Il vincolo su `uid` che l'accompagna
+        # risponde a un'altra domanda — «e' ancora lo stesso parser?» — e non
+        # sostituisce la versione: vedi `_aggiorna_parser`.
+        scritto = _aggiorna_parser(c, utente['id'], riga[1], slug, titolo,
+                                   json.dumps(dati.config), dati.active,
+                                   dati.versione)
+        if scritto is None and dati.versione is not None:
             # Il parser c'era al SELECT iniziale: se l'UPDATE non ha toccato
             # righe e' la versione a non combaciare — qualcun altro ha salvato
             # nel frattempo. (Se invece una DELETE concorrente l'ha portato
-            # via, lo dice la rilettura qui sotto col suo 404.)
-            ancora = c.execute('SELECT 1 FROM parsers WHERE user_id=? AND slug=?',
-                               (utente['id'], slug)).fetchone()
+            # via, o l'ha sostituito un omonimo ricreato, lo dice la rilettura
+            # qui sotto col suo 404: quella cerca lo STESSO `uid`.)
+            ancora = c.execute('SELECT 1 FROM parsers WHERE user_id=? AND uid=?',
+                               (utente['id'], riga[1])).fetchone()
             if ancora:
                 raise HTTPException(
                     409, "ricarica il parser: e' stato modificato altrove")
         nuova = c.execute('SELECT id, slug, titolo, active, config_json, ordine, versione'
-                          ' FROM parsers WHERE user_id=? AND slug=?',
-                          (utente['id'], slug)).fetchone()
+                          ' FROM parsers WHERE user_id=? AND uid=?',
+                          (utente['id'], riga[1])).fetchone()
         if nuova is None:
             # Una DELETE concorrente (rotta sync, threadpool anyio) ha svuotato la riga
             # fra il SELECT iniziale e l'UPDATE: la corsa l'ha vinta la cancellazione.
             # **404**, come se lo slug non ci fosse — non un 500 da `_vista_parser(None)`.
-            # Bloccante di GPT-5.6 Sol sulla PR #30.
+            # Bloccante di GPT-5.6 Sol sulla PR #30. La rilettura cerca per `uid` e non
+            # per slug (#73): con lo slug tornerebbe il parser OMONIMO ricreato nel
+            # frattempo, e la risposta direbbe «salvato» mostrando i dati di un altro.
             raise HTTPException(404, 'parser non trovato')
         c.commit()
     finally:
@@ -5223,7 +5265,47 @@ async def modifica_parser_mio(slug: str, request: Request):
     return _rispondi_con_sessione(utente['id'], utente['versione'], _vista_parser(nuova))
 
 
-def _elimina_parser(c, user_id, parser_id, slug):
+def _aggiorna_parser(c, user_id, uid, slug, titolo, config_json, active, versione):
+    """L'UPDATE della PUT, vincolato all'IDENTITA' della riga letta (#73).
+
+    Filtrava per `(user_id, slug)`, e `slug` torna libero appena il parser viene
+    eliminato: un elimina+ricrea concorrente produce una riga nuova che quel
+    filtro non distingue dalla vecchia. Misurato sul codice precedente — la PUT
+    stantia toccava 1 riga e SOVRASCRIVEVA titolo e `config_json` del parser
+    appena ricreato. E' peggio della DELETE gemella: il parser resta, continua a
+    girare, e produce righe CSV con le regole vecchie senza nessun sintomo.
+
+    La precondizione di `versione` (#51) NON copre questo caso e resta per il
+    suo: `versione` parte da 1, il ricreato ha 1, ed e' proprio il valore che la
+    richiesta stantia porta con se' (misurato). Le due guardie rispondono a
+    domande diverse — «e' cambiato mentre lo modificavo?» e «e' ancora lo stesso
+    parser?» — e vivono nello stesso statement senza sostituirsi.
+
+    Restituisce True se ha scritto, None se nessuna riga combacia: il chiamante
+    distingue il 409 (versione vecchia, riga ancora li') dal 404 (riga sparita).
+
+    **Quale finestra chiude.** Quella DENTRO la richiesta: fra il `SELECT` con
+    cui la rotta legge `uid` e questo statement. NON quella client->server — se
+    l'elimina+ricrea avviene prima che la rotta legga, la rotta legge l'uid
+    NUOVO e questa scrive sul parser ricreato. Misurato via HTTP al gate della
+    PR #74 (bloccante di GPT-5.6 Sol): `PUT` con `versione: 1` dopo un
+    elimina+ricrea risponde 200 e sovrascrive il ricreato, perche' anche lui
+    riparte da `versione = 1`. Chiuderla richiede che sia il client a nominare
+    la riga (esporre `uid` nell'API): cambio di contratto, non fatto qui, vedi
+    SAAS.md e la issue dedicata.
+    """
+    parametri = [titolo, config_json, 1 if active else 0, user_id, uid, slug]
+    condizione = ''
+    if versione is not None:
+        condizione = ' AND versione=?'
+        parametri.append(versione)
+    toccate = c.execute(
+        'UPDATE parsers SET titolo=?, config_json=?, active=?, versione=versione+1'
+        ' WHERE user_id=? AND uid=? AND slug=?' + condizione, parametri).rowcount
+    return True if toccate else None
+
+
+def _elimina_parser(c, user_id, uid):
     """La cascata del parser (link chat→parser → riga), col proprietario
     ripetuto DENTRO ogni statement (issue #65, stesso pattern della PR #64).
 
@@ -5249,29 +5331,21 @@ def _elimina_parser(c, user_id, parser_id, slug):
     morta. I due statement devono parlare dello STESSO parser: quello che la
     rotta ha letto.
 
-    **Cosa NON chiude, e perche' e' scritto invece che taciuto** (secondo giro
-    di GPT-5.6 Sol sulla PR #72). Se il parser eliminato deteneva il rowid
-    massimo, sqlite lo riusa e il ricreato riceve lo STESSO id: le due righe
-    diventano indistinguibili per qualunque filtro, e la DELETE stantia porta
-    via il ricreato. Cio' che il vincolo garantisce anche li' e' la COERENZA —
-    parser e suoi link spariscono INSIEME, mai un link orfano che un parser
-    futuro possa ereditare (vincolato dal secondo scenario del test). Resta che
-    una create molto recente dello stesso utente puo' essere annullata dalla sua
-    stessa DELETE in volo.
-
-    Chiuderlo davvero richiede un identificatore non riusabile — `AUTOINCREMENT`
-    su `parsers`, cioe' un cambio di schema sulla tabella originale — oppure una
-    precondizione di `versione` sulla DELETE, cioe' una modifica dell'API.
-    Entrambe sono decisioni del proprietario, come il terzo punto della issue
-    #65: non si allarga lo scope di una PR di isolamento per prenderle. Portata:
-    stesso utente, stesso slug, finestra di una richiesta in volo, nessun altro
-    account coinvolto.
+    **Il caso col rowid riusato, chiuso dalla #73.** La PR #72 aveva reso
+    coerenti i due statement legandoli all'`id`, ma `id` viene dal `rowid` e
+    sqlite lo riusa: un parser eliminato e ricreato con lo stesso slug riceveva
+    lo STESSO id, e la richiesta stantia lo cancellava. Adesso entrambi gli
+    statement passano da `uid`, che non si riusa mai: la riga ricreata ne ha uno
+    nuovo, la richiesta stantia ne porta uno che non esiste piu', tocca zero
+    righe e la rotta risponde 404 — come se la sostituzione fosse arrivata prima.
+    La stessa colonna vincola l'UPDATE della PUT (`_aggiorna_parser`), che aveva
+    il difetto gemello.
     """
     c.execute('DELETE FROM parser_chats WHERE parser_id IN'
-              ' (SELECT id FROM parsers WHERE id=? AND user_id=?)',
-              (parser_id, user_id))
-    tolte = c.execute('DELETE FROM parsers WHERE id=? AND user_id=? AND slug=?',
-                      (parser_id, user_id, slug)).rowcount
+              ' (SELECT id FROM parsers WHERE uid=? AND user_id=?)',
+              (uid, user_id))
+    tolte = c.execute('DELETE FROM parsers WHERE uid=? AND user_id=?',
+                      (uid, user_id)).rowcount
     return True if tolte else None
 
 
@@ -5281,13 +5355,15 @@ def elimina_parser_mio(slug: str, request: Request):
     utente = _sessione_valida(request)
     c = db()
     try:
-        riga = c.execute('SELECT id FROM parsers WHERE user_id=? AND slug=?',
+        riga = c.execute('SELECT uid FROM parsers WHERE user_id=? AND slug=?',
                          (utente['id'], slug)).fetchone()
         if not riga:
             raise HTTPException(404, 'parser non trovato')
-        if _elimina_parser(c, utente['id'], riga[0], slug) is None:
-            # Il parser e' sparito (DELETE o travaso concorrente) fra la
-            # lettura e il write-lock: 404, come se fosse successo prima.
+        if _elimina_parser(c, utente['id'], riga[0]) is None:
+            # Il parser e' sparito (DELETE o travaso concorrente), oppure e'
+            # stato sostituito da un omonimo ricreato — che ha un `uid` nuovo e
+            # non e' quello che questa richiesta voleva eliminare (#73). In
+            # entrambi i casi: 404, come se fosse successo prima.
             raise HTTPException(404, 'parser non trovato')
         c.commit()
     finally:
