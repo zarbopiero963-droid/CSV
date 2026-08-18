@@ -63,19 +63,24 @@ parsers            ← tabella PREESISTENTE, estesa con ALTER additivo
   handicap, bet_type,                       ← le colonne del formato originale
   user_id, slug, config_json, titolo, active, ordine, created_at, id,
   versione, uid
-  unique (user_id, slug)   come indice: su una tabella esistente UNIQUE non si
-  unique (id)              aggiunge con ALTER, e un PRIMARY KEY nemmeno. `id` è
-  unique (uid)             riempito dal `rowid`, che `parser_chats` può riferire.
-                           `titolo` è il nome che il cliente sceglie (`name` resta
-                           l'identità interna, unica fra TUTTI gli utenti).
-                           `versione` è la precondizione della PUT (#51), `uid`
-                           l'identità non riusabile di PUT e DELETE (#73): l'`id`
-                           viene dal `rowid`, che sqlite RIUSA, quindi non
-                           identifica una riga nel tempo. `uid` è nullable perché
-                           `ALTER ADD COLUMN NOT NULL` esigerebbe un default
-                           costante — cioè lo stesso «identificatore» per tutti; a
-                           riempirlo sono la migrazione e i percorsi di creazione,
-                           e che nessuno lo dimentichi è vincolato da un test
+  unique (user_id, slug), unique (id), unique (uid)
+                           tutti e tre come indice: su una tabella esistente
+                           UNIQUE non si aggiunge con ALTER, e un PRIMARY KEY
+                           nemmeno.
+                           `id` è riempito dal `rowid`, ed è quello che
+                           `parser_chats` riferisce.
+                           `titolo` è il nome che il cliente sceglie (`name`
+                           resta l'identità interna, unica fra TUTTI gli utenti).
+                           `versione` è la precondizione della PUT (#51).
+                           `uid` è l'identità non riusabile di PUT e DELETE
+                           (#73), e **non** viene dal `rowid`: proprio perché
+                           sqlite il `rowid` lo RIUSA, e quindi `id` non
+                           identifica una riga nel tempo. È un valore casuale a
+                           128 bit, ed è nullable perché `ALTER ADD COLUMN NOT
+                           NULL` esigerebbe un default costante — cioè lo stesso
+                           «identificatore» per tutte le righe. A riempirlo sono
+                           la migrazione e i percorsi di creazione; che nessuno
+                           lo dimentichi è vincolato da un test
 
 chats
   id, telegram_chat_id, message_thread_id, title, type, owner_user_id, verified_at
