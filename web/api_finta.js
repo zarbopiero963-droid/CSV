@@ -129,7 +129,8 @@ export async function createParser(titolo) {
   const pulito = String(titolo || '').trim();
   if (!pulito) throw new Error('titolo mancante');
   const parser = { id: stato.dati.parsers.length + 1, slug: slugDa(pulito),
-                   titolo: pulito, active: true, config: {}, ordine: 0 };
+                   titolo: pulito, active: true, config: {}, ordine: 0,
+                   versione: 1 };
   stato.dati.parsers.push(parser);
   salva();
   return parser;
@@ -152,8 +153,19 @@ export async function updateParser(slug, patch) {
     p.config = patch.config;
   }
   if (patch.active !== undefined) p.active = patch.active;
+  // La `versione` avanza come sul server (#51). La demo e' un solo browser su
+  // localStorage: il conflitto fra due sessioni non puo' accadere, quindi
+  // niente 409 — ma la superficie e la forma del parser restano identiche.
+  p.versione = (p.versione || 1) + 1;
   salva();
   return p;
+}
+
+// La via d'uscita dal 409 del server (#51): nella demo non c'e' un server da
+// cui rileggere, quindi restituisce il parser com'e'. Esiste per parita' di
+// superficie con api.js.
+export async function ricaricaParser(slug) {
+  return getParser(slug);
 }
 
 export async function deleteParser(slug) {

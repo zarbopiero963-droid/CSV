@@ -742,6 +742,11 @@ class ParserMioIn(BaseModel):
     titolo: str
     config: dict = Field(default_factory=dict)
     active: bool = True
+    # La precondizione della PUT (#51): la versione che il client ha LETTO.
+    # `None` = scrittura incondizionata (compat coi chiamanti storici); con un
+    # valore, il salvataggio riesce solo se il parser e' ancora a quella
+    # versione — altrimenti 409, e il lost update diventa visibile.
+    versione: int | None = None
 
 
 # Le tre tabelle con cui il servizio e' nato. Restano con QUESTI nomi e questa
@@ -946,6 +951,10 @@ COLONNE_MULTIUTENTE = (
     # e mancava perche' un PRIMARY KEY non si aggiunge con ALTER — si aggiunge come
     # colonna con indice UNIQUE, riempita dal `rowid`. Segnalato da GPT-5.5.
     ('parsers', 'id', 'INTEGER'),
+    # La precondizione della PUT (#51): incrementata a ogni modifica, e' cio'
+    # che smaschera il lost update fra due sessioni dello stesso account. Le
+    # righe esistenti partono da 1 col DEFAULT dell'ALTER.
+    ('parsers', 'versione', 'INTEGER NOT NULL DEFAULT 1'),
     # Le DUE colonne legacy, e stanno qui perche' le avevo PERSE riscrivendo la
     # migrazione. Il codice precedente le aggiungeva con due `try/except` e il commento
     # «Migrate databases created before profile support»: su un database creato prima
@@ -4835,10 +4844,13 @@ def _slugifica(testo):
 def _vista_parser(riga):
     """La vista pubblica di un parser: mai il `name` interno, mai `user_id`.
 
-    `riga` = (id, slug, titolo, active, config_json, ordine).
+    `riga` = (id, slug, titolo, active, config_json, ordine, versione).
+    `versione` e' la precondizione della PUT (#51): il client la rimanda al
+    salvataggio e chi ce l'ha vecchia riceve 409 invece di sovrascrivere.
     """
     return {'id': riga[0], 'slug': riga[1], 'titolo': riga[2], 'active': bool(riga[3]),
-            'config': json.loads(riga[4]) if riga[4] else {}, 'ordine': riga[5]}
+            'config': json.loads(riga[4]) if riga[4] else {}, 'ordine': riga[5],
+            'versione': riga[6]}
 
 
 def _valida_tetti_parser(titolo, config):
@@ -5044,7 +5056,7 @@ def _crea_parser_utente(c, user_id, titolo, config, active):
     # `id` = `rowid`, come fa la migrazione: e' il surrogato stabile a cui punta
     # `parser_chats.parser_id` (dispatch per-utente, PR successivo).
     c.execute('UPDATE parsers SET id=rowid WHERE name=? AND id IS NULL', (nome,))
-    riga = c.execute('SELECT id, slug, titolo, active, config_json, ordine'
+    riga = c.execute('SELECT id, slug, titolo, active, config_json, ordine, versione'
                      ' FROM parsers WHERE name=?', (nome,)).fetchone()
     return _vista_parser(riga)
 
@@ -5055,7 +5067,7 @@ def lista_parser_miei(request: Request):
     utente = _sessione_valida(request)
     c = db()
     righe = c.execute(
-        'SELECT id, slug, titolo, active, config_json, ordine FROM parsers'
+        'SELECT id, slug, titolo, active, config_json, ordine, versione FROM parsers'
         ' WHERE user_id=? ORDER BY ordine, slug', (utente['id'],)).fetchall()
     c.close()
     return _rispondi_con_sessione(utente['id'], utente['versione'],
@@ -5171,10 +5183,32 @@ async def modifica_parser_mio(slug: str, request: Request):
         # spendesse una selezione altrui aggirerebbe il confine del POST.
         _valida_betfair(c, utente['id'], dati.config)
         _valida_team_source(c, utente['id'], dati.config)
-        c.execute('UPDATE parsers SET titolo=?, config_json=?, active=?'
-                  ' WHERE user_id=? AND slug=?',
-                  (titolo, json.dumps(dati.config), 1 if dati.active else 0, utente['id'], slug))
-        nuova = c.execute('SELECT id, slug, titolo, active, config_json, ordine'
+        # La precondizione (#51) sta DENTRO l'UPDATE, non in un SELECT prima:
+        # un solo statement e' atomico sotto il write-lock di SQLite, quindi
+        # niente TOCTOU — il controllo client-side puo' solo restringere la
+        # finestra, questo la chiude. `versione` avanza a OGNI scrittura,
+        # anche incondizionata: e' cio' che fa perdere in modo visibile la
+        # sessione rimasta indietro.
+        parametri = [titolo, json.dumps(dati.config), 1 if dati.active else 0,
+                     utente['id'], slug]
+        condizione = ''
+        if dati.versione is not None:
+            condizione = ' AND versione=?'
+            parametri.append(dati.versione)
+        esito = c.execute('UPDATE parsers SET titolo=?, config_json=?, active=?,'
+                          ' versione=versione+1 WHERE user_id=? AND slug=?' + condizione,
+                          parametri)
+        if esito.rowcount == 0 and dati.versione is not None:
+            # Il parser c'era al SELECT iniziale: se l'UPDATE non ha toccato
+            # righe e' la versione a non combaciare — qualcun altro ha salvato
+            # nel frattempo. (Se invece una DELETE concorrente l'ha portato
+            # via, lo dice la rilettura qui sotto col suo 404.)
+            ancora = c.execute('SELECT 1 FROM parsers WHERE user_id=? AND slug=?',
+                               (utente['id'], slug)).fetchone()
+            if ancora:
+                raise HTTPException(
+                    409, "ricarica il parser: e' stato modificato altrove")
+        nuova = c.execute('SELECT id, slug, titolo, active, config_json, ordine, versione'
                           ' FROM parsers WHERE user_id=? AND slug=?',
                           (utente['id'], slug)).fetchone()
         if nuova is None:

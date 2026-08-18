@@ -31,6 +31,18 @@ function fallita(e) {
   toast(e && e.message ? e.message : 'operazione fallita');
 }
 
+// Il conflitto della PUT (#51): un'altra sessione ha salvato questo parser
+// dopo che noi l'abbiamo letto, e il server ha risposto 409 invece di
+// lasciar sovrascrivere in silenzio. Qui si RICARICA la versione vera in
+// cache — il draft con le modifiche dell'utente resta intatto — cosi' il
+// prossimo «Salva» e' una sovrascrittura deliberata, non un incidente.
+async function conflittoOFallita(e) {
+  if (!e || e.status !== 409 || !wiz) { fallita(e); return; }
+  try { await api.ricaricaParser(wiz.parserId); } catch { /* resta il 409 */ }
+  toast('Modificato altrove: le tue modifiche sono ancora qui — '
+    + 'ricontrolla e salva di nuovo per sovrascrivere.');
+}
+
 async function copy(text, label = 'Copiato') {
   try {
     await navigator.clipboard.writeText(text);
@@ -1910,7 +1922,7 @@ const actions = {
     leggiTeamSource();
     leggiMulti();
     try { await api.updateParser(wiz.parserId, { config: wiz.draft }); }
-    catch (e) { fallita(e); return; }
+    catch (e) { await conflittoOFallita(e); return; }
     toast('Configurazione salvata sul server.');
     render();
   },
@@ -1927,7 +1939,7 @@ const actions = {
     try {
       await api.updateParser(wiz.parserId, { config: wiz.draft });
       wiz.test = await api.testParser(wiz.parserId, msg);
-    } catch (e) { fallita(e); return; }
+    } catch (e) { await conflittoOFallita(e); return; }
     render();
   },
 

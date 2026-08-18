@@ -1028,6 +1028,23 @@ generata: `row`, `missing`, `scarti`, `complete` — con `complete` al livello
 alto vero se **almeno una** riga è piazzabile e `csv` composto delle sole
 complete (vedi «Il multi-riga» sopra).
 
+**La precondizione della PUT (#51).** La vista del parser porta `versione`
+(parte da 1, avanza a **ogni** modifica), e la PUT accetta una `versione`
+opzionale: con un valore, il salvataggio riesce solo se il parser è ancora a
+quella versione — altrimenti **409** con `ricarica il parser: e' stato
+modificato altrove`, e il salvataggio dell'altra sessione resta intatto. Il
+controllo sta **dentro l'UPDATE** (`… AND versione=?`), un solo statement
+atomico sotto il write-lock di SQLite: niente TOCTOU, che è il motivo per cui
+il fix client-side della PR #50 non bastava. Senza `versione` nel corpo la PUT
+resta incondizionata (compat coi chiamanti storici) ma la versione avanza
+comunque, così le altre sessioni se ne accorgono. `web/api.js` manda sempre la
+versione letta; sul 409 la web app **non** butta le modifiche: `ricaricaParser`
+riallinea la cache e il toast dice verbatim «Modificato altrove: le tue
+modifiche sono ancora qui — ricontrolla e salva di nuovo per sovrascrivere» —
+il secondo salvataggio è una sovrascrittura deliberata, non un incidente.
+Vincolata da `tests/relay/test_parser_crud.py` (due PUT dalla stessa base) e
+`tests/web/test_conflitto_web.py` (il conflitto visto dal browser).
+
 **Quote e tetti per-tenant** (#31 B2, PR 3 della sequenza #2 — vincolati da
 `tests/relay/test_quote_parser.py`): il database e il volume Railway sono
 **condivisi**, quindi la creazione ha un tetto di `MAX_PARSER_PER_UTENTE` parser

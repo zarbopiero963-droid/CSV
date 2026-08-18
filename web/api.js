@@ -210,7 +210,11 @@ export async function createParser(titolo) {
 
 // La PUT del server vuole il parser INTERO (titolo, config, active): la
 // patch parziale si completa qui dalla cache, cosi' le viste continuano a
-// mandare solo cio' che cambia.
+// mandare solo cio' che cambia. La `versione` letta viaggia come
+// PRECONDIZIONE (#51): se un'altra sessione ha salvato nel frattempo il
+// server risponde 409 invece di lasciar sovrascrivere in silenzio — il
+// chiamante mostra il conflitto (`ricaricaParser` aggiorna la cache, e un
+// nuovo salvataggio e' una sovrascrittura deliberata, non un incidente).
 export async function updateParser(slug, patch) {
   const attuale = getParser(slug);
   if (!attuale) throw new Error('parser non trovato');
@@ -218,10 +222,21 @@ export async function updateParser(slug, patch) {
     titolo: patch.titolo ?? attuale.titolo,
     config: patch.config ?? attuale.config,
     active: patch.active ?? attuale.active,
+    versione: attuale.versione,
   });
   const i = stato.parsers.findIndex(p => p.slug === slug);
   if (i >= 0) stato.parsers[i] = nuovo;
   return nuovo;
+}
+
+// Rilegge i parser dal server e restituisce quello chiesto: e' la via
+// d'uscita dal 409 della PUT — la versione in cache torna quella vera, il
+// draft resta del chiamante, e il prossimo salvataggio vince
+// consapevolmente. Passa dalla LISTA perche' e' la rotta che esiste
+// (`GET /api/me/parsers`): il singolo non ha una GET propria.
+export async function ricaricaParser(slug) {
+  stato.parsers = await http('GET', '/api/me/parsers');
+  return getParser(slug);
 }
 
 export async function deleteParser(slug) {

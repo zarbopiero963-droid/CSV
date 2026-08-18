@@ -159,7 +159,13 @@ sessione (il cookie di login), non col token del feed. user_id viene dalla sessi
 mai dal corpo; su un parser di un altro la risposta e' 404 (non 403).
 GET    /api/me/parsers                  i parser dell'utente
 POST   /api/me/parsers                  body {"titolo":"Test 1","config":{...},"active":true}
-PUT    /api/me/parsers/SLUG             aggiorna il proprio (lo slug non cambia con la rinomina)
+PUT    /api/me/parsers/SLUG             aggiorna il proprio (lo slug non cambia con la rinomina).
+                                        Con "versione" nel body (quella letta) la PUT e'
+                                        CONDIZIONATA: se un'altra sessione ha salvato nel
+                                        frattempo risponde 409 "ricarica il parser: e' stato
+                                        modificato altrove" e non sovrascrive (#51). Senza
+                                        "versione" resta incondizionata; la versione del
+                                        parser avanza a ogni modifica e sta nella vista.
 DELETE /api/me/parsers/SLUG             elimina il proprio
 POST   /api/me/parsers/SLUG/test        body {"message":"..."} -> {matched,missing,scarti,complete,event?,csv?}
 La config viene validata alla creazione (struttura + dry-run): una config storta da'
