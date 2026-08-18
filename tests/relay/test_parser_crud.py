@@ -1109,3 +1109,49 @@ def test_una_PUT_dalla_scheda_VECCHIA_non_sovrascrive_il_parser_ricreato(servizi
                    f'/api/me/parsers/{slug}?uid={ricreato["uid"]}',
                    cookie=cookie)[0] == 200
     assert json.loads(_chiama(servizio, 'GET', '/api/me/parsers', cookie=cookie)[1]) == []
+
+
+def test_un_chiamante_SENZA_uid_resta_incondizionato_come_prima(servizio):
+    """Le due precondizioni sono OPZIONALI, e questo lo inchioda.
+
+    `SAAS.md` e la docstring di `_controlla_identita` promettono che chi non
+    manda `uid` (chiamanti storici, script, chiamate a mano) continua a lavorare
+    come prima della #75: la richiesta e' INCONDIZIONATA. Una promessa scritta
+    e non vincolata da un test e' esattamente il tipo di affermazione che in
+    questo repository e' gia' sopravvissuta mesi essendo falsa.
+
+    Chiesto da GPT-5.5 al giro di review della PR #76 («test su update legacy
+    senza uid: deve mantenere il comportamento previsto»), ed era davvero
+    scoperto: il resto della suite passa dal client, che l'uid lo manda.
+
+    Nota su cosa il test asserisce: senza `uid` la PUT stantia **sovrascrive**
+    il parser ricreato. Non e' una svista, e' il comportamento legacy — chi non
+    nomina la riga non puo' essere protetto dal server, che non ha modo di
+    sapere quale riga il chiamante intendesse. E' il motivo per cui la #75 ha
+    dovuto cambiare il CLIENT e non solo il server.
+    """
+    cookie, _ = _login_a(servizio)
+    creato = json.loads(_crea(servizio, cookie, 'Senza uid')[1])
+    slug = creato['slug']
+
+    # Stesso scenario del test qui sopra: elimina + ricrea dall'altra scheda.
+    assert _chiama(servizio, 'DELETE', f'/api/me/parsers/{slug}', cookie=cookie)[0] == 200
+    ricreato = json.loads(_crea(servizio, cookie, 'Senza uid')[1])
+    assert ricreato['slug'] == slug and ricreato['uid'] != creato['uid']
+
+    # Il chiamante storico non manda ne' uid ne' versione: passa, come prima.
+    stato, corpo, _ = _chiama(
+        servizio, 'PUT', f'/api/me/parsers/{slug}', cookie=cookie,
+        corpo={'titolo': 'Chiamante storico',
+               'config': dict(CONFIG_OK, match={'type': 'contains', 'value': 'LEGACY'}),
+               'active': True})
+    assert stato == 200, f'senza precondizioni la PUT deve restare incondizionata: {corpo}'
+
+    vivo = next(p for p in json.loads(
+        _chiama(servizio, 'GET', '/api/me/parsers', cookie=cookie)[1])
+        if p['slug'] == slug)
+    assert vivo['titolo'] == 'Chiamante storico', vivo
+
+    # E la DELETE senza ?uid= elimina, come prima della #75.
+    assert _chiama(servizio, 'DELETE', f'/api/me/parsers/{slug}', cookie=cookie)[0] == 200
+    assert json.loads(_chiama(servizio, 'GET', '/api/me/parsers', cookie=cookie)[1]) == []
