@@ -250,9 +250,15 @@ veda.
    preso dalla sessione, mai da un parametro della richiesta. Dal PR 6 quella
    sessione esiste, e il solo posto da cui leggerla è `utente_dalla_sessione()`
    in `main.py` — vedi «Il cookie di sessione».
-2. Ogni endpoint che riceve un `parser_id` verifica la proprietà prima di leggere
-   o scrivere. Un parser di un altro utente risponde 404, non 403: non si rivela
-   nemmeno l'esistenza.
+2. Ogni endpoint che riceve un `parser_id` (o uno slug) verifica la proprietà
+   prima di leggere o scrivere. Un parser di un altro utente risponde 404, non
+   403: non si rivela nemmeno l'esistenza. **Vale per la risorsa singola** —
+   `PUT`, `DELETE`, `POST …/test`, che nominano un parser preciso. Una rotta di
+   **elenco** non può rispondere 404 perché non nomina niente: filtra per
+   `user_id` e restituisce 200 con la lista dei soli parser propri, vuota
+   compresa. Le due forme non si contraddicono, e la regola 8 dice la stessa
+   cosa per tutte le altre tabelle (segnalato da CodeRabbit sulla PR #72, dove
+   questa riga sembrava promettere 404 anche per gli elenchi).
 3. **Una chat appartiene a un solo utente**, ma può essere assegnata a più parser
    di quell'utente. L'unicità sta su `chats.telegram_chat_id`, non su
    `parser_chats`. Senza questo vincolo due account potrebbero leggere i segnali
