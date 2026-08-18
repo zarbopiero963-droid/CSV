@@ -178,6 +178,45 @@ def test_modifica_cambia_titolo_e_config_ma_NON_lo_slug(servizio):
     assert agg['config']['match']['value'] == 'ALTRO'
 
 
+def test_due_PUT_dalla_stessa_base_la_seconda_PERDE_in_modo_visibile(servizio):
+    """Il lost update della #51: due sessioni leggono lo stesso parser e salvano
+    entrambe — oggi vince l'ULTIMA in silenzio. Con la precondizione, chi salva
+    con la versione vecchia riceve 409 col motivo, e il salvataggio del primo
+    resta intatto. La PUT SENZA versione resta incondizionata (compat legacy)."""
+    cookie, _ = _login_a(servizio)
+    creato = json.loads(_crea(servizio, cookie, 'Conteso')[1])
+    slug = creato['slug']
+    assert 'versione' in creato, 'la vista del parser deve portare la versione'
+    base = creato['versione']
+
+    # Prima sessione: salva con la versione letta → vince, versione incrementata.
+    config_a = dict(CONFIG_OK, match={'type': 'contains', 'value': 'PRIMA'})
+    stato, corpo, _ = _chiama(servizio, 'PUT', f'/api/me/parsers/{slug}', cookie=cookie,
+                              corpo={'titolo': 'Conteso', 'config': config_a,
+                                     'active': True, 'versione': base})
+    assert stato == 200, corpo
+    assert json.loads(corpo)['versione'] == base + 1
+
+    # Seconda sessione, STESSA base ormai vecchia → deve perdere in modo VISIBILE.
+    config_b = dict(CONFIG_OK, match={'type': 'contains', 'value': 'SECONDA'})
+    stato, corpo, _ = _chiama(servizio, 'PUT', f'/api/me/parsers/{slug}', cookie=cookie,
+                              corpo={'titolo': 'Conteso', 'config': config_b,
+                                     'active': True, 'versione': base})
+    assert stato == 409, f'la PUT con la versione vecchia deve perdere: {stato} {corpo}'
+    assert 'modificato altrove' in json.loads(corpo)['detail'], corpo
+
+    # Il salvataggio del primo e' intatto.
+    lista = json.loads(_chiama(servizio, 'GET', '/api/me/parsers', cookie=cookie)[1])
+    vivo = next(p for p in lista if p['slug'] == slug)
+    assert vivo['config']['match']['value'] == 'PRIMA', vivo
+
+    # Senza versione: incondizionata come sempre, e la versione avanza comunque.
+    stato, corpo, _ = _chiama(servizio, 'PUT', f'/api/me/parsers/{slug}', cookie=cookie,
+                              corpo={'titolo': 'Conteso', 'config': config_b, 'active': True})
+    assert stato == 200, corpo
+    assert json.loads(corpo)['versione'] == base + 2
+
+
 def test_elimina_il_proprio_parser(servizio):
     cookie, _ = _login_a(servizio)
     slug = json.loads(_crea(servizio, cookie, 'Da eliminare')[1])['slug']
