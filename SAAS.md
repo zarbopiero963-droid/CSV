@@ -1115,6 +1115,26 @@ prima. Le due guardie **convivono e non si sostituiscono**: `versione` non
 copre questo caso, perché parte da 1 e il parser ricreato ha 1, cioè proprio il
 valore che la richiesta stantia porta con sé.
 
+**Quale finestra chiude, e quale no.** La distinzione conta, ed è stata scritta
+male al primo giro (bloccante di GPT-5.6 Sol al gate della PR #74, verificato
+via HTTP prima di accoglierlo):
+
+- **chiusa** — la finestra *dentro* la richiesta: fra il `SELECT` con cui la
+  rotta legge il parser e la scrittura che ne segue. È lì che il write-lock e la
+  concorrenza del threadpool mettono un elimina+ricrea, ed è lì che `uid` fa la
+  differenza;
+- **aperta** — la finestra *client→server*: due schede aperte, l'utente elimina
+  e ricrea il parser in una, e l'altra salva. Quella richiesta arriva **dopo**,
+  quindi la rotta legge l'`uid` nuovo e scrive sul parser ricreato. Misurato via
+  HTTP: `PUT` con `versione: 1` → **200**, titolo e `config_json` del ricreato
+  sovrascritti con quelli della scheda vecchia. Il #51 non protegge qui perché
+  il ricreato riparte da `versione = 1`.
+
+Chiuderla richiede che sia il **client** a dire quale riga intende modificare —
+cioè esporre `uid` nella vista del parser e accettarlo come precondizione, che è
+un cambio di contratto API e del client web. Non è stato fatto in questa PR:
+resta registrato, con la misura, per la decisione del proprietario.
+
 `uid` è identità **interna**: non compare nella vista del parser né nell'API,
 come `name` e `user_id`. La migrazione lo assegna alle righe già esistenti con
 un valore distinto per riga, una volta sola (`WHERE uid IS NULL`): rigenerarlo a

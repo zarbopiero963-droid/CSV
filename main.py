@@ -5283,6 +5283,16 @@ def _aggiorna_parser(c, user_id, uid, slug, titolo, config_json, active, version
 
     Restituisce True se ha scritto, None se nessuna riga combacia: il chiamante
     distingue il 409 (versione vecchia, riga ancora li') dal 404 (riga sparita).
+
+    **Quale finestra chiude.** Quella DENTRO la richiesta: fra il `SELECT` con
+    cui la rotta legge `uid` e questo statement. NON quella client->server — se
+    l'elimina+ricrea avviene prima che la rotta legga, la rotta legge l'uid
+    NUOVO e questa scrive sul parser ricreato. Misurato via HTTP al gate della
+    PR #74 (bloccante di GPT-5.6 Sol): `PUT` con `versione: 1` dopo un
+    elimina+ricrea risponde 200 e sovrascrive il ricreato, perche' anche lui
+    riparte da `versione = 1`. Chiuderla richiede che sia il client a nominare
+    la riga (esporre `uid` nell'API): cambio di contratto, non fatto qui, vedi
+    SAAS.md e la issue dedicata.
     """
     parametri = [titolo, config_json, 1 if active else 0, user_id, uid, slug]
     condizione = ''

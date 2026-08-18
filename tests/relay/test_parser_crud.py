@@ -274,6 +274,25 @@ def test_due_utenti_STESSO_titolo_nessuna_collisione(servizio):
     assert [p['slug'] for p in json.loads(_chiama(servizio, 'GET', '/api/me/parsers', cookie=cookie_a)[1])] == ['test-1']
     assert [p['slug'] for p in json.loads(_chiama(servizio, 'GET', '/api/me/parsers', cookie=cookie_b)[1])] == ['test-1']
 
+    # E nessuno dei due SCRIVE sull'altro, benche' lo slug sia identico
+    # (suggerito da GPT-5.5 sulla PR #74: con `uid` la separazione non e' piu'
+    # ovvia a lettura, quindi va misurata). Entrambe le rotte leggono la riga
+    # con `WHERE user_id=? AND slug=?`, quindi ognuno trova solo la propria.
+    stato, _, _ = _chiama(servizio, 'PUT', '/api/me/parsers/test-1', cookie=cookie_a,
+                          corpo={'titolo': 'Solo di A', 'config': CONFIG_OK,
+                                 'active': True})
+    assert stato == 200
+    di_b = next(p for p in json.loads(
+        _chiama(servizio, 'GET', '/api/me/parsers', cookie=cookie_b)[1])
+        if p['slug'] == 'test-1')
+    assert di_b['titolo'] == 'Test 1', \
+        f'la PUT di A ha toccato il parser omonimo di B: {di_b}'
+    assert _chiama(servizio, 'DELETE', '/api/me/parsers/test-1',
+                   cookie=cookie_a)[0] == 200
+    assert [p['slug'] for p in json.loads(
+        _chiama(servizio, 'GET', '/api/me/parsers', cookie=cookie_b)[1])] == ['test-1'], \
+        'la DELETE di A ha portato via anche il parser omonimo di B'
+
 
 def test_user_id_viene_dalla_SESSIONE_non_dal_corpo(servizio):
     """Un `user_id` nel corpo non deve poter assegnare il parser a un altro utente."""
@@ -1019,3 +1038,51 @@ def test_NESSUN_percorso_di_creazione_lascia_un_parser_senza_uid(tmp_path, monke
                       ('parser-admin',)).fetchone()[0] == 1, 'il parser admin non c\'e\''
     c2.close()
     c.close()
+
+
+def test_la_finestra_CLIENT_resta_aperta_dopo_un_elimina_e_ricrea(servizio):
+    """Il limite di `uid`, misurato invece che dedotto (bloccante di GPT-5.6 Sol
+    al gate della PR #74) — e vincolato qui, cosi' la documentazione non puo'
+    divergere dal comportamento senza che qualcosa diventi rosso.
+
+    `uid` chiude la finestra DENTRO la richiesta: fra il `SELECT` con cui la
+    rotta legge il parser e la scrittura che ne segue. NON chiude quella
+    client->server: due schede aperte, l'utente elimina e ricrea il parser in
+    una, l'altra salva. Quella PUT arriva DOPO, quindi la rotta legge l'uid
+    NUOVO e scrive sul ricreato.
+
+    La precondizione di `versione` (#51) non protegge qui, ed e' il punto meno
+    ovvio: il parser ricreato riparte da `versione = 1`, cioe' proprio il valore
+    che la scheda vecchia porta con se'. Il contatore non ha memoria degli slug
+    eliminati.
+
+    Chiuderla richiede che sia il CLIENT a nominare la riga — esporre `uid`
+    nella vista e accettarlo come precondizione — cioe' un cambio di contratto
+    API, deciso dal proprietario e non fatto in questa PR. Se un domani lo
+    sara', questo test diventa rosso: e' il segnale che il limite non c'e' piu'
+    e che la documentazione va aggiornata, non un fallimento.
+    """
+    cookie, _ = _login_a(servizio)
+    creato = json.loads(_crea(servizio, cookie, 'Due schede')[1])
+    slug, versione = creato['slug'], creato['versione']
+
+    # L'utente, dall'ALTRA scheda, elimina e ricrea lo stesso parser.
+    assert _chiama(servizio, 'DELETE', f'/api/me/parsers/{slug}', cookie=cookie)[0] == 200
+    ricreato = json.loads(_crea(servizio, cookie, 'Due schede')[1])
+    assert ricreato['slug'] == slug, 'lo slug torna libero e viene riusato'
+    assert ricreato['versione'] == versione == 1, \
+        'il contatore riparte da 1: e\' il motivo per cui la #51 non copre questo caso'
+
+    # ...e adesso salva la PRIMA scheda, con la versione che aveva letto.
+    stato, corpo, _ = _chiama(
+        servizio, 'PUT', f'/api/me/parsers/{slug}', cookie=cookie,
+        corpo={'titolo': 'Dalla scheda vecchia',
+               'config': dict(CONFIG_OK, match={'type': 'contains', 'value': 'VECCHIO'}),
+               'active': True, 'versione': versione})
+    assert stato == 200, f'oggi passa: la finestra client->server e\' aperta ({corpo})'
+    vivo = next(p for p in json.loads(
+        _chiama(servizio, 'GET', '/api/me/parsers', cookie=cookie)[1])
+        if p['slug'] == slug)
+    assert vivo['titolo'] == 'Dalla scheda vecchia', vivo
+    assert vivo['config']['match']['value'] == 'VECCHIO', \
+        'la config del parser ricreato viene sovrascritta: il limite e\' questo'
