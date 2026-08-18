@@ -1746,6 +1746,8 @@ senza doppio ruolo.
 | Fatto | **Sorgenti squadre, pezzo 1** (#34): modello dati e rotte `/api/me/sorgenti-squadre*` + `/api/me/competizioni*` — competizioni con lista Betfair condivisa, sorgenti rinominabili, alias per (sorgente, squadra), azioni «⌫ alias»/«× squadra», cascate esplicite (sport compreso), travaso alla riconciliazione. Test in `tests/relay/test_sorgenti_squadre.py` |
 | Fatto | **Sorgenti squadre, pezzo 2** (#34): la sezione web «Sorgenti squadre» — elenco competizioni, squadre Betfair salvate una volta, pulsanti sorgente col badge `compilati`, tabella a due colonne con ⌫/×, Rinomina/Elimina — su `api.js`/`api_finta.js` in parità. Test browser in `tests/web/test_squadre_web.py` |
 | Fatto | **Sorgenti squadre, pezzo 3** (#34): selettore «Sorgente squadre» nel wizard + trasform alias→Betfair a parse-time in **entrambi** i motori (parità vincolata, campo `avvisi`), identità Betfair→Betfair nella mappa, `team_source` validato al confine di scrittura, avvisi nella prova e in `message_logs`, alias ambiguo vietato al salvataggio. Chiude la #34 e, col wizard «Da mercati Betfair» della #33, la coppia di issue gemelle |
+| Fatto | **Multi-riga, pezzi 1–2** (#35): feed a N righe vive (`store_signal` a lista, `componi_feed`, TTL per riga) e motore base+override nei due motori (somma mercati+selezioni, eredità, `enabled`, punteggi dinamici col tetto, gate #41 per riga, `config.multi` validata col 422 e `MAX_RIGHE_MULTI`). Test in `tests/relay/test_multiriga.py` e `tests/engine/` |
+| Fatto | **Multi-riga, pezzo 3** (#35): la card «Output e condizioni» nel riepilogo del wizard — righe di override editabili, prova col k su N per riga, CSV composto anche nell'anteprima locale (`componiFeed`), persistenza della `config.multi` nel draft. Chiude la #35. Test browser in `tests/web/test_multiriga_web.py` |
 | M3 | «Entra come» e lo storico di `admin_audit` nel pannello: servono rotte nuove lato server |
 | M4 | Log persistenti, sospensione, suggerimento AI lato server, abbonamenti |
 
@@ -1963,6 +1965,44 @@ messaggio di prova, niente salvataggio implicito al change — e riaprire il
 parser la ritrova selezionata. Nella prova, gli **avvisi** delle squadre senza
 alias compaiono in un banner giallo (`#test-avvisi`) accanto a quello degli
 scarti: avvisano, non bloccano — il CSV c'è comunque.
+
+### La card «Output e condizioni» nel riepilogo del wizard (#35, pezzo 3)
+
+Sotto la card «Sorgente squadre», la card **«Output e condizioni»**: le righe
+di override del multi-riga (`config.multi`), con il contatore **«N/20 righe»**
+e la microcopy verbatim: «Un messaggio, più righe nel feed: la riga base è il
+modello, ogni riga qui dice solo **cosa cambia** e il resto eredita. Una riga
+con un valore scartato non ferma le altre. Selezione vuota + delimitatori =
+una riga per punteggio N-N, solo su CORRECT_SCORE e HALF_TIME_SCORE.»
+
+- **«Aggiungi mercato»** / **«Aggiungi selezione»**: ogni riga è una sotto-card
+  («Mercato N» / «Selezione N») con il checkbox **«attiva»**, il pulsante
+  **«Rimuovi»** e i campi con placeholder **«eredita»** — vuoto = il valore
+  della base. Le righe selezione **non** mostrano MarketType/MarketName:
+  restano sul mercato della base, com'è da contratto della somma. I due
+  delimitatori sono etichettati «Quota/punteggi da (testo dopo)» e «fino a
+  (testo prima)». Al tetto (20, il default del server) i pulsanti si
+  disabilitano.
+- Le righe si **leggono dal DOM prima di ogni azione** (`leggiMulti` nel
+  dispatcher dei click: anche «Sospendi» o un'altra azione fuori dalla card
+  ridisegnano il riepilogo, e senza la cattura cancellavano gli input non
+  salvati — Fable, PR #70) — niente salvataggio implicito al change — e
+  riaprire il parser le ritrova (la config.multi viaggia nel draft come
+  `betfair`/`team_source`: senza, riaprire e salvare la cancellerebbe).
+- **La prova col k su N**: col multi **attivo** (almeno una riga non vuota e
+  non spenta — anche una sola: una riga singola rotta non deve nascondere il
+  suo motivo, segnalato da CodeRabbit sulla PR #70) la pillola d'esito dice
+  «Riconosciuto: k di N righe piazzabili» (o «Nessuna riga piazzabile: 0 di
+  N…»), e sotto (`#test-righe`) ogni riga ha la sua pillola
+  **«piazzabile»**/**«scartata»** con `MarketType · SelectionName` e, per le
+  scartate, il motivo (gli scarti, o «manca …»). Il CSV della prova è quello
+  **composto** dal server (header una volta, le sole righe piazzabili); anche
+  l'anteprima locale compone le righe piazzabili con `componiFeed`, così —
+  **senza una sorgente squadre selezionata** — i due riquadri coincidono byte
+  per byte. Con una sorgente selezionata l'anteprima locale resta quella
+  storica del #34: **non traduce gli alias** (la mappa vive sul server) ed è
+  dichiarata indicativa — fa fede la prova sul server. Senza `config.multi`
+  tutto resta com'era.
 
 ### Il pannello Richieste (#7, solo amministratore)
 

@@ -4,8 +4,8 @@
 // accorgono. Nessun build step: moduli ES nativi.
 
 import * as api from './api.js';
-import { COLUMNS, TRANSFORMS, describeRule, runParser, extractValue, toCsv,
-         headerOnlyCsv, cutByCodePoint } from './engine.js';
+import { COLUMNS, TRANSFORMS, componiFeed, describeRule, runParser, extractValue,
+         toCsv, headerOnlyCsv, cutByCodePoint } from './engine.js';
 
 const app = document.getElementById('app');
 
@@ -737,6 +737,10 @@ function initWiz(p) {
   // Il riferimento «Sorgente squadre» (#34 pezzo 3) viaggia come `betfair`:
   // riaprire il parser non deve far perdere la scelta gia' validata.
   if (p.config.team_source !== undefined) draft.team_source = p.config.team_source;
+  // Le righe di override (#35 pezzo 3) viaggiano come `betfair`: senza questa
+  // copia, riaprire il wizard e salvare CANCELLEREBBE le righe gia' salvate —
+  // il draft riparte da match+columns e la PUT manda il draft intero.
+  if (p.config.multi !== undefined) draft.multi = p.config.multi;
   wiz = {
     parserId: p.slug,
     step: campione ? (configured ? 15 : 0) : 0,
@@ -846,10 +850,16 @@ function mappedCount() {
 // Il CSV mostrato accanto al wizard: se la condizione non riconosce il messaggio
 // di esempio, XTrader riceverebbe solo l'intestazione.
 function livePreviewCsv() {
-  // `complete`, non `matched`: un segnale riconosciuto ma senza le colonne
-  // obbligatorie non viene scritto, e l'anteprima non deve promettere il contrario.
-  const { complete, row } = runParser(wiz.message, wiz.draft);
-  return complete ? toCsv(row) : headerOnlyCsv();
+  // `complete` per riga, non `matched`: un segnale riconosciuto ma senza le
+  // colonne obbligatorie non viene scritto, e l'anteprima non deve promettere
+  // il contrario. Dal #35 pezzo 3 l'anteprima COMPONE le righe generate
+  // piazzabili, come il feed vero: senza `config.multi` la lista e' la sola
+  // base e i byte sono quelli di sempre (`componiFeed` di uno = quello).
+  const esito = runParser(wiz.message, wiz.draft);
+  const piazzabili = (esito.righe || []).filter(r => r.complete);
+  return piazzabili.length
+    ? componiFeed(piazzabili.map(r => toCsv(r.row)))
+    : headerOnlyCsv();
 }
 
 function fragments() {
@@ -1114,6 +1124,17 @@ function stepReview() {
   }).join('');
 
   const t = wiz.test;
+  // Il k/N si mostra quando il MULTI e' attivo, anche con UNA sola riga
+  // generata: con `righe.length > 1` la riga singola rotta nascondeva il suo
+  // motivo — la pillola cadeva sul ramo della base, che di scarti non ne ha
+  // (segnalato da CodeRabbit sulla PR #70). Attiva = oggetto non vuoto con
+  // `enabled !== false`, lo stesso predicato del motore (`rigaMulti`).
+  const attive = l => (l || []).filter(r => r && typeof r === 'object'
+    && !Array.isArray(r) && Object.keys(r).length && r.enabled !== false).length;
+  const multiAttivo = t && (attive((wiz.draft.multi || {}).markets)
+    + attive((wiz.draft.multi || {}).selections)) > 0;
+  const righeTest = (t && t.righe) || [];
+  const mostraRighe = righeTest.length > 1 || (multiAttivo && righeTest.length > 0);
   return `
     <div class="bubble ai"><div class="who">Assistente</div>
       Mappatura completa. Controlla la tabella, prova un messaggio reale e salva.
@@ -1130,6 +1151,7 @@ function stepReview() {
         : '<span style="color:var(--err)">non impostata: il parser non riconoscerà nulla</span>'}</div>
     </div>
     ${cardTeamSource()}
+    ${cardMulti()}
     <div class="tbl-scroll" style="margin-top:14px"><table class="map-table">
       <thead><tr><th>Colonna</th><th>Regola</th><th>Valore</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
@@ -1146,10 +1168,24 @@ function stepReview() {
       ${t ? `<div class="stack" style="gap:10px" id="test-result">
         <div class="row"><span class="pill ${t.complete ? 'on' : 'no'}">${
           t.errore ? esc(t.errore)
+          : mostraRighe
+            ? `${t.complete ? 'Riconosciuto' : 'Nessuna riga piazzabile'}: ${
+                righeTest.filter(r => r.complete).length} di ${righeTest.length} righe piazzabili`
           : t.complete ? 'Riconosciuto'
           : !t.matched ? 'Ignorato: la condizione non corrisponde'
           : `Riconosciuto ma incompleto: manca ${(t.missing || []).join(', ')}`
         }</span></div>
+        ${mostraRighe ? `<div class="stack" id="test-righe" style="gap:6px">
+          ${righeTest.map((r, i) => `<div class="row wrap" style="gap:8px;align-items:baseline">
+            <span class="pill ${r.complete ? 'on' : 'no'}">${r.complete ? 'piazzabile' : 'scartata'}</span>
+            <span class="small mono">${esc(r.row[COLUMNS.indexOf('MarketType')] || '—')}
+              · ${esc(r.row[COLUMNS.indexOf('SelectionName')] || '—')}</span>
+            ${!r.complete ? `<span class="small dim">${
+              esc((r.scarti || []).join(' ')
+                  || ((r.missing || []).length ? `manca ${r.missing.join(', ')}` : ''))
+            }</span>` : ''}
+          </div>`).join('')}
+        </div>` : ''}
         ${(t.scarti || []).length ? `<div class="banner warn" id="test-scarti">
           ${t.scarti.map(esc).join('<br>')}
         </div>` : ''}
@@ -1206,6 +1242,125 @@ function leggiTeamSource() {
   if (!tendina) return;
   if (tendina.value === '') delete wiz.draft.team_source;
   else wiz.draft.team_source = Number(tendina.value);
+}
+
+// I campi di una riga di override (#35 pezzo 3): chiave config → etichetta.
+// Le MultiSelection restano sul mercato della base, quindi i due campi del
+// mercato non si disegnano per loro — e' il contratto della somma.
+const CAMPI_RIGA = [
+  ['market_type', 'MarketType'], ['market_name', 'MarketName'],
+  ['selection_name', 'SelectionName'], ['price', 'Price'],
+  ['min_price', 'MinPrice'], ['max_price', 'MaxPrice'],
+  ['bet_type', 'BetType'], ['handicap', 'Handicap'], ['points', 'Points'],
+  ['start_after', 'Quota/punteggi da (testo dopo)'],
+  ['end_before', 'fino a (testo prima)'],
+];
+const MAX_RIGHE_CARD = 20;   // il tetto di default del server (MAX_RIGHE_MULTI)
+
+function rigaMultiCard(lista, i, riga) {
+  const mercato = lista === 'markets';
+  const campi = CAMPI_RIGA
+    .filter(([campo]) => mercato
+      || (campo !== 'market_type' && campo !== 'market_name'))
+    .map(([campo, etichetta]) => `
+      <label class="small">${esc(etichetta)}
+        <input data-mfield="${campo}" value="${esc(riga[campo] ?? '')}"
+               placeholder="eredita"></label>`).join('');
+  return `
+    <div class="multi-riga" data-mrow="${lista}:${i}" data-lista="${lista}" data-i="${i}">
+      <div class="row" style="margin-bottom:8px">
+        <strong class="small">${mercato ? 'Mercato' : 'Selezione'} ${i + 1}</strong>
+        <div class="spacer"></div>
+        <label class="small row" style="gap:6px">
+          <input type="checkbox" data-mfield="enabled"${riga.enabled === false ? '' : ' checked'}>
+          attiva</label>
+        <button class="small ghost danger" data-act="multi-del"
+                data-lista="${lista}" data-i="${i}">Rimuovi</button>
+      </div>
+      <div class="multi-campi">${campi}</div>
+    </div>`;
+}
+
+// La card «Output e condizioni» del riepilogo (#35 pezzo 3): le righe di
+// override della base — MultiMarket e MultiSelection. Campo vuoto = eredita
+// dalla base; ogni riga e' giudicata da sola e una rotta non ferma le altre.
+// I valori si LEGGONO dal DOM (leggiMulti) prima di ogni render che potrebbe
+// ridisegnare la card, come il messaggio di prova: niente handler di change.
+function cardMulti() {
+  const multi = wiz.draft.multi || {};
+  const mercati = multi.markets || [];
+  const selezioni = multi.selections || [];
+  const totale = mercati.length + selezioni.length;
+  const pieno = totale >= MAX_RIGHE_CARD;
+  return `
+    <div class="card" style="margin-top:14px" id="multi-card">
+      <div class="row" style="margin-bottom:6px">
+        <strong class="small">Output e condizioni</strong>
+        <div class="spacer"></div>
+        <span class="dim small">${totale}/${MAX_RIGHE_CARD} righe</span>
+      </div>
+      <p class="dim small" style="margin:0 0 10px">
+        Un messaggio, più righe nel feed: la riga base è il modello, ogni riga
+        qui dice solo <strong>cosa cambia</strong> e il resto eredita. Una riga
+        con un valore scartato non ferma le altre. Selezione vuota + delimitatori
+        = una riga per punteggio N-N, solo su CORRECT_SCORE e HALF_TIME_SCORE.
+      </p>
+      <div class="stack" style="gap:10px">
+        ${mercati.map((r, i) => rigaMultiCard('markets', i, r)).join('')}
+        ${selezioni.map((r, i) => rigaMultiCard('selections', i, r)).join('')}
+      </div>
+      <div class="row wrap" style="margin-top:10px">
+        <button class="small" data-act="multi-add" data-lista="markets"${pieno ? ' disabled' : ''}>
+          Aggiungi mercato</button>
+        <button class="small" data-act="multi-add" data-lista="selections"${pieno ? ' disabled' : ''}>
+          Aggiungi selezione</button>
+      </div>
+    </div>`;
+}
+
+// Le righe della card entrano nel draft SOLO se la card e' a schermo, lette
+// dal DOM come il messaggio di prova. I campi vuoti non si salvano (vuoto =
+// eredita); i delimitatori NON si trimmano (uno spazio puo' essere il
+// delimitatore voluto); `enabled` si scrive solo quando e' false.
+function leggiMulti() {
+  const card = document.getElementById('multi-card');
+  if (!card) return;
+  const multi = { markets: [], selections: [] };
+  for (const rigaEl of card.querySelectorAll('[data-mrow]')) {
+    const riga = {};
+    for (const campo of rigaEl.querySelectorAll('[data-mfield]')) {
+      const nome = campo.dataset.mfield;
+      if (nome === 'enabled') {
+        if (!campo.checked) riga.enabled = false;
+        continue;
+      }
+      const valore = (nome === 'start_after' || nome === 'end_before')
+        ? campo.value : campo.value.trim();
+      if (valore !== '') riga[nome] = valore;
+    }
+    multi[rigaEl.dataset.lista].push(riga);
+  }
+  if (!multi.markets.length && !multi.selections.length) delete wiz.draft.multi;
+  else wiz.draft.multi = multi;
+}
+
+// La cattura GUARDATA per il render: legge il DOM solo se il numero di righe
+// per lista coincide col draft. Divergono esattamente dopo una mutazione
+// programmatica (multi-add/del) non ancora ridisegnata: li' il DOM e' vecchio
+// e rileggerlo disferebbe la mutazione. A righe allineate, invece, cattura i
+// valori digitati dopo l'ultima azione — inclusi quelli arrivati durante un
+// await (vedi il commento in `render`).
+function leggiMultiSeAllineata() {
+  const card = document.getElementById('multi-card');
+  if (!card) return;
+  const dom = { markets: 0, selections: 0 };
+  for (const riga of card.querySelectorAll('[data-mrow]')) {
+    dom[riga.dataset.lista] += 1;
+  }
+  const draft = wiz.draft.multi || {};
+  if (dom.markets !== (draft.markets || []).length
+      || dom.selections !== (draft.selections || []).length) return;
+  leggiMulti();
 }
 
 function stepPaste() {
@@ -1685,6 +1840,9 @@ const actions = {
     render();
   },
   'wiz-goto'(el) {
+    // Dal riepilogo si torna a una colonna: le righe della card vanno lette
+    // PRIMA del render, o le modifiche non ancora salvate sparirebbero.
+    leggiMulti();
     const i = Number(el.dataset.i);
     wiz.step = i < 0 ? 0 : i + 1;
     wiz.mode = modeOf(wiz.draft.columns[COLUMNS[i]] || {});
@@ -1725,11 +1883,32 @@ const actions = {
       ? { op, from: ' v ', to: ' - ' } : { op });
     render();
   },
+  'multi-add'(el) {
+    leggiMulti();
+    const multi = wiz.draft.multi || { markets: [], selections: [] };
+    multi.markets = multi.markets || [];
+    multi.selections = multi.selections || [];
+    if (multi.markets.length + multi.selections.length >= MAX_RIGHE_CARD) return;
+    multi[el.dataset.lista].push({});
+    wiz.draft.multi = multi;
+    render();
+  },
+  'multi-del'(el) {
+    leggiMulti();
+    const multi = wiz.draft.multi;
+    if (!multi) return;
+    (multi[el.dataset.lista] || []).splice(Number(el.dataset.i), 1);
+    if (!(multi.markets || []).length && !(multi.selections || []).length) {
+      delete wiz.draft.multi;
+    }
+    render();
+  },
   async 'wiz-save'() {
     const msg = document.getElementById('test-msg')?.value ?? wiz.message;
     api.saveSampleMessage(wiz.parserId, msg);
     coerenzaBetfair();
     leggiTeamSource();
+    leggiMulti();
     try { await api.updateParser(wiz.parserId, { config: wiz.draft }); }
     catch (e) { fallita(e); return; }
     toast('Configurazione salvata sul server.');
@@ -1741,6 +1920,7 @@ const actions = {
     api.saveSampleMessage(wiz.parserId, msg);
     coerenzaBetfair();
     leggiTeamSource();
+    leggiMulti();
     // Prima si salva la config, poi si prova: la prova gira sul server, che
     // conosce solo cio' che e' stato salvato — provare un draft non salvato
     // mostrerebbe l'esito di un'altra configurazione.
@@ -1894,6 +2074,14 @@ document.addEventListener('click', e => {
   if (!el) return;
   const fn = actions[el.dataset.act];
   if (!fn) return;
+  // Le righe della card «Output e condizioni» si catturano PRIMA di
+  // QUALUNQUE azione: un'azione fuori dalla card («Sospendi») ridisegna il
+  // riepilogo e cancellava in silenzio gli input digitati e non salvati
+  // (Fable, PR #70). Qui e non in `render()`: il render arriva DOPO che
+  // un'azione ha mutato il draft (multi-add), e leggere allora il DOM
+  // vecchio disferebbe la mutazione. `leggiMulti` e' un no-op quando la
+  // card non e' a schermo o il wizard non c'e'.
+  if (wiz) leggiMulti();
   // I checkbox gestiscono lo stato da sé: non impedirne il click nativo.
   if (el.tagName !== 'INPUT') e.preventDefault();
   fn(el);
@@ -1942,6 +2130,14 @@ document.addEventListener('keydown', e => {
 /* ----------------------------------------------------------------- render */
 
 function render() {
+  // Seconda cattura, all'INGRESSO del render: chiude la race dell'await —
+  // cio' che l'utente digita mentre un'azione asincrona e' in volo
+  // (sospendi, salva, prova) arrivava dopo la cattura del dispatcher e
+  // spariva al redraw (Sol, PR #70). GUARDATA sull'allineamento del numero
+  // di righe DOM/draft: dopo multi-add/del il draft e' gia' stato mutato e
+  // rileggere il DOM vecchio disferebbe la mutazione — misurato: la cattura
+  // non guardata rompeva l'aggiunta delle righe.
+  if (wiz) leggiMultiSeAllineata();
   generazione += 1;
   Object.assign(route, { id: null, tab: 'config' }, parseHash());
   if (!api.me()) { viewLogin(); return; }
