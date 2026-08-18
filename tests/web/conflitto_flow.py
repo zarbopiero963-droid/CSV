@@ -143,6 +143,45 @@ with sync_playwright() as pw:
         f'il secondo salvataggio deve vincere consapevolmente: {json.dumps(salvata)[:120]}'
     shot(pg, '02-sovrascrittura-deliberata')
 
+    # Dopo la sovrascrittura, la PROVA deve produrre il CSV atteso byte per
+    # byte: intestazione, CRLF, quota localizzata (CodeRabbit, PR #71).
+    INTESTAZIONE = ('"Provider","EventId","EventName","MarketId","MarketName",'
+                    '"MarketType","SelectionId","SelectionName","Handicap",'
+                    '"Price","MinPrice","MaxPrice","BetType","Points"')
+    RIGA = ('"","","Juve - Milan","","","OVER_UNDER_15","","Over 1,5","",'
+            '"1,85","","","PUNTA",""')
+    # Nel DOM il parser HTML normalizza CRLF in LF (misurato): il confronto
+    # qui e' sul testo MOSTRATO, BOM e quota localizzata compresi. I byte veri
+    # con CRLF sono vincolati al layer relay (`tests/relay/test_csv_contract.py`
+    # asserisce i byte della risposta HTTP).
+    ATTESO = '\ufeff' + INTESTAZIONE + '\n' + RIGA + '\n'
+    pg.fill('#test-msg', MSG)
+    pg.click('[data-act="run-test"]')
+    pg.wait_for_selector('#test-csv')
+    csv = pg.eval_on_selector('#test-csv', 'el => el.textContent')
+    assert csv == ATTESO, f'CSV della prova diverso dall\'atteso:\n{csv!r}\n{ATTESO!r}'
+
+    # ------------------------ il conflitto sul TOGGLE Sospendi/Riattiva:
+    # anche fuori dal wizard il 409 deve RIALLINEARE la cache — senza, ogni
+    # toggle successivo rimanda la stessa versione vecchia e fallisce per
+    # sempre (CodeRabbit, PR #71).
+    pg.reload()
+    pg.wait_for_selector('#test-msg')          # cache fresca alla versione V
+    stato = pg.evaluate(
+        """async ([slug, config]) => {
+             const r = await fetch(`/api/me/parsers/${slug}`, {
+               method: 'PUT',
+               headers: {'Content-Type': 'application/json'},
+               body: JSON.stringify({titolo: 'Conteso', config, active: true})});
+             return r.status;
+           }""", [slug, CONFIG_BASE])
+    assert stato == 200, stato                  # «l'altra sessione»: ora V+1
+    pg.click('[data-act="toggle-active"]')      # parte con V → 409
+    pg.wait_for_selector('.toast:has-text("Modificato altrove")')
+    pg.click('[data-act="toggle-active"]')      # cache riallineata: deve riuscire
+    pg.wait_for_selector('.pill.off')
+    shot(pg, '03-toggle-dopo-conflitto')
+
     b.close()
 
 if errors:

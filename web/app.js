@@ -35,12 +35,18 @@ function fallita(e) {
 // dopo che noi l'abbiamo letto, e il server ha risposto 409 invece di
 // lasciar sovrascrivere in silenzio. Qui si RICARICA la versione vera in
 // cache — il draft con le modifiche dell'utente resta intatto — cosi' il
-// prossimo «Salva» e' una sovrascrittura deliberata, non un incidente.
-async function conflittoOFallita(e) {
-  if (!e || e.status !== 409 || !wiz) { fallita(e); return; }
-  try { await api.ricaricaParser(wiz.parserId); } catch { /* resta il 409 */ }
+// prossimo salvataggio e' una sovrascrittura deliberata, non un incidente.
+// Prende lo SLUG e non legge `wiz`: vale per OGNI chiamante di
+// `updateParser`, anche il toggle Sospendi/Riattiva fuori dal wizard —
+// senza il riallineamento, ogni toggle successivo rimandava la stessa
+// versione vecchia e falliva per sempre (CodeRabbit, PR #71). Restituisce
+// true se era un conflitto gestito, cosi' il chiamante ridisegna.
+async function conflittoOFallita(e, slug) {
+  if (!e || e.status !== 409 || !slug) { fallita(e); return false; }
+  try { await api.ricaricaParser(slug); } catch { /* resta il 409 */ }
   toast('Modificato altrove: le tue modifiche sono ancora qui — '
     + 'ricontrolla e salva di nuovo per sovrascrivere.');
+  return true;
 }
 
 async function copy(text, label = 'Copiato') {
@@ -1617,7 +1623,13 @@ const actions = {
   },
   async 'toggle-active'(el) {
     const p = api.getParser(el.dataset.id);
-    try { await api.updateParser(p.slug, { active: !p.active }); } catch (e) { fallita(e); return; }
+    try { await api.updateParser(p.slug, { active: !p.active }); }
+    catch (e) {
+      // Sul conflitto la cache e' gia' riallineata: si ridisegna, cosi'
+      // la pillola mostra lo stato vero e il prossimo toggle riesce.
+      if (await conflittoOFallita(e, p.slug)) render();
+      return;
+    }
     render();
   },
   async 'del-parser'(el) {
@@ -1922,7 +1934,7 @@ const actions = {
     leggiTeamSource();
     leggiMulti();
     try { await api.updateParser(wiz.parserId, { config: wiz.draft }); }
-    catch (e) { await conflittoOFallita(e); return; }
+    catch (e) { await conflittoOFallita(e, wiz.parserId); return; }
     toast('Configurazione salvata sul server.');
     render();
   },
@@ -1939,7 +1951,7 @@ const actions = {
     try {
       await api.updateParser(wiz.parserId, { config: wiz.draft });
       wiz.test = await api.testParser(wiz.parserId, msg);
-    } catch (e) { await conflittoOFallita(e); return; }
+    } catch (e) { await conflittoOFallita(e, wiz.parserId); return; }
     render();
   },
 
