@@ -280,9 +280,25 @@ veda.
    statement, e uno statement che filtra solo per id atterrerebbe sui dati ormai
    dell'account superstite. Perciò ogni INSERT/UPDATE/DELETE **e ogni SELECT dei
    dati** ripete il vincolo `user_id` nella stessa istruzione (JOIN/EXISTS fino a
-   `sports.user_id`/`competizioni.user_id`/`parsers.user_id`): per il
-   proprietario sbagliato zero righe toccate, `None`/lista vuota al chiamante,
-   404 dalla rotta. Portata: il travaso avviene solo fra account della **stessa
+   `sports.user_id`/`competizioni.user_id`/`parsers.user_id`). L'esito per il
+   proprietario sbagliato **non è lo stesso sui due lati**, e la differenza è
+   deliberata:
+
+   - **scritture** (INSERT/UPDATE/DELETE): zero righe toccate, `None` al
+     chiamante, **404** dalla rotta — come se il travaso fosse arrivato prima
+     della richiesta;
+   - **letture** (le SELECT dei dati): **lista vuota**, e la rotta risponde
+     **200** con quella lista. Non un 404: una lista vuota è già il risultato
+     legittimo di un padre che non ha figli, e distinguere «vuoto perché non è
+     più mio» da «vuoto perché non c'è niente» richiederebbe una seconda
+     lettura, che avrebbe la stessa finestra della prima. Quel che conta — ed è
+     ciò che il vincolo garantisce — è che **nessun dato di un altro account
+     compaia mai** nella risposta. (Segnalato da Claude Fable 5 al gate finale
+     della PR #72: la versione precedente di questa regola diceva «404 dalla
+     rotta» per tutti e due i lati, ed era il testo a essere sbagliato, non il
+     codice.)
+
+   Portata: il travaso avviene solo fra account della **stessa
    persona** (merge/riparazione) — è difesa in profondità, non una falla
    cross-persona. Restano fuori, per decisione da prendere dal proprietario, gli
    INSERT per-utente legati all'id di sessione (`crea_sport_mio`,

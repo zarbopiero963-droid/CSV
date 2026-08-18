@@ -928,4 +928,15 @@ def test_anche_le_letture_sono_vincolate_al_proprietario_nello_statement(
     assert main._alias_di(c, utenti['mio'], cid, sorgente_altrui) == [
         (squadra, 'Juventus', '')], \
         'l\'alias della sorgente altrui non deve comparire nella mia tabella'
+
+    # E il BADGE `compilati` della schermata competizione, che e' un'altra
+    # lettura della stessa classe ([REAL_FINDING] di GPT-5.6 Sol al gate finale
+    # della PR #72): contava gli alias per sola `competizione_id`, quindi dopo
+    # un travaso della competizione il numero continuava a contare squadre
+    # ormai dell'altro account — e nella STESSA risposta l'elenco squadre era
+    # gia' vuoto per il vincolo di `_squadre_di`. Un badge che dice «3» sopra
+    # una lista vuota.
+    assert main._compilati_di(c, utenti['mio'], cid, sorgente) == 1
+    assert main._compilati_di(c, utenti['altrui'], cid, sorgente) == 0, \
+        'il badge non conta squadre di una competizione che non e\' piu\' mia'
     c.close()

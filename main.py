@@ -5247,9 +5247,25 @@ def _elimina_parser(c, user_id, parser_id, slug):
     link orfano puo' venire EREDITATO da un parser futuro che riceve quello
     stesso id — segnali della chat altrui nel suo feed, peggio di una riga
     morta. I due statement devono parlare dello STESSO parser: quello che la
-    rotta ha letto. (Se il rowid del parser eliminato viene riusato dal
-    ricreato, id uguale = stessa identita' di riga: cascata e DELETE restano
-    coerenti fra loro per costruzione.)
+    rotta ha letto.
+
+    **Cosa NON chiude, e perche' e' scritto invece che taciuto** (secondo giro
+    di GPT-5.6 Sol sulla PR #72). Se il parser eliminato deteneva il rowid
+    massimo, sqlite lo riusa e il ricreato riceve lo STESSO id: le due righe
+    diventano indistinguibili per qualunque filtro, e la DELETE stantia porta
+    via il ricreato. Cio' che il vincolo garantisce anche li' e' la COERENZA —
+    parser e suoi link spariscono INSIEME, mai un link orfano che un parser
+    futuro possa ereditare (vincolato dal secondo scenario del test). Resta che
+    una create molto recente dello stesso utente puo' essere annullata dalla sua
+    stessa DELETE in volo.
+
+    Chiuderlo davvero richiede un identificatore non riusabile — `AUTOINCREMENT`
+    su `parsers`, cioe' un cambio di schema sulla tabella originale — oppure una
+    precondizione di `versione` sulla DELETE, cioe' una modifica dell'API.
+    Entrambe sono decisioni del proprietario, come il terzo punto della issue
+    #65: non si allarga lo scope di una PR di isolamento per prenderle. Portata:
+    stesso utente, stesso slug, finestra di una richiesta in volo, nessun altro
+    account coinvolto.
     """
     c.execute('DELETE FROM parser_chats WHERE parser_id IN'
               ' (SELECT id FROM parsers WHERE id=? AND user_id=?)',
@@ -5964,6 +5980,25 @@ def _squadre_di(c, user_id, competizione_id):
                      ' ORDER BY q.nome', (competizione_id, user_id)).fetchall()
 
 
+def _compilati_di(c, user_id, competizione_id, sorgente_id):
+    """Quante squadre della competizione hanno gia' un alias in quella sorgente.
+
+    E' il badge `compilati` della schermata competizione, e ripete il vincolo
+    di proprieta' come `_squadre_di`: contava per sola `competizione_id`,
+    quindi dopo un travaso concorrente il numero continuava a contare squadre
+    ormai dell'account superstite — mentre nella STESSA risposta l'elenco
+    squadre era gia' vuoto. Un badge che dice «3» sopra una lista vuota.
+    [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #72.
+    """
+    return c.execute(
+        'SELECT COUNT(*) FROM alias_squadre a'
+        ' JOIN squadre_betfair q ON q.id = a.squadra_id'
+        ' JOIN competizioni k ON k.id = q.competizione_id'
+        " WHERE a.sorgente_id=? AND a.alias != '' AND q.competizione_id=?"
+        ' AND k.user_id=?',
+        (sorgente_id, competizione_id, user_id)).fetchone()[0]
+
+
 def _alias_di(c, user_id, competizione_id, sorgente_id):
     """La tabella squadra→alias di una sorgente, vincolata come `_squadre_di`
     su ENTRAMBI i padri: competizione e sorgente."""
@@ -6114,13 +6149,15 @@ def competizione_mia(cid: str, request: Request):
     try:
         competizione = _competizione_o_404(c, utente['id'], cid)
         squadre = _squadre_di(c, utente['id'], competizione[0])
-        sorgenti = c.execute(
-            'SELECT g.id, g.nome,'
-            ' (SELECT COUNT(*) FROM alias_squadre a JOIN squadre_betfair q'
-            "  ON q.id = a.squadra_id WHERE a.sorgente_id = g.id AND a.alias != ''"
-            '  AND q.competizione_id=?)'
-            ' FROM sorgenti_squadre g WHERE g.user_id=? ORDER BY g.nome',
-            (competizione[0], utente['id'])).fetchall()
+        # Il badge `compilati` passa da `_compilati_di`, che vincola il conteggio
+        # alla competizione ANCORA dell'utente (#65): senza, dopo un travaso
+        # concorrente il numero contava squadre ormai altrui sopra un elenco
+        # squadre gia' vuoto.
+        sorgenti = [(r[0], r[1], _compilati_di(c, utente['id'], competizione[0], r[0]))
+                    for r in c.execute(
+                        'SELECT g.id, g.nome FROM sorgenti_squadre g'
+                        ' WHERE g.user_id=? ORDER BY g.nome',
+                        (utente['id'],)).fetchall()]
     finally:
         c.close()
     return _rispondi_con_sessione(utente['id'], utente['versione'], {
