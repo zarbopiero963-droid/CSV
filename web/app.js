@@ -1344,6 +1344,25 @@ function leggiMulti() {
   else wiz.draft.multi = multi;
 }
 
+// La cattura GUARDATA per il render: legge il DOM solo se il numero di righe
+// per lista coincide col draft. Divergono esattamente dopo una mutazione
+// programmatica (multi-add/del) non ancora ridisegnata: li' il DOM e' vecchio
+// e rileggerlo disferebbe la mutazione. A righe allineate, invece, cattura i
+// valori digitati dopo l'ultima azione — inclusi quelli arrivati durante un
+// await (vedi il commento in `render`).
+function leggiMultiSeAllineata() {
+  const card = document.getElementById('multi-card');
+  if (!card) return;
+  const dom = { markets: 0, selections: 0 };
+  for (const riga of card.querySelectorAll('[data-mrow]')) {
+    dom[riga.dataset.lista] += 1;
+  }
+  const draft = wiz.draft.multi || {};
+  if (dom.markets !== (draft.markets || []).length
+      || dom.selections !== (draft.selections || []).length) return;
+  leggiMulti();
+}
+
 function stepPaste() {
   return `
     <div class="bubble ai"><div class="who">Assistente</div>
@@ -2111,6 +2130,14 @@ document.addEventListener('keydown', e => {
 /* ----------------------------------------------------------------- render */
 
 function render() {
+  // Seconda cattura, all'INGRESSO del render: chiude la race dell'await —
+  // cio' che l'utente digita mentre un'azione asincrona e' in volo
+  // (sospendi, salva, prova) arrivava dopo la cattura del dispatcher e
+  // spariva al redraw (Sol, PR #70). GUARDATA sull'allineamento del numero
+  // di righe DOM/draft: dopo multi-add/del il draft e' gia' stato mutato e
+  // rileggere il DOM vecchio disferebbe la mutazione — misurato: la cattura
+  // non guardata rompeva l'aggiunta delle righe.
+  if (wiz) leggiMultiSeAllineata();
   generazione += 1;
   Object.assign(route, { id: null, tab: 'config' }, parseHash());
   if (!api.me()) { viewLogin(); return; }

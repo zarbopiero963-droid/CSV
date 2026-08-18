@@ -217,6 +217,25 @@ with sync_playwright() as pw:
         'il motivo della riga singola rotta deve restare visibile'
     shot(pg, '07-riga-singola-rotta')
 
+    # ------------------------------------ la race dell'await (Sol, PR #70):
+    # cio' che si digita MENTRE un'azione asincrona e' in volo non deve
+    # sparire al render. Fetch rallentato di 600 ms, click su «Riattiva»
+    # (la vista e' sospesa dal passo precedente? no: riattivata — quindi
+    # «Sospendi»), digitazione durante il volo, poi il redraw.
+    pg.evaluate(
+        """() => {
+             const vero = window.fetch.bind(window);
+             window.fetch = (...args) => new Promise(res =>
+               setTimeout(() => res(vero(...args)), 600));
+           }""")
+    pg.click('[data-act="toggle-active"]')
+    pg.fill('[data-mrow="markets:0"] [data-mfield="price"]', '9.99')
+    pg.wait_for_selector('.pill.off')          # il redraw della sospensione
+    valore = pg.input_value('[data-mrow="markets:0"] [data-mfield="price"]')
+    assert valore == '9.99', \
+        f'la digitazione durante l\'await non deve sparire al render: {valore!r}'
+    pg.reload()                                 # ripristina il fetch vero
+
     # ------------------------------------------------ 390px, niente scroll X
     pg.set_viewport_size({'width': 390, 'height': 844})
     pg.wait_for_timeout(200)
