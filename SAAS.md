@@ -1988,14 +1988,20 @@ una riga per punteggio N-N, solo su CORRECT_SCORE e HALF_TIME_SCORE.»
   di prova, niente salvataggio implicito al change — e riaprire il parser le
   ritrova (la config.multi viaggia nel draft come `betfair`/`team_source`:
   senza, riaprire e salvare la cancellerebbe).
-- **La prova col k su N**: con più righe generate la pillola d'esito dice
+- **La prova col k su N**: col multi **attivo** (almeno una riga non vuota e
+  non spenta — anche una sola: una riga singola rotta non deve nascondere il
+  suo motivo, segnalato da CodeRabbit sulla PR #70) la pillola d'esito dice
   «Riconosciuto: k di N righe piazzabili» (o «Nessuna riga piazzabile: 0 di
   N…»), e sotto (`#test-righe`) ogni riga ha la sua pillola
   **«piazzabile»**/**«scartata»** con `MarketType · SelectionName` e, per le
   scartate, il motivo (gli scarti, o «manca …»). Il CSV della prova è quello
   **composto** dal server (header una volta, le sole righe piazzabili); anche
-  l'anteprima locale compone le righe piazzabili con `componiFeed`, così i due
-  riquadri coincidono byte per byte. Con una riga sola tutto resta com'era.
+  l'anteprima locale compone le righe piazzabili con `componiFeed`, così —
+  **senza una sorgente squadre selezionata** — i due riquadri coincidono byte
+  per byte. Con una sorgente selezionata l'anteprima locale resta quella
+  storica del #34: **non traduce gli alias** (la mappa vive sul server) ed è
+  dichiarata indicativa — fa fede la prova sul server. Senza `config.multi`
+  tutto resta com'era.
 
 ### Il pannello Richieste (#7, solo amministratore)
 

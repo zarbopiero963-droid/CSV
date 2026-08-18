@@ -1124,6 +1124,17 @@ function stepReview() {
   }).join('');
 
   const t = wiz.test;
+  // Il k/N si mostra quando il MULTI e' attivo, anche con UNA sola riga
+  // generata: con `righe.length > 1` la riga singola rotta nascondeva il suo
+  // motivo — la pillola cadeva sul ramo della base, che di scarti non ne ha
+  // (segnalato da CodeRabbit sulla PR #70). Attiva = oggetto non vuoto con
+  // `enabled !== false`, lo stesso predicato del motore (`rigaMulti`).
+  const attive = l => (l || []).filter(r => r && typeof r === 'object'
+    && !Array.isArray(r) && Object.keys(r).length && r.enabled !== false).length;
+  const multiAttivo = t && (attive((wiz.draft.multi || {}).markets)
+    + attive((wiz.draft.multi || {}).selections)) > 0;
+  const righeTest = (t && t.righe) || [];
+  const mostraRighe = righeTest.length > 1 || (multiAttivo && righeTest.length > 0);
   return `
     <div class="bubble ai"><div class="who">Assistente</div>
       Mappatura completa. Controlla la tabella, prova un messaggio reale e salva.
@@ -1157,15 +1168,15 @@ function stepReview() {
       ${t ? `<div class="stack" style="gap:10px" id="test-result">
         <div class="row"><span class="pill ${t.complete ? 'on' : 'no'}">${
           t.errore ? esc(t.errore)
-          : (t.righe || []).length > 1
+          : mostraRighe
             ? `${t.complete ? 'Riconosciuto' : 'Nessuna riga piazzabile'}: ${
-                t.righe.filter(r => r.complete).length} di ${t.righe.length} righe piazzabili`
+                righeTest.filter(r => r.complete).length} di ${righeTest.length} righe piazzabili`
           : t.complete ? 'Riconosciuto'
           : !t.matched ? 'Ignorato: la condizione non corrisponde'
           : `Riconosciuto ma incompleto: manca ${(t.missing || []).join(', ')}`
         }</span></div>
-        ${(t.righe || []).length > 1 ? `<div class="stack" id="test-righe" style="gap:6px">
-          ${t.righe.map((r, i) => `<div class="row wrap" style="gap:8px;align-items:baseline">
+        ${mostraRighe ? `<div class="stack" id="test-righe" style="gap:6px">
+          ${righeTest.map((r, i) => `<div class="row wrap" style="gap:8px;align-items:baseline">
             <span class="pill ${r.complete ? 'on' : 'no'}">${r.complete ? 'piazzabile' : 'scartata'}</span>
             <span class="small mono">${esc(r.row[COLUMNS.indexOf('MarketType')] || '—')}
               · ${esc(r.row[COLUMNS.indexOf('SelectionName')] || '—')}</span>

@@ -188,13 +188,29 @@ with sync_playwright() as pw:
     assert len(righe_card(pg)) == 2, 'la riga rimossa deve restare rimossa'
     shot(pg, '06-riga-rimossa')
 
+    # ------------------------------------ UNA sola riga attiva, rotta: il
+    # motivo NON deve sparire (CodeRabbit, PR #70): il k/N si mostra anche
+    # con una riga sola quando il multi e' attivo.
+    pg.click('[data-mrow="selections:0"] [data-act="multi-del"]')
+    pg.wait_for_selector('[data-mrow="selections:0"]', state='detached')
+    pg.fill('[data-mrow="markets:0"] [data-mfield="price"]', 'abc')
+    pg.fill('#test-msg', MSG)
+    pg.click('[data-act="run-test"]')
+    pg.wait_for_selector('#test-righe')
+    esito_uno = pg.inner_text('#test-result')
+    assert '0 di 1' in esito_uno, \
+        f'una sola riga rotta deve dire 0 di 1, non nascondersi: {esito_uno!r}'
+    assert 'abc' in pg.inner_text('#test-righe'), \
+        'il motivo della riga singola rotta deve restare visibile'
+    shot(pg, '07-riga-singola-rotta')
+
     # ------------------------------------------------ 390px, niente scroll X
     pg.set_viewport_size({'width': 390, 'height': 844})
     pg.wait_for_timeout(200)
     scroll = pg.evaluate(
         'document.documentElement.scrollWidth - document.documentElement.clientWidth')
     assert scroll <= 0, f'scroll orizzontale a 390px: {scroll}px di troppo'
-    shot(pg, '07-mobile')
+    shot(pg, '08-mobile')
 
     b.close()
 
