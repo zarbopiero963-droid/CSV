@@ -298,17 +298,24 @@ with sync_playwright() as pw:
     # ripeterebbe il 409 all'infinito: e' il bug del toggle della PR #71, nella
     # sua forma per la DELETE. (GPT-5.5 sulla PR #76: le asserzioni di sola
     # presenza dicono che la UI non e' rotta, non che lo stato sia giusto.)
+    elenco = ("async () => (await (await fetch('/api/me/parsers')).json())"
+              ".map(p => p.slug).sort()")
+    prima = pg.evaluate(elenco)
     pg.wait_for_selector('.toast', state='detached')
     pg.click('[data-act="del-parser"]')
     pg.click('[data-act="del-parser-ok"]')
     pg.wait_for_selector('[data-act="new-parser"]')      # tornati alla lista
-    rimasti = pg.evaluate(
-        "async () => (await (await fetch('/api/me/parsers')).json()).map(p => p.slug)")
-    # Solo lo slug conteso: l'utente ha anche il parser legacy del seme, che non
-    # c'entra e deve restare (la prima stesura asseriva la lista VUOTA ed e'
-    # diventata rossa proprio per lui — assert sbagliato, non codice sbagliato).
-    assert slug not in rimasti, \
-        f'la DELETE con l-uid riallineato non ha eliminato il parser: {rimasti}'
+    rimasti = pg.evaluate(elenco)
+    # Sparisce lo slug conteso ed ESATTAMENTE quello: l'utente ha anche il
+    # parser legacy del seme, che non c'entra e deve restare. Il confronto e'
+    # con la lista di prima meno lo slug, non con la lista vuota: la prima
+    # stesura asseriva il vuoto ed e' diventata rossa proprio per il legacy
+    # (assert sbagliato, non codice sbagliato), e un `slug not in rimasti` da
+    # solo passerebbe anche se la DELETE portasse via tutto il resto
+    # (rilievo di GPT-5.5 sulla PR #76 — il commento diceva «deve restare» ma
+    # nessuna asserzione lo pretendeva).
+    assert rimasti == [s for s in prima if s != slug], \
+        f'la DELETE ha cambiato piu- dello slug conteso: prima {prima}, dopo {rimasti}'
     shot(pg, '07-delete-dopo-riallineamento')
 
     b.close()
