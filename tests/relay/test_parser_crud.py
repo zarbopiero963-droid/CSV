@@ -816,4 +816,32 @@ def test_l_eliminazione_stantia_NON_colpisce_un_parser_ricreato_stesso_slug(
     assert main._elimina_parser(c, uid, nuovo, 'rifatto') is True
     assert c.execute('SELECT COUNT(*) FROM parser_chats').fetchone()[0] == 0, \
         'nessun link orfano: la cascata e la DELETE colpiscono lo stesso id'
+
+    # Secondo scenario (bloccante 2 di GPT-5.5 sul fix): il parser eliminato
+    # detiene il rowid MASSIMO — sqlite lo riusa e il ricreato ha lo STESSO
+    # id. Le due righe sono indistinguibili per costruzione (senza
+    # AUTOINCREMENT anche il `name` liberato puo' tornare identico), quindi
+    # nessun filtro puo' separarle; ma l'esito e' una SERIALIZZAZIONE LEGALE
+    # delle richieste dello stesso utente — equivale a «la DELETE e' arrivata
+    # per ultima»: parser ricreato e i SUOI link spariscono INSIEME, zero
+    # orfani, zero divergenza fra i due statement. Il test vincola questa
+    # coerenza; con un utente DIVERSO sull'id riusato resta il no-op del
+    # vincolo user_id (primo scenario del test qui sopra, PR #64).
+    c.execute("DELETE FROM parsers WHERE name='u-a-sentinella'")
+    vecchio2 = crea('u-a-riuso')             # ora detiene il rowid massimo
+    c.execute('DELETE FROM parser_chats WHERE parser_id=?', (vecchio2,))
+    c.execute('DELETE FROM parsers WHERE id=?', (vecchio2,))
+    nuovo2 = crea('u-a-riuso-2')             # sqlite riusa il massimo: id uguale
+    assert nuovo2 == vecchio2, \
+        'lo scenario esige il riuso del rowid (parsers e\' senza AUTOINCREMENT)'
+    c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id) VALUES (?,?)',
+              ('-100777', uid))
+    chat2 = c.execute('SELECT last_insert_rowid()').fetchone()[0]
+    c.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (?,?)',
+              (nuovo2, chat2))
+    assert main._elimina_parser(c, uid, vecchio2, 'rifatto') is True
+    assert c.execute('SELECT COUNT(*) FROM parsers WHERE slug=?',
+                     ('rifatto',)).fetchone()[0] == 0
+    assert c.execute('SELECT COUNT(*) FROM parser_chats').fetchone()[0] == 0, \
+        'id riusato: parser e link spariscono insieme, mai link orfani'
     c.close()
