@@ -166,6 +166,12 @@ PUT    /api/me/parsers/SLUG             aggiorna il proprio (lo slug non cambia 
                                         modificato altrove" e non sovrascrive (#51). Senza
                                         "versione" resta incondizionata; la versione del
                                         parser avanza a ogni modifica e sta nella vista.
+                                        PUT e DELETE identificano la riga con "uid" (#73),
+                                        un id interno mai riusato: se il parser e' stato
+                                        eliminato e RICREATO con lo stesso slug mentre la
+                                        richiesta era in volo, la risposta e' 404 e il
+                                        parser nuovo non viene toccato. "uid" non compare
+                                        nell'API: e' identita' interna come user_id.
 DELETE /api/me/parsers/SLUG             elimina il proprio
 POST   /api/me/parsers/SLUG/test        body {"message":"..."} -> {matched,missing,scarti,complete,event?,csv?}
 La config viene validata alla creazione (struttura + dry-run): una config storta da'

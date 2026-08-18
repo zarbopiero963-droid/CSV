@@ -1080,6 +1080,33 @@ versione letta; sul 409 la web app **non** butta le modifiche: `ricaricaParser`
 riallinea la cache e il toast dice verbatim «Modificato altrove: le tue
 modifiche sono ancora qui — ricontrolla e salva di nuovo per sovrascrivere» —
 il secondo salvataggio è una sovrascrittura deliberata, non un incidente.
+
+**L'identità della riga: `uid` (#73).** `versione` risponde alla domanda «è
+cambiato mentre lo modificavo?». Ne esiste una seconda, diversa: «è ancora lo
+**stesso** parser?». Lo `slug` torna libero appena il parser viene eliminato, e
+`id` viene dal `rowid` che sqlite **riusa** (`parsers` è la tabella originale,
+senza `AUTOINCREMENT`): un elimina+ricrea dello stesso slug produce una riga
+nuova identica alla vecchia in ogni colonna che la identifichi. Una richiesta
+rimasta in volo colpiva quella nuova — misurato: la DELETE la cancellava, e la
+PUT le **sovrascriveva `config_json`**, cioè le regole che generano il CSV,
+senza nessun sintomo visibile.
+
+`parsers.uid` è un identificatore casuale a 128 bit assegnato alla creazione e
+**mai riusato**. La DELETE e l'UPDATE della PUT lo vincolano entrambi, insieme a
+`user_id`: la richiesta stantia porta un `uid` che non esiste più, tocca zero
+righe e la rotta risponde **404** — come se la sostituzione fosse arrivata
+prima. Le due guardie **convivono e non si sostituiscono**: `versione` non
+copre questo caso, perché parte da 1 e il parser ricreato ha 1, cioè proprio il
+valore che la richiesta stantia porta con sé.
+
+`uid` è identità **interna**: non compare nella vista del parser né nell'API,
+come `name` e `user_id`. La migrazione lo assegna alle righe già esistenti con
+un valore distinto per riga, una volta sola (`WHERE uid IS NULL`): rigenerarlo a
+ogni avvio renderebbe stantio a ogni deploy ogni riferimento in volo.
+
+La scelta è del proprietario (18/08): `AUTOINCREMENT` avrebbe chiuso lo stesso
+caso, ma non si aggiunge con un `ALTER` — andrebbe ricreata la tabella che porta
+i parser di produzione.
 Vincolata da `tests/relay/test_parser_crud.py` (due PUT dalla stessa base) e
 `tests/web/test_conflitto_web.py` (il conflitto visto dal browser).
 
