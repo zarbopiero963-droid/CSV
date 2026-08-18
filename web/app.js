@@ -1650,7 +1650,21 @@ const actions = {
         <button class="danger" data-act="del-parser-ok" data-id="${esc(p.slug)}">Elimina</button></div>`);
   },
   async 'del-parser-ok'(el) {
-    try { await api.deleteParser(el.dataset.id); } catch (e) { fallita(e); return; }
+    const slug = el.dataset.id;
+    // Dalla #75 anche la DELETE porta la precondizione di identita', quindi
+    // anche lei puo' ricevere il 409 «eliminato e ricreato altrove» — e va
+    // detto con lo STESSO toast della PUT, non col `detail` grezzo del server,
+    // che `fallita` mostrerebbe tale e quale. La modale poi va chiusa: si
+    // riferisce a una riga che non esiste piu', e il riallineamento di
+    // `conflittoOFallita` ha gia' portato in cache il parser che c'e' adesso.
+    // Segnalato da CodeRabbit sulla PR #76: avevo aggiunto `?uid=` alla
+    // chiamata senza dare al suo conflitto una voce.
+    try { await api.deleteParser(slug); }
+    catch (e) {
+      if (await conflittoOFallita(e, slug)) closeModal();
+      render();
+      return;
+    }
     closeModal(); wiz = null; go('#/parsers'); render();
   },
 

@@ -1155,3 +1155,47 @@ def test_un_chiamante_SENZA_uid_resta_incondizionato_come_prima(servizio):
     # E la DELETE senza ?uid= elimina, come prima della #75.
     assert _chiama(servizio, 'DELETE', f'/api/me/parsers/{slug}', cookie=cookie)[0] == 200
     assert json.loads(_chiama(servizio, 'GET', '/api/me/parsers', cookie=cookie)[1]) == []
+
+
+def test_l_uid_di_un_ALTRO_utente_non_apre_niente(servizio):
+    """`uid` esce nell'API dalla #75: questo test copre la superficie che apre.
+
+    Prima della #75 l'identita' della riga non usciva mai, quindi non poteva
+    essere rimandata indietro. Adesso e' un valore che il client conosce e
+    manda — e la domanda che ne segue e' se conoscere l'`uid` di un altro
+    utente serva a qualcosa. Non deve: `user_id` viene dalla SESSIONE, e la
+    lettura di proprieta' delle due rotte e' `WHERE user_id=? AND slug=?`,
+    quindi la sessione di A trova solo la riga di A. L'`uid` di B non la
+    combacia, e il 409 ferma la richiesta prima di ogni scrittura.
+
+    Chiesto da GPT-5.5 al giro di review della PR #76 («controlli equivalenti
+    che confermino che un uid errato non possa colpire parser di altri
+    utenti»). Il test misura ENTRAMBI i lati: il parser di A non cambia, e
+    soprattutto quello di B — omonimo, stesso slug — resta intatto.
+    """
+    cookie_a, _ = _login_a(servizio)
+    cookie_b, _ = _login_b(servizio)
+
+    a = json.loads(_crea(servizio, cookie_a, 'Conteso')[1])
+    b = json.loads(_crea(servizio, cookie_b, 'Conteso')[1])
+    assert a['slug'] == b['slug'], 'lo slug per-utente e- indipendente: serve omonimia'
+    assert a['uid'] != b['uid']
+
+    # A prova a salvare nominando la riga di B.
+    stato, corpo, _ = _chiama(
+        servizio, 'PUT', f'/api/me/parsers/{a["slug"]}', cookie=cookie_a,
+        corpo={'titolo': 'Rubato', 'config': CONFIG_OK, 'active': True,
+               'uid': b['uid']})
+    assert stato == 409, f'l\'uid altrui non deve identificare niente: {stato} {corpo}'
+
+    # ...e a eliminarla.
+    stato, corpo, _ = _chiama(
+        servizio, 'DELETE', f'/api/me/parsers/{a["slug"]}?uid={b["uid"]}',
+        cookie=cookie_a)
+    assert stato == 409, f'nemmeno sulla DELETE: {stato} {corpo}'
+
+    # Nessuno dei due parser e' stato toccato: ne' quello di A, ne' quello di B.
+    di_a = json.loads(_chiama(servizio, 'GET', '/api/me/parsers', cookie=cookie_a)[1])
+    di_b = json.loads(_chiama(servizio, 'GET', '/api/me/parsers', cookie=cookie_b)[1])
+    assert [(p['titolo'], p['uid']) for p in di_a] == [('Conteso', a['uid'])], di_a
+    assert [(p['titolo'], p['uid']) for p in di_b] == [('Conteso', b['uid'])], di_b

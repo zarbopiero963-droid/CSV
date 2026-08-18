@@ -1115,6 +1115,15 @@ giusto — accoppiamento fra codice e copy che è **inchiodato**, non fragile:
 cambiare il testo del 409 in `main.py` rende rosso quel flusso, misurato per
 mutazione sulla PR #76.
 
+**Vale per il salvataggio e per l'eliminazione.** Anche la conferma «Elimina»
+può ricevere il conflitto di identità — la #75 ha dato la precondizione a
+entrambe le rotte — e mostra lo **stesso** toast, non il `detail` grezzo del
+server: dopo di esso la modale di conferma si chiude, perché si riferisce a una
+riga che non esiste più, e la vista si ridisegna sul parser che c'è adesso. Fino
+alla PR #76 quel percorso passava dal gestore d'errore generico, quindi la
+DELETE stantia stampava il testo interno del server e non riallineava niente:
+segnalato da CodeRabbit, e ora vincolato dallo scenario in browser.
+
 **Cosa il toast NON impedisce, e va detto.** Dopo il 409 la cache viene
 riallineata (senza, ogni salvataggio successivo fallirebbe per sempre — il bug
 del toggle, CodeRabbit PR #71), quindi un **secondo** click su Salva porta

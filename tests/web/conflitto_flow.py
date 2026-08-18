@@ -240,6 +240,45 @@ with sync_playwright() as pw:
          f'{json.dumps(salvata)[:120]}')
     shot(pg, '05-residuo-secondo-salvataggio')
 
+    # ---------------- la DELETE stantia, vista dalla scheda vecchia (#75)
+    # La PUT aveva la sua voce, la DELETE no: `del-parser-ok` gestiva l'errore
+    # con `fallita`, che stampa il `detail` grezzo del server e non riallinea
+    # niente. Segnalato da CodeRabbit sulla PR #76 — avevo aggiunto `?uid=`
+    # alla chiamata senza dare al suo conflitto un modo di essere capito.
+    # Il pulsante Elimina sta nella scheda del parser, dove il flusso gia' e'
+    # (il wizard e' una tab di quella vista): non serve navigare, e navigare
+    # alla LISTA lo porterebbe via — li' il pulsante non c'e'.
+    pg.wait_for_selector('[data-act="del-parser"]')
+    esito = pg.evaluate(
+        """async ([slug, config]) => {
+             const d = await fetch(`/api/me/parsers/${slug}`, {method: 'DELETE'});
+             const c = await fetch('/api/me/parsers', {
+               method: 'POST',
+               headers: {'Content-Type': 'application/json'},
+               body: JSON.stringify({titolo: 'Conteso', config, active: true})});
+             return [d.status, c.status, (await c.json()).slug];
+           }""", [slug, config_ricreato])
+    assert esito[0] == 200 and esito[1] == 200 and esito[2] == slug, esito
+
+    # La scheda vecchia conferma l'eliminazione di un parser che non c'e' piu'.
+    # Prima si aspetta che il toast del passo precedente sparisca da solo (dura
+    # 2,6 s): senza, `wait_for_selector('.toast')` qui sotto trova QUELLO, e
+    # l'asserzione leggerebbe il messaggio sbagliato invece del nuovo.
+    pg.wait_for_selector('.toast', state='detached')
+    pg.click('[data-act="del-parser"]')
+    pg.click('[data-act="del-parser-ok"]')
+    pg.wait_for_selector('.toast')
+    toast = pg.inner_text('.toast')
+    assert 'Eliminato e ricreato altrove' in toast, \
+        f'anche la DELETE deve dire il conflitto con parole sue, non col detail: {toast!r}'
+    # E il parser ricreato e' ancora li': la conferma non l'ha portato via.
+    assert config_sul_server(pg, slug)['match']['value'] == 'RICREATO', \
+        'la DELETE stantia ha eliminato il parser RICREATO'
+    # La modale si e' chiusa: si riferiva a una riga che non esiste piu'.
+    assert pg.query_selector('.veil') is None, \
+        'la modale di conferma e- rimasta aperta su un parser che non c-e- piu-'
+    shot(pg, '06-delete-stantia')
+
     b.close()
 
 if errors:
