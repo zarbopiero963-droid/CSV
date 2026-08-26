@@ -334,11 +334,18 @@ with sync_playwright() as pw:
     # bottone «Copia» (attributo, invisibile nei pixel ma presente nel DOM). Si
     # redigono ENTRAMBI — il segnalatore GPT-5.5 aveva ragione: oscurare solo il
     # testo lasciava il token nell'attributo.
-    redatto = "xt_' + '\\u2022'.repeat(20) + '  (redatto nello screenshot)"
-    pg.evaluate("document.querySelectorAll('.modal .secret')"
-                f".forEach(e => e.textContent = '{redatto}');"
-                "document.querySelectorAll('.modal [data-val]')"
-                f".forEach(e => e.setAttribute('data-val', '{redatto}'))")
+    # Il testo di redazione si costruisce in Python (`\u2022` e' il pallino (U+2022),
+    # scritto per escape cosi' il sorgente resta ASCII) e si passa come
+    # ARGOMENTO a evaluate: niente concatenazione JS-dentro-stringa con
+    # virgolette annidate, che era corretta ma illeggibile — e infatti un
+    # reviewer l'aveva letta come «`repeat` non esegue» (GPT-5.5, PR #79).
+    redatto = 'xt_' + '\u2022' * 20 + '  (redatto nello screenshot)'
+    pg.evaluate(
+        "(t) => {"
+        "  document.querySelectorAll('.modal .secret').forEach(e => e.textContent = t);"
+        "  document.querySelectorAll('.modal [data-val]').forEach("
+        "    e => e.setAttribute('data-val', t));"
+        "}", redatto)
     # La redazione deve aver MORSO: si controlla l'`outerHTML` INTERO della
     # modale — testo E attributi — e si pretende che ne' il token ne' l'URL ci
     # siano piu'. `inner_text()` da solo non vedrebbe il `data-val`; `outerHTML`
