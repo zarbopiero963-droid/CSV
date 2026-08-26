@@ -463,6 +463,58 @@ def assicura_registrazione(forza=False):
 _COMPITO_REGISTRAZIONE = None
 
 
+# Redazione del token nell'access-log di uvicorn (audit #81, A1).
+# Il feed di XTrader e' `GET /feed/{slug}.csv?token=<segreto>` (e l'alias
+# `/xtrader.csv?token=<CSV_ACCESS_TOKEN>`): il token viaggia nel query string, e
+# l'access-log formatta `full_path` — `args[2]` del record — che lo contiene.
+# Senza redazione, ogni poll di XTrader scriverebbe il token in chiaro nei log del
+# container, che e' esattamente cio' che «Non stampare token di feed nei log» e la
+# priorita' #9 vietano. Si REDIGE il valore, non si sopprime la riga: l'access-log
+# resta utile. Il parametro si chiama `token` sia sul feed per-utente sia sull'alias
+# legacy, quindi una sola regola copre entrambi.
+_RE_TOKEN_LOG = re.compile(r'(token=)[^&\s"\']+', re.IGNORECASE)
+
+
+def _redigi_token_log(valore):
+    """Sostituisce il valore di `token=` con `[REDACTED]` in una stringa.
+
+    Gli argomenti non-stringa del record (client_addr e' str, ma lo status e' int)
+    passano intatti: cosi' la funzione si applica a ogni elemento di `record.args`
+    senza doverne conoscere la posizione.
+    """
+    if not isinstance(valore, str):
+        return valore
+    return _RE_TOKEN_LOG.sub(r'\1[REDACTED]', valore)
+
+
+class RedazioneTokenAccessLog(logging.Filter):
+    """Toglie il valore di `token=` dalle righe dell'access-log di uvicorn.
+
+    uvicorn costruisce `record.args = (client_addr, method, full_path,
+    http_version, status_code)` e formatta `full_path`, che per il feed contiene
+    `?token=<segreto>`. Il filtro redige ogni argomento stringa (e il messaggio,
+    per sicurezza se un giorno il record cambiasse forma). Restituisce sempre
+    `True`: e' una redazione, non un filtro che scarta righe.
+    """
+
+    def filter(self, record):
+        if isinstance(record.args, tuple):
+            record.args = tuple(_redigi_token_log(a) for a in record.args)
+        record.msg = _redigi_token_log(record.msg)
+        return True
+
+
+def installa_redazione_access_log():
+    """Attacca la redazione al logger `uvicorn.access`, una volta sola.
+
+    Idempotente: chiamata due volte non impila due filtri. Va invocata all'avvio,
+    dopo che uvicorn ha configurato i suoi logger — vedi l'handler di `startup`.
+    """
+    logger = logging.getLogger('uvicorn.access')
+    if not any(isinstance(f, RedazioneTokenAccessLog) for f in logger.filters):
+        logger.addFilter(RedazioneTokenAccessLog())
+
+
 @app.on_event('startup')
 async def avvia_la_registrazione_del_webhook():
     """Fa partire la registrazione DIETRO l'avvio, e lascia completare l'avvio.
@@ -485,6 +537,12 @@ async def avvia_la_registrazione_del_webhook():
     finire — e in quel caso la registrazione non avverrebbe, in silenzio, che e'
     il genere di guasto che questa PR passa il tempo a chiudere.
     """
+    # Prima di servire qualunque richiesta: togli il token del feed dall'access-log
+    # di uvicorn (audit #81, A1). Qui, non a import del modulo, perche' uvicorn
+    # configura i suoi logger appena prima di far partire l'app — un filtro aggiunto
+    # troppo presto verrebbe scavalcato dalla sua configurazione.
+    installa_redazione_access_log()
+
     if admin_id_malformato():
         # Non solleva: un avvio che muore per una variabile scritta male sarebbe peggio del
         # difetto che segnala. Ma lo dice, perche' l'alternativa e' un proprietario che
