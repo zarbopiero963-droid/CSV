@@ -332,6 +332,15 @@ with sync_playwright() as pw:
     pg.evaluate("document.querySelectorAll('.modal .secret')"
                 ".forEach(e => e.textContent = 'xt_' + '\\u2022'.repeat(20)"
                 " + '  (redatto nello screenshot)')")
+    # La redazione deve aver MORSO: se un domani `.modal .secret` non combaciasse
+    # piu' (markup cambiato), l'evaluate sopra non oscurerebbe nulla e lo `shot`
+    # rifotograferebbe il token IN SILENZIO. Qui si rilegge il testo visibile
+    # della modale e si pretende che ne' il token ne' l'URL che lo contiene ci
+    # siano piu': cosi' una redazione che smette di funzionare fa ROSSO il test
+    # invece di lasciar passare il segreto. Suggerito da GPT-5.5 sulla PR #79.
+    visibile = pg.locator('.modal').inner_text()
+    assert token not in visibile and url_feed not in visibile, \
+        'la redazione non ha morso: il token e\' ancora visibile nella modale'
     shot(pg, 'token', 'Il token, una volta sola',
          'Il server ne conserva solo l\'hash: questa schermata e\' l\'unico '
          'momento in cui il token esiste in chiaro. Rigenerarlo revoca il '
