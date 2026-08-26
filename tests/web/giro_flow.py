@@ -323,10 +323,20 @@ with sync_playwright() as pw:
     token, url_feed = segreti[0].strip(), segreti[1].strip()
     assert token.startswith('xt_') and len(token) > 20, f'token strano: {token!r}'
     assert url_feed.endswith('?token=' + token) and '/feed/' in url_feed, url_feed
+    # Il token va REDATTO prima di fotografarlo: e' la regola del repo — «i token
+    # non compaiono mai nei log, nelle tabelle o negli screenshot» — e vale anche
+    # per un token di test da un DB effimero. Si legge (sopra) per le asserzioni,
+    # poi si oscura il valore nel DOM, cosi' lo screenshot mostra la modale «una
+    # volta sola» senza il segreto. `.secret` sono due: il token e l'URL che lo
+    # contiene. Segnalato da GPT-5.5 sulla PR #79.
+    pg.evaluate("document.querySelectorAll('.modal .secret')"
+                ".forEach(e => e.textContent = 'xt_' + '\\u2022'.repeat(20)"
+                " + '  (redatto nello screenshot)')")
     shot(pg, 'token', 'Il token, una volta sola',
          'Il server ne conserva solo l\'hash: questa schermata e\' l\'unico '
          'momento in cui il token esiste in chiaro. Rigenerarlo revoca il '
-         'precedente.')
+         'precedente. Nello screenshot il valore e\' redatto: un token, anche di '
+         'test, non va fotografato.')
 
     b.close()
 
