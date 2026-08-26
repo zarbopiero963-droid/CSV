@@ -972,8 +972,16 @@ def test_l_uid_e_unico_e_le_righe_esistenti_lo_ricevono_dalla_migrazione(
     assert all(uids), f'un parser e\' senza uid: {uids}'
     assert len(set(uids)) == len(uids), f'due parser con lo stesso uid: {uids}'
     assert primo['slug'] != secondo['slug']
-    # `uid` non esce dall'API: e' identita' interna, come `name` e `user_id`.
-    assert 'uid' not in primo and 'uid' not in secondo, primo
+    # Dalla #75 `uid` ESCE dall'API, ed e' un cambiamento deliberato: serve al
+    # client per dire quale riga intende modificare (vedi la PUT dalla scheda
+    # vecchia). Fino alla #74 era identita' interna e questo test asseriva il
+    # contrario — l'inversione e' il fatto, non un incidente.
+    # Non e' un segreto: e' un identificatore opaco delle PROPRIE righe, che la
+    # sessione gia' autorizza a leggere e modificare. Cio' che resta interno e'
+    # `name` (identita' globale fra tutti gli utenti) e `user_id`.
+    assert primo['uid'] and secondo['uid'], primo
+    assert primo['uid'] != secondo['uid'], 'due parser, due identita\''
+    assert 'name' not in primo and 'user_id' not in primo, primo
 
     # Idempotenza: una seconda migrazione non ribatte gli uid gia' assegnati.
     prima = dict(c.execute('SELECT name, uid FROM parsers').fetchall())
@@ -1040,49 +1048,154 @@ def test_NESSUN_percorso_di_creazione_lascia_un_parser_senza_uid(tmp_path, monke
     c.close()
 
 
-def test_la_finestra_CLIENT_resta_aperta_dopo_un_elimina_e_ricrea(servizio):
-    """Il limite di `uid`, misurato invece che dedotto (bloccante di GPT-5.6 Sol
-    al gate della PR #74) — e vincolato qui, cosi' la documentazione non puo'
-    divergere dal comportamento senza che qualcosa diventi rosso.
+def test_una_PUT_dalla_scheda_VECCHIA_non_sovrascrive_il_parser_ricreato(servizio):
+    """La finestra client->server, CHIUSA (#75) — ed e' il test della PR #74 che
+    la fotografava, ora invertito: era scritto apposta perche' diventasse rosso
+    il giorno in cui il limite fosse caduto, e quel giorno e' questo.
 
-    `uid` chiude la finestra DENTRO la richiesta: fra il `SELECT` con cui la
-    rotta legge il parser e la scrittura che ne segue. NON chiude quella
-    client->server: due schede aperte, l'utente elimina e ricrea il parser in
-    una, l'altra salva. Quella PUT arriva DOPO, quindi la rotta legge l'uid
-    NUOVO e scrive sul ricreato.
+    Lo scenario e' quello vero: due schede aperte. Nella prima l'utente elimina
+    il parser e lo ricrea (per ripartire da zero). Nella seconda, rimasta aperta
+    da prima, preme Salva.
 
-    La precondizione di `versione` (#51) non protegge qui, ed e' il punto meno
-    ovvio: il parser ricreato riparte da `versione = 1`, cioe' proprio il valore
-    che la scheda vecchia porta con se'. Il contatore non ha memoria degli slug
-    eliminati.
+    Misurato PRIMA della patch: `200`, con titolo e `config_json` del parser
+    ricreato sovrascritti da quelli della scheda vecchia — e `config_json` e'
+    cio' che genera le righe CSV verso XTrader, quindi il parser continuava a
+    girare con le regole che l'utente credeva di aver sostituito.
 
-    Chiuderla richiede che sia il CLIENT a nominare la riga — esporre `uid`
-    nella vista e accettarlo come precondizione — cioe' un cambio di contratto
-    API, deciso dal proprietario e non fatto in questa PR. Se un domani lo
-    sara', questo test diventa rosso: e' il segnale che il limite non c'e' piu'
-    e che la documentazione va aggiornata, non un fallimento.
+    La precondizione di `versione` (#51) non bastava: il ricreato riparte da
+    `versione = 1`, cioe' esattamente il valore che la scheda vecchia porta con
+    se'. Serviva l'identita' della RIGA, non il suo contatore: `uid`, che dalla
+    #73 esiste e dalla #75 il client rimanda indietro.
     """
     cookie, _ = _login_a(servizio)
     creato = json.loads(_crea(servizio, cookie, 'Due schede')[1])
-    slug, versione = creato['slug'], creato['versione']
+    slug, uid_letto, versione = creato['slug'], creato['uid'], creato['versione']
+    assert uid_letto, 'la vista del parser deve portare uid: e\' la precondizione'
 
     # L'utente, dall'ALTRA scheda, elimina e ricrea lo stesso parser.
     assert _chiama(servizio, 'DELETE', f'/api/me/parsers/{slug}', cookie=cookie)[0] == 200
     ricreato = json.loads(_crea(servizio, cookie, 'Due schede')[1])
     assert ricreato['slug'] == slug, 'lo slug torna libero e viene riusato'
+    assert ricreato['uid'] != uid_letto, 'ma l\'uid no: e\' una riga diversa'
     assert ricreato['versione'] == versione == 1, \
-        'il contatore riparte da 1: e\' il motivo per cui la #51 non copre questo caso'
+        'il contatore riparte da 1: e\' il motivo per cui la #51 non bastava'
 
-    # ...e adesso salva la PRIMA scheda, con la versione che aveva letto.
+    # ...e adesso salva la PRIMA scheda, con l'uid e la versione che aveva letto.
     stato, corpo, _ = _chiama(
         servizio, 'PUT', f'/api/me/parsers/{slug}', cookie=cookie,
         corpo={'titolo': 'Dalla scheda vecchia',
                'config': dict(CONFIG_OK, match={'type': 'contains', 'value': 'VECCHIO'}),
-               'active': True, 'versione': versione})
-    assert stato == 200, f'oggi passa: la finestra client->server e\' aperta ({corpo})'
+               'active': True, 'versione': versione, 'uid': uid_letto})
+    assert stato == 409, f'la scheda vecchia deve perdere in modo VISIBILE: {stato} {corpo}'
+    assert 'ricreato' in json.loads(corpo)['detail'], corpo
+
+    # Il parser ricreato e' intatto: nessuna sovrascrittura silenziosa.
     vivo = next(p for p in json.loads(
         _chiama(servizio, 'GET', '/api/me/parsers', cookie=cookie)[1])
         if p['slug'] == slug)
-    assert vivo['titolo'] == 'Dalla scheda vecchia', vivo
-    assert vivo['config']['match']['value'] == 'VECCHIO', \
-        'la config del parser ricreato viene sovrascritta: il limite e\' questo'
+    assert vivo['titolo'] == 'Due schede', vivo
+    assert vivo['config']['match']['value'] == 'SEGNALE', \
+        'la config del ricreato non deve essere toccata'
+
+    # E la DELETE dalla scheda vecchia non porta via il ricreato.
+    stato, corpo, _ = _chiama(servizio, 'DELETE',
+                              f'/api/me/parsers/{slug}?uid={uid_letto}', cookie=cookie)
+    assert stato == 409, f'anche la DELETE stantia deve perdere: {stato} {corpo}'
+    assert [p['slug'] for p in json.loads(
+        _chiama(servizio, 'GET', '/api/me/parsers', cookie=cookie)[1])] == [slug]
+
+    # Con l'uid FRESCO invece si elimina normalmente.
+    assert _chiama(servizio, 'DELETE',
+                   f'/api/me/parsers/{slug}?uid={ricreato["uid"]}',
+                   cookie=cookie)[0] == 200
+    assert json.loads(_chiama(servizio, 'GET', '/api/me/parsers', cookie=cookie)[1]) == []
+
+
+def test_un_chiamante_SENZA_uid_resta_incondizionato_come_prima(servizio):
+    """Le due precondizioni sono OPZIONALI, e questo lo inchioda.
+
+    `SAAS.md` e la docstring di `_controlla_identita` promettono che chi non
+    manda `uid` (chiamanti storici, script, chiamate a mano) continua a lavorare
+    come prima della #75: la richiesta e' INCONDIZIONATA. Una promessa scritta
+    e non vincolata da un test e' esattamente il tipo di affermazione che in
+    questo repository e' gia' sopravvissuta mesi essendo falsa.
+
+    Chiesto da GPT-5.5 al giro di review della PR #76 («test su update legacy
+    senza uid: deve mantenere il comportamento previsto»), ed era davvero
+    scoperto: il resto della suite passa dal client, che l'uid lo manda.
+
+    Nota su cosa il test asserisce: senza `uid` la PUT stantia **sovrascrive**
+    il parser ricreato. Non e' una svista, e' il comportamento legacy — chi non
+    nomina la riga non puo' essere protetto dal server, che non ha modo di
+    sapere quale riga il chiamante intendesse. E' il motivo per cui la #75 ha
+    dovuto cambiare il CLIENT e non solo il server.
+    """
+    cookie, _ = _login_a(servizio)
+    creato = json.loads(_crea(servizio, cookie, 'Senza uid')[1])
+    slug = creato['slug']
+
+    # Stesso scenario del test qui sopra: elimina + ricrea dall'altra scheda.
+    assert _chiama(servizio, 'DELETE', f'/api/me/parsers/{slug}', cookie=cookie)[0] == 200
+    ricreato = json.loads(_crea(servizio, cookie, 'Senza uid')[1])
+    assert ricreato['slug'] == slug and ricreato['uid'] != creato['uid']
+
+    # Il chiamante storico non manda ne' uid ne' versione: passa, come prima.
+    stato, corpo, _ = _chiama(
+        servizio, 'PUT', f'/api/me/parsers/{slug}', cookie=cookie,
+        corpo={'titolo': 'Chiamante storico',
+               'config': dict(CONFIG_OK, match={'type': 'contains', 'value': 'LEGACY'}),
+               'active': True})
+    assert stato == 200, f'senza precondizioni la PUT deve restare incondizionata: {corpo}'
+
+    vivo = next(p for p in json.loads(
+        _chiama(servizio, 'GET', '/api/me/parsers', cookie=cookie)[1])
+        if p['slug'] == slug)
+    assert vivo['titolo'] == 'Chiamante storico', vivo
+
+    # E la DELETE senza ?uid= elimina, come prima della #75.
+    assert _chiama(servizio, 'DELETE', f'/api/me/parsers/{slug}', cookie=cookie)[0] == 200
+    assert json.loads(_chiama(servizio, 'GET', '/api/me/parsers', cookie=cookie)[1]) == []
+
+
+def test_l_uid_di_un_ALTRO_utente_non_apre_niente(servizio):
+    """`uid` esce nell'API dalla #75: questo test copre la superficie che apre.
+
+    Prima della #75 l'identita' della riga non usciva mai, quindi non poteva
+    essere rimandata indietro. Adesso e' un valore che il client conosce e
+    manda — e la domanda che ne segue e' se conoscere l'`uid` di un altro
+    utente serva a qualcosa. Non deve: `user_id` viene dalla SESSIONE, e la
+    lettura di proprieta' delle due rotte e' `WHERE user_id=? AND slug=?`,
+    quindi la sessione di A trova solo la riga di A. L'`uid` di B non la
+    combacia, e il 409 ferma la richiesta prima di ogni scrittura.
+
+    Chiesto da GPT-5.5 al giro di review della PR #76 («controlli equivalenti
+    che confermino che un uid errato non possa colpire parser di altri
+    utenti»). Il test misura ENTRAMBI i lati: il parser di A non cambia, e
+    soprattutto quello di B — omonimo, stesso slug — resta intatto.
+    """
+    cookie_a, _ = _login_a(servizio)
+    cookie_b, _ = _login_b(servizio)
+
+    a = json.loads(_crea(servizio, cookie_a, 'Conteso')[1])
+    b = json.loads(_crea(servizio, cookie_b, 'Conteso')[1])
+    assert a['slug'] == b['slug'], 'lo slug per-utente e- indipendente: serve omonimia'
+    assert a['uid'] != b['uid']
+
+    # A prova a salvare nominando la riga di B.
+    stato, corpo, _ = _chiama(
+        servizio, 'PUT', f'/api/me/parsers/{a["slug"]}', cookie=cookie_a,
+        corpo={'titolo': 'Rubato', 'config': CONFIG_OK, 'active': True,
+               'uid': b['uid']})
+    assert stato == 409, f'l\'uid altrui non deve identificare niente: {stato} {corpo}'
+
+    # ...e a eliminarla.
+    stato, corpo, _ = _chiama(
+        servizio, 'DELETE', f'/api/me/parsers/{a["slug"]}?uid={b["uid"]}',
+        cookie=cookie_a)
+    assert stato == 409, f'nemmeno sulla DELETE: {stato} {corpo}'
+
+    # Nessuno dei due parser e' stato toccato: ne' quello di A, ne' quello di B.
+    di_a = json.loads(_chiama(servizio, 'GET', '/api/me/parsers', cookie=cookie_a)[1])
+    di_b = json.loads(_chiama(servizio, 'GET', '/api/me/parsers', cookie=cookie_b)[1])
+    assert [(p['titolo'], p['uid']) for p in di_a] == [('Conteso', a['uid'])], di_a
+    assert [(p['titolo'], p['uid']) for p in di_b] == [('Conteso', b['uid'])], di_b

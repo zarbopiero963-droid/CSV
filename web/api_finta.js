@@ -125,12 +125,24 @@ export function getParser(slug) {
   return stato.dati.parsers.find(p => p.slug === slug) || null;
 }
 
+// L'`uid` della demo: un valore opaco e distinto per riga, come quello che il
+// server conia con `randomblob(16)`. Non ha requisiti crittografici — serve
+// solo a non ripetersi fra i parser di questo browser.
+function uidDemo() {
+  return 'demo-' + Math.random().toString(16).slice(2) + Date.now().toString(16);
+}
+
 export async function createParser(titolo) {
   const pulito = String(titolo || '').trim();
   if (!pulito) throw new Error('titolo mancante');
+  // `uid` come sul server (#75): identita' della riga, distinta dallo slug che
+  // si libera con l'eliminazione. Qui non serve a chiudere nessuna corsa — la
+  // demo e' un solo browser su localStorage — ma la FORMA del parser deve
+  // restare identica a quella di `api.js`, ed e' cio' che il test di parita'
+  // verifica.
   const parser = { id: stato.dati.parsers.length + 1, slug: slugDa(pulito),
                    titolo: pulito, active: true, config: {}, ordine: 0,
-                   versione: 1 };
+                   versione: 1, uid: uidDemo() };
   stato.dati.parsers.push(parser);
   salva();
   return parser;

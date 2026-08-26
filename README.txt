@@ -167,12 +167,20 @@ PUT    /api/me/parsers/SLUG             aggiorna il proprio (lo slug non cambia 
                                         "versione" resta incondizionata; la versione del
                                         parser avanza a ogni modifica e sta nella vista.
                                         PUT e DELETE identificano la riga con "uid" (#73),
-                                        un id interno mai riusato: se il parser e' stato
-                                        eliminato e RICREATO con lo stesso slug mentre la
-                                        richiesta era in volo, la risposta e' 404 e il
-                                        parser nuovo non viene toccato. "uid" non compare
-                                        nell'API: e' identita' interna come user_id.
-DELETE /api/me/parsers/SLUG             elimina il proprio
+                                        un id mai riusato: se il parser e' stato eliminato
+                                        e RICREATO con lo stesso slug, il parser nuovo non
+                                        viene toccato.
+                                        "uid" sta nella vista del parser e il client lo
+                                        rimanda come SECONDA precondizione (#75): nel body
+                                        della PUT, in ?uid= sulla DELETE. Se lo slug ora
+                                        e' di un'altra riga -> 409 "ricarica il parser:
+                                        e' stato eliminato e ricreato altrove". Serve
+                                        perche' il parser ricreato riparte da versione 1,
+                                        cioe' proprio il valore che la scheda rimasta
+                                        aperta ha in cache: il contatore da solo non
+                                        distingue le due righe. Senza "uid" la richiesta
+                                        resta incondizionata, come senza "versione".
+DELETE /api/me/parsers/SLUG[?uid=UID]   elimina il proprio (uid = precondizione, #75)
 POST   /api/me/parsers/SLUG/test        body {"message":"..."} -> {matched,missing,scarti,complete,event?,csv?}
 La config viene validata alla creazione (struttura + dry-run): una config storta da'
 422 col motivo. La prova (/test) e' a secco: non scrive nel feed di nessuno, e dice

@@ -44,8 +44,18 @@ function fallita(e) {
 async function conflittoOFallita(e, slug) {
   if (!e || e.status !== 409 || !slug) { fallita(e); return false; }
   try { await api.ricaricaParser(slug); } catch { /* resta il 409 */ }
-  toast('Modificato altrove: le tue modifiche sono ancora qui — '
-    + 'ricontrolla e salva di nuovo per sovrascrivere.');
+  // DUE conflitti diversi, e all'utente vanno detti diversi (#75). «Modificato
+  // altrove» (#51) significa che la SUA riga e' cambiata: risalvare la
+  // sovrascrive, ed e' una scelta legittima. «Eliminato e ricreato» significa
+  // che quel nome appartiene ormai a un ALTRO parser: risalvare cancellerebbe
+  // il lavoro appena fatto nell'altra scheda, quindi il testo non invita a
+  // farlo — invita a guardare cosa c'e' adesso.
+  const ricreato = /ricreato/.test(String(e.message || ''));
+  toast(ricreato
+    ? 'Eliminato e ricreato altrove: questo nome ora è di un altro parser. '
+      + 'Le tue modifiche sono ancora qui — controlla quello nuovo prima di salvare.'
+    : 'Modificato altrove: le tue modifiche sono ancora qui — '
+      + 'ricontrolla e salva di nuovo per sovrascrivere.');
   return true;
 }
 
@@ -1640,7 +1650,21 @@ const actions = {
         <button class="danger" data-act="del-parser-ok" data-id="${esc(p.slug)}">Elimina</button></div>`);
   },
   async 'del-parser-ok'(el) {
-    try { await api.deleteParser(el.dataset.id); } catch (e) { fallita(e); return; }
+    const slug = el.dataset.id;
+    // Dalla #75 anche la DELETE porta la precondizione di identita', quindi
+    // anche lei puo' ricevere il 409 «eliminato e ricreato altrove» — e va
+    // detto con lo STESSO toast della PUT, non col `detail` grezzo del server,
+    // che `fallita` mostrerebbe tale e quale. La modale poi va chiusa: si
+    // riferisce a una riga che non esiste piu', e il riallineamento di
+    // `conflittoOFallita` ha gia' portato in cache il parser che c'e' adesso.
+    // Segnalato da CodeRabbit sulla PR #76: avevo aggiunto `?uid=` alla
+    // chiamata senza dare al suo conflitto una voce.
+    try { await api.deleteParser(slug); }
+    catch (e) {
+      if (await conflittoOFallita(e, slug)) closeModal();
+      render();
+      return;
+    }
     closeModal(); wiz = null; go('#/parsers'); render();
   },
 

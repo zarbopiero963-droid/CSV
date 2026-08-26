@@ -223,6 +223,11 @@ export async function updateParser(slug, patch) {
     config: patch.config ?? attuale.config,
     active: patch.active ?? attuale.active,
     versione: attuale.versione,
+    // L'identita' della riga letta (#75): `versione` da sola non basta, perche'
+    // un parser eliminato e ricreato con lo stesso slug riparte da 1 — cioe'
+    // dal valore che questa scheda ha in cache. Con `uid` il server risponde
+    // 409 «eliminato e ricreato» invece di lasciar sovrascrivere il nuovo.
+    uid: attuale.uid,
   });
   const i = stato.parsers.findIndex(p => p.slug === slug);
   if (i >= 0) stato.parsers[i] = nuovo;
@@ -239,8 +244,14 @@ export async function ricaricaParser(slug) {
   return getParser(slug);
 }
 
+// La DELETE porta la stessa precondizione di identita' della PUT (#75), ma
+// nella QUERY: una DELETE non ha corpo. Senza, la scheda rimasta aperta
+// porterebbe via il parser che l'utente ha appena ricreato con lo stesso nome.
 export async function deleteParser(slug) {
-  await http('DELETE', `/api/me/parsers/${encodeURIComponent(slug)}`);
+  const attuale = getParser(slug);
+  const percorso = `/api/me/parsers/${encodeURIComponent(slug)}`;
+  await http('DELETE', attuale?.uid
+    ? `${percorso}?uid=${encodeURIComponent(attuale.uid)}` : percorso);
   stato.parsers = stato.parsers.filter(p => p.slug !== slug);
 }
 

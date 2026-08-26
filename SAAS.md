@@ -73,7 +73,8 @@ parsers            ← tabella PREESISTENTE, estesa con ALTER additivo
                            resta l'identità interna, unica fra TUTTI gli utenti).
                            `versione` è la precondizione della PUT (#51).
                            `uid` è l'identità non riusabile di PUT e DELETE
-                           (#73), e **non** viene dal `rowid`: proprio perché
+                           (#73) e la loro seconda precondizione dal client
+                           (#75), e **non** viene dal `rowid`: proprio perché
                            sqlite il `rowid` lo RIUSA, e quindi `id` non
                            identifica una riga nel tempo. È un valore casuale a
                            128 bit, ed è nullable perché `ALTER ADD COLUMN NOT
@@ -1097,6 +1098,42 @@ riallinea la cache e il toast dice verbatim «Modificato altrove: le tue
 modifiche sono ancora qui — ricontrolla e salva di nuovo per sovrascrivere» —
 il secondo salvataggio è una sovrascrittura deliberata, non un incidente.
 
+**I due conflitti sono due toast diversi, e devono restarlo (#75).** Il rimedio
+è lo stesso — ricaricare — ma la cosa da fare dopo no, e il testo lo dice:
+
+| conflitto | toast, verbatim |
+|---|---|
+| `versione` (#51): la **stessa** riga è cambiata | «Modificato altrove: le tue modifiche sono ancora qui — ricontrolla e salva di nuovo per sovrascrivere.» |
+| `uid` (#75): quel nome è ormai di un'**altra** riga | «Eliminato e ricreato altrove: questo nome ora è di un altro parser. Le tue modifiche sono ancora qui — controlla quello nuovo prima di salvare.» |
+
+La differenza non è di tono: nel primo caso risalvare sovrascrive una versione
+che l'utente ha già visto, ed è una scelta legittima; nel secondo cancellerebbe
+il lavoro appena fatto nell'altra scheda, quindi il testo **non** invita a
+farlo. `app.js` distingue i due sul `detail` del 409, e il flusso in browser
+(`tests/web/conflitto_flow.py`) verifica che il toast giusto compaia nel caso
+giusto — accoppiamento fra codice e copy che è **inchiodato**, non fragile:
+cambiare il testo del 409 in `main.py` rende rosso quel flusso, misurato per
+mutazione sulla PR #76.
+
+**Vale per il salvataggio e per l'eliminazione.** Anche la conferma «Elimina»
+può ricevere il conflitto di identità — la #75 ha dato la precondizione a
+entrambe le rotte — e mostra lo **stesso** toast, non il `detail` grezzo del
+server: dopo di esso la modale di conferma si chiude, perché si riferisce a una
+riga che non esiste più, e la vista si ridisegna sul parser che c'è adesso. Fino
+alla PR #76 quel percorso passava dal gestore d'errore generico, quindi la
+DELETE stantia stampava il testo interno del server e non riallineava niente:
+segnalato da CodeRabbit, e ora vincolato dallo scenario in browser.
+
+**Cosa il toast NON impedisce, e va detto.** Dopo il 409 la cache viene
+riallineata (senza, ogni salvataggio successivo fallirebbe per sempre — il bug
+del toggle, CodeRabbit PR #71), quindi un **secondo** click su Salva porta
+l'`uid` nuovo e sovrascrive il parser ricreato. Il salvataggio silenzioso è
+chiuso — c'è il 409 e c'è l'avviso — ma la sovrascrittura resta a un click, e
+chiuderla vuole una **conferma esplicita**, cioè UI nuova. Segnalato da Claude
+Fable 5 sulla PR #76, fotografato dal flusso in browser (che diventerà rosso il
+giorno in cui la conferma arriva) e registrato come issue per la decisione del
+proprietario.
+
 **L'identità della riga: `uid` (#73).** `versione` risponde alla domanda «è
 cambiato mentre lo modificavo?». Ne esiste una seconda, diversa: «è ancora lo
 **stesso** parser?». Lo `slug` torna libero appena il parser viene eliminato, e
@@ -1115,30 +1152,45 @@ prima. Le due guardie **convivono e non si sostituiscono**: `versione` non
 copre questo caso, perché parte da 1 e il parser ricreato ha 1, cioè proprio il
 valore che la richiesta stantia porta con sé.
 
-**Quale finestra chiude, e quale no.** La distinzione conta, ed è stata scritta
-male al primo giro (bloccante di GPT-5.6 Sol al gate della PR #74, verificato
-via HTTP prima di accoglierlo):
+**Le due finestre, e come si sono chiuse in due passi.** La distinzione era
+scritta male al primo giro (bloccante di GPT-5.6 Sol al gate della PR #74,
+verificato via HTTP prima di accoglierlo), e il secondo passo è la #75:
 
-- **chiusa** — la finestra *dentro* la richiesta: fra il `SELECT` con cui la
-  rotta legge il parser e la scrittura che ne segue. È lì che il write-lock e la
-  concorrenza del threadpool mettono un elimina+ricrea, ed è lì che `uid` fa la
-  differenza;
-- **aperta** — la finestra *client→server*: due schede aperte, l'utente elimina
-  e ricrea il parser in una, e l'altra salva. Quella richiesta arriva **dopo**,
-  quindi la rotta legge l'`uid` nuovo e scrive sul parser ricreato. Misurato via
-  HTTP: `PUT` con `versione: 1` → **200**, titolo e `config_json` del ricreato
-  sovrascritti con quelli della scheda vecchia. Il #51 non protegge qui perché
-  il ricreato riparte da `versione = 1`.
+- **dentro la richiesta** — fra il `SELECT` con cui la rotta legge il parser e
+  la scrittura che ne segue. È lì che la concorrenza del threadpool mette un
+  elimina+ricrea. **Chiusa dalla #73/PR #74**: gli statement passano da `uid`.
+- **client→server** — due schede aperte, l'utente elimina e ricrea il parser in
+  una, l'altra salva. Quella richiesta arriva **dopo**, quindi la rotta legge
+  l'`uid` nuovo. Misurato allora: `PUT` con `versione: 1` → **200**, titolo e
+  `config_json` del ricreato sovrascritti con quelli della scheda vecchia.
+  **Chiusa dalla #75**: `uid` esce nella vista del parser e il client lo rimanda
+  come **precondizione** — nel corpo della `PUT`, in `?uid=` sulla `DELETE`
+  (che un corpo non ce l'ha). Se lo slug identifica ormai un'altra riga il
+  server risponde **409** `ricarica il parser: e' stato eliminato e ricreato
+  altrove`, e il parser nuovo non viene toccato.
 
-Chiuderla richiede che sia il **client** a dire quale riga intende modificare —
-cioè esporre `uid` nella vista del parser e accettarlo come precondizione, che è
-un cambio di contratto API e del client web. Non è stato fatto in questa PR:
-resta registrato, con la misura, per la decisione del proprietario.
+**Perché servivano due precondizioni e non una.** Rispondono a domande diverse:
+`versione` a «è cambiato mentre lo modificavo?», `uid` a «è ancora lo **stesso**
+parser?». Un elimina+ricrea produce una riga che riparte da `versione = 1` —
+cioè dal valore che la scheda rimasta indietro ha in cache — quindi il contatore
+da solo non li distingue. Entrambe restano **opzionali**: senza, le rotte sono
+incondizionate come per i chiamanti storici.
 
-`uid` è identità **interna**: non compare nella vista del parser né nell'API,
-come `name` e `user_id`. La migrazione lo assegna alle righe già esistenti con
-un valore distinto per riga, una volta sola (`WHERE uid IS NULL`): rigenerarlo a
-ogni avvio renderebbe stantio a ogni deploy ogni riferimento in volo.
+`uid` è quindi passato da identità *interna* (#73) a campo della vista (#75).
+Non è un segreto: è un identificatore opaco delle **proprie** righe, che la
+sessione già autorizza a leggere e modificare. Restano interni `name` (identità
+globale fra tutti gli utenti) e `user_id`.
+
+La migrazione lo assegna alle righe già esistenti con un valore distinto per
+riga, una volta sola (`WHERE uid IS NULL`): rigenerarlo a ogni avvio renderebbe
+stantio a ogni deploy ogni riferimento in volo.
+
+*Storia, perché non si ripeta:* fino alla #75 qui sotto restava la frase della
+#73 — «`uid` è identità **interna**: non compare nella vista del parser né
+nell'API» — accanto al paragrafo che documentava il contrario. Due affermazioni
+opposte sullo stesso campo, a cinque righe di distanza: la documentazione del
+cambiamento aggiunta senza togliere quella del comportamento precedente, che è
+la stessa forma dell'errore del BOM. Segnalata da Claude Fable 5 sulla PR #76.
 
 La scelta è del proprietario (18/08): `AUTOINCREMENT` avrebbe chiuso lo stesso
 caso, ma non si aggiunge con un `ALTER` — andrebbe ricreata la tabella che porta

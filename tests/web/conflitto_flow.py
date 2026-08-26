@@ -182,6 +182,142 @@ with sync_playwright() as pw:
     pg.wait_for_selector('.pill.off')
     shot(pg, '03-toggle-dopo-conflitto')
 
+    # ---------------- le DUE SCHEDE: eliminato e ricreato mentre ero aperto (#75)
+    # Il caso che la #74 aveva misurato e lasciato aperto: la scheda rimasta
+    # indietro non deve sovrascrivere il parser NUOVO che porta lo stesso nome.
+    # Qui la scheda vecchia e' il browser (cache con l'uid vecchio), e «l'altra
+    # scheda» e' la coppia DELETE+POST via fetch, indistinguibile al server.
+    pg.reload()
+    pg.wait_for_selector('#test-msg')
+    # Il ricreato porta un valore DIVERSO da quello della scheda rimasta aperta
+    # (che dopo la reload ha in draft `CONFIG_BASE`, cioe' 'P.Bet.'). Non e' un
+    # dettaglio: con lo stesso valore su entrambi, il server direbbe 'P.Bet.'
+    # sia che l'overwrite avvenga sia che no, e l'asserzione qui sotto
+    # passerebbe senza dimostrare niente.
+    config_ricreato = dict(CONFIG_BASE)
+    config_ricreato['match'] = {'type': 'contains', 'value': 'RICREATO'}
+    esito = pg.evaluate(
+        """async ([slug, config]) => {
+             const d = await fetch(`/api/me/parsers/${slug}`, {method: 'DELETE'});
+             const c = await fetch('/api/me/parsers', {
+               method: 'POST',
+               headers: {'Content-Type': 'application/json'},
+               body: JSON.stringify({titolo: 'Conteso', config, active: true})});
+             const nuovo = await c.json();
+             return [d.status, c.status, nuovo.slug, nuovo.uid];
+           }""", [slug, config_ricreato])
+    assert esito[0] == 200 and esito[1] == 200, esito
+    assert esito[2] == slug, f'il ricreato deve riprendere lo slug: {esito}'
+
+    # La scheda vecchia salva: deve perdere, e con il motivo GIUSTO.
+    pg.click('[data-act="wiz-save"]')
+    pg.wait_for_selector('.toast')
+    toast = pg.inner_text('.toast')
+    assert 'Eliminato e ricreato altrove' in toast, \
+        f'il conflitto di IDENTITA- va detto diverso da quello di versione: {toast!r}'
+    salvata = config_sul_server(pg, slug)
+    assert salvata['match']['value'] == 'RICREATO', \
+        f'il parser ricreato e- stato sovrascritto: {json.dumps(salvata)[:120]}'
+    shot(pg, '04-eliminato-e-ricreato')
+
+    # ---------------- il RESIDUO, fotografato: il SECONDO salvataggio passa
+    # `conflittoOFallita` riallinea la cache (serve: senza, ogni salvataggio
+    # successivo fallirebbe per sempre — il bug del toggle, CodeRabbit PR #71),
+    # quindi il click dopo il 409 porta l'uid NUOVO e sovrascrive il parser
+    # ricreato. Il primo salvataggio non e' piu' silenzioso — c'e' il 409 e il
+    # toast che dice di guardare quello nuovo — ma il secondo e' a un click.
+    # Segnalato da Claude Fable 5 sulla PR #76 e registrato come issue: chiuderlo
+    # vuole una conferma esplicita, cioe' UI nuova, non un filtro.
+    # Questo test NON approva il comportamento: lo inchioda, come quello della
+    # #74 che fotografava la finestra client. Il giorno in cui la conferma
+    # arriva, questo diventa rosso — ed e' esattamente il punto.
+    pg.click('[data-act="wiz-save"]')
+    pg.wait_for_selector('.toast:has-text("Configurazione salvata")')
+    salvata = config_sul_server(pg, slug)
+    assert salvata['match']['value'] == 'P.Bet.', \
+        ('residuo cambiato: il secondo salvataggio NON sovrascrive piu-. '
+         'Se e- arrivata la conferma esplicita, invertire questo test: '
+         f'{json.dumps(salvata)[:120]}')
+    shot(pg, '05-residuo-secondo-salvataggio')
+
+    # ---------------- la DELETE stantia, vista dalla scheda vecchia (#75)
+    # La PUT aveva la sua voce, la DELETE no: `del-parser-ok` gestiva l'errore
+    # con `fallita`, che stampa il `detail` grezzo del server e non riallinea
+    # niente. Segnalato da CodeRabbit sulla PR #76 — avevo aggiunto `?uid=`
+    # alla chiamata senza dare al suo conflitto un modo di essere capito.
+    # Il pulsante Elimina sta nella scheda del parser, dove il flusso gia' e'
+    # (il wizard e' una tab di quella vista): non serve navigare, e navigare
+    # alla LISTA lo porterebbe via — li' il pulsante non c'e'.
+    pg.wait_for_selector('[data-act="del-parser"]')
+    esito = pg.evaluate(
+        """async ([slug, config]) => {
+             const d = await fetch(`/api/me/parsers/${slug}`, {method: 'DELETE'});
+             const c = await fetch('/api/me/parsers', {
+               method: 'POST',
+               headers: {'Content-Type': 'application/json'},
+               body: JSON.stringify({titolo: 'Conteso', config, active: true})});
+             return [d.status, c.status, (await c.json()).slug];
+           }""", [slug, config_ricreato])
+    assert esito[0] == 200 and esito[1] == 200 and esito[2] == slug, esito
+
+    # La scheda vecchia conferma l'eliminazione di un parser che non c'e' piu'.
+    # Prima si aspetta che il toast del passo precedente sparisca da solo (dura
+    # 2,6 s): senza, `wait_for_selector('.toast')` qui sotto trova QUELLO, e
+    # l'asserzione leggerebbe il messaggio sbagliato invece del nuovo.
+    pg.wait_for_selector('.toast', state='detached')
+    pg.click('[data-act="del-parser"]')
+    pg.click('[data-act="del-parser-ok"]')
+    pg.wait_for_selector('.toast')
+    toast = pg.inner_text('.toast')
+    assert 'Eliminato e ricreato altrove' in toast, \
+        f'anche la DELETE deve dire il conflitto con parole sue, non col detail: {toast!r}'
+    # E il parser ricreato e' ancora li': la conferma non l'ha portato via.
+    assert config_sul_server(pg, slug)['match']['value'] == 'RICREATO', \
+        'la DELETE stantia ha eliminato il parser RICREATO'
+    # La modale si e' chiusa: si riferiva a una riga che non esiste piu'.
+    assert pg.query_selector('.veil') is None, \
+        'la modale di conferma e- rimasta aperta su un parser che non c-e- piu-'
+    # E l'app resta VIVA e coerente dopo il conflitto: `render()` gira su una
+    # cache in cui quello slug ha cambiato identita', ed e' il punto dove un
+    # riallineamento fatto male si vedrebbe come schermata rotta. La scheda del
+    # parser si ridisegna, con i suoi comandi al loro posto. (Chiesto da GPT-5.5:
+    # «assertare lo stato UI post-conflitto». Il wizard resta agganciato allo
+    # slug ed e' voluto — lo slug esiste ancora, e il draft dell'utente si
+    # conserva come nel conflitto della PUT: buttarlo via contraddirebbe il
+    # toast che dice «le tue modifiche sono ancora qui».)
+    assert pg.query_selector('[data-act="del-parser"]') is not None, \
+        'dopo il conflitto la scheda del parser non si e- ridisegnata'
+    assert pg.query_selector('#test-msg') is not None, \
+        'il wizard e- sparito: il draft dell-utente non deve essere buttato via'
+    shot(pg, '06-delete-stantia')
+
+    # E la prova che il riallineamento ha funzionato DAVVERO, non solo che la
+    # pagina e' sopravvissuta: la stessa conferma, rifatta subito, adesso deve
+    # RIUSCIRE — perche' la cache porta ormai l'uid del parser ricreato. Se
+    # `conflittoOFallita` non avesse riallineato, questa seconda DELETE
+    # ripeterebbe il 409 all'infinito: e' il bug del toggle della PR #71, nella
+    # sua forma per la DELETE. (GPT-5.5 sulla PR #76: le asserzioni di sola
+    # presenza dicono che la UI non e' rotta, non che lo stato sia giusto.)
+    elenco = ("async () => (await (await fetch('/api/me/parsers')).json())"
+              ".map(p => p.slug).sort()")
+    prima = pg.evaluate(elenco)
+    pg.wait_for_selector('.toast', state='detached')
+    pg.click('[data-act="del-parser"]')
+    pg.click('[data-act="del-parser-ok"]')
+    pg.wait_for_selector('[data-act="new-parser"]')      # tornati alla lista
+    rimasti = pg.evaluate(elenco)
+    # Sparisce lo slug conteso ed ESATTAMENTE quello: l'utente ha anche il
+    # parser legacy del seme, che non c'entra e deve restare. Il confronto e'
+    # con la lista di prima meno lo slug, non con la lista vuota: la prima
+    # stesura asseriva il vuoto ed e' diventata rossa proprio per il legacy
+    # (assert sbagliato, non codice sbagliato), e un `slug not in rimasti` da
+    # solo passerebbe anche se la DELETE portasse via tutto il resto
+    # (rilievo di GPT-5.5 sulla PR #76 — il commento diceva «deve restare» ma
+    # nessuna asserzione lo pretendeva).
+    assert rimasti == [s for s in prima if s != slug], \
+        f'la DELETE ha cambiato piu- dello slug conteso: prima {prima}, dopo {rimasti}'
+    shot(pg, '07-delete-dopo-riallineamento')
+
     b.close()
 
 if errors:
