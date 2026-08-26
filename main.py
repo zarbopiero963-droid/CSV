@@ -515,6 +515,16 @@ def installa_redazione_access_log():
         logger.addFilter(RedazioneTokenAccessLog())
 
 
+# Installata QUI, a import del modulo, oltre che nello startup. La ragione la ha vista
+# Claude Fable 5 sulla PR #82: legare la redazione al solo handler di `startup` la rende
+# saltabile — se un giorno un handler registrato prima sollevasse, o l'app venisse montata
+# senza eseguire il lifespan, uvicorn potrebbe loggare una richiesta col token prima che il
+# filtro esista. All'import il filtro c'e' comunque. E' sicuro: verificato che sopravvive al
+# `dictConfig` di uvicorn (il suo `LOGGING_CONFIG` non azzera i filtri di `uvicorn.access`),
+# e la chiamata e' idempotente con quella nello startup — vedi test_redazione_log.py.
+installa_redazione_access_log()
+
+
 @app.on_event('startup')
 async def avvia_la_registrazione_del_webhook():
     """Fa partire la registrazione DIETRO l'avvio, e lascia completare l'avvio.

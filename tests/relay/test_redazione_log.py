@@ -82,6 +82,21 @@ def test_l_access_log_di_uvicorn_non_espone_il_token_del_feed():
         logger.filters[:] = filtri_prima
 
 
+def test_l_import_di_main_installa_gia_la_redazione():
+    """La redazione e' attiva gia' a IMPORT del modulo, non solo allo startup.
+
+    Segnalato da Claude Fable 5 sulla PR #82: un filtro legato al solo handler di
+    startup sarebbe saltabile se un handler registrato prima sollevasse, o se l'app
+    venisse montata senza eseguire il lifespan — uvicorn potrebbe loggare una
+    richiesta col token prima che il filtro esista. `main.py` chiama
+    `installa_redazione_access_log()` anche a livello di modulo: importare `main`
+    (gia' fatto in cima a questo file) deve bastare.
+    """
+    nostri = [f for f in logging.getLogger('uvicorn.access').filters
+              if type(f).__name__ == 'RedazioneTokenAccessLog']
+    assert nostri, 'importare main deve gia\' aver installato la redazione, senza startup'
+
+
 def test_installa_redazione_e_idempotente():
     """Chiamarla due volte non impila due filtri sullo stesso logger."""
     logger = logging.getLogger('uvicorn.access')
