@@ -329,18 +329,25 @@ with sync_playwright() as pw:
     # poi si oscura il valore nel DOM, cosi' lo screenshot mostra la modale «una
     # volta sola» senza il segreto. `.secret` sono due: il token e l'URL che lo
     # contiene. Segnalato da GPT-5.5 sulla PR #79.
+    # Il token vive in DUE posti nella modale (`copyRow` in app.js): il testo del
+    # `.secret` (visibile, cio' che lo screenshot cattura) E il `data-val` del
+    # bottone «Copia» (attributo, invisibile nei pixel ma presente nel DOM). Si
+    # redigono ENTRAMBI — il segnalatore GPT-5.5 aveva ragione: oscurare solo il
+    # testo lasciava il token nell'attributo.
+    redatto = "xt_' + '\\u2022'.repeat(20) + '  (redatto nello screenshot)"
     pg.evaluate("document.querySelectorAll('.modal .secret')"
-                ".forEach(e => e.textContent = 'xt_' + '\\u2022'.repeat(20)"
-                " + '  (redatto nello screenshot)')")
-    # La redazione deve aver MORSO: se un domani `.modal .secret` non combaciasse
-    # piu' (markup cambiato), l'evaluate sopra non oscurerebbe nulla e lo `shot`
-    # rifotograferebbe il token IN SILENZIO. Qui si rilegge il testo visibile
-    # della modale e si pretende che ne' il token ne' l'URL che lo contiene ci
-    # siano piu': cosi' una redazione che smette di funzionare fa ROSSO il test
-    # invece di lasciar passare il segreto. Suggerito da GPT-5.5 sulla PR #79.
-    visibile = pg.locator('.modal').inner_text()
-    assert token not in visibile and url_feed not in visibile, \
-        'la redazione non ha morso: il token e\' ancora visibile nella modale'
+                f".forEach(e => e.textContent = '{redatto}');"
+                "document.querySelectorAll('.modal [data-val]')"
+                f".forEach(e => e.setAttribute('data-val', '{redatto}'))")
+    # La redazione deve aver MORSO: si controlla l'`outerHTML` INTERO della
+    # modale — testo E attributi — e si pretende che ne' il token ne' l'URL ci
+    # siano piu'. `inner_text()` da solo non vedrebbe il `data-val`; `outerHTML`
+    # copre ogni via con cui un segreto potrebbe restare nel DOM. Se un domani il
+    # markup cambia e la redazione non morde, il test va ROSSO invece di lasciar
+    # passare il segreto. Suggerito da GPT-5.5 sulla PR #79 (due giri).
+    html_modale = pg.evaluate("document.querySelector('.modal').outerHTML")
+    assert token not in html_modale and url_feed not in html_modale, \
+        'la redazione non ha morso: il token e\' ancora nel DOM della modale'
     shot(pg, 'token', 'Il token, una volta sola',
          'Il server ne conserva solo l\'hash: questa schermata e\' l\'unico '
          'momento in cui il token esiste in chiaro. Rigenerarlo revoca il '
