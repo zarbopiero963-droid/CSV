@@ -97,6 +97,33 @@ def test_l_import_di_main_installa_gia_la_redazione():
     assert nostri, 'importare main deve gia\' aver installato la redazione, senza startup'
 
 
+def test_la_redazione_sopravvive_alla_config_logging_di_uvicorn():
+    """La redazione, installata a import, deve sopravvivere al `dictConfig` che
+    uvicorn applica al bootstrap.
+
+    E' la proprieta' su cui poggia l'installazione a import-time: se il
+    `LOGGING_CONFIG` di uvicorn azzerasse i filtri di `uvicorn.access`, un token
+    potrebbe passare in chiaro prima che lo startup reinstalli il filtro. Se un
+    domani uvicorn cambiasse quel comportamento, questo test diventa rosso invece
+    di lasciare il difetto silenzioso. Scenario segnalato da GPT-5.5 su #82.
+    """
+    import logging.config
+
+    import uvicorn.config
+
+    logger = logging.getLogger('uvicorn.access')
+    main.installa_redazione_access_log()
+    filtri, handler = list(logger.filters), list(logger.handlers)
+    try:
+        logging.config.dictConfig(uvicorn.config.LOGGING_CONFIG)
+        nostri = [f for f in logger.filters
+                  if type(f).__name__ == 'RedazioneTokenAccessLog']
+        assert nostri, ("il dictConfig di uvicorn ha cancellato la redazione: "
+                        "l'installazione a import non sarebbe piu' sufficiente")
+    finally:
+        logger.filters[:], logger.handlers[:] = filtri, handler
+
+
 def test_installa_redazione_e_idempotente():
     """Chiamarla due volte non impila due filtri sullo stesso logger."""
     logger = logging.getLogger('uvicorn.access')
