@@ -321,8 +321,16 @@ with sync_playwright() as pw:
     pg.wait_for_selector('.modal .secret')
     segreti = pg.locator('.modal .secret').all_inner_texts()
     token, url_feed = segreti[0].strip(), segreti[1].strip()
-    assert token.startswith('xt_') and len(token) > 20, f'token strano: {token!r}'
-    assert url_feed.endswith('?token=' + token) and '/feed/' in url_feed, url_feed
+    # I messaggi d'assert NON devono contenere il token: se un assert fallisse,
+    # pytest lo stamperebbe nei log CI e il wrapper (`test_giro_web.py`) lo
+    # ribalterebbe nell'output — la stessa regola «token mai nei log» che la
+    # redazione dello screenshot rispetta. Si asserisce sulla FORMA, con
+    # messaggi che descrivono senza esporre: solo il prefisso `xt_` (non
+    # segreto) e la lunghezza. Segnalato dal gate finale Fable 5 sulla PR #79.
+    assert token.startswith('xt_') and len(token) > 20, \
+        f'token di forma inattesa (prefisso={token[:3]!r}, len={len(token)})'
+    assert '/feed/' in url_feed and url_feed.endswith('?token=' + token), \
+        'URL feed di forma inattesa: rotta /feed/ o suffisso ?token= non combaciano'
     # Il token va REDATTO prima di fotografarlo: e' la regola del repo — «i token
     # non compaiono mai nei log, nelle tabelle o negli screenshot» — e vale anche
     # per un token di test da un DB effimero. Si legge (sopra) per le asserzioni,
