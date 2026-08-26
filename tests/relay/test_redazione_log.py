@@ -97,6 +97,30 @@ def test_l_import_di_main_installa_gia_la_redazione():
     assert nostri, 'importare main deve gia\' aver installato la redazione, senza startup'
 
 
+def _istantanea_logger(nomi):
+    """Salva lo stato completo dei logger indicati, per ripristinarlo dopo un
+    `dictConfig` globale — così il test non lascia il logging alterato per gli
+    altri test della sessione (rischio segnalato da GPT-5.5 su #82)."""
+    import logging
+    stato = {}
+    for n in nomi:
+        lg = logging.getLogger(n)
+        stato[n] = (lg.level, lg.propagate, lg.disabled,
+                    list(lg.handlers), list(lg.filters))
+    return stato
+
+
+def _ripristina_logger(stato):
+    import logging
+    for n, (level, propagate, disabled, handlers, filtri) in stato.items():
+        lg = logging.getLogger(n)
+        lg.setLevel(level)
+        lg.propagate = propagate
+        lg.disabled = disabled
+        lg.handlers[:] = handlers
+        lg.filters[:] = filtri
+
+
 def test_la_redazione_sopravvive_alla_config_logging_di_uvicorn():
     """La redazione, installata a import, deve sopravvivere al `dictConfig` che
     uvicorn applica al bootstrap.
@@ -106,22 +130,31 @@ def test_la_redazione_sopravvive_alla_config_logging_di_uvicorn():
     potrebbe passare in chiaro prima che lo startup reinstalli il filtro. Se un
     domani uvicorn cambiasse quel comportamento, questo test diventa rosso invece
     di lasciare il difetto silenzioso. Scenario segnalato da GPT-5.5 su #82.
+
+    `dictConfig(LOGGING_CONFIG)` riconfigura TRE logger (`uvicorn`,
+    `uvicorn.error`, `uvicorn.access`): li si salva e ripristina TUTTI, non solo
+    `uvicorn.access`, per non rendere la suite dipendente dall'ordine dei test
+    (secondo rilievo di GPT-5.5). Il config di uvicorn non ha una chiave `root` e
+    usa `disable_existing_loggers: False`, quindi non tocca la cattura di pytest.
     """
     import logging.config
 
     import uvicorn.config
 
-    logger = logging.getLogger('uvicorn.access')
-    main.installa_redazione_access_log()
-    filtri, handler = list(logger.filters), list(logger.handlers)
+    nomi = list(uvicorn.config.LOGGING_CONFIG.get('loggers', {}))
+    stato = _istantanea_logger(nomi)
     try:
+        main.installa_redazione_access_log()
         logging.config.dictConfig(uvicorn.config.LOGGING_CONFIG)
-        nostri = [f for f in logger.filters
+        nostri = [f for f in logging.getLogger('uvicorn.access').filters
                   if type(f).__name__ == 'RedazioneTokenAccessLog']
         assert nostri, ("il dictConfig di uvicorn ha cancellato la redazione: "
                         "l'installazione a import non sarebbe piu' sufficiente")
     finally:
-        logger.filters[:], logger.handlers[:] = filtri, handler
+        _ripristina_logger(stato)
+        # Ri-garantisce la redazione per i test successivi, qualunque fosse lo
+        # stato salvato (idempotente).
+        main.installa_redazione_access_log()
 
 
 def test_installa_redazione_e_idempotente():
