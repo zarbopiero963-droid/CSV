@@ -428,3 +428,14 @@ def test_divergenze_note_88_match_flag_e_classi_ascii(casi):
     assert js['puntoAstraleSenzaU'] == '\ud83c' and py_punto == '\U0001F19A', (
         f'la divergenza `.` astrale e- cambiata: JS={js["puntoAstraleSenzaU"]!r} '
         f'Python={py_punto!r} (se ora coincidono, aggiornare SAAS.md e #88)')
+
+    # 4) Il rovescio ALLINEATO (#90): `\p{L}`/`\p{N}` CON `u` estraggono lo STESSO
+    #    valore nei due motori. E' la base per cui la blindatura ACCETTA `\p{}` con
+    #    flags:'u'; se i due lati divergessero, accettarlo sarebbe un bug. Richiesta
+    #    di GPT-5.5 al gate finale della #90 (supporto JS reale di `\p{}`+`u`).
+    py_pL = main._estrai_valore('café', {'source': 'regex', 'pattern': r'(\p{L}+)',
+                                         'group': 1, 'flags': 'u'})
+    py_pN = main._estrai_valore('num ٤٢', {'source': 'regex', 'pattern': r'(\p{N}+)',
+                                           'group': 1, 'flags': 'u'})
+    assert js['pLconU'] == py_pL == 'café', f'\\p{{L}}+u: JS={js["pLconU"]!r} Python={py_pL!r}'
+    assert js['pNconU'] == py_pN == '٤٢', f'\\p{{N}}+u: JS={js["pNconU"]!r} Python={py_pN!r}'

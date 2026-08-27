@@ -472,6 +472,10 @@ def test_POSIX_e_proprieta_unicode_rilevate_con_la_sfumatura_del_flag_u():
     assert div(r'(\p{L}+)', unicode_ok=True) is None   # con `u` allinea → ok
     # Un `\p` letterale (backslash pari) non e' la proprieta'.
     assert div(r'\\p{L}') is None
+    # Conservativo: `[:alpha:]` e' rilevato anche fuori da un vero `[[...]]` POSIX
+    # (es. `foo[:alpha:]bar`). Distinguerlo chiederebbe di tracciare le char-class;
+    # come per `[\b]`, si preferisce il raro falso positivo. Dichiarato (GPT-5.5 #90).
+    assert div('foo[:alpha:]bar') == '[:alpha:]'
     # Restano fuori i costrutti davvero esotici (whack-a-mole): `\h`, `\R`, ecc.
     assert div(r'\h') is None
 
