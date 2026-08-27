@@ -2788,6 +2788,10 @@ _RE_POSIX = _regex.compile(r'\[:\^?[a-z]+:\]')
 # (in JS `\p` senza `u` e' la lettera `p`) e si ALLINEANO con `u`. Il capture e' il
 # solo `\p`/`\P`, per il messaggio.
 _RE_PROP_UNICODE = _regex.compile(r'(?<!\\)(?:\\\\)*(\\[pP])\{')
+# La forma BREVE senza graffe `\pL`/`\PN`: Python la interpreta, ma in JS senza `u`
+# e' `pL` letterale e CON `u` SOLLEVA (le graffe sono obbligatorie li'). Quindi
+# diverge SEMPRE — `u` non la salva — a differenza della forma con graffe.
+_RE_PROP_UNICODE_BREVE = _regex.compile(r'(?<!\\)(?:\\\\)*(\\[pP][A-Za-z])')
 
 
 def _costrutto_regex_divergente(pattern, unicode_ok=False):
@@ -2801,9 +2805,11 @@ def _costrutto_regex_divergente(pattern, unicode_ok=False):
     - le classi POSIX `[[:name:]]`: JS non le supporta.
 
     Divergente SOLO senza `u` (con `u` i due motori si allineano):
-    - `\\p{}`/`\\P{}` proprieta' unicode. Con `unicode_ok=True` (il flag `u` c'e')
-      NON sono segnalate. La condizione `match` non legge i flag, quindi la' e'
-      sempre `unicode_ok=False`.
+    - `\\p{}`/`\\P{}` proprieta' unicode con GRAFFE. Con `unicode_ok=True` (il flag
+      `u` c'e') NON sono segnalate. La condizione `match` non legge i flag, quindi
+      la' e' sempre `unicode_ok=False`. La forma BREVE senza graffe `\\pL` invece
+      diverge SEMPRE (in JS con `u` solleva, senza `u` e' letterale) → segnalata a
+      prescindere da `unicode_ok`.
 
     NON e' esaustivo, e non pretende di esserlo: restano fuori i costrutti davvero
     esotici (`\\h`, `\\R`, `\\X`, quantificatori possessivi…). `[\\b]` (backspace,
@@ -2817,6 +2823,10 @@ def _costrutto_regex_divergente(pattern, unicode_ok=False):
     m = _RE_POSIX.search(pattern)
     if m:
         return m.group(0)
+    # La forma breve `\pL` diverge SEMPRE (u non la allinea): prima del gate `u`.
+    m = _RE_PROP_UNICODE_BREVE.search(pattern)
+    if m:
+        return m.group(1)
     if not unicode_ok:
         m = _RE_PROP_UNICODE.search(pattern)
         if m:
@@ -2841,10 +2851,11 @@ def _vieta_costrutto_regex_divergente(dove, pattern, unicode_ok=False):
     if classe:
         consiglio = (f' Usa una classe esplicita ({classe}), che i due motori '
                      'trattano identica.')
-    elif costrutto in (r'\p', r'\P'):
-        consiglio = (" Usa una classe esplicita, oppure — su una colonna regex — il "
-                     "flag 'u', che allinea `\\p{}` nei due motori (il match non "
-                     'legge i flag).')
+    elif costrutto[:2] in (r'\p', r'\P'):
+        consiglio = (" Usa una classe esplicita, oppure la forma con graffe `\\p{…}` "
+                     "su una colonna regex col flag 'u', che allinea i due motori "
+                     '(il match non legge i flag; la forma breve `\\pL` non si allinea '
+                     'mai).')
     elif costrutto.startswith('[:'):
         consiglio = (' Le classi POSIX non esistono in JavaScript: usa una classe '
                      'esplicita.')

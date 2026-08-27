@@ -470,6 +470,12 @@ def test_POSIX_e_proprieta_unicode_rilevate_con_la_sfumatura_del_flag_u():
     assert div(r'(\p{L}+)') == r'\p'
     assert div(r'(\P{N})') == r'\P'
     assert div(r'(\p{L}+)', unicode_ok=True) is None   # con `u` allinea → ok
+    # La forma BREVE `\pL`/`\PN` (senza graffe): diverge SEMPRE. In JS senza `u` e'
+    # `pL` letterale, con `u` SOLLEVA (le graffe sono obbligatorie li'), Python la
+    # interpreta. Quindi `unicode_ok` NON la salva, a differenza di `\p{L}`.
+    assert div(r'\pL') == r'\pL'
+    assert div(r'\pL', unicode_ok=True) == r'\pL'
+    assert div(r'a\PNb') == r'\PN'
     # Un `\p` letterale (backslash pari) non e' la proprieta'.
     assert div(r'\\p{L}') is None
     # Conservativo: `[:alpha:]` e' rilevato anche fuori da un vero `[[...]]` POSIX
@@ -519,6 +525,17 @@ def test_POSIX_e_prop_unicode_al_salvataggio_con_la_sfumatura_u():
         main._valida_config_parser({'match': {'type': 'regex', 'value': r'\p{L}+SEGNALE'},
                                     'columns': obblig()})
     assert e.value.status_code == 422 and 'match' in e.value.detail, e.value.detail
+
+    # La forma BREVE `\pL` e' rifiutata ANCHE con flags:'u' (u non la allinea),
+    # a differenza di `\p{L}`+u che invece passa qui sopra.
+    regola_breve_u = {'source': 'regex', 'pattern': r'(\pL+)', 'group': 1, 'flags': 'u'}
+    with pytest.raises(main.HTTPException) as e:
+        main._valida_config_parser({'match': {'type': 'contains', 'value': 'x'},
+                                    'columns': {'EventName': regola_breve_u,
+                                                'MarketType': {'source': 'constant', 'value': 'O'},
+                                                'SelectionName': {'source': 'constant', 'value': 'Over'},
+                                                'BetType': {'source': 'constant', 'value': 'PUNTA'}}})
+    assert e.value.status_code == 422 and '#88' in e.value.detail, e.value.detail
 
 
 def test_un_parser_di_sole_COSTANTI_non_scrive_su_qualunque_messaggio():

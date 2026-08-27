@@ -552,6 +552,9 @@ identico dai due lati — nessuna divergenza possibile.
 > quando manca `u`, ma **accettato** su una colonna `source: regex` con `flags:'u'`,
 > che è la forma consigliata per il testo non-ASCII. Nella condizione `match`, che
 > non legge i flag, `\p{}` non può mai avere `u` e quindi è **sempre** rifiutato.
+> La forma **breve** senza graffe `\pL` è rifiutata **sempre**, anche con `u`: in JS
+> con `u` è un errore di sintassi (le graffe sono obbligatorie) e senza `u` è la
+> lettera `p` — non si allinea mai; va usata `\p{L}`+`u`.
 > Misurato: `([[:alpha:]]+)` su `abc123` dà `abc` nel feed e `''` in anteprima;
 > match `\p{L}+` su `café` è `True` in Python e `false` in JS.
 >
