@@ -380,29 +380,29 @@ def test_un_parser_config_json_scrive_un_feed_valido(db_isolato):
 # --------------------------------------------------- parita' dei motori (#81 E1/E2)
 
 def test_flag_regex_onora_il_solo_insieme_comune_ims():
-    """`_flag_regex` (Python) allineato a `flagRegex` (engine.js): {i,m,s}.
+    """`_flag_regex` (Python) allineato a `flagRegex` (engine.js): {i,m,s}+u.
 
-    `x` (verbose) e' stato tolto perche' `new RegExp(_, 'x')` in JS SOLLEVA:
-    onorarlo di qua e non di la' era la divergenza E2. Qui si pinna il lato
-    Python parola per parola, mentre il caso gemello in engine_cases.mjs pinna
-    il lato JS e il confronto li tiene insieme.
+    Il DEFAULT `'i'` vale SOLO per i flag assenti (come `rule.flags || 'i'`). Un
+    insieme presente ma con soli flag scartati (`'x'`, `'gy'`) NON ricade su `'i'`:
+    tiene 0 bit, cioe' resta CASE-SENSITIVE — cosi' un parser gia' salvato con quei
+    flag non cambia i suoi valori nel feed (bloccante Fable 5, PR #85). Il lato JS
+    e' pinnato dal caso gemello in engine_cases.mjs e il confronto li tiene insieme.
     """
     R = main._regex
     assert main._flag_regex('i') == R.I
     assert main._flag_regex('ims') == (R.I | R.M | R.S)
-    # `x` non e' piu' onorato e, come in JS (`tenuti || 'i'`), un insieme che
-    # si svuota ricade sul default 'i' — non su 0 bit (che sarebbe case-sensitive
-    # e divergerebbe dal JS su un pattern con lettere).
-    assert main._flag_regex('x') == main._flag_regex('') == R.I
-    assert not (main._flag_regex('x') & R.X)
-    # `g`, `y` non riconosciuti: l'insieme si svuota → default 'i', come in JS.
-    assert main._flag_regex('gy') == R.I
-    # `u` e' riconosciuto ma no-op (_regex e' codepoint-native): sopravvive,
-    # quindi NON fa scattare il default → 0 bit (case-sensitive), come
-    # `new RegExp(_, 'u')` in JS.
+    # `x`/`gy` PRESENTI ma scartati: 0 bit (case-SENSITIVE), NON il default 'i'.
+    # E' la differenza che tiene invariato il feed di un parser salvato con quei
+    # flag: cambia solo il verbose/sticky, non la case.
+    assert main._flag_regex('x') == 0
+    assert main._flag_regex('gy') == 0
+    assert not (main._flag_regex('x') & R.X)   # niente verbose
+    # `u` riconosciuto ma no-op (_regex e' codepoint-native): 0 bit, case-sensitive,
+    # come `new RegExp(_, 'u')` in JS.
     assert main._flag_regex('u') == 0
-    assert main._flag_regex('iu') == R.I   # 'i' vince, 'u' resta no-op
-    # default quando vuoto: 'i', come `rule.flags || 'i'` in engine.js.
+    assert main._flag_regex('iu') == R.I       # 'i' vince, 'u' resta no-op
+    # ASSENTI (None o '') → default 'i', backward-compatible con TUTTI i parser
+    # del wizard, che non emettono flag.
     assert main._flag_regex('') == R.I
     assert main._flag_regex(None) == R.I
 

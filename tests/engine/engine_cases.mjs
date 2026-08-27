@@ -325,6 +325,27 @@ caso('estrazione: regola vuota o assente -> stringa vuota', () => {
   return 'ok';
 });
 
+// Il valore ASSOLUTO dei flag, non solo la parita' col gemello: il confronto
+// JS/Python vede solo le DIVERGENZE, quindi un cambio di comportamento
+// COORDINATO (entrambi i motori che passano a case-insensitive) gli
+// sfuggirebbe. Qui si pinna la case sul lato JS; il gemello e'
+// `test_flag_regex_...` in Python. Pattern con maiuscole/minuscole distinte per
+// distinguere case-sensitive da insensitive (audit #81 E2, bloccante Fable 5 #85).
+caso('estrazione: i flag scartati NON cambiano la case (x/gy restano sensitive)', () => {
+  const ex = (flags) => extractValue('xyzABCabc',
+    { source: 'regex', pattern: '(abc)', flags, group: 1 });
+  // flag ASSENTI -> default 'i' (case-insensitive): prima occorrenza = 'ABC'.
+  eq(ex(undefined), 'ABC', 'niente flag: default i');
+  eq(ex(''), 'ABC', 'flag vuoti: default i');
+  // flag PRESENTI ma scartati -> case-SENSITIVE (niente default 'i'): 'abc'.
+  eq(ex('x'), 'abc', 'x scartato ma la case resta sensitive');
+  eq(ex('gy'), 'abc', 'gy scartati ma la case resta sensitive');
+  // flag comuni onorati.
+  eq(ex('i'), 'ABC', 'i onorato');
+  eq(ex('iiu'), 'ABC', 'iiu deduplicato e onorato');
+  return 'ok';
+});
+
 /* ------------------------------------------------------ suggeritore */
 
 caso('suggeritore: ancora tagliata per codepoint, mai mezzo surrogato', () => {

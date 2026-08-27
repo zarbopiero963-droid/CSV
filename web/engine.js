@@ -39,9 +39,8 @@ function replaceLast(text, from, to) {
   return i < 0 ? text : text.slice(0, i) + to + text.slice(i + from.length);
 }
 
-// I soli flag regex che i due motori onorano IDENTICI, piu' il default 'i'
-// (come prima: `rule.flags || 'i'`). Fuori da questo insieme i motori
-// divergono (audit #81 E2), e la divergenza e' misurata, non temuta:
+// I soli flag regex che i due motori onorano IDENTICI. Fuori da questo insieme
+// i motori divergono (audit #81 E2), e la divergenza e' misurata, non temuta:
 //   x (verbose) -> Python lo onora (`regex.X`), in JS `new RegExp(_, 'x')`
 //                  SOLLEVA "Invalid flags" e l'estrazione cade a '' ;
 //   y (sticky)  -> in JS ancora il match all'indice 0, in Python e' ignorato;
@@ -50,11 +49,19 @@ function replaceLast(text, from, to) {
 // `u` RESTA: Python e' gia' codepoint-native (modulo `regex`) e JS ha bisogno
 // di `u` perche' `.` e `\p{}` combacino con Python — toglierlo riaprirebbe la
 // divergenza sui caratteri astrali. Il gemello e' `_flag_regex` in main.py.
+//
+// Il default `'i'` si applica SOLO ai flag ASSENTI (come `rule.flags || 'i'`
+// storico): un insieme PRESENTE ma con soli flag scartati (`'x'`, `'gy'`) tiene
+// stringa vuota, cioe' resta CASE-SENSITIVE — non ricade su `'i'`. Cosi' un
+// parser gia' salvato con quei flag non cambia i suoi valori (regressione
+// silenziosa segnalata come bloccante da Claude Fable 5, PR #85); si toglie
+// solo il verbose/sticky, gia' divergenti. Il Set deduplica: `new RegExp(_,
+// 'ii')` SOLLEVA "Invalid flags".
 const FLAG_REGEX_COMUNI = 'imsu';
 function flagRegex(flags) {
-  const tenuti = [...new Set(String(flags || '').split(''))]
+  if (flags == null || flags === '') return 'i';
+  return [...new Set(String(flags).split(''))]
     .filter(f => FLAG_REGEX_COMUNI.includes(f)).join('');
-  return tenuti || 'i';
 }
 
 // Una regola vuota: la colonna resta vuota nel CSV.

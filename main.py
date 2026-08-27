@@ -2773,22 +2773,24 @@ def _flag_regex(flags):
     `_cerca_regex_utente`), non lo `re` di stdlib. Il gemello e' `flagRegex` in
     `web/engine.js`, e il confronto in `engine_cases.mjs` tiene i due allineati.
 
-    Il DEFAULT combacia con `tenuti || 'i'` di JS: si applica `'i'` quando NESSUN
-    flag riconosciuto sopravvive — cosi' `'x'`, `'gy'`, `''` danno tutti `'i'`
-    (case-insensitive) su ENTRAMBI i motori. `'u'` e' riconosciuto ma no-op
-    (`_regex` e' gia' codepoint-native): sopravvive, quindi NON fa scattare il
-    default — `flags='u'` resta case-sensitive di qua come `new RegExp(_, 'u')`
-    di la'. Senza questa distinzione `'x'` diventava 0 bit (case-sensitive) in
-    Python e `'i'` in JS: una divergenza di case che i pattern con lettere
-    avrebbero fatto emergere.
+    Il DEFAULT combacia ESATTO con `rule.flags || 'i'` di JS: `'i'` si applica
+    solo quando i flag sono ASSENTI (None o stringa vuota). Un insieme PRESENTE
+    ma con soli flag fuori dal comune (`'x'`, `'gy'`) NON ricade su `'i'`: tiene
+    zero flag, cioe' resta CASE-SENSITIVE — che e' il comportamento che aveva
+    prima di questo fix (pre-fix `_flag_regex('gy')` era `0`, e `'x'` era
+    `regex.X`, entrambi senza `I`). Il fix toglie solo il verbose (`x`) e lo
+    sticky (`y`), gia' divergenti fra i motori; la case NON cambia, cosi' un
+    parser gia' salvato con quei flag non muta i suoi valori nel feed. Cambiarla
+    sarebbe la regressione silenziosa segnalata come bloccante da Claude Fable 5
+    sulla PR #85. `'u'` e' riconosciuto ma no-op (`_regex` e' gia'
+    codepoint-native) e resta case-sensitive, come `new RegExp(_, 'u')` in JS.
     """
-    mappa = {'i': _regex.I, 'm': _regex.M, 's': _regex.S, 'u': 0}
-    riconosciuti = [f for f in (flags or '') if f in mappa]
-    if not riconosciuti:
+    if not flags:
         return _regex.I
+    mappa = {'i': _regex.I, 'm': _regex.M, 's': _regex.S, 'u': 0}
     risultato = 0
-    for f in riconosciuti:
-        risultato |= mappa[f]
+    for f in flags:
+        risultato |= mappa.get(f, 0)
     return risultato
 
 
