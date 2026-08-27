@@ -220,25 +220,57 @@ with sync_playwright() as pw:
         f'il parser ricreato e- stato sovrascritto: {json.dumps(salvata)[:120]}'
     shot(pg, '04-eliminato-e-ricreato')
 
-    # ---------------- il RESIDUO, fotografato: il SECONDO salvataggio passa
-    # `conflittoOFallita` riallinea la cache (serve: senza, ogni salvataggio
-    # successivo fallirebbe per sempre — il bug del toggle, CodeRabbit PR #71),
-    # quindi il click dopo il 409 porta l'uid NUOVO e sovrascrive il parser
-    # ricreato. Il primo salvataggio non e' piu' silenzioso — c'e' il 409 e il
-    # toast che dice di guardare quello nuovo — ma il secondo e' a un click.
-    # Segnalato da Claude Fable 5 sulla PR #76 e registrato come issue: chiuderlo
-    # vuole una conferma esplicita, cioe' UI nuova, non un filtro.
-    # Questo test NON approva il comportamento: lo inchioda, come quello della
-    # #74 che fotografava la finestra client. Il giorno in cui la conferma
-    # arriva, questo diventa rosso — ed e' esattamente il punto.
-    pg.click('[data-act="wiz-save"]')
-    pg.wait_for_selector('.toast:has-text("Configurazione salvata")')
-    salvata = config_sul_server(pg, slug)
-    assert salvata['match']['value'] == 'P.Bet.', \
-        ('residuo cambiato: il secondo salvataggio NON sovrascrive piu-. '
-         'Se e- arrivata la conferma esplicita, invertire questo test: '
-         f'{json.dumps(salvata)[:120]}')
-    shot(pg, '05-residuo-secondo-salvataggio')
+    # ---------------- il RESIDUO CHIUSO (#77 opzione A): il SECONDO salvataggio
+    # ora CHIEDE conferma invece di sovrascrivere in silenzio. `conflittoOFallita`
+    # riallinea la cache (serve: senza, ogni salvataggio fallirebbe per sempre —
+    # il bug del toggle, PR #71), quindi il click dopo il 409 porterebbe l'uid
+    # NUOVO: la guardia che mancava e' la modale di conferma. Questo test PRIMA
+    # fotografava la sovrascrittura a un click; ora, arrivata la conferma (Fable
+    # sulla PR #76 → issue #77), e' INVERTITO e ne e' la prova.
+    pg.click('[data-act="wiz-save"]')                    # secondo salva
+    pg.wait_for_selector('.veil')                        # la modale, non una sovrascrittura
+    modale = pg.inner_text('.veil')
+    assert 'un altro parser' in modale, \
+        f'la conferma deve spiegare il conflitto di identita-: {modale!r}'
+    # aprire la conferma, da sola, non salva niente: il ricreato resta intatto
+    assert config_sul_server(pg, slug)['match']['value'] == 'RICREATO', \
+        'aprire la conferma non deve toccare il parser ricreato'
+    shot(pg, '05-conferma-esplicita')
+
+    # strada «Guarda quello nuovo»: ricarica dal server, il draft stantio si
+    # perde, e il parser ricreato NON viene toccato.
+    pg.click('[data-act="ricreato-guarda"]')
+    pg.wait_for_selector('#test-msg')                    # wizard ricaricato sul parser che c'e'
+    assert pg.query_selector('.veil') is None, 'la modale doveva chiudersi'
+    assert config_sul_server(pg, slug)['match']['value'] == 'RICREATO', \
+        'guardare quello nuovo non deve sovrascriverlo'
+    shot(pg, '06-guarda-quello-nuovo')
+
+    # strada «Sovrascrivi comunque»: ri-provoco il conflitto (ricreo come
+    # RICREATO2) e stavolta scelgo di sovrascrivere. La scheda porta il draft del
+    # parser che stava guardando (RICREATO), diverso da RICREATO2: se vince, l'ho
+    # sovrascritto DAVVERO — e per scelta, non a un click silenzioso.
+    config_ric2 = dict(CONFIG_BASE)
+    config_ric2['match'] = {'type': 'contains', 'value': 'RICREATO2'}
+    esito = pg.evaluate(
+        """async ([slug, config]) => {
+             const d = await fetch(`/api/me/parsers/${slug}`, {method: 'DELETE'});
+             const c = await fetch('/api/me/parsers', {
+               method: 'POST', headers: {'Content-Type': 'application/json'},
+               body: JSON.stringify({titolo: 'Conteso', config, active: true})});
+             return [d.status, c.status, (await c.json()).slug];
+           }""", [slug, config_ric2])
+    assert esito == [200, 200, slug], esito
+    pg.wait_for_selector('.toast', state='detached')     # via l'eventuale toast di prima
+    pg.click('[data-act="wiz-save"]')                    # 409 identita- → toast + flag
+    pg.wait_for_selector('.toast:has-text("Eliminato e ricreato altrove")')
+    pg.click('[data-act="wiz-save"]')                    # flag alzato → modale
+    pg.wait_for_selector('.veil')
+    pg.click('[data-act="ricreato-sovrascrivi"]')        # scelta deliberata
+    pg.wait_for_selector('.toast:has-text("salvata")')
+    assert config_sul_server(pg, slug)['match']['value'] == 'RICREATO', \
+        'sovrascrivi comunque deve far vincere il draft della scheda vecchia'
+    shot(pg, '07-sovrascrivi-comunque')
 
     # ---------------- la DELETE stantia, vista dalla scheda vecchia (#75)
     # La PUT aveva la sua voce, la DELETE no: `del-parser-ok` gestiva l'errore
@@ -289,7 +321,7 @@ with sync_playwright() as pw:
         'dopo il conflitto la scheda del parser non si e- ridisegnata'
     assert pg.query_selector('#test-msg') is not None, \
         'il wizard e- sparito: il draft dell-utente non deve essere buttato via'
-    shot(pg, '06-delete-stantia')
+    shot(pg, '08-delete-stantia')
 
     # E la prova che il riallineamento ha funzionato DAVVERO, non solo che la
     # pagina e' sopravvissuta: la stessa conferma, rifatta subito, adesso deve
@@ -316,7 +348,7 @@ with sync_playwright() as pw:
     # nessuna asserzione lo pretendeva).
     assert rimasti == [s for s in prima if s != slug], \
         f'la DELETE ha cambiato piu- dello slug conteso: prima {prima}, dopo {rimasti}'
-    shot(pg, '07-delete-dopo-riallineamento')
+    shot(pg, '09-delete-dopo-riallineamento')
 
     b.close()
 
