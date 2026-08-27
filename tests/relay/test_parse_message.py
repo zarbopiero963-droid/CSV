@@ -242,10 +242,18 @@ def test_legacy_un_handicap_GIA_localizzato_resta_byte_identico():
     parsed = main.parse_message(testo, cfg)
     assert parsed is not None, 'un messaggio valido non deve sparire'
     documento = parsed['csv']
-    testo_csv = documento.decode('utf-8') if isinstance(documento, bytes) else documento
-    # Esattamente «0,5», non «0,,5» ne' «0.5»: la colonna Handicap intatta.
-    assert '"0,5"' in testo_csv, testo_csv
-    assert '"0,,5"' not in testo_csv and '"0.5"' not in testo_csv, testo_csv
+
+    # Byte per byte, non «contiene 0,5»: la riga attesa e' scritta A MANO qui —
+    # indipendente da `_giudica_riga` — quindi l'uguaglianza dimostra che il
+    # giudizio e' un no-op su un input gia' corretto, non solo che l'handicap
+    # sopravvive. GPT-5.5 sulla PR #84: il nome prometteva piu' dell'asserzione.
+    riga_attesa = ['XTrader', '', 'SQUADRA-A - SQUADRA-B', '', 'M', 'OVER_UNDER_05',
+                   '', 'Over', '0,5', '', '', '', 'PUNTA', '']
+    atteso = main.make_csv(riga_attesa)
+    assert documento == atteso, (
+        'il CSV non e- byte-identico alla riga attesa:\n'
+        f'  atteso   : {atteso!r}\n'
+        f'  ottenuto : {documento!r}')
     main.verify_csv(documento)  # il contratto regge
 
 
