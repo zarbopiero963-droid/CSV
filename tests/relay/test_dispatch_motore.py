@@ -375,3 +375,66 @@ def test_un_parser_config_json_scrive_un_feed_valido(db_isolato):
     # E il feed di PIERO, nello stesso DB, non e' stato toccato dal parser del cliente.
     piero = c.execute('SELECT csv FROM signals WHERE profile=?', ('PIERO',)).fetchone()
     assert piero is None, 'il parser del cliente ha scritto nel feed di PIERO: isolamento rotto'
+
+
+# --------------------------------------------------- parita' dei motori (#81 E1/E2)
+
+def test_flag_regex_onora_il_solo_insieme_comune_ims():
+    """`_flag_regex` (Python) allineato a `flagRegex` (engine.js): {i,m,s}.
+
+    `x` (verbose) e' stato tolto perche' `new RegExp(_, 'x')` in JS SOLLEVA:
+    onorarlo di qua e non di la' era la divergenza E2. Qui si pinna il lato
+    Python parola per parola, mentre il caso gemello in engine_cases.mjs pinna
+    il lato JS e il confronto li tiene insieme.
+    """
+    R = main._regex
+    assert main._flag_regex('i') == R.I
+    assert main._flag_regex('ims') == (R.I | R.M | R.S)
+    # `x` non e' piu' onorato e, come in JS (`tenuti || 'i'`), un insieme che
+    # si svuota ricade sul default 'i' — non su 0 bit (che sarebbe case-sensitive
+    # e divergerebbe dal JS su un pattern con lettere).
+    assert main._flag_regex('x') == main._flag_regex('') == R.I
+    assert not (main._flag_regex('x') & R.X)
+    # `g`, `y` non riconosciuti: l'insieme si svuota → default 'i', come in JS.
+    assert main._flag_regex('gy') == R.I
+    # `u` e' riconosciuto ma no-op (_regex e' codepoint-native): sopravvive,
+    # quindi NON fa scattare il default → 0 bit (case-sensitive), come
+    # `new RegExp(_, 'u')` in JS.
+    assert main._flag_regex('u') == 0
+    assert main._flag_regex('iu') == R.I   # 'i' vince, 'u' resta no-op
+    # default quando vuoto: 'i', come `rule.flags || 'i'` in engine.js.
+    assert main._flag_regex('') == R.I
+    assert main._flag_regex(None) == R.I
+
+
+def test_estrai_valore_col_flag_x_non_va_in_modalita_verbose():
+    """Il verso end-to-end del lato Python: `flags:'x'` non ignora gli spazi.
+
+    Pattern con spazi su un messaggio senza spazi: in verbose combacerebbe
+    ('123'), senza verbose no (''). Dopo la patch Python risponde '' come JS,
+    che su 'x' solleva e cade a '' — i due motori concordano.
+    """
+    regola = {'source': 'regex', 'pattern': '( [0-9]+ )', 'flags': 'x', 'group': 1}
+    assert main._estrai_valore('val123end', regola) == ''
+
+
+def test_estrai_valore_col_flag_y_non_e_sticky():
+    """`flags:'y'` (sticky) e' ignorato: la cifra non all'indice 0 viene trovata.
+
+    In JS 'y' ancora il match a 0 e non trova nulla; Python lo ignora e trova
+    '123'. Dopo la patch JS toglie 'y' e trova '123' anch'esso: parita'.
+    """
+    regola = {'source': 'regex', 'pattern': '([0-9]+)', 'flags': 'y', 'group': 1}
+    assert main._estrai_valore('abc123', regola) == '123'
+
+
+def test_replace_all_con_from_vuoto_e_no_op_in_python():
+    """Il gemello di E1 sul lato Python: `from` vuoto non esplode il valore.
+
+    In JS senza guard `''.split('')` intercala `to` fra ogni carattere; qui il
+    guard `if t.get('from') else v` c'era gia', e questo test lo pinna perche'
+    non regredisca sotto un refactor.
+    """
+    ra = main.TRASFORMAZIONI_MOTORE['replace_all']
+    assert ra('abc', {'from': '', 'to': 'X'}) == 'abc'
+    assert ra('a-b-c', {'from': '-', 'to': ' '}) == 'a b c'

@@ -768,6 +768,51 @@ function casiConfronto() {
       SelectionName: { source: 'constant', value: 'Over' },
       BetType: { source: 'constant', value: 'PUNTA' } },
   });
+  // --- Parita' dei due motori: replace_all e flag regex (audit #81 E1/E2) -----
+  //
+  // Config a quattro obbligatorie costanti + il caso in una colonna facoltativa
+  // (MarketName), cosi' `complete` e' true e la `row` porta il valore da
+  // confrontare direttamente. L'oracolo e' `runParser`: il gemello Python deve
+  // produrre la stessa `row`.
+  const conMercato = (regola, message) => [message, {
+    match: { type: 'contains', value: 'P.Bet.' },
+    columns: { ...soloEmpty,
+      EventName: { source: 'constant', value: 'Juve - Milan' },
+      MarketType: { source: 'constant', value: 'OVER_UNDER_15' },
+      SelectionName: { source: 'constant', value: 'Over' },
+      BetType: { source: 'constant', value: 'PUNTA' },
+      MarketName: regola },
+  }];
+  // E1 (P1): `replace_all` con `from` vuoto. In JS `''.split('')` esplode il
+  // valore carattere per carattere e vi INTERCALA `to` ("abc" -> "aXbXc"); il
+  // gemello Python lo tratta gia' come no-op (`if t.get('from') else v`). Senza
+  // il guard in JS le due `row` divergono. Misurato: JS "aXbXc", Python "abc".
+  aggiungi('E1: replace_all con from VUOTO e- no-op nei due motori',
+    ...conMercato({ source: 'constant', value: 'abc',
+      transforms: [{ op: 'replace_all', from: '', to: 'X' }] }, 'P.Bet.'));
+  // E2 (P3): flag `x` (verbose). JS lo passa a `new RegExp` che SOLLEVA
+  // ("Invalid flags") -> l'estrazione cade a '' ; Python lo mappa su `regex.X`
+  // e la modalita' verbose ignora gli spazi del pattern, quindi combacia. Il
+  // pattern chiede spazi che il messaggio non ha: con `x` onorato solo da un
+  // lato, i due motori divergono. Misurato: JS '', Python "123".
+  aggiungi('E2: flag x (verbose) non onorato in nessuno dei due',
+    ...conMercato({ source: 'regex', pattern: '( [0-9]+ )', flags: 'x', group: 1 },
+      'P.Bet. val123end'));
+  // E2 (P3): flag `y` (sticky). JS ancora il match all'indice 0 e non trova la
+  // cifra dopo "P.Bet. " -> '' ; Python ignora `y` e trova "123". Misurato: JS
+  // '', Python "123".
+  aggiungi('E2: flag y (sticky) non onorato in nessuno dei due',
+    ...conMercato({ source: 'regex', pattern: '([0-9]+)', flags: 'y', group: 1 },
+      'P.Bet. abc123'));
+  // E2 CONTROLLO: `u` (unicode) e' l'unico flag oltre {i,m,s} che i due motori
+  // devono continuare a onorare IDENTICO — Python e' gia' codepoint-native e
+  // JS ha bisogno di `u` per far combaciare `.` su un carattere astrale. Verde
+  // prima e dopo la patch: e' la guardia che vieta di "normalizzare via" anche
+  // `u`, che RIAPRIREBBE la divergenza sui codepoint astrali. Misurato: "🆚"
+  // in entrambi.
+  aggiungi('E2: flag u (unicode) onorato IDENTICO nei due motori',
+    ...conMercato({ source: 'regex', pattern: '(.)', flags: 'u', group: 1 },
+      'P.Bet. \u{1F19A}X'));
   return confronti;
 }
 

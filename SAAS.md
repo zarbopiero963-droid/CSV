@@ -473,6 +473,17 @@ le trasformazioni non hanno piu' l'ultima parola: il **confine di scrittura**
 `comma_to_dot` resta legale ma superfluo su quelle colonne — il suggeritore ha
 smesso di proporlo su `Price`.
 
+**I flag della sorgente `regex`** (campo opzionale `flags`) sono onorati solo per
+l'insieme che i due motori — `web/engine.js` in anteprima e `main.py` in
+produzione — trattano **identico**: `i` (default), `m`, `s`, piu' `u` (unicode).
+`x` (verbose), `y` (sticky) e `g` (globale) sono **ignorati**, e un insieme che
+si svuota ricade su `i`. È il fix E2 dell'audit #81: `new RegExp(_, 'x')` in
+JavaScript solleva mentre `regex.X` in Python funziona, e `y` è sticky solo in
+JS — un flag onorato da un lato solo faceva combaciare l'anteprima e il feed in
+modo diverso. Allo stesso modo `replace_all` con `from` vuoto è un **no-op** in
+entrambi (E1), non l'esplosione carattere-per-carattere del vecchio `split('')`.
+Il confronto in `tests/engine/engine_cases.mjs` tiene i due motori allineati.
+
 ### Il multi-riga: base + override (#35, pezzo 2)
 
 Un messaggio può generare **N righe** dallo stesso parser. La riga **base** — le

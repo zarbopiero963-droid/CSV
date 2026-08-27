@@ -2756,16 +2756,39 @@ def _cerca_regex_utente(pattern, message, flags, scadenza=None):
 def _flag_regex(flags):
     """I flag JS (`'i'`, `'im'`, …) tradotti nei flag del modulo `regex`.
 
-    `'i'` e' il default in engine.js (`rule.flags || 'i'`). `'g'` e `'u'` non
-    hanno un equivalente utile qui — la ricerca non e' globale, e le stringhe sono
-    gia' unicode — e vengono ignorati, non tradotti in un errore. I flag sono
-    quelli di `_regex` perche' e' `_regex.search` a riceverli (vedi
-    `_cerca_regex_utente`), non lo `re` di stdlib.
+    Onora il solo insieme che i due motori condividono IDENTICO — `i`, `m`, `s` —
+    col default `'i'` (in engine.js `rule.flags || 'i'`). Gli altri sono ignorati,
+    non tradotti in errore, e il perche' e' MISURATO, non temuto (audit #81 E2):
+
+    - `x` (verbose): qui lo mappava `regex.X`, ma `web/engine.js` passa i flag a
+      `new RegExp`, che su `'x'` SOLLEVA "Invalid flags" e fa cadere l'estrazione
+      a '' — cioe' lo stesso parser con `flags:'x'` scartava gli spazi del pattern
+      di qua e non di la'. Tolto da entrambi i lati per parita';
+    - `u` (unicode): JS ne ha bisogno perche' `.` e `\\p{}` combacino coi
+      codepoint; qui `_regex` e' gia' codepoint-native, quindi `u` e' un no-op
+      innocuo e i due motori restano allineati;
+    - `g` (globale), `y` (sticky): la ricerca non e' globale e non e' ancorata.
+
+    I flag sono quelli di `_regex` perche' e' `_regex.search` a riceverli (vedi
+    `_cerca_regex_utente`), non lo `re` di stdlib. Il gemello e' `flagRegex` in
+    `web/engine.js`, e il confronto in `engine_cases.mjs` tiene i due allineati.
+
+    Il DEFAULT combacia con `tenuti || 'i'` di JS: si applica `'i'` quando NESSUN
+    flag riconosciuto sopravvive — cosi' `'x'`, `'gy'`, `''` danno tutti `'i'`
+    (case-insensitive) su ENTRAMBI i motori. `'u'` e' riconosciuto ma no-op
+    (`_regex` e' gia' codepoint-native): sopravvive, quindi NON fa scattare il
+    default — `flags='u'` resta case-sensitive di qua come `new RegExp(_, 'u')`
+    di la'. Senza questa distinzione `'x'` diventava 0 bit (case-sensitive) in
+    Python e `'i'` in JS: una divergenza di case che i pattern con lettere
+    avrebbero fatto emergere.
     """
-    mappa = {'i': _regex.I, 'm': _regex.M, 's': _regex.S, 'x': _regex.X}
+    mappa = {'i': _regex.I, 'm': _regex.M, 's': _regex.S, 'u': 0}
+    riconosciuti = [f for f in (flags or '') if f in mappa]
+    if not riconosciuti:
+        return _regex.I
     risultato = 0
-    for f in (flags or 'i'):
-        risultato |= mappa.get(f, 0)
+    for f in riconosciuti:
+        risultato |= mappa[f]
     return risultato
 
 
