@@ -1624,27 +1624,52 @@ def _blocco_della_riga(status, access_expires_at, is_admin):
     return stato if stato in ACCESSI_BLOCCATI else None
 
 
+# Le tabelle il cui possesso rende una riga di `users` l'account di QUALCUNO: cose che
+# l'utente COSTRUISCE — un parser, una chat rivendicata, la sua libreria mercati (#33), le
+# sue sorgenti squadre (#34) — non tracce di passaggio (segnali, log) ne' artefatti di
+# processo (verifiche, richieste). Ogni voce e' `(tabella, colonna)`.
+#
+# DEVE restare allineata a cio' che `riconcilia_su_utente` travasa come DATI dell'utente
+# (`_trasferisci_parser`/`_trasferisci_sport`/`_trasferisci_sorgenti_squadre` + le chat in
+# `RIFERIMENTI_DATI_UTENTE`): se il guard elenca meno di cio' che la riconciliazione sposta,
+# un utente con SOLO la parte mancante viene classificato vuoto e assorbito — la libreria o
+# le sorgenti di un cliente finiscono sull'account del proprietario (audit #81, I1). Le
+# `competizioni` non hanno una voce a se': riferiscono uno `sport` dello stesso utente
+# (`sport_id`), quindi chi ne possiede una possiede gia' uno sport ed e' coperto — come i
+# mercati, le selezioni, le squadre e gli alias, che seguono i loro genitori. Fonte unica:
+# la usa `possiede_qualcosa`.
+TABELLE_POSSEDUTE = (
+    ('parsers', 'user_id'),
+    ('chats', 'owner_user_id'),
+    ('sports', 'user_id'),
+    ('sorgenti_squadre', 'user_id'),
+)
+
+
 def possiede_qualcosa(c, utente):
     """Vero se questa riga di `users` e' l'account di QUALCUNO, non una riga nata per errore.
 
-    Il criterio sono **parser e chat**, perche' sono le due cose che si possiedono: un parser
-    e' una configurazione che quell'utente ha scritto, una chat e' una rivendicazione che ha
-    provato. Segnali e log non contano: sono tracce di passaggio, e nella riconciliazione
-    seguono l'utente senza dire di chi sia l'account.
+    Il criterio sono i **dati costruiti** dall'utente — un parser, una chat rivendicata, la
+    libreria mercati (#33), le sorgenti squadre (#34): vedi `TABELLE_POSSEDUTE`. Segnali e
+    log non contano: sono tracce di passaggio, e nella riconciliazione seguono l'utente senza
+    dire di chi sia l'account.
 
     Serve perche' la riparazione del collegamento dell'amministratore presumeva che la riga
     da assorbire fosse **sempre** quella nata per errore. Non lo e': basta che
     `TELEGRAM_ADMIN_ID` contenga per sbaglio l'ID di un cliente, e al suo login il servizio
-    gli travasava parser e chat sulla riga del proprietario, gli azzerava il `telegram_id` e
-    gli dava `is_admin=1`. Il cliente perdeva tutto **e** otteneva la dashboard di un altro:
-    la violazione dell'isolamento fra utenti che e' la priorita' 7 di `CLAUDE.md`, senza
-    nessun errore a segnalarla. Misurato prima di correggerlo. Bloccante di Claude Fable 5
-    sulla PR #24.
+    gli travasava i dati sulla riga del proprietario, gli azzerava il `telegram_id` e gli
+    dava `is_admin=1`. Il cliente perdeva tutto **e** otteneva la dashboard di un altro: la
+    violazione dell'isolamento fra utenti che e' la priorita' 7 di `CLAUDE.md`, senza nessun
+    errore a segnalarla. Misurato prima di correggerlo. Bloccante di Claude Fable 5 sulla PR
+    #24; esteso a libreria e sorgenti dall'audit #81 (I1), che aveva trovato lo stesso buco
+    per un cliente con SOLO la libreria — `possiede_qualcosa` guardava allora solo parser e
+    chat, mentre `riconcilia_su_utente` travasava anche sport e sorgenti.
     """
-    if c.execute('SELECT COUNT(*) FROM parsers WHERE user_id=?', (utente,)).fetchone()[0]:
-        return True
-    return bool(c.execute('SELECT COUNT(*) FROM chats WHERE owner_user_id=?',
-                          (utente,)).fetchone()[0])
+    for tabella, colonna in TABELLE_POSSEDUTE:
+        if c.execute(f'SELECT 1 FROM {tabella} WHERE {colonna}=? LIMIT 1',
+                     (utente,)).fetchone():
+            return True
+    return False
 
 
 def riconcilia_su_utente(c, da_utente, a_utente):
@@ -4113,9 +4138,10 @@ def _decidi_identita(c, data):
             # differisce: correggere la variabile, oppure autorizzare l'assorbimento.
             if possiede_qualcosa(c, riga[0]):
                 logging.getLogger('xtrader.relay').error(
-                    "TELEGRAM_ADMIN_ID punta a un account che possiede parser o chat:"
-                    " collegamento RIFIUTATO per non fondere due utenti. Correggere la"
-                    " variabile con l'ID Telegram del proprietario."
+                    "TELEGRAM_ADMIN_ID punta a un account che possiede dati (parser, chat,"
+                    " libreria mercati o sorgenti squadre): collegamento RIFIUTATO per non"
+                    " fondere due utenti. Correggere la variabile con l'ID Telegram del"
+                    " proprietario."
                     " TELEGRAM_ADMIN_RECONCILE non autorizza questo caso: il consenso"
                     " riguarda una riga VUOTA, non i dati di un altro utente.")
                 _annota_admin(c, proprietario[0], 'collegamento_admin_rifiutato',
