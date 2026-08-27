@@ -921,6 +921,13 @@ caso('divergenze #88: match ignora flags, e le classi \\w/\\d in JS sono ASCII',
     wSuCafe: E.extractValue('café', { source: 'regex', pattern: '(\\w+)', group: 1 }),
     // \d ASCII in JS: le cifre arabo-indiane non sono \d (Python si').
     dSuArabo: E.extractValue('numero ٤٢ qui', { source: 'regex', pattern: '(\\d+)', group: 1 }),
+    // `.` su un carattere ASTRALE SENZA `u`: JS conta unita' UTF-16, quindi `(.)`
+    // prende meta' della coppia surrogata (il surrogato alto \uD83C di U+1F19A);
+    // Python e' codepoint-native e prende il carattere intero. La riga «con `u`»
+    // che allinea i due motori e' gia' coperta (caso E2, flag u onorato
+    // IDENTICO); qui si pinna il lato DIVERGENTE, quello senza `u`, richiesto da
+    // GPT-5.6 Sol al gate finale della #89.
+    puntoAstraleSenzaU: E.extractValue('\u{1F19A}X', { source: 'regex', pattern: '(.)', group: 1 }),
   };
 });
 

@@ -418,3 +418,13 @@ def test_divergenze_note_88_match_flag_e_classi_ascii(casi):
         '(se ora coincidono, aggiornare SAAS.md e #88)')
     assert js['dSuArabo'] == '' and py_d == '٤٢', (
         f'la divergenza \\d e- cambiata: JS={js["dSuArabo"]!r} Python={py_d!r}')
+
+    # 3) `.` su carattere astrale SENZA `u`: JS conta unita' UTF-16 e prende
+    #    meta' coppia surrogata; Python prende il codepoint intero. Il lato
+    #    allineato (con `u`) e' gia' coperto dal caso E2; qui si pinna il lato
+    #    divergente, quello che GPT-5.6 Sol ha chiesto al gate finale della #89.
+    py_punto = main._estrai_valore('\U0001F19AX',
+                                   {'source': 'regex', 'pattern': r'(.)', 'group': 1})
+    assert js['puntoAstraleSenzaU'] == '\ud83c' and py_punto == '\U0001F19A', (
+        f'la divergenza `.` astrale e- cambiata: JS={js["puntoAstraleSenzaU"]!r} '
+        f'Python={py_punto!r} (se ora coincidono, aggiornare SAAS.md e #88)')
