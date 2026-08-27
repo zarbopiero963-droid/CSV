@@ -326,6 +326,34 @@ def test_una_config_non_valida_da_422(servizio):
         assert stato == 422, f'config {cattiva!r}: atteso 422, ricevuto {stato} ({corpo[:120]!r})'
 
 
+def test_un_costrutto_regex_divergente_da_422_dalla_ROTTA_reale(servizio):
+    """La blindatura #88 (Sol #89) emerge dall'ENDPOINT reale, non solo da
+    `_valida_config_parser`: cosi' l'utente vede davvero il 422 in UI.
+
+    Due percorsi, come nel validatore: una colonna `source: regex` con `\\d`, e la
+    condizione `match` di tipo regex con `\\b`. Il motivo cita `#88` e il punto.
+    """
+    cookie, _ = _login_a(servizio)
+    cfg_col = {**CONFIG_OK,
+               'columns': {**CONFIG_OK['columns'],
+                           'Price': {'source': 'regex', 'pattern': r'quota (\d+)', 'group': 1}}}
+    stato, corpo, _ = _crea(servizio, cookie, 'Divergente col', config=cfg_col)
+    testo = corpo.decode() if isinstance(corpo, bytes) else corpo
+    assert stato == 422 and '#88' in testo and 'Price' in testo, (stato, testo[:200])
+
+    cfg_match = {**CONFIG_OK, 'match': {'type': 'regex', 'value': r'\bSEGNALE\b'}}
+    stato, corpo, _ = _crea(servizio, cookie, 'Divergente match', config=cfg_match)
+    testo = corpo.decode() if isinstance(corpo, bytes) else corpo
+    assert stato == 422 and '#88' in testo and 'match' in testo, (stato, testo[:200])
+
+    # Il rovescio: le classi esplicite passano dalla stessa rotta.
+    cfg_ok = {**CONFIG_OK,
+              'columns': {**CONFIG_OK['columns'],
+                          'Price': {'source': 'regex', 'pattern': r'quota ([0-9]+)', 'group': 1}}}
+    stato, corpo, _ = _crea(servizio, cookie, 'Esplicita', config=cfg_ok)
+    assert stato == 200, (stato, corpo[:200])
+
+
 def test_prova_a_secco_diagnostica_e_NON_tocca_il_feed(servizio):
     cookie, _ = _login_a(servizio)
     slug = json.loads(_crea(servizio, cookie, 'Diagnostica')[1])['slug']

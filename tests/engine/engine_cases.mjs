@@ -928,6 +928,13 @@ caso('divergenze #88: match ignora flags, e le classi \\w/\\d in JS sono ASCII',
     // IDENTICO); qui si pinna il lato DIVERGENTE, quello senza `u`, richiesto da
     // GPT-5.6 Sol al gate finale della #89.
     puntoAstraleSenzaU: E.extractValue('\u{1F19A}X', { source: 'regex', pattern: '(.)', group: 1 }),
+    // Il rovescio ALLINEATO (blindatura #90): `\p{L}`/`\p{N}` CON `u` estraggono lo
+    // stesso valore nei due motori — JS li supporta col flag `u`. E' la ragione per
+    // cui il gate ACCETTA `\p{}` su una colonna con flags:'u'. Se un domani il motore
+    // JS target non supportasse le property escape, questo confronto lo segnalerebbe
+    // (richiesta di GPT-5.5 al gate finale della #90).
+    pLconU: E.extractValue('café', { source: 'regex', pattern: '(\\p{L}+)', group: 1, flags: 'u' }),
+    pNconU: E.extractValue('num ٤٢', { source: 'regex', pattern: '(\\p{N}+)', group: 1, flags: 'u' }),
   };
 });
 

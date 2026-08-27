@@ -2762,6 +2762,112 @@ _MAPPA_FLAG_REGEX = {'i': _regex.I, 'm': _regex.M, 's': _regex.S, 'u': 0}
 FLAG_REGEX_COMUNI = ''.join(_MAPPA_FLAG_REGEX)
 
 
+# I costrutti regex che i due motori interpretano DIVERSAMENTE, a prescindere dai
+# flag (Issue #88): `\w`/`\d`/`\b` e le loro negazioni sono unicode-aware nel modulo
+# `regex` di Python (produzione) e ASCII in `RegExp` di JavaScript (anteprima). Su
+# testo non-ASCII l'anteprima e il feed estraggono valori diversi per la STESSA
+# regola — `(\d+)` su `٤٢` da' `٤٢` nel feed e `''` in anteprima. Al salvataggio si
+# rifiutano, come i flag esotici (#86): un NUOVO parser non puo' nascere divergente;
+# le config gia' salvate restano gestite a runtime (grandfathering). NON sono qui:
+# `.` (allineato da `u`, pinnato dal contratto #89) e `\s`/`\S` (i due motori
+# concordano in pratica). Opzione B scelta dal proprietario al gate finale #89.
+COSTRUTTI_REGEX_DIVERGENTI = (r'\w', r'\W', r'\d', r'\D', r'\b', r'\B')
+# Le lettere-classe si DERIVANO dalla lista sopra (fonte unica): 'wWdDbB'. Un
+# backslash DISPARI davanti a una di esse e' il costrutto; uno PARI e' un backslash
+# letterale + la lettera (`\\d` = backslash + 'd', non la classe cifra). Il
+# lookbehind + le coppie `(?:\\\\)*` isolano il backslash dispari, ovunque nel
+# pattern (anche dentro una char-class, dove `\d` resta la classe cifra).
+_LETTERE_REGEX_DIVERGENTI = ''.join(c[1] for c in COSTRUTTI_REGEX_DIVERGENTI)
+_RE_COSTRUTTO_DIVERGENTE = _regex.compile(
+    r'(?<!\\)(?:\\\\)*(\\[' + _LETTERE_REGEX_DIVERGENTI + '])')
+# Classe POSIX `[[:alpha:]]`/`[[:^digit:]]`: Python `regex` la interpreta, JS la
+# legge come una char-class letterale — quindi diverge SEMPRE, a prescindere dai
+# flag (Sol #90).
+_RE_POSIX = _regex.compile(r'\[:\^?[a-z]+:\]')
+# Proprieta' unicode `\p{...}`/`\P{...}` (backslash dispari): divergono SENZA `u`
+# (in JS `\p` senza `u` e' la lettera `p`) e si ALLINEANO con `u`. Il capture e' il
+# solo `\p`/`\P`, per il messaggio.
+_RE_PROP_UNICODE = _regex.compile(r'(?<!\\)(?:\\\\)*(\\[pP])\{')
+# La forma BREVE senza graffe `\pL`/`\PN`: Python la interpreta, ma in JS senza `u`
+# e' `pL` letterale e CON `u` SOLLEVA (le graffe sono obbligatorie li'). Quindi
+# diverge SEMPRE — `u` non la salva — a differenza della forma con graffe.
+_RE_PROP_UNICODE_BREVE = _regex.compile(r'(?<!\\)(?:\\\\)*(\\[pP][A-Za-z])')
+
+
+def _costrutto_regex_divergente(pattern, unicode_ok=False):
+    """Il primo costrutto NON-escapato in `pattern` che i due motori interpretano
+    DIVERSAMENTE, oppure `None`. Fonte UNICA del giudizio di `_valida_config_parser`.
+
+    Sempre divergenti, a prescindere dai flag:
+    - `\\w`/`\\d`/`\\b` (e negazioni): unicode in Python `regex`, ASCII in JS. Conta
+      i backslash per non confondere la classe con un letterale (`\\d` classe,
+      `\\\\d` letterale, `\\\\\\d` letterale+classe);
+    - le classi POSIX `[[:name:]]`: JS non le supporta.
+
+    Divergente SOLO senza `u` (con `u` i due motori si allineano):
+    - `\\p{}`/`\\P{}` proprieta' unicode con GRAFFE. Con `unicode_ok=True` (il flag
+      `u` c'e') NON sono segnalate. La condizione `match` non legge i flag, quindi
+      la' e' sempre `unicode_ok=False`. La forma BREVE senza graffe `\\pL` invece
+      diverge SEMPRE (in JS con `u` solleva, senza `u` e' letterale) → segnalata a
+      prescindere da `unicode_ok`.
+
+    NON e' esaustivo, e non pretende di esserlo: restano fuori i costrutti davvero
+    esotici (`\\h`, `\\R`, `\\X`, quantificatori possessivi…). `[\\b]` (backspace,
+    in realta' allineato) e' rifiutato in modo CONSERVATIVO insieme al `\\b` confine.
+    """
+    if not isinstance(pattern, str):
+        return None
+    m = _RE_COSTRUTTO_DIVERGENTE.search(pattern)
+    if m:
+        return m.group(1)
+    m = _RE_POSIX.search(pattern)
+    if m:
+        return m.group(0)
+    # La forma breve `\pL` diverge SEMPRE (u non la allinea): prima del gate `u`.
+    m = _RE_PROP_UNICODE_BREVE.search(pattern)
+    if m:
+        return m.group(1)
+    if not unicode_ok:
+        m = _RE_PROP_UNICODE.search(pattern)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _vieta_costrutto_regex_divergente(dove, pattern, unicode_ok=False):
+    """Rifiuta al salvataggio un pattern con un costrutto divergente (#88, #90), con
+    un 422 che nomina il costrutto e la via d'uscita.
+
+    Fonte UNICA per i due punti che compilano un pattern dell'utente: le colonne
+    `source: regex` (dove `unicode_ok` dipende dal flag `u`) e la condizione `match`
+    di tipo `regex` (che i flag non li legge, quindi `unicode_ok=False`). Non tocca
+    il runtime: le config gia' salvate continuano a girare (grandfathering).
+    """
+    costrutto = _costrutto_regex_divergente(pattern, unicode_ok=unicode_ok)
+    if costrutto is None:
+        return
+    classe = {r'\d': '[0-9]', r'\D': '[^0-9]',
+              r'\w': '[A-Za-z0-9_]', r'\W': '[^A-Za-z0-9_]'}.get(costrutto)
+    if classe:
+        consiglio = (f' Usa una classe esplicita ({classe}), che i due motori '
+                     'trattano identica.')
+    elif costrutto[:2] in (r'\p', r'\P'):
+        consiglio = (" Usa una classe esplicita, oppure la forma con graffe `\\p{…}` "
+                     "su una colonna regex col flag 'u', che allinea i due motori "
+                     '(il match non legge i flag; la forma breve `\\pL` non si allinea '
+                     'mai).')
+    elif costrutto.startswith('[:'):
+        consiglio = (' Le classi POSIX non esistono in JavaScript: usa una classe '
+                     'esplicita.')
+    else:
+        consiglio = (' Ancora la condizione con delimitatori espliciti invece del '
+                     'confine di parola.')
+    raise HTTPException(
+        422, f'{dove}: il costrutto regex {costrutto!r} e\' interpretato '
+             f'diversamente fra anteprima (JS) e feed (Python) sul testo '
+             f'non-ASCII (#88).' + consiglio)
+
+
 def _flag_regex(flags):
     """I flag JS (`'i'`, `'im'`, …) tradotti nei flag del modulo `regex`.
 
@@ -5107,6 +5213,13 @@ def _valida_config_parser(config):
     match = config.get('match')
     if match is not None and not isinstance(match, dict):
         raise HTTPException(422, 'config.match deve essere un oggetto')
+    # La condizione `match` di tipo `regex` compila il pattern come le colonne,
+    # quindi un costrutto divergente (#88) va rifiutato anche qui — non solo nelle
+    # colonne. `contains` e' una sottostringa letterale: non e' regex, non diverge.
+    # Il match NON legge i flag (`i` cablato), quindi `\p{}` non puo' allinearsi con
+    # `u` qui: `unicode_ok` resta False.
+    if isinstance(match, dict) and match.get('type') == 'regex':
+        _vieta_costrutto_regex_divergente('la condizione match', match.get('value') or '')
     colonne = config.get('columns')
     if colonne is not None and not isinstance(colonne, dict):
         raise HTTPException(422, 'config.columns deve essere un oggetto')
@@ -5146,6 +5259,12 @@ def _valida_config_parser(config):
                     422, f'la colonna {nome!r}: flag regex non supportato '
                          f'({flags!r}). Usa solo una stringa con i caratteri '
                          f'{", ".join(FLAG_REGEX_COMUNI)}.')
+            # Costrutti `\w`/`\d`/`\b`/POSIX/`\p{}` divergenti fra i due motori
+            # (#88, #90): rifiutati al Salva come i flag esotici, cosi' l'anteprima
+            # non mente al feed. `\p{}` con `u` in flags si allinea → `unicode_ok`.
+            unicode_ok = isinstance(flags, str) and 'u' in flags
+            _vieta_costrutto_regex_divergente(
+                f'la colonna {nome!r}', regola.get('pattern') or '', unicode_ok=unicode_ok)
     _valida_config_multi(config.get('multi'))
     # Numeri JSON non-finiti (`NaN`, `Infinity`): `request.json()` li accetta e
     # `json.dumps` di default li serializza come JSON NON standard. Verrebbero scritti,

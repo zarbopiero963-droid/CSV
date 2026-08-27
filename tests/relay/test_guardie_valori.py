@@ -324,6 +324,229 @@ def test_la_lista_dei_flag_e_FONTE_UNICA():
     assert main._flag_regex('x') == 0
 
 
+# --------------------- costrutti regex divergenti fra i due motori (Sol, #89/#88)
+
+def _cfg_pattern(pattern, colonna='EventName'):
+    """Config valida con una colonna `regex` che usa `pattern` (blindatura #89)."""
+    regola = {'source': 'regex', 'pattern': pattern, 'group': 1}
+    return {'match': {'type': 'contains', 'value': 'x'},
+            'columns': {colonna: regola,
+                        'MarketType': {'source': 'constant', 'value': 'OVER_UNDER_15'},
+                        'SelectionName': {'source': 'constant', 'value': 'Over'},
+                        'BetType': {'source': 'constant', 'value': 'PUNTA'}}}
+
+
+@pytest.mark.parametrize('pattern', [
+    r'(\d+)',        # cifra: unicode in Python, ASCII in JS
+    r'(\w+)',        # parola: idem
+    r'x\bx',         # confine di parola: dipende da \w, quindi diverge
+    r'(\D)',         # negazione della cifra
+    r'(\W)',         # negazione della parola
+    r'a\Bb',         # negazione del confine
+    r'[\d]',         # la classe cifra DENTRO una char-class diverge ancora
+    r'pre\d{2}post', # in mezzo al pattern
+    r'\\\d',         # backslash DISPARI (letterale + classe): diverge
+])
+def test_costrutti_regex_divergenti_RIFIUTATI_al_salvataggio(pattern):
+    """Sol al gate finale #89 (opzione B di Piero): un costrutto \\w/\\d/\\b (o
+    negazione) in una regola `regex` → 422 al salvataggio.
+
+    Su testo non-ASCII l'anteprima (JS `RegExp`, ASCII) e il feed (Python `regex`,
+    unicode) estraggono valori diversi per la STESSA regola: `\\d+` su `٤٢` da'
+    `٤٢` nel feed e `''` in anteprima. Come i flag esotici (#86), il confine di
+    scrittura li rifiuta con un motivo chiaro cosi' nessun NUOVO parser puo'
+    nascere divergente; le config gia' salvate restano eseguibili a runtime.
+
+    Fail-first: sul codice PRIMA di questo fix `_valida_config_parser` NON
+    sollevava (misurato: `(\\d+)` accettato).
+    """
+    with pytest.raises(main.HTTPException) as e:
+        main._valida_config_parser(_cfg_pattern(pattern))
+    assert e.value.status_code == 422
+    assert 'EventName' in e.value.detail and '#88' in e.value.detail, e.value.detail
+
+
+@pytest.mark.parametrize('pattern', [
+    r'([0-9]+)',          # la classe esplicita, equivalente ASCII di \d
+    r'([A-Za-z0-9_]+)',   # equivalente esplicito di \w
+    r'(\s+)',             # \s: i due motori concordano in pratica → NON rifiutato
+    r'(\.)',              # punto ESCAPATO: letterale, non un costrutto
+    r'(.)',               # punto: allineato da `u`, pinnato dal contratto (#89)
+    r'\\d',               # backslash PARI (letterale + 'd'): non e' la classe cifra
+    r'(x)',               # nessun costrutto
+    r'quota\s*([0-9]+)',  # il pattern che suggestConfig genera davvero
+])
+def test_costrutti_regex_SICURI_ACCETTATI_al_salvataggio(pattern):
+    """Il rovescio: i pattern che i due motori trattano IDENTICO passano.
+
+    Senza questo caso un `return 422` fisso passerebbe il test sopra e murerebbe
+    ogni regola regex — inclusa la Price di `suggestConfig`, che usa `\\s` e
+    `[0-9]`. `\\.` e `\\\\d` (backslash pari) sono letterali, non costrutti: il
+    rilevatore conta i backslash e non deve confonderli con la classe.
+    """
+    main._valida_config_parser(_cfg_pattern(pattern))  # non deve sollevare
+
+
+def test_costrutto_divergente_nella_condizione_MATCH_regex_RIFIUTATO():
+    """La condizione `match` di tipo `regex` compila il pattern come le colonne,
+    quindi `\\d`/`\\w` divergono anche li' — e va rifiutata al Salva.
+
+    Il check dei flag (#86) copriva solo le COLONNE; il match non era guardato
+    (i flag sul match sono inerti). Qui invece il costrutto conta: un match
+    `\\bLIVE\\b` riconoscerebbe messaggi diversi fra anteprima e feed su testo
+    non-ASCII. Fail-first: prima del fix il match con `\\d` era accettato.
+    """
+    cfg = {'match': {'type': 'regex', 'value': r'quota \d+'},
+           'columns': {c: {'source': 'constant', 'value': 'X'}
+                       for c in main.COLONNE_OBBLIGATORIE}}
+    with pytest.raises(main.HTTPException) as e:
+        main._valida_config_parser(cfg)
+    assert e.value.status_code == 422
+    assert 'match' in e.value.detail and '#88' in e.value.detail, e.value.detail
+
+
+def test_una_condizione_MATCH_contains_con_backslash_d_NON_e_regex():
+    """Un `match` di tipo `contains` col testo `\\d` e' una sottostringa letterale,
+    non un costrutto regex: non diverge e non va rifiutato."""
+    cfg = {'match': {'type': 'contains', 'value': r'\d'},
+           'columns': {c: {'source': 'constant', 'value': 'X'}
+                       for c in main.COLONNE_OBBLIGATORIE}}
+    main._valida_config_parser(cfg)  # non deve sollevare
+
+
+def test_le_config_gia_salvate_con_backslash_d_restano_ESEGUIBILI_a_runtime():
+    """Grandfathering: il rifiuto e' SOLO al salvataggio. Un parser gia' nel DB con
+    `\\d` deve continuare a estrarre a runtime, identico a prima — `esegui_parser`
+    e `_estrai_valore` non sono toccati.
+
+    Su input ASCII (il caso reale Betfair) `\\d` da' lo stesso valore nei due
+    motori; il rifiuto al Salva riguarda i NUOVI parser, non rompe quelli esistenti.
+    """
+    regola = {'source': 'regex', 'pattern': r'quota (\d+)', 'group': 1}
+    assert main._estrai_valore('quota 190 fine', regola) == '190'
+
+
+def test_il_rilevatore_di_costrutti_divergenti_e_FONTE_UNICA():
+    """`_costrutto_regex_divergente` e' l'unico giudice, e distingue l'escape.
+
+    `\\d` (backslash dispari) e' la classe cifra → rilevato; `\\\\d` (pari) e'
+    backslash letterale + 'd' → NON rilevato; `\\s`/`\\.`/`.` non sono nell'insieme.
+    Il set costante e le negazioni ci sono tutte.
+    """
+    div = main._costrutto_regex_divergente
+    # La lista costante e' la fonte da cui si deriva la char-class del rilevatore.
+    assert set(main.COSTRUTTI_REGEX_DIVERGENTI) == {r'\w', r'\W', r'\d', r'\D', r'\b', r'\B'}
+    for costrutto in main.COSTRUTTI_REGEX_DIVERGENTI:
+        assert div(costrutto) == costrutto, costrutto
+    assert div(r'\d') == r'\d'
+    assert div(r'a\wb') == r'\w'
+    assert div(r'\b') == r'\b'
+    assert div(r'\D') == r'\D' and div(r'\W') == r'\W' and div(r'\B') == r'\B'
+    assert div(r'[\d]') == r'\d'          # dentro una char-class conta
+    assert div(r'\\d') is None            # backslash pari: letterale
+    assert div(r'\\\d') == r'\d'          # dispari: classe
+    assert div(r'\s') is None and div(r'\.') is None and div('.') is None
+    assert div('[0-9]+') is None
+    assert div(None) is None and div(123) is None
+
+
+def test_POSIX_e_proprieta_unicode_rilevate_con_la_sfumatura_del_flag_u():
+    """Estensione (richiesta di Sol al gate finale #90): oltre a `\\w`/`\\d`/`\\b`,
+    il detector rileva anche le classi POSIX e le proprieta' unicode `\\p{}`.
+
+    - POSIX `[[:name:]]`: JavaScript non le supporta (le legge come char-class
+      letterale), quindi divergono SEMPRE → rilevate a prescindere dai flag.
+    - `\\p{}`/`\\P{}`: divergono SENZA `u` (in JS `\\p` senza `u` e' la lettera `p`)
+      e si ALLINEANO con `u`. Quindi `unicode_ok=True` (il flag `u` c'e') le lascia
+      passare; senza, sono rilevate. Il match, che non legge i flag, e' sempre
+      `unicode_ok=False`.
+    """
+    div = main._costrutto_regex_divergente
+    assert div(r'[\b]') == r'\b'                  # falso positivo conservativo, dichiarato
+    # POSIX: sempre divergente, con o senza u.
+    assert div(r'([[:alpha:]]+)') is not None
+    assert div(r'([[:^digit:]]+)', unicode_ok=True) is not None
+    # \p{}: divergente senza u, allineato con u.
+    assert div(r'(\p{L}+)') == r'\p'
+    assert div(r'(\P{N})') == r'\P'
+    assert div(r'(\p{L}+)', unicode_ok=True) is None   # con `u` allinea → ok
+    # La forma BREVE `\pL`/`\PN` (senza graffe): diverge SEMPRE. In JS senza `u` e'
+    # `pL` letterale, con `u` SOLLEVA (le graffe sono obbligatorie li'), Python la
+    # interpreta. Quindi `unicode_ok` NON la salva, a differenza di `\p{L}`.
+    assert div(r'\pL') == r'\pL'
+    assert div(r'\pL', unicode_ok=True) == r'\pL'
+    assert div(r'a\PNb') == r'\PN'
+    assert div(r'\\pL') is None    # backslash PARI: `\`+`pL` letterale, non la proprieta'
+    assert div(r'\\\pL') == r'\pL'  # dispari: letterale + proprieta' breve
+    # RESIDUO NOTO dichiarato (Sol #90, scelta del proprietario di fermarsi): con `u`
+    # si fida che le sintassi `\p{}` coincidano, ma i NOMI DI SCRIPT no — `\p{Latin}`
+    # e' valido in Python e un errore in JS (che vuole `\p{Script=Latin}`). Con `u`
+    # non e' intercettato: e' un buco dichiarato, non nascosto. Se un domani si
+    # decidesse di chiuderlo (whitelist categorie generali), questo test lo segnala.
+    assert div(r'\p{Latin}', unicode_ok=True) is None
+    assert div(r'\p{Latin}') == r'\p'   # senza u resta preso dalla regola generale
+    # Un `\p` letterale (backslash pari) non e' la proprieta'.
+    assert div(r'\\p{L}') is None
+    # Conservativo: `[:alpha:]` e' rilevato anche fuori da un vero `[[...]]` POSIX
+    # (es. `foo[:alpha:]bar`). Distinguerlo chiederebbe di tracciare le char-class;
+    # come per `[\b]`, si preferisce il raro falso positivo. Dichiarato (GPT-5.5 #90).
+    assert div('foo[:alpha:]bar') == '[:alpha:]'
+    # Restano fuori i costrutti davvero esotici (whack-a-mole): `\h`, `\R`, ecc.
+    assert div(r'\h') is None
+
+
+def test_POSIX_e_prop_unicode_al_salvataggio_con_la_sfumatura_u():
+    """La blindatura estesa al salvataggio (Sol #90):
+    - POSIX in colonna e nel match → 422 (JS non le supporta);
+    - `\\p{}` in colonna SENZA `u` → 422; CON `flags:'u'` → accettato (allinea);
+    - `\\p{}` nel match → 422 (il match non legge i flag, non puo' avere `u`).
+    Fail-first: prima dell'estensione tutti passavano.
+    """
+    def obblig():
+        return {c: {'source': 'constant', 'value': 'X'} for c in main.COLONNE_OBBLIGATORIE}
+
+    # POSIX in colonna
+    with pytest.raises(main.HTTPException) as e:
+        main._valida_config_parser(_cfg_pattern(r'([[:alpha:]]+)'))
+    assert e.value.status_code == 422 and '#88' in e.value.detail, e.value.detail
+
+    # POSIX nel match
+    with pytest.raises(main.HTTPException) as e:
+        main._valida_config_parser({'match': {'type': 'regex', 'value': r'[[:digit:]]'},
+                                    'columns': obblig()})
+    assert e.value.status_code == 422 and 'match' in e.value.detail, e.value.detail
+
+    # \p{} in colonna SENZA u → 422
+    with pytest.raises(main.HTTPException) as e:
+        main._valida_config_parser(_cfg_pattern(r'(\p{L}+)'))
+    assert e.value.status_code == 422 and '#88' in e.value.detail, e.value.detail
+
+    # \p{} in colonna CON flags:'u' → accettato (i due motori si allineano)
+    regola_u = {'source': 'regex', 'pattern': r'(\p{L}+)', 'group': 1, 'flags': 'u'}
+    main._valida_config_parser({'match': {'type': 'contains', 'value': 'x'},
+                                'columns': {'EventName': regola_u,
+                                            'MarketType': {'source': 'constant', 'value': 'O'},
+                                            'SelectionName': {'source': 'constant', 'value': 'Over'},
+                                            'BetType': {'source': 'constant', 'value': 'PUNTA'}}})
+
+    # \p{} nel match → 422 (nessun `u` possibile li')
+    with pytest.raises(main.HTTPException) as e:
+        main._valida_config_parser({'match': {'type': 'regex', 'value': r'\p{L}+SEGNALE'},
+                                    'columns': obblig()})
+    assert e.value.status_code == 422 and 'match' in e.value.detail, e.value.detail
+
+    # La forma BREVE `\pL` e' rifiutata ANCHE con flags:'u' (u non la allinea),
+    # a differenza di `\p{L}`+u che invece passa qui sopra.
+    regola_breve_u = {'source': 'regex', 'pattern': r'(\pL+)', 'group': 1, 'flags': 'u'}
+    with pytest.raises(main.HTTPException) as e:
+        main._valida_config_parser({'match': {'type': 'contains', 'value': 'x'},
+                                    'columns': {'EventName': regola_breve_u,
+                                                'MarketType': {'source': 'constant', 'value': 'O'},
+                                                'SelectionName': {'source': 'constant', 'value': 'Over'},
+                                                'BetType': {'source': 'constant', 'value': 'PUNTA'}}})
+    assert e.value.status_code == 422 and '#88' in e.value.detail, e.value.detail
+
+
 def test_un_parser_di_sole_COSTANTI_non_scrive_su_qualunque_messaggio():
     """Gap 2: quattro obbligatorie costanti + condizione larga = riga piazzabile
     per qualsiasi messaggio che contenga la condizione.
