@@ -2240,6 +2240,75 @@ def test_possiede_qualcosa_conta_libreria_e_sorgenti(tmp_path, monkeypatch):
     c.close()
 
 
+def test_un_cliente_con_SOLO_le_SORGENTI_non_viene_assorbito(tmp_path, monkeypatch):
+    """Simmetrico del caso libreria: un cliente con SOLE sorgenti squadre (#34) — niente
+    parser, niente chat — non e' una riga vuota, sul path COMPLETO del login (non solo
+    l'unita'). Segnalato da GPT-5.5 su #83 come caso end-to-end mancante. Audit #81 (I1).
+    """
+    import sqlite3
+    from fastapi import HTTPException
+    percorso = _prepara(tmp_path, monkeypatch, 'cliente_sorgenti.db')
+    CLIENTE = '424242424'
+    cliente, piero = _cliente_nudo(percorso, monkeypatch, CLIENTE)
+
+    c = sqlite3.connect(percorso)
+    c.execute("INSERT INTO sorgenti_squadre(user_id, nome) VALUES (?, 'La mia fonte')",
+              (cliente,))
+    c.commit()
+    c.close()
+
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_ID', CLIENTE)
+    monkeypatch.setattr(main, 'TELEGRAM_ADMIN_RECONCILE', str(cliente))
+
+    with pytest.raises(HTTPException) as errore:
+        main.login_telegram(main.LoginTelegramIn(**_dati_login(id=CLIENTE)))
+    assert errore.value.status_code == 409, (
+        'un cliente con sole sorgenti e- stato trattato come vuoto e assorbito: '
+        f'{errore.value.status_code} invece di 409')
+
+    c = sqlite3.connect(percorso)
+    sorgenti = c.execute('SELECT COUNT(*) FROM sorgenti_squadre WHERE user_id=?',
+                         (cliente,)).fetchone()[0]
+    suo_tg = c.execute('SELECT telegram_id FROM users WHERE id=?', (cliente,)).fetchone()[0]
+    c.close()
+    assert sorgenti == 1, 'le sorgenti del cliente sono state travasate al proprietario'
+    assert suo_tg == CLIENTE, f'il cliente ha perso il suo telegram_id (ora {suo_tg!r})'
+
+
+def test_riconciliazione_travasa_ESATTAMENTE_le_TABELLE_POSSEDUTE(tmp_path, monkeypatch):
+    """Ogni tabella che il guard controlla e' davvero travasata dalla riconciliazione.
+
+    L'audit #81 (I1) e' nato dal disallineamento fra le due mappe: `riconcilia_su_utente`
+    travasava sport e sorgenti, ma `possiede_qualcosa` non li guardava. Questo test le lega:
+    un utente con una riga in OGNI tabella di `TABELLE_POSSEDUTE` e' visto come «di
+    qualcuno», e dopo `riconcilia_su_utente` su un altro utente NESSUNA di quelle righe
+    resta sua — cioe' ogni tabella elencata nel guard e' una che la riconciliazione sposta
+    davvero. Se un domani il guard elencasse una tabella che riconcilia ignora, o le due
+    mappe divergessero, qui diventa rosso invece di lasciare il buco silenzioso. E' il verso
+    ispezionabile della nota di GPT-5.5 e Fable 5 su #83 («tieni allineate le due liste»).
+    """
+    _prepara(tmp_path, monkeypatch, 'allineamento.db')
+    c = main.db()
+    c.execute("INSERT INTO users(telegram_id, status) VALUES ('201','attivo')")
+    c.execute("INSERT INTO users(telegram_id, status) VALUES ('202','attivo')")
+    a = c.execute("SELECT id FROM users WHERE telegram_id='201'").fetchone()[0]
+    b = c.execute("SELECT id FROM users WHERE telegram_id='202'").fetchone()[0]
+    c.execute("INSERT INTO parsers(name, header, user_id, slug) VALUES ('P','H',?,'p')", (a,))
+    c.execute("INSERT INTO chats(telegram_chat_id, owner_user_id) VALUES ('999',?)", (a,))
+    c.execute("INSERT INTO sports(user_id, slug, nome) VALUES (?, 's', 'S')", (a,))
+    c.execute("INSERT INTO sorgenti_squadre(user_id, nome) VALUES (?, 'F')", (a,))
+    assert main.possiede_qualcosa(c, a) is True
+
+    main.riconcilia_su_utente(c, a, b)
+
+    resti = {t: c.execute(f'SELECT COUNT(*) FROM {t} WHERE {col}=?', (a,)).fetchone()[0]
+             for t, col in main.TABELLE_POSSEDUTE}
+    c.close()
+    assert resti == {t: 0 for t, _ in main.TABELLE_POSSEDUTE}, (
+        f'una tabella del guard NON e- stata travasata dalla riconciliazione: {resti} — '
+        'guard e riconciliazione sono disallineati')
+
+
 def test_col_CONSENSO_la_riparazione_funziona_ancora(tmp_path, monkeypatch):
     """Il verso opposto, e senza di lui il fail-closed avrebbe rotto cio' che la PR ripara.
 
