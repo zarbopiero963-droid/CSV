@@ -497,6 +497,16 @@ esce — nessun crash e nessun segnale prodotto «per default» da una config no
 valida — e senza dipendere dalla forma della coercizione a stringa, che
 divergerebbe fra `String()` di JS e `str()` di Python.
 
+**Al salvataggio** (`_valida_config_parser`, Issue #86) un `flags` fuori da
+`{i,m,s,u}` — un `x`/`y`/`g`, o un valore non-stringa — viene **rifiutato con un
+422** e un motivo chiaro, così nessun nuovo parser può nascere con flag che
+degraderebbero a runtime. La lista `{i,m,s,u}` è fonte unica (`FLAG_REGEX_COMUNI`
+in `main.py`, riusata da `_flag_regex` e dalla validazione). Le config già
+salvate restano gestite a runtime come sopra. E quando un segnale del motore cade
+per una **colonna obbligatoria vuota**, il motivo nomina ora quella colonna in
+`message_logs` (come già fa il percorso legacy dal #84), invece del generico
+`parser_no_match`: la perdita non è mai silenziosa.
+
 Allo stesso modo `replace_all` con `from` vuoto è un **no-op** in entrambi (E1),
 non l'esplosione carattere-per-carattere del vecchio `split('')`. Il confronto in
 `tests/engine/engine_cases.mjs` tiene i due motori allineati.

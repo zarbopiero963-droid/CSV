@@ -236,6 +236,67 @@ def test_le_14_colonne_VERE_restano_accettate():
     main._valida_config_parser(cfg)
 
 
+def _cfg_flags(flags):
+    """Una config valida con una colonna `regex` e i `flags` dati (Issue #86)."""
+    regola = {'source': 'regex', 'pattern': '(x)', 'group': 1}
+    if flags is not None:
+        regola['flags'] = flags
+    return {'match': {'type': 'contains', 'value': 'x'},
+            'columns': {'EventName': regola,
+                        'MarketType': {'source': 'constant', 'value': 'OVER_UNDER_15'},
+                        'SelectionName': {'source': 'constant', 'value': 'Over'},
+                        'BetType': {'source': 'constant', 'value': 'PUNTA'}}}
+
+
+@pytest.mark.parametrize('flags', ['x', 'gy', 'g', 'y', 'ix', 5, [{'a': 1}], {'i': 1}, True])
+def test_flags_regex_fuori_dal_comune_RIFIUTATI_al_salvataggio(flags):
+    """Issue #86: un `flags` fuori da `{i,m,s,u}` o non-stringa → 422 al salvataggio.
+
+    Prima venivano ACCETTATI e degradavano a runtime (case-sensitive per `x`/`y`,
+    fail-closed per i non-stringa, #85): un parser poteva nascere con un flag che
+    l'anteprima e il feed trattavano in modo diverso da come l'utente credeva. Ora
+    il confine di scrittura li rifiuta con un motivo chiaro, cosi' nessun NUOVO
+    parser puo' averli. Fail-first: sul codice vecchio `_valida_config_parser` non
+    sollevava (misurato: `flags:'x'` accettato).
+    """
+    with pytest.raises(main.HTTPException) as e:
+        main._valida_config_parser(_cfg_flags(flags))
+    assert e.value.status_code == 422
+    assert 'flag regex' in e.value.detail and 'EventName' in e.value.detail, e.value.detail
+
+
+@pytest.mark.parametrize('flags', [None, '', 'i', 'ms', 'ims', 'u', 'iu', 'imsu'])
+def test_flags_regex_del_comune_ACCETTATI_al_salvataggio(flags):
+    """Il rovescio: i flag onorati da entrambi i motori passano, e l'assenza pure.
+
+    Senza questo caso un `return 422` fisso passerebbe il test sopra e murerebbe
+    ogni parser con una regola regex.
+    """
+    main._valida_config_parser(_cfg_flags(flags))  # non deve sollevare
+
+
+def test_la_lista_dei_flag_e_FONTE_UNICA():
+    """`FLAG_REGEX_COMUNI` e' l'insieme onorato da `_flag_regex`, non una copia.
+
+    La validazione al salvataggio rifiuta i flag fuori da `FLAG_REGEX_COMUNI`; se
+    quella lista divergesse da cio' che `_flag_regex` onora davvero, si
+    rifiuterebbe un flag valido o si accetterebbe un flag che il motore ignora.
+    Qui si pretende che ogni carattere della lista sia effettivamente onorato
+    (i/m/s cambiano i bit, `u` e' un no-op riconosciuto) e che nessun altro lo sia.
+    """
+    R = main._regex
+    assert set(main.FLAG_REGEX_COMUNI) == set('imsu')
+    # i, m, s attivano il bit corrispondente.
+    assert main._flag_regex('i') == R.I
+    assert main._flag_regex('m') == R.M
+    assert main._flag_regex('s') == R.S
+    # u e' riconosciuto (accettato al salvataggio) ma no-op nel motore Python.
+    assert main._flag_regex('u') == 0
+    # un carattere fuori dalla lista NON e' onorato (case-sensitive) — ed e'
+    # esattamente cio' che la validazione rifiuta al salvataggio.
+    assert main._flag_regex('x') == 0
+
+
 def test_un_parser_di_sole_COSTANTI_non_scrive_su_qualunque_messaggio():
     """Gap 2: quattro obbligatorie costanti + condizione larga = riga piazzabile
     per qualsiasi messaggio che contenga la condizione.

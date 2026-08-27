@@ -490,3 +490,57 @@ def test_replace_all_con_from_vuoto_e_no_op_in_python():
     ra = main.TRASFORMAZIONI_MOTORE['replace_all']
     assert ra('abc', {'from': '', 'to': 'X'}) == 'abc'
     assert ra('a-b-c', {'from': '-', 'to': ' '}) == 'a b c'
+
+
+# --------------------------------------------------- diagnosi non-silenziosa (#86)
+
+def test_ramo_motore_nomina_la_colonna_obbligatoria_mancante():
+    """Issue #86: un segnale che cade per OBBLIGATORIE mancanti non e' piu' muto.
+
+    Prima il ramo `config_json` di `esito_messaggio`, quando la riga non era
+    completa per `missing` (non per uno scarto), restituiva `motivi=[]`: il
+    dispatch scriveva il generico `parser_no_match` e la causa non arrivava in
+    `message_logs`. Ora nomina QUALE colonna manca, con la stessa formula del
+    percorso legacy (#84). Fail-first: sul codice vecchio `motivi` era `[]`.
+    """
+    config = {
+        'match': {'type': 'contains', 'value': 'P.Bet.'},
+        'columns': {
+            # Una obbligatoria da regex che NON combacia -> colonna vuota -> mancante.
+            'EventName': {'source': 'regex', 'pattern': '(NON_ESISTE)', 'group': 1},
+            'MarketType': {'source': 'constant', 'value': 'OVER_UNDER_15'},
+            'SelectionName': {'source': 'constant', 'value': 'Over'},
+            'BetType': {'source': 'constant', 'value': 'PUNTA'},
+        },
+    }
+    parsed, motivi = main.esito_messaggio(
+        'P.Bet. Juve - Milan', {'config_json': json.dumps(config)})
+    assert parsed is None, 'un segnale senza EventName non deve uscire'
+    assert 'EventName: colonna obbligatoria vuota nel segnale' in motivi, (
+        f'il ramo motore non nomina la colonna mancante: {motivi!r}')
+
+
+def test_ramo_motore_uno_SCARTO_prevale_sul_missing():
+    """La diagnosi del missing scatta SOLO se non c'e' gia' uno scarto a spiegarlo.
+
+    Se una colonna cade per una guardia sul valore (scarto), il motivo deve
+    restare quello dello scarto — la diagnosi manderebbe a correggere la colonna
+    sbagliata. Qui un Price col separatore delle migliaia produce uno scarto, e il
+    motivo NON deve diventare quello del missing.
+    """
+    config = {
+        'match': {'type': 'contains', 'value': 'P.Bet.'},
+        'columns': {
+            'EventName': {'source': 'line', 'contains': 'P.Bet.'},
+            'MarketType': {'source': 'constant', 'value': 'OVER_UNDER_15'},
+            'SelectionName': {'source': 'constant', 'value': 'Over'},
+            'BetType': {'source': 'constant', 'value': 'PUNTA'},
+            'Price': {'source': 'constant', 'value': '1.000.000'},
+        },
+    }
+    parsed, motivi = main.esito_messaggio(
+        'P.Bet. Juventus - Palermo', {'config_json': json.dumps(config)})
+    assert parsed is None
+    assert motivi, 'lo scarto deve produrre un motivo'
+    assert not any('colonna obbligatoria vuota' in m for m in motivi), (
+        f'con uno scarto presente non si deve aggiungere la diagnosi del missing: {motivi!r}')
