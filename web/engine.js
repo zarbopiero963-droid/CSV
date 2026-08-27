@@ -122,6 +122,12 @@ export function extractValue(message, rule) {
       break;
     }
     case 'regex': {
+      // `flags` presente ma NON stringa (config_json non attendibile): regola
+      // malformata → colonna VUOTA (fail-closed), come un pattern che non
+      // compila. Su una colonna obbligatoria il segnale non esce, senza fail-open
+      // e senza dipendere dalla coercizione. Simmetrico a `_estrai_valore` in
+      // main.py. Bloccante GPT-5.6 Sol, PR #85.
+      if (rule.flags != null && typeof rule.flags !== 'string') return '';
       let m = null;
       try {
         m = new RegExp(rule.pattern, flagRegex(rule.flags)).exec(message);

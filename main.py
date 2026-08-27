@@ -2785,17 +2785,16 @@ def _flag_regex(flags):
     sulla PR #85. `'u'` e' riconosciuto ma no-op (`_regex` e' gia'
     codepoint-native) e resta case-sensitive, come `new RegExp(_, 'u')` in JS.
 
-    `flags` viene dal `config_json` dell'utente, quindi NON e' garantito una
-    stringa. Solo una STRINGA e' un insieme di flag valido: un JSON con `flags: 5`,
-    `flags: [{...}]` o `flags: {...}` e' malformato e vale come ASSENTE -> `'i'`.
-    Cosi' non si itera un non-iterabile (era un `TypeError` durante il dispatch,
-    [REAL_FINDING] di Claude Fable 5) e non si dipende dalla forma della
-    coercizione a stringa, che diverge da `String()` di JS: `str({'i': 1})` =
-    "{'i': 1}" raccoglierebbe una `i` (case-insensitive), mentre
-    `String({i:1})` = "[object Object]" no (case-sensitive). Trattare ogni
-    non-stringa come assente chiude la divergenza ([REAL_FINDING] di GPT-5.6 Sol,
-    PR #85). Una STRINGA presente ma con soli flag scartati resta case-sensitive,
-    come sopra.
+    `flags` arriva qui GIA' validato come stringa (o assente): un `flags` presente
+    ma non-stringa viene scartato PRIMA, in `_estrai_valore`, che tratta la regola
+    come malformata e restituisce colonna vuota (fail-closed) — cosi' un config
+    con `flags: 5`/`[{...}]`/`{...}` non fa uscire un segnale che su `main` non
+    usciva, e non si dipende dalla forma della coercizione a stringa (che diverge
+    da `String()` di JS). Bloccanti Claude Fable 5 (niente `TypeError`) e GPT-5.6
+    Sol (niente fail-open), PR #85. Il `isinstance` qui e' una rete difensiva
+    ridondante: tiene la funzione totale se un domani un chiamante la invoca senza
+    passare dal guard. Una STRINGA presente ma con soli flag scartati resta
+    case-sensitive.
     """
     if not isinstance(flags, str) or flags == '':
         return _regex.I
@@ -2840,11 +2839,21 @@ def _estrai_valore(message, regola, scadenza=None):
         else:
             v = riga
     elif sorgente == 'regex':
+        # `flags` presente ma NON stringa (dal config_json non attendibile): regola
+        # malformata. Come un pattern che non compila, la colonna resta VUOTA
+        # (fail-closed) invece di girare col default: su una colonna obbligatoria
+        # il segnale non esce, come su `main` (dove un flags non-stringa sollevava
+        # TypeError e il segnale non usciva) — ma senza il crash e senza fail-open.
+        # Simmetrico a `extractValue` in engine.js. [REAL_FINDING] di GPT-5.6 Sol,
+        # PR #85.
+        flags = regola.get('flags')
+        if flags is not None and not isinstance(flags, str):
+            return ''
         # Pattern dell'utente → timeout duro (worker condiviso), dentro il budget di
         # parser. Errore o scadenza danno None, cioe' colonna vuota, come prima
         # faceva `except re.error`.
         m = _cerca_regex_utente(regola.get('pattern', ''), message,
-                                _flag_regex(regola.get('flags')), scadenza)
+                                _flag_regex(flags), scadenza)
         if not m:
             return ''
         gruppo = regola.get('group', 1)

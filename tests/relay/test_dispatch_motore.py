@@ -407,24 +407,56 @@ def test_flag_regex_onora_il_solo_insieme_comune_ims():
     assert main._flag_regex(None) == R.I
 
 
-def test_flag_regex_non_stringa_degrada_come_assente():
-    """`flags` viene dal config_json non attendibile: non deve MAI sollevare, e
-    ogni NON-stringa vale come assente → default `'i'`.
+def test_estrai_valore_flags_non_stringa_e_FAIL_CLOSED():
+    """Un `flags` non-stringa (config_json non attendibile) → colonna VUOTA.
 
-    Prima iterava `flags` diretto: `for f in 5` → `TypeError`, `mappa.get({})` →
-    `TypeError: unhashable`. Il dispatch si interrompeva. Poi una coercizione con
-    `str()` toglieva l'eccezione ma dipendeva dalla FORMA della stringa, che
-    diverge da `String()` di JS: `str({'i': 1})` = "{'i': 1}" raccoglieva una `i`
-    (case-insensitive) mentre `String({i:1})` = "[object Object]" no
-    (case-sensitive) — divergenza reale ([REAL_FINDING] Sol, PR #85). Trattare
-    ogni non-stringa come assente chiude sia il TypeError (Fable) sia la
-    divergenza (Sol): entrambi i motori danno `'i'`.
+    La storia di questo caso, tutta misurata:
+    - su `main` `for f in (5 or 'i')` sollevava `TypeError` → il segnale non
+      usciva (fail-closed per crash) — [REAL_FINDING] Claude Fable 5;
+    - una coercizione `str(flags)` toglieva il crash ma dipendeva dalla FORMA
+      della stringa, che diverge da `String()` di JS (`str({'i':1})`="{'i': 1}"
+      con una `i`, `String({i:1})`="[object Object]" senza) — [REAL_FINDING] Sol;
+    - trattarla come assente (default `i`) chiudeva la divergenza ma cambiava la
+      produzione in fail-OPEN: un config malformato che prima non produceva
+      segnale ora ne produceva uno — [REAL_FINDING] Sol.
+
+    Fix: `flags` non-stringa = regola malformata → estrazione `''` in ENTRAMBI i
+    motori (come un pattern che non compila). Su una colonna obbligatoria il
+    segnale non esce (fail-closed, come `main`), senza crash e senza divergenza.
+    Il gemello JS e' `extractValue` in engine.js, confrontato in engine_cases.mjs.
+    """
+    for cattivo in (5, 0, [], [{'a': 1}], {}, {'i': 1}, ['i'], False, True):
+        regola = {'source': 'regex', 'pattern': '(abc)', 'flags': cattivo, 'group': 1}
+        assert main._estrai_valore('abcABC', regola) == '', (
+            f'flags={cattivo!r}: la regola malformata deve dare colonna vuota, '
+            f'non estrarre col default')
+    # E il verso end-to-end: una OBBLIGATORIA con flags non-stringa → nessun
+    # segnale (fail-closed), non un segnale col default.
+    config = {
+        'match': {'type': 'contains', 'value': 'P.Bet.'},
+        'columns': {
+            'EventName': {'source': 'regex', 'pattern': '(Juve - Milan)',
+                          'flags': 5, 'group': 1},
+            'MarketType': {'source': 'constant', 'value': 'OVER_UNDER_15'},
+            'SelectionName': {'source': 'constant', 'value': 'Over'},
+            'BetType': {'source': 'constant', 'value': 'PUNTA'},
+        },
+    }
+    r = main.esegui_parser('P.Bet. Juve - Milan', config)
+    assert r['matched'] is True, 'la condizione combacia comunque'
+    assert 'EventName' in r['missing'], 'EventName con flags malformato → mancante'
+    assert r['complete'] is False, 'nessun segnale da un config con flags malformato'
+
+
+def test_flag_regex_resta_TOTALE_come_rete_difensiva():
+    """`_flag_regex` non viene mai chiamata con non-stringa (il guard e' a monte),
+    ma resta totale: non deve sollevare se un domani un chiamante salta il guard.
     """
     R = main._regex
-    # Ogni non-stringa → default 'i' (case-insensitive), IDENTICO in JS. Nessuna
-    # dipendenza dalla forma della coercizione, quindi nessuna divergenza.
-    for v in (5, 0, [], [{'a': 1}], {}, {'i': 1}, ['i'], False, True):
-        assert main._flag_regex(v) == R.I, f'{v!r} deve dare I (assente)'
+    for v in (5, [], {}, False, True, None, ''):
+        assert main._flag_regex(v) == R.I   # difensivo, mai un'eccezione
+    assert main._flag_regex('x') == 0       # stringa presente ma scartata: case-sensitive
+    assert main._flag_regex('ims') == (R.I | R.M | R.S)
 
 
 def test_estrai_valore_col_flag_x_non_va_in_modalita_verbose():

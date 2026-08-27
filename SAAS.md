@@ -490,10 +490,12 @@ cambia i propri valori nel feed, perde solo il verbose/sticky (che comunque
 divergevano fra i motori).
 
 Un `flags` **malformato** (non stringa: numero, lista, oggetto, booleano — il
-`config_json` è dato utente non attendibile) vale come **assente** → default `i`,
-identico nei due motori. Non solleva mai (un parser storto non interrompe il
-dispatch) e non dipende dalla forma della coercizione a stringa, che divergerebbe
-fra `String()` di JS e `str()` di Python.
+`config_json` è dato utente non attendibile) rende la regola `regex`
+**malformata**: la colonna resta **vuota** (fail-closed), come per un pattern che
+non compila, identico nei due motori. Su una colonna obbligatoria il segnale non
+esce — nessun crash e nessun segnale prodotto «per default» da una config non
+valida — e senza dipendere dalla forma della coercizione a stringa, che
+divergerebbe fra `String()` di JS e `str()` di Python.
 
 Allo stesso modo `replace_all` con `from` vuoto è un **no-op** in entrambi (E1),
 non l'esplosione carattere-per-carattere del vecchio `split('')`. Il confronto in

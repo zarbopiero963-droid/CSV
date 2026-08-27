@@ -847,33 +847,29 @@ function casiConfronto() {
   aggiungi('E2: flag misti (xiu) tengono solo i validi comuni',
     ...conMercato({ source: 'regex', pattern: '(ABC)', flags: 'xiu', group: 1 },
       'P.Bet. xyzABCabc'));
-  // E2, flag NON-STRINGA (config_json non attendibile): Python iterava `flags`
-  // diretto e SOLLEVAVA `TypeError` (`for f in 5`, o `mappa.get({})` unhashable),
-  // interrompendo il dispatch di quel parser. Ora ogni non-stringa vale come
-  // ASSENTE → default `i` in entrambi: mai un'eccezione, mai una divergenza.
-  // Bloccante Fable 5, PR #85. Misurato ROSSO sul codice vecchio: TypeError.
-  aggiungi('E2: flag non-stringa (numero) → default i, non solleva',
+  // E2, flag NON-STRINGA (config_json non attendibile): una regola con `flags`
+  // non-stringa e' MALFORMATA → colonna VUOTA (fail-closed) in ENTRAMBI, come un
+  // pattern che non compila. Cosi': niente `TypeError` (Python su `main` faceva
+  // `for f in 5` → crash, Fable), niente fail-open (un config malformato non
+  // produce piu' un segnale che prima non usciva, Sol), niente dipendenza dalla
+  // forma della coercizione a stringa (che diverge fra `str()` e `String()`,
+  // Sol). Qui MarketName e' facoltativa, quindi la riga resta completa ma con la
+  // colonna vuota; l'oracolo e' `runParser` e Python deve dare la stessa riga.
+  aggiungi('E2: flag non-stringa (numero) → colonna vuota, non solleva',
     ...conMercato({ source: 'regex', pattern: '(abc)', flags: 5, group: 1 },
       'P.Bet. abcABC'));
-  aggiungi('E2: flag non-stringa (lista di oggetti) → default i, non solleva',
+  aggiungi('E2: flag non-stringa (lista di oggetti) → colonna vuota',
     ...conMercato({ source: 'regex', pattern: '(abc)', flags: [{ a: 1 }], group: 1 },
       'P.Bet. abcABC'));
-  // E2, flag NON-STRINGA falsy/truthy: `false`, `true` e un OGGETTO non sono
-  // stringhe → valgono come ASSENTI → default `'i'` in ENTRAMBI. Prima
-  // dipendevano dalla coercizione: `false`→"false" prendeva la `s` (dotAll) e
-  // un oggetto divergeva (`String({i:1})`="[object Object]" senza `i` contro
-  // `str({'i':1})`="{'i': 1}" con `i`). Trattarli come assenti chiude la
-  // divergenza. Bloccante GPT-5.6 Sol, PR #85. Il pattern `(a.b)` su `a\nb`
-  // vede il default `i` (niente dotAll → nessun match), l'oracolo e' `runParser`.
-  aggiungi('E2: flag false (non-stringa) → default i in entrambi',
+  aggiungi('E2: flag false (non-stringa) → colonna vuota in entrambi',
     ...conMercato({ source: 'regex', pattern: '(a.b)', flags: false, group: 1 },
       'P.Bet. a\nb'));
-  aggiungi('E2: flag true (non-stringa) → default i in entrambi',
+  aggiungi('E2: flag true (non-stringa) → colonna vuota in entrambi',
     ...conMercato({ source: 'regex', pattern: '(abc)', flags: true, group: 1 },
       'P.Bet. ABCabc'));
   // Un OGGETTO come flags: era la divergenza residua (Python raccoglieva la `i`
-  // della chiave, JS no). Trattato come assente → `i` in entrambi.
-  aggiungi('E2: flag oggetto {i:1} (non-stringa) → default i, niente divergenza',
+  // della chiave, JS no). Malformato → colonna vuota in entrambi, niente divergenza.
+  aggiungi('E2: flag oggetto {i:1} (non-stringa) → colonna vuota, niente divergenza',
     ...conMercato({ source: 'regex', pattern: '(abc)', flags: { i: 1 }, group: 1 },
       'P.Bet. ABCabc'));
   return confronti;
