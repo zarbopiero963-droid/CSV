@@ -179,11 +179,19 @@ con una disambiguazione deterministica invece di un errore:
 - **due utenti con lo stesso `origin_profile`**, cioè lo stato che l'assenza di indice
   sui database già migrati permetteva → l'etichetta resta a **una sola** riga e sulle
   altre diventa NULL. Qui **non si cancella nessuna riga**, a differenza delle chat:
-  una riga di `users` possiede chat, parser e segnali, e cancellarla perderebbe dati di
+  una riga di `users` possiede chat, parser, segnali, la libreria mercati (#33) e le
+  sorgenti squadre (#34), e cancellarla perderebbe dati di
   un cliente. Ma azzerare l'etichetta **non basta**: ciò che la riga perdente possiede
-  — chat, segnali, parser — viene **trasferito al superstite** prima di togliergliela,
+  — chat, segnali, parser, sport/mercati/selezioni, sorgenti/competizioni/alias — viene
+  **trasferito al superstite** prima di togliergliela,
   altrimenti quei dati restano su un utente che non risulta più quel profilo, cioè
-  nessuno li rivendica e per il codice multiutente sono di un altro. Nel trasferimento
+  nessuno li rivendica e per il codice multiutente sono di un altro. La stessa lista
+  vincola `possiede_qualcosa` (`TABELLE_POSSEDUTE`): il guard che, sul login
+  dell'amministratore, rifiuta di **assorbire** una riga che possiede dati invece di una
+  vuota. Dall'audit #81 (I1) conta anche libreria e sorgenti, non più solo parser e chat:
+  un cliente che si costruisce prima la libreria — l'ordine naturale, il wizard la consuma —
+  non deve essere scambiato per una riga vuota e travasato sull'account del proprietario.
+  Nel trasferimento
   dei parser lo **slug che collide** viene ri-disambiguato: `UNIQUE (user_id, slug)`
   vieta la coppia, e due parser di utenti diversi con lo stesso slug sono uno stato
   legale sotto quel vincolo — quindi esiste, e uno `UPDATE` in blocco vi sbatterebbe
