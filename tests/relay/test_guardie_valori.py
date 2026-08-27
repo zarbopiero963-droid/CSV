@@ -265,12 +265,19 @@ def test_flags_regex_fuori_dal_comune_RIFIUTATI_al_salvataggio(flags):
     assert 'flag regex' in e.value.detail and 'EventName' in e.value.detail, e.value.detail
 
 
-@pytest.mark.parametrize('flags', [None, '', 'i', 'ms', 'ims', 'u', 'iu', 'imsu'])
+@pytest.mark.parametrize('flags', [None, '', 'i', 'ms', 'ims', 'u', 'iu', 'imsu',
+                                   'ii', 'uu', 'imsi'])
 def test_flags_regex_del_comune_ACCETTATI_al_salvataggio(flags):
     """Il rovescio: i flag onorati da entrambi i motori passano, e l'assenza pure.
 
     Senza questo caso un `return 422` fisso passerebbe il test sopra e murerebbe
     ogni parser con una regola regex.
+
+    I DUPLICATI (`ii`, `uu`, `imsi`) sono ACCETTATI di proposito: `flagRegex` in JS
+    deduplica col Set prima di `new RegExp` (che su `'ii'` solleverebbe) e Python li
+    combina — i due motori danno lo stesso valore (misurato in engine_cases.mjs).
+    GPT-5.6 Sol (PR #87) li temeva divergenti: non lo sono, quindi rifiutarli
+    sarebbe una restrizione senza motivo.
     """
     main._valida_config_parser(_cfg_flags(flags))  # non deve sollevare
 
