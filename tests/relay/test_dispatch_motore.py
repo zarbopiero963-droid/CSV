@@ -581,3 +581,33 @@ def test_il_ramo_motore_non_perde_MAI_un_segnale_matched_in_silenzio():
     parsed, motivi = esito('un altro messaggio qualsiasi', req)
     assert parsed is None and motivi == [], (
         f'un messaggio non-matched deve dare motivi=[] (parser_no_match), non {motivi!r}')
+
+
+# --------------------------------------------------- divergenze note (#88)
+
+def test_la_condizione_MATCH_ignora_i_flag():
+    """Issue #88 / review #87 (Fable): il `match` di tipo regex NON legge `flags`.
+
+    `condizione_soddisfatta` usa `_regex.I` CABLATO (come `matches` in engine.js usa
+    `'i'` cablato): un `match.flags` è un campo inerte, ignorato identico nei due
+    motori — nessun percorso `match`+flags non validato né divergente.
+    """
+    base = {'type': 'regex', 'value': 'pbet'}
+    atteso = main.condizione_soddisfatta('PBET LIVE', base)
+    assert atteso is True  # 'i' cablato: combacia con le maiuscole
+    for flags in ('x', 'ims', 'u', 'gy', 5, [{'a': 1}]):
+        assert main.condizione_soddisfatta('PBET LIVE', {**base, 'flags': flags}) == atteso, (
+            f'match con flags={flags!r} ha cambiato l-esito: i flag non sono ignorati')
+
+
+def test_le_classi_W_D_sono_UNICODE_in_python_produzione():
+    """Issue #88: `\\w`/`\\d` in Python (`regex`) sono unicode-aware; in JS ASCII.
+
+    Questo pinna il lato PRODUZIONE della divergenza pre-esistente documentata in
+    SAAS.md e #88: `\\w+` su `café` estrae `café` qui (Python). Il caso gemello in
+    engine_cases.mjs pinna il lato JS (`caf`), e il confronto in
+    test_engine_contract.py tiene documentata la divergenza — così un domani, se un
+    motore cambiasse, il test lo segnala invece di lasciarla derivare in silenzio.
+    """
+    assert main._estrai_valore('café', {'source': 'regex', 'pattern': r'(\w+)', 'group': 1}) == 'café'
+    assert main._estrai_valore('numero ٤٢ qui', {'source': 'regex', 'pattern': r'(\d+)', 'group': 1}) == '٤٢'

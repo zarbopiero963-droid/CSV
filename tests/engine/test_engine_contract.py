@@ -377,3 +377,54 @@ def test_il_feed_multi_riga_passa_ENTRAMBI_i_verificatori(casi):
     documenti = esportato['dettaglio']['documenti']
     assert main.componi_feed(documenti) == multi, (
         'componi_feed diverge da componiFeed sugli stessi documenti')
+
+
+def test_divergenze_note_88_match_flag_e_classi_ascii(casi):
+    """Issue #88: pinna cio' che i due motori fanno DIVERSO, sul lato JS, e lo
+    confronta col lato Python.
+
+    Due cose distinte:
+    - `match` IGNORA i flag in ENTRAMBI (JS `matches` e Python `condizione_soddisfatta`
+      usano `i` cablato): allineati, nessuna divergenza. Il gate finale #87 (Fable)
+      chiedeva di confermarlo.
+    - `\\w`/`\\d` divergono: ASCII in JS, unicode nel modulo `regex` di Python. E' la
+      limitazione pre-esistente documentata in SAAS.md. Qui la si PINNA su entrambi i
+      lati, cosi' se un domani un motore cambiasse, questo test lo segnala invece di
+      lasciarla derivare in silenzio.
+    """
+    import importlib
+    import sys
+    sys.path.insert(0, str(RADICE))
+    main = importlib.import_module('main')
+
+    esportato = next((c for c in casi if 'divergenze #88' in c['nome']), None)
+    assert esportato and esportato['ok'], \
+        'il caso JS delle divergenze #88 non e\' passato: ' + str(esportato and esportato.get('errore'))
+    js = esportato['dettaglio']
+
+    # 1) match ignora i flag: identico nei due motori.
+    assert js['matchIgnoraFlags'] is True, 'in JS il match non ignora i flag'
+    base = {'type': 'regex', 'value': 'pbet'}
+    for flags in ('x', 'ims', 'u', 'gy'):
+        assert (main.condizione_soddisfatta('PBET LIVE', {**base, 'flags': flags})
+                == main.condizione_soddisfatta('PBET LIVE', base)), \
+            f'in Python il match non ignora flags={flags!r}'
+
+    # 2) \w e \d: la divergenza documentata, pinnata su entrambi i lati.
+    py_w = main._estrai_valore('café', {'source': 'regex', 'pattern': r'(\w+)', 'group': 1})
+    py_d = main._estrai_valore('numero ٤٢ qui', {'source': 'regex', 'pattern': r'(\d+)', 'group': 1})
+    assert js['wSuCafe'] == 'caf' and py_w == 'café', (
+        f'la divergenza \\w e- cambiata: JS={js["wSuCafe"]!r} Python={py_w!r} '
+        '(se ora coincidono, aggiornare SAAS.md e #88)')
+    assert js['dSuArabo'] == '' and py_d == '٤٢', (
+        f'la divergenza \\d e- cambiata: JS={js["dSuArabo"]!r} Python={py_d!r}')
+
+    # 3) `.` su carattere astrale SENZA `u`: JS conta unita' UTF-16 e prende
+    #    meta' coppia surrogata; Python prende il codepoint intero. Il lato
+    #    allineato (con `u`) e' gia' coperto dal caso E2; qui si pinna il lato
+    #    divergente, quello che GPT-5.6 Sol ha chiesto al gate finale della #89.
+    py_punto = main._estrai_valore('\U0001F19AX',
+                                   {'source': 'regex', 'pattern': r'(.)', 'group': 1})
+    assert js['puntoAstraleSenzaU'] == '\ud83c' and py_punto == '\U0001F19A', (
+        f'la divergenza `.` astrale e- cambiata: JS={js["puntoAstraleSenzaU"]!r} '
+        f'Python={py_punto!r} (se ora coincidono, aggiornare SAAS.md e #88)')

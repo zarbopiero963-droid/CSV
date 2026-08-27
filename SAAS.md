@@ -507,6 +507,36 @@ per una **colonna obbligatoria vuota**, il motivo nomina ora quella colonna in
 `message_logs` (come già fa il percorso legacy dal #84), invece del generico
 `parser_no_match`: la perdita non è mai silenziosa.
 
+La **condizione** `match` di tipo `regex` **non** legge `flags`: usa `i` cablato
+in entrambi i motori (`condizione_soddisfatta` in `main.py`, `matches` in
+`web/engine.js`). Un `match.flags` è quindi un campo inerte, ignorato in modo
+identico dai due lati — nessuna divergenza possibile.
+
+> **Caveat — costrutti regex che divergono fra i due motori (Issue #88).**
+> Oltre ai *flag*, alcuni **costrutti del linguaggio** regex si comportano in modo
+> diverso fra il modulo `regex` di Python (produzione) e `RegExp` di JavaScript
+> (anteprima), **a prescindere dai flag**:
+>
+> | Costrutto | Python `regex` | JS `RegExp` |
+> |---|---|---|
+> | `\w`, `\d`, `\b` | unicode-aware (`café`, cifre arabo-indiane…) | **ASCII** (anche con `u`) |
+> | `.` su un carattere astrale | un codepoint | un'unità UTF-16 (surrogato) senza `u` |
+>
+> Esempio misurato: `(\w+)` su `café` estrae `café` nel feed (Python) e `caf`
+> nell'anteprima (JS). È una differenza **pre-esistente** dei due motori, non dei
+> flag né delle Issue #85/#86. Per i valori con **testo non-ASCII** (nomi con
+> accenti) conviene usare **classi esplicite** — `[A-Za-zÀ-ÿ0-9]` — o `\p{L}`/`\p{N}`
+> con `flags:'u'` (che allinea i due motori sulle proprietà unicode). Nei mercati
+> ed eventi Betfair il testo è quasi sempre ASCII, quindi il caso è raro.
+> **Il perimetro di questo consiglio è l'estrazione**: `flags:'u'` ha effetto
+> solo sulle regole di colonna `source: regex`, l'unico percorso che compila
+> davvero i `flags` di una regola. **Sulla condizione `match` non serve e non fa
+> nulla**: come detto sopra, `match` cabla `i` e ignora `flags`, quindi per
+> allineare un `match` su testo non-ASCII vanno usate le **classi esplicite**,
+> non un flag che quel percorso non legge. (Le trasformazioni `replace_all` e
+> `replace_last` non usano regex: sono sostituzioni letterali, i `flags` non le
+> toccano.)
+
 Allo stesso modo `replace_all` con `from` vuoto è un **no-op** in entrambi (E1),
 non l'esplosione carattere-per-carattere del vecchio `split('')`. Il confronto in
 `tests/engine/engine_cases.mjs` tiene i due motori allineati.
