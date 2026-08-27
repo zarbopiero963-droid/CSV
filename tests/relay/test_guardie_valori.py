@@ -476,6 +476,15 @@ def test_POSIX_e_proprieta_unicode_rilevate_con_la_sfumatura_del_flag_u():
     assert div(r'\pL') == r'\pL'
     assert div(r'\pL', unicode_ok=True) == r'\pL'
     assert div(r'a\PNb') == r'\PN'
+    assert div(r'\\pL') is None    # backslash PARI: `\`+`pL` letterale, non la proprieta'
+    assert div(r'\\\pL') == r'\pL'  # dispari: letterale + proprieta' breve
+    # RESIDUO NOTO dichiarato (Sol #90, scelta del proprietario di fermarsi): con `u`
+    # si fida che le sintassi `\p{}` coincidano, ma i NOMI DI SCRIPT no — `\p{Latin}`
+    # e' valido in Python e un errore in JS (che vuole `\p{Script=Latin}`). Con `u`
+    # non e' intercettato: e' un buco dichiarato, non nascosto. Se un domani si
+    # decidesse di chiuderlo (whitelist categorie generali), questo test lo segnala.
+    assert div(r'\p{Latin}', unicode_ok=True) is None
+    assert div(r'\p{Latin}') == r'\p'   # senza u resta preso dalla regola generale
     # Un `\p` letterale (backslash pari) non e' la proprieta'.
     assert div(r'\\p{L}') is None
     # Conservativo: `[:alpha:]` e' rilevato anche fuori da un vero `[[...]]` POSIX

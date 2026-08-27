@@ -548,10 +548,16 @@ identico dai due lati — nessuna divergenza possibile.
 > **Anche le classi POSIX e le proprietà unicode sono rifiutate** (estensione #90):
 > `[[:alpha:]]` (che JS legge come una char-class letterale) diverge **sempre** ed
 > è rifiutata ovunque; `\p{L}`/`\p{N}`/`\P{…}` divergono **senza** `u` (in JS un `\p`
-> senza `u` è la lettera `p`) e si **allineano con `u`** — perciò `\p{}` è rifiutato
-> quando manca `u`, ma **accettato** su una colonna `source: regex` con `flags:'u'`,
-> che è la forma consigliata per il testo non-ASCII. Nella condizione `match`, che
+> senza `u` è la lettera `p`) e si allineano con `u` **per le categorie generali**
+> (`\p{L}`, `\p{N}`, `\p{Lu}`, `\p{Nd}`…) — perciò `\p{}` è rifiutato quando manca
+> `u`, ma **accettato** su una colonna `source: regex` con `flags:'u'`, che è la
+> forma consigliata per il testo non-ASCII. Nella condizione `match`, che
 > non legge i flag, `\p{}` non può mai avere `u` e quindi è **sempre** rifiutato.
+> **Attenzione al dialetto** (residuo noto): l'accettazione con `u` fida che le due
+> sintassi coincidano, ma i **nomi di script** no — `\p{Latin}` è valido in Python
+> e un errore in JS (che pretende `\p{Script=Latin}`). Misurato: `\p{Latin}+`+u su
+> `café` dà `café` nel feed e `''` in anteprima. Non è intercettato: attieniti alle
+> **categorie generali** o alle **classi esplicite** per il testo non-ASCII.
 > La forma **breve** senza graffe `\pL` è rifiutata **sempre**, anche con `u`: in JS
 > con `u` è un errore di sintassi (le graffe sono obbligatorie) e senza `u` è la
 > lettera `p` — non si allinea mai; va usata `\p{L}`+`u`.
@@ -559,9 +565,14 @@ identico dai due lati — nessuna divergenza possibile.
 > match `\p{L}+` su `café` è `True` in Python e `false` in JS.
 >
 > **Il gate resta non esaustivo**, ed è onesto dirlo: la coda dei costrutti che
-> differiscono fra i due motori non finisce — `\h`, `\R`, `\X`, i quantificatori
-> possessivi, i gruppi atomici restano fuori. Una blocklist non può essere
-> completa; questa cattura i casi che un utente scrive davvero. Inoltre `[\b]`
+> differiscono fra i due motori non finisce — i nomi di script in `\p{…}` (sopra),
+> `.` su un carattere astrale **senza** `u` (allineato con `u`, e il lato divergente
+> è pinnato dal contratto in `test_engine_contract.py`), `\h`, `\R`, `\X`, i
+> quantificatori possessivi, i gruppi atomici restano fuori. Una blocklist non può
+> essere completa — quattro giri di review su questa PR lo hanno dimostrato: ogni
+> costrutto chiuso ne scopre uno più profondo. Il gate cattura i casi che un utente
+> scrive davvero (`\w`/`\d`/`\b`, POSIX, `\p{}` senza `u`); per il testo non-ASCII
+> la via robusta resta la **classe esplicita**. Inoltre `[\b]`
 > (backspace, ASCII, allineato) è rifiutato in modo **conservativo** insieme al
 > `\b` confine-di-parola: il gate preferisce un raro falso positivo su un carattere
 > patologico a un buco su un pattern reale.
