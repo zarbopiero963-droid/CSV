@@ -2753,6 +2753,15 @@ def _cerca_regex_utente(pattern, message, flags, scadenza=None):
         return None
 
 
+# I flag regex onorati IDENTICI dai due motori: `i`, `m`, `s` traducono al bit di
+# `_regex`; `u` e' riconosciuto ma no-op (`_regex` e' gia' codepoint-native). Fonte
+# UNICA: `_valida_config_parser` rifiuta al salvataggio ogni flag fuori da queste
+# chiavi (Issue #86), e `flagRegex` in web/engine.js tiene lo stesso insieme
+# (`FLAG_REGEX_COMUNI = 'imsu'`). Il confronto in engine_cases.mjs li allinea.
+_MAPPA_FLAG_REGEX = {'i': _regex.I, 'm': _regex.M, 's': _regex.S, 'u': 0}
+FLAG_REGEX_COMUNI = ''.join(_MAPPA_FLAG_REGEX)
+
+
 def _flag_regex(flags):
     """I flag JS (`'i'`, `'im'`, …) tradotti nei flag del modulo `regex`.
 
@@ -2798,10 +2807,9 @@ def _flag_regex(flags):
     """
     if not isinstance(flags, str) or flags == '':
         return _regex.I
-    mappa = {'i': _regex.I, 'm': _regex.M, 's': _regex.S, 'u': 0}
     risultato = 0
     for f in flags:
-        risultato |= mappa.get(f, 0)
+        risultato |= _MAPPA_FLAG_REGEX.get(f, 0)
     return risultato
 
 
@@ -3295,6 +3303,17 @@ def esito_messaggio(message, cfg, risolvi_mappa=None):
             if not (len(righe) == 1 and (righe[0].get('scarti') or []) == motivi):
                 motivi = [f'riga {i}: {s}' for i, r in enumerate(righe, 1)
                           for s in (r.get('scarti') or [])]
+            # Se il segnale cade per obbligatorie MANCANTI (non per uno scarto), il
+            # motivo restava vuoto e il dispatch scriveva il generico
+            # `parser_no_match`: la perdita del segnale era silenziosa (Issue #86,
+            # dalla review #85). Come il percorso legacy (#84 C1/C2), qui si nomina
+            # QUALE colonna manca, con la STESSA formula, cosi' la causa arriva in
+            # `message_logs`. Solo quando non c'e' gia' uno scarto a spiegarlo.
+            if not motivi:
+                for i, r in enumerate(righe, 1):
+                    prefisso = '' if len(righe) == 1 else f'riga {i}: '
+                    motivi += [f'{prefisso}{c}: colonna obbligatoria vuota nel segnale'
+                               for c in (r.get('missing') or [])]
             return None, motivi
         # `esegui_parser` puo' lasciare valori non-stringa nella riga (una costante
         # JSON `0`/`False`): nel CSV vanno nella forma CANONICA (`_testo_canonico`,
@@ -5111,6 +5130,22 @@ def _valida_config_parser(config):
             suggerimento = f' Forse intendevi {vicine[0]!r}?' if vicine else ''
             raise HTTPException(
                 422, f'{nome!r} non e\' una colonna del CSV.{suggerimento}')
+        # I flag di una regola `regex` (Issue #86): al salvataggio si accetta solo
+        # l'insieme che i due motori onorano IDENTICO (`FLAG_REGEX_COMUNI`), come
+        # STRINGA. Un `flags` con `x`/`y`/`g` (che divergevano fra anteprima e feed,
+        # #85) o non-stringa viene RIFIUTATO qui con un 422 chiaro, invece di
+        # degradare in silenzio a runtime: cosi' nessun nuovo parser puo' nascere
+        # con flag esotici. Le config gia' salvate restano gestite a runtime
+        # (case-sensitive per `x`/`y`, fail-closed per i non-stringa; vedi #85).
+        if regola.get('source') == 'regex':
+            flags = regola.get('flags')
+            if flags is not None and flags != '' and (
+                    not isinstance(flags, str)
+                    or any(c not in FLAG_REGEX_COMUNI for c in flags)):
+                raise HTTPException(
+                    422, f'la colonna {nome!r}: flag regex non supportato '
+                         f'({flags!r}). Usa solo una stringa con i caratteri '
+                         f'{", ".join(FLAG_REGEX_COMUNI)}.')
     _valida_config_multi(config.get('multi'))
     # Numeri JSON non-finiti (`NaN`, `Infinity`): `request.json()` li accetta e
     # `json.dumps` di default li serializza come JSON NON standard. Verrebbero scritti,

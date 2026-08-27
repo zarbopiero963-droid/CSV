@@ -841,6 +841,20 @@ function casiConfronto() {
   aggiungi('E2: flag duplicati (iiu) deduplicati, non un errore',
     ...conMercato({ source: 'regex', pattern: '(ABC)', flags: 'iiu', group: 1 },
       'P.Bet. xyzABCabc'));
+  // E2, flag DUPLICATI PURI: `new RegExp(_, 'ii')`/`'uu'` in JS SOLLEVANO
+  // "Invalid flags", ma `flagRegex` deduplica col Set PRIMA di `new RegExp`, e
+  // Python li combina; entrambi danno lo stesso valore. GPT-5.6 Sol (PR #87) li
+  // temeva divergenti: qui si misura che NON lo sono. `ii`/`imsi` -> `i`
+  // (case-insensitive) -> "ABC"; `uu` -> nessun bit -> case-sensitive -> "abc".
+  aggiungi('E2: flag duplicato i (ii) uguale a i nei due motori',
+    ...conMercato({ source: 'regex', pattern: '(abc)', flags: 'ii', group: 1 },
+      'P.Bet. ABCabc'));
+  aggiungi('E2: flag duplicato u (uu) uguale a u (case-sensitive) nei due motori',
+    ...conMercato({ source: 'regex', pattern: '(abc)', flags: 'uu', group: 1 },
+      'P.Bet. ABCabc'));
+  aggiungi('E2: flag misto duplicato (imsi) uguale a ims nei due motori',
+    ...conMercato({ source: 'regex', pattern: '(abc)', flags: 'imsi', group: 1 },
+      'P.Bet. ABCabc'));
   // E2, flag MISTI validi+scartati: `xiu` tiene `iu` (case-insensitive unicode)
   // e butta `x`. I due motori devono estrarre lo stesso valore. Chiesto da
   // GPT-5.5 come guardia dell'allineamento reale anteprima/feed.
