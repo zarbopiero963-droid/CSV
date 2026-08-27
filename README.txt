@@ -127,6 +127,16 @@ ripulito a [A-Za-z0-9._-] prima di entrare nell'header (un nome profilo con
 virgolette o caratteri non-ASCII non deve rompere la consegna). Fonte unica:
 _intestazioni_feed() in main.py, vincolata da tests/relay/test_nome_download.py.
 
+IL TOKEN NON FINISCE NEI LOG (audit #81)
+Il token del feed viaggia nel query string (?token=...), e l'access-log di
+uvicorn formatta l'URL richiesto: senza precauzioni ogni poll di XTrader
+scriverebbe il token in chiaro nei log del container. All'avvio il servizio
+installa una redazione sul logger uvicorn.access (installa_redazione_access_log()
+in main.py) che sostituisce il valore con token=[REDACTED] lasciando il resto
+della riga leggibile. Vale anche per l'alias /xtrader.csv?token=... . Vincolata
+da tests/relay/test_redazione_log.py, che esercita il vero AccessFormatter di
+uvicorn. L'URL e il corpo non cambiano: e' solo cio' che finisce nei log.
+
 IL FEED PER UTENTE (il percorso nuovo; /xtrader.csv resta l'alias del profilo PIERO)
 GET /feed/SLUG.csv?token=xt_...
 E' il feed di UN utente, autenticato dal SUO token, non da CSV_ACCESS_TOKEN.
