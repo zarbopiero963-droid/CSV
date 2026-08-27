@@ -67,7 +67,13 @@ async function conflittoOFallita(e, slug) {
 // parser nuovo con il draft stantio, a un solo click e con un toast che sparisce.
 // La guardia che mancava e' questa modale: dopo l'identita', il salvataggio (o la
 // prova, che salva anche lei) chiede una scelta ESPLICITA invece di procedere.
+// Il contesto e' CATTURATO all'apertura, non riletto da `wiz` al click: una
+// navigazione puo' cambiare `wiz` mentre la modale e' aperta (Fable/GPT-5.5), e
+// un doppio click non deve rilanciare l'azione — il primo lo azzera.
+let ctxRicreato = null;
+
 function modalConfermaRicreato() {
+  ctxRicreato = { slug: wiz.parserId, azione: wiz.confermaRicreato };
   openModal(`
     <h2>Questo nome ora è di un altro parser</h2>
     <p class="muted small">Mentre lo modificavi, questo parser è stato eliminato e
@@ -2001,35 +2007,54 @@ const actions = {
     leggiMulti();
     // Prima si salva la config, poi si prova: la prova gira sul server, che
     // conosce solo cio' che e' stato salvato — provare un draft non salvato
-    // mostrerebbe l'esito di un'altra configurazione.
-    try {
-      await api.updateParser(wiz.parserId, { config: wiz.draft });
-      wiz.test = await api.testParser(wiz.parserId, msg);
-    } catch (e) {
+    // mostrerebbe l'esito di un'altra configurazione. I due try/catch sono
+    // SEPARATI (Fable, #91): se il SALVATAGGIO va in conflitto di identita', il
+    // draft NON e' stato scritto e si arma la conferma — nessuna finestra in cui
+    // un errore della prova, a salvataggio gia' avvenuto, lascia passare una
+    // sovrascrittura. Un conflitto della prova arriva a salvataggio riuscito
+    // (uid combaciante, quindi non stantio): si arma comunque la conferma, cosi'
+    // il prossimo salvataggio chiede, ma senza confondere le due fasi.
+    try { await api.updateParser(wiz.parserId, { config: wiz.draft }); }
+    catch (e) {
+      if (await conflittoOFallita(e, wiz.parserId) === 'ricreato') wiz.confermaRicreato = 'run-test';
+      return;
+    }
+    try { wiz.test = await api.testParser(wiz.parserId, msg); }
+    catch (e) {
       if (await conflittoOFallita(e, wiz.parserId) === 'ricreato') wiz.confermaRicreato = 'run-test';
       return;
     }
     render();
   },
-  // #77: le due strade della conferma di identita'.
+  // #77: le due strade della conferma di identita'. Usano il contesto CATTURATO
+  // (`ctxRicreato`), non il `wiz` vivo, e lo azzerano: cosi' un doppio click e'
+  // un no-op e una navigazione a modale aperta non agisce sul parser sbagliato.
   async 'ricreato-guarda'() {
-    // Scarta il draft stantio e riapre il wizard sul parser che c'e' ADESSO.
-    // NON `go()`: siamo gia' su `#/parsers/<slug>/config`, e `go` alla STESSA
-    // hash non scatena `hashchange`, quindi non ridisegna (il wizard resterebbe
-    // quello vecchio, con `wiz=null`). Si rilegge la versione vera e si
-    // ridisegna a mano: `render()` chiama `initWiz` sul parser aggiornato.
-    const slug = wiz.parserId;
+    const ctx = ctxRicreato;
+    ctxRicreato = null;
     closeModal();
-    try { await api.ricaricaParser(slug); } catch { /* la vista mostra cio' che c'e' in cache */ }
-    wiz = null;
+    if (!ctx) return;   // gia' risolto (doppio click)
+    // Rilegge la versione vera dal server. NON `go()`: se siamo ancora su
+    // `#/parsers/<slug>/config`, `go` alla STESSA hash non scatena `hashchange`
+    // e non ridisegna. Si ridisegna a mano; `initWiz` riparte sul parser
+    // aggiornato — ma solo se il wizard e' ancora quello del conflitto, per non
+    // buttare via il draft di un parser diverso su cui l'utente e' navigato.
+    try { await api.ricaricaParser(ctx.slug); } catch { /* la vista mostra la cache */ }
+    if (wiz && wiz.parserId === ctx.slug) wiz = null;
     render();
   },
   'ricreato-sovrascrivi'() {
-    // Scelta deliberata: pulisci il flag e rilancia l'azione che l'aveva armato.
-    const azione = wiz.confermaRicreato;
-    wiz.confermaRicreato = false;
+    const ctx = ctxRicreato;
+    ctxRicreato = null;
     closeModal();
-    actions[azione]();
+    if (!ctx) return;   // gia' risolto (doppio click)
+    // Scelta deliberata, ma solo se siamo ANCORA sul parser del conflitto: se
+    // l'utente ha navigato altrove, il contesto e' cambiato e sovrascrivere
+    // sarebbe sull'oggetto sbagliato.
+    if (wiz && wiz.parserId === ctx.slug && wiz.confermaRicreato) {
+      wiz.confermaRicreato = false;
+      actions[ctx.azione]();
+    }
   },
 
   // ------- token del feed (dell'utente)

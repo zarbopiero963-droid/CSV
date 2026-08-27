@@ -272,6 +272,31 @@ with sync_playwright() as pw:
         'sovrascrivi comunque deve far vincere il draft della scheda vecchia'
     shot(pg, '07-sovrascrivi-comunque')
 
+    # anche «Prova» (run-test) salva prima di provare, quindi anche lei apre la
+    # conferma dopo un conflitto di identita' (#77): la stessa guardia sul secondo
+    # percorso di salvataggio, non solo su «Salva».
+    config_ric3 = dict(CONFIG_BASE)
+    config_ric3['match'] = {'type': 'contains', 'value': 'RICREATO3'}
+    esito = pg.evaluate(
+        """async ([slug, config]) => {
+             const d = await fetch(`/api/me/parsers/${slug}`, {method: 'DELETE'});
+             const c = await fetch('/api/me/parsers', {
+               method: 'POST', headers: {'Content-Type': 'application/json'},
+               body: JSON.stringify({titolo: 'Conteso', config, active: true})});
+             return [d.status, c.status, (await c.json()).slug];
+           }""", [slug, config_ric3])
+    assert esito == [200, 200, slug], esito
+    pg.wait_for_selector('.toast', state='detached')
+    pg.click('[data-act="run-test"]')                    # 409 identita- → toast + flag
+    pg.wait_for_selector('.toast:has-text("Eliminato e ricreato altrove")')
+    pg.click('[data-act="run-test"]')                    # flag alzato → modale, non prova
+    pg.wait_for_selector('.veil')
+    assert config_sul_server(pg, slug)['match']['value'] == 'RICREATO3', \
+        'la prova non deve salvare-sovrascrivere di nascosto'
+    pg.click('[data-act="ricreato-guarda"]')             # pulizia: torna sul ricreato
+    pg.wait_for_selector('#test-msg')
+    shot(pg, '08-anche-la-prova-conferma')
+
     # ---------------- la DELETE stantia, vista dalla scheda vecchia (#75)
     # La PUT aveva la sua voce, la DELETE no: `del-parser-ok` gestiva l'errore
     # con `fallita`, che stampa il `detail` grezzo del server e non riallinea
@@ -321,7 +346,7 @@ with sync_playwright() as pw:
         'dopo il conflitto la scheda del parser non si e- ridisegnata'
     assert pg.query_selector('#test-msg') is not None, \
         'il wizard e- sparito: il draft dell-utente non deve essere buttato via'
-    shot(pg, '08-delete-stantia')
+    shot(pg, '09-delete-stantia')
 
     # E la prova che il riallineamento ha funzionato DAVVERO, non solo che la
     # pagina e' sopravvissuta: la stessa conferma, rifatta subito, adesso deve
@@ -348,7 +373,7 @@ with sync_playwright() as pw:
     # nessuna asserzione lo pretendeva).
     assert rimasti == [s for s in prima if s != slug], \
         f'la DELETE ha cambiato piu- dello slug conteso: prima {prima}, dopo {rimasti}'
-    shot(pg, '09-delete-dopo-riallineamento')
+    shot(pg, '10-delete-dopo-riallineamento')
 
     b.close()
 
