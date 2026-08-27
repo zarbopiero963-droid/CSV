@@ -153,6 +153,76 @@ def test_senza_header_resta_None_come_prima():
     assert main.parse_message(f'ALTRO TESTO\n{MARCATORE} SQUADRA-A v SQUADRA-B', CFG) is None
 
 
+def test_legacy_localizza_l_handicap_col_punto():
+    """Audit #81 (C1): il percorso legacy non localizzava l'handicap.
+
+    Un parser legacy con `handicap` scritto col punto («0.5») costruiva una riga
+    con «0.5», e `verify_csv` la scartava in SILENZIO perche' il contratto vuole la
+    virgola (#40). Ora `parse_message` passa dallo stesso `_giudica_riga` del motore,
+    che localizza: la riga esce con «0,5» e supera il verificatore.
+
+    Fail-first: sul codice vecchio la riga contiene «0.5» e `verify_csv` SOLLEVA.
+    """
+    cfg = {**CFG, 'handicap': '0.5', 'selection_name': 'Over',
+           'market_name': 'M', 'market_type': 'OVER_UNDER_05'}
+    testo = f'{HEADER}\n{MARCATORE} SQUADRA-A v SQUADRA-B'
+    parsed = main.parse_message(testo, cfg)
+    assert parsed is not None, 'un messaggio valido non deve sparire'
+    documento = parsed['csv']
+    testo_csv = documento.decode('utf-8') if isinstance(documento, bytes) else documento
+    assert '"0,5"' in testo_csv and '"0.5"' not in testo_csv, testo_csv
+    main.verify_csv(documento)  # non deve sollevare: era il difetto C1
+
+
+def test_legacy_diagnostica_l_emoji_invece_di_scartare_muto():
+    """Audit #81 (C2): un'emoji decorativa nell'evento non deve sparire in silenzio.
+
+    Il percorso legacy estraeva l'evento dopo il marcatore senza togliere le emoji
+    decorative finali; `verify_csv` rifiutava la riga e il segnale spariva SENZA una
+    riga di diagnosi (il legacy restituiva sempre `motivi=[]`). Ora `esito_messaggio`
+    passa dal giudizio comune: nessun segnale, ma il PERCHE' viaggia nei `motivi`,
+    che il dispatch scrive in `message_logs`.
+
+    Fail-first: sul codice vecchio `motivi` e' vuoto e `parsed` non e' None (la riga
+    con l'emoji viene costruita e poi scartata a valle).
+    """
+    cfg = {**CFG, 'handicap': '0', 'selection_name': 'Over',
+           'market_name': 'M', 'market_type': 'OVER_UNDER_05'}
+    testo = f'{HEADER}\n{MARCATORE} SQUADRA-A v SQUADRA-B ✅'
+    parsed, motivi = main.esito_messaggio(testo, cfg)
+    assert parsed is None, 'un evento con emoji non deve produrre un segnale valido'
+    assert any('emoji' in m.lower() for m in motivi), (
+        f'il motivo dell\'emoji non e- stato diagnosticato: {motivi!r}')
+
+
+def test_il_profilo_legacy_scrive_la_diagnosi_non_il_generico(tmp_path, monkeypatch):
+    """Audit #81 (C2), verso dispatch del profilo: la diagnosi arriva in fondo.
+
+    `_elabora_profilo` usava `elabora_messaggio`, che scarta i motivi, e tornava
+    `parser_no_match` — il generico, non il perche'. Ora usa `esito_messaggio` e
+    restituisce «scartato: ...emoji...», che il chiamante scrive in `message_logs`.
+    Il verso end-to-end del ramo legacy, oltre all'unita' di `esito_messaggio`.
+    """
+    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'profilo.db'))
+    c = main.db()
+    main.migra(c)
+    c.execute("INSERT INTO parsers(name, header, market_name, market_type,"
+              " selection_name, handicap, bet_type)"
+              " VALUES ('leg', ?, 'M', 'OVER_UNDER_05', 'Over', '0', 'PUNTA')", (HEADER,))
+    c.commit()
+    profilo = {'parser': 'leg', 'name': 'PIERO'}
+
+    # Emoji nell'evento: nessun segnale, ma la CAUSA e' esplicita, non parser_no_match.
+    esito = main._elabora_profilo(c, profilo, f'{HEADER}\n{MARCATORE} A v B ✅')
+    assert isinstance(esito, str) and esito.startswith('scartato:'), esito
+    assert 'emoji' in esito.lower(), esito
+
+    # Un messaggio pulito continua a produrre il segnale (non e- diventato tutto «scartato»).
+    ok = main._elabora_profilo(c, profilo, f'{HEADER}\n{MARCATORE} A v B')
+    assert isinstance(ok, dict) and ok.get('event') == 'A - B', ok
+    c.close()
+
+
 # ------------------------------------------- il giro HTTP vero, sul servizio
 
 def _consegna(base, testo):

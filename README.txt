@@ -111,6 +111,17 @@ comma_to_dot resta legale e tutte le config producono lo stesso feed fra loro --
 ma il CONTENUTO del feed cambia rispetto a prima della #40: dove usciva "1.85"
 ora esce "1,85". E' il fix, non un effetto collaterale.
 
+IL PERCORSO LEGACY GIUDICA COME IL MOTORE (audit #81, C1/C2)
+I parser storici senza config_json (PIERO) passavano per parse_message, che
+costruiva la riga grezza SENZA localizzare i numerici e SENZA le guardie: un
+handicap col punto o un'emoji nell'evento venivano scartati da verify_csv in
+silenzio, senza una riga di causa. Ora parse_message passa dalla STESSA
+_giudica_riga del motore (regola 3): l'handicap col punto esce localizzato con la
+virgola (come il motore, sopra), e un segnale fermato dal giudizio scrive il
+PERCHE' in message_logs ("scartato: ...") invece di sparire. Su un messaggio
+valido i byte non cambiano -- _giudica_riga non tocca un valore gia' corretto --
+quindi il feed di PIERO resta identico.
+
 ENDPOINT PUBBLICO CSV
 GET /xtrader.csv?token=TOKEN
 Restituisce TUTTE le righe vive (non scadute) in ordine di scrittura, composte
