@@ -545,17 +545,23 @@ identico dai due lati — nessuna divergenza possibile.
 > salvate** restano gestite a runtime (grandfathering): il rifiuto è solo al
 > confine di scrittura, `_estrai_valore` e `condizione_soddisfatta` non cambiano.
 >
-> **Il gate non è una prova di completezza**, ed è onesto dirlo: altri costrutti
-> più esotici divergono e **non** sono intercettati — le classi POSIX
-> `[[:alpha:]]` (che JS legge come una char-class letterale) e `\p{L}`/`\p{N}`
-> **senza** `flags:'u'` (in JS un `\p` senza `u` è la lettera `p`). Misurato:
-> `([[:alpha:]]+)` su `abc123` dà `abc` nel feed e `''` in anteprima. Non sono
-> rifiutati di proposito: sono rari, fuori dall'ambito della #89 (che mira ai
-> `\w`/`\d`/`\b` scritti per abitudine ASCII), e la forma **consigliata** —
-> `\p{L}`/`\p{N}` **con** `flags:'u'` — allinea i due motori invece di divergere.
-> Inoltre `[\b]` (backspace, ASCII, allineato) è rifiutato in modo
-> **conservativo** insieme al `\b` confine-di-parola: il gate preferisce un raro
-> falso positivo su un carattere patologico a un buco su un pattern reale.
+> **Anche le classi POSIX e le proprietà unicode sono rifiutate** (estensione #90):
+> `[[:alpha:]]` (che JS legge come una char-class letterale) diverge **sempre** ed
+> è rifiutata ovunque; `\p{L}`/`\p{N}`/`\P{…}` divergono **senza** `u` (in JS un `\p`
+> senza `u` è la lettera `p`) e si **allineano con `u`** — perciò `\p{}` è rifiutato
+> quando manca `u`, ma **accettato** su una colonna `source: regex` con `flags:'u'`,
+> che è la forma consigliata per il testo non-ASCII. Nella condizione `match`, che
+> non legge i flag, `\p{}` non può mai avere `u` e quindi è **sempre** rifiutato.
+> Misurato: `([[:alpha:]]+)` su `abc123` dà `abc` nel feed e `''` in anteprima;
+> match `\p{L}+` su `café` è `True` in Python e `false` in JS.
+>
+> **Il gate resta non esaustivo**, ed è onesto dirlo: la coda dei costrutti che
+> differiscono fra i due motori non finisce — `\h`, `\R`, `\X`, i quantificatori
+> possessivi, i gruppi atomici restano fuori. Una blocklist non può essere
+> completa; questa cattura i casi che un utente scrive davvero. Inoltre `[\b]`
+> (backspace, ASCII, allineato) è rifiutato in modo **conservativo** insieme al
+> `\b` confine-di-parola: il gate preferisce un raro falso positivo su un carattere
+> patologico a un buco su un pattern reale.
 > **Il perimetro di questo consiglio è l'estrazione**: `flags:'u'` ha effetto
 > solo sulle regole di colonna `source: regex`, l'unico percorso che compila
 > davvero i `flags` di una regola. **Sulla condizione `match` non serve e non fa

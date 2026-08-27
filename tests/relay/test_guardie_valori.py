@@ -450,21 +450,71 @@ def test_il_rilevatore_di_costrutti_divergenti_e_FONTE_UNICA():
     assert div(None) is None and div(123) is None
 
 
-def test_il_gate_e_CONSERVATIVO_e_NON_esaustivo_documentato():
-    """I confini DICHIARATI del gate, pinnati perche' non derivino in silenzio.
+def test_POSIX_e_proprieta_unicode_rilevate_con_la_sfumatura_del_flag_u():
+    """Estensione (richiesta di Sol al gate finale #90): oltre a `\\w`/`\\d`/`\\b`,
+    il detector rileva anche le classi POSIX e le proprieta' unicode `\\p{}`.
 
-    - `[\\b]` (backspace, che i due motori trattano identico) e' rifiutato in modo
-      CONSERVATIVO insieme al `\\b` confine: distinguere i due chiederebbe di
-      tracciare le char-class, e si preferisce un raro falso positivo.
-    - Il gate NON e' esaustivo: `[[:alpha:]]` (POSIX) e `\\p{L}` senza `u`
-      divergono ma NON sono intercettati (rari, fuori ambito #89, e la forma
-      consigliata `\\p{}`+`u` allinea). Se un domani si estende la copertura,
-      questo test lo segnala e ricorda di aggiornare SAAS.md.
+    - POSIX `[[:name:]]`: JavaScript non le supporta (le legge come char-class
+      letterale), quindi divergono SEMPRE → rilevate a prescindere dai flag.
+    - `\\p{}`/`\\P{}`: divergono SENZA `u` (in JS `\\p` senza `u` e' la lettera `p`)
+      e si ALLINEANO con `u`. Quindi `unicode_ok=True` (il flag `u` c'e') le lascia
+      passare; senza, sono rilevate. Il match, che non legge i flag, e' sempre
+      `unicode_ok=False`.
     """
     div = main._costrutto_regex_divergente
-    assert div(r'[\b]') == r'\b'          # falso positivo conservativo, dichiarato
-    assert div(r'([[:alpha:]]+)') is None  # residuo noto: non intercettato
-    assert div(r'(\p{L}+)') is None        # residuo noto: non intercettato
+    assert div(r'[\b]') == r'\b'                  # falso positivo conservativo, dichiarato
+    # POSIX: sempre divergente, con o senza u.
+    assert div(r'([[:alpha:]]+)') is not None
+    assert div(r'([[:^digit:]]+)', unicode_ok=True) is not None
+    # \p{}: divergente senza u, allineato con u.
+    assert div(r'(\p{L}+)') == r'\p'
+    assert div(r'(\P{N})') == r'\P'
+    assert div(r'(\p{L}+)', unicode_ok=True) is None   # con `u` allinea → ok
+    # Un `\p` letterale (backslash pari) non e' la proprieta'.
+    assert div(r'\\p{L}') is None
+    # Restano fuori i costrutti davvero esotici (whack-a-mole): `\h`, `\R`, ecc.
+    assert div(r'\h') is None
+
+
+def test_POSIX_e_prop_unicode_al_salvataggio_con_la_sfumatura_u():
+    """La blindatura estesa al salvataggio (Sol #90):
+    - POSIX in colonna e nel match → 422 (JS non le supporta);
+    - `\\p{}` in colonna SENZA `u` → 422; CON `flags:'u'` → accettato (allinea);
+    - `\\p{}` nel match → 422 (il match non legge i flag, non puo' avere `u`).
+    Fail-first: prima dell'estensione tutti passavano.
+    """
+    def obblig():
+        return {c: {'source': 'constant', 'value': 'X'} for c in main.COLONNE_OBBLIGATORIE}
+
+    # POSIX in colonna
+    with pytest.raises(main.HTTPException) as e:
+        main._valida_config_parser(_cfg_pattern(r'([[:alpha:]]+)'))
+    assert e.value.status_code == 422 and '#88' in e.value.detail, e.value.detail
+
+    # POSIX nel match
+    with pytest.raises(main.HTTPException) as e:
+        main._valida_config_parser({'match': {'type': 'regex', 'value': r'[[:digit:]]'},
+                                    'columns': obblig()})
+    assert e.value.status_code == 422 and 'match' in e.value.detail, e.value.detail
+
+    # \p{} in colonna SENZA u → 422
+    with pytest.raises(main.HTTPException) as e:
+        main._valida_config_parser(_cfg_pattern(r'(\p{L}+)'))
+    assert e.value.status_code == 422 and '#88' in e.value.detail, e.value.detail
+
+    # \p{} in colonna CON flags:'u' → accettato (i due motori si allineano)
+    regola_u = {'source': 'regex', 'pattern': r'(\p{L}+)', 'group': 1, 'flags': 'u'}
+    main._valida_config_parser({'match': {'type': 'contains', 'value': 'x'},
+                                'columns': {'EventName': regola_u,
+                                            'MarketType': {'source': 'constant', 'value': 'O'},
+                                            'SelectionName': {'source': 'constant', 'value': 'Over'},
+                                            'BetType': {'source': 'constant', 'value': 'PUNTA'}}})
+
+    # \p{} nel match → 422 (nessun `u` possibile li')
+    with pytest.raises(main.HTTPException) as e:
+        main._valida_config_parser({'match': {'type': 'regex', 'value': r'\p{L}+SEGNALE'},
+                                    'columns': obblig()})
+    assert e.value.status_code == 422 and 'match' in e.value.detail, e.value.detail
 
 
 def test_un_parser_di_sole_COSTANTI_non_scrive_su_qualunque_messaggio():

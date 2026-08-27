@@ -2780,51 +2780,81 @@ COSTRUTTI_REGEX_DIVERGENTI = (r'\w', r'\W', r'\d', r'\D', r'\b', r'\B')
 _LETTERE_REGEX_DIVERGENTI = ''.join(c[1] for c in COSTRUTTI_REGEX_DIVERGENTI)
 _RE_COSTRUTTO_DIVERGENTE = _regex.compile(
     r'(?<!\\)(?:\\\\)*(\\[' + _LETTERE_REGEX_DIVERGENTI + '])')
+# Classe POSIX `[[:alpha:]]`/`[[:^digit:]]`: Python `regex` la interpreta, JS la
+# legge come una char-class letterale — quindi diverge SEMPRE, a prescindere dai
+# flag (Sol #90).
+_RE_POSIX = _regex.compile(r'\[:\^?[a-z]+:\]')
+# Proprieta' unicode `\p{...}`/`\P{...}` (backslash dispari): divergono SENZA `u`
+# (in JS `\p` senza `u` e' la lettera `p`) e si ALLINEANO con `u`. Il capture e' il
+# solo `\p`/`\P`, per il messaggio.
+_RE_PROP_UNICODE = _regex.compile(r'(?<!\\)(?:\\\\)*(\\[pP])\{')
 
 
-def _costrutto_regex_divergente(pattern):
-    """Il primo costrutto `\\w`/`\\d`/`\\b` (o negazione) NON-escapato in `pattern`,
-    oppure `None`. Fonte UNICA del giudizio usato da `_valida_config_parser`.
+def _costrutto_regex_divergente(pattern, unicode_ok=False):
+    """Il primo costrutto NON-escapato in `pattern` che i due motori interpretano
+    DIVERSAMENTE, oppure `None`. Fonte UNICA del giudizio di `_valida_config_parser`.
 
-    Conta i backslash per non confondere la classe con un letterale: `\\d` e' la
-    classe cifra (divergente), `\\\\d` e' un backslash letterale seguito da 'd'
-    (non divergente), `\\\\\\d` e' backslash letterale + classe (divergente).
+    Sempre divergenti, a prescindere dai flag:
+    - `\\w`/`\\d`/`\\b` (e negazioni): unicode in Python `regex`, ASCII in JS. Conta
+      i backslash per non confondere la classe con un letterale (`\\d` classe,
+      `\\\\d` letterale, `\\\\\\d` letterale+classe);
+    - le classi POSIX `[[:name:]]`: JS non le supporta.
 
-    NON e' esaustivo, e non pretende di esserlo: costrutti esotici (`[[:alpha:]]`
-    POSIX, `\\p{}` senza `u`) divergono e non sono qui — sono rari e fuori
-    dall'ambito, e la forma consigliata `\\p{}`+`u` allinea invece di divergere.
-    `[\\b]` (backspace, in realta' allineato) e' rifiutato in modo CONSERVATIVO
-    insieme al `\\b` confine: distinguere i due chiederebbe di tracciare le
-    char-class, e il gate preferisce un raro falso positivo su un carattere
-    patologico a un buco su un pattern reale.
+    Divergente SOLO senza `u` (con `u` i due motori si allineano):
+    - `\\p{}`/`\\P{}` proprieta' unicode. Con `unicode_ok=True` (il flag `u` c'e')
+      NON sono segnalate. La condizione `match` non legge i flag, quindi la' e'
+      sempre `unicode_ok=False`.
+
+    NON e' esaustivo, e non pretende di esserlo: restano fuori i costrutti davvero
+    esotici (`\\h`, `\\R`, `\\X`, quantificatori possessivi…). `[\\b]` (backspace,
+    in realta' allineato) e' rifiutato in modo CONSERVATIVO insieme al `\\b` confine.
     """
     if not isinstance(pattern, str):
         return None
     m = _RE_COSTRUTTO_DIVERGENTE.search(pattern)
-    return m.group(1) if m else None
+    if m:
+        return m.group(1)
+    m = _RE_POSIX.search(pattern)
+    if m:
+        return m.group(0)
+    if not unicode_ok:
+        m = _RE_PROP_UNICODE.search(pattern)
+        if m:
+            return m.group(1)
+    return None
 
 
-def _vieta_costrutto_regex_divergente(dove, pattern):
-    """Rifiuta al salvataggio un pattern con un costrutto divergente (#88), con un
-    422 che nomina il costrutto e l'equivalente esplicito da usare.
+def _vieta_costrutto_regex_divergente(dove, pattern, unicode_ok=False):
+    """Rifiuta al salvataggio un pattern con un costrutto divergente (#88, #90), con
+    un 422 che nomina il costrutto e la via d'uscita.
 
     Fonte UNICA per i due punti che compilano un pattern dell'utente: le colonne
-    `source: regex` e la condizione `match` di tipo `regex`. Non tocca il runtime:
-    le config gia' salvate continuano a girare (grandfathering).
+    `source: regex` (dove `unicode_ok` dipende dal flag `u`) e la condizione `match`
+    di tipo `regex` (che i flag non li legge, quindi `unicode_ok=False`). Non tocca
+    il runtime: le config gia' salvate continuano a girare (grandfathering).
     """
-    costrutto = _costrutto_regex_divergente(pattern)
+    costrutto = _costrutto_regex_divergente(pattern, unicode_ok=unicode_ok)
     if costrutto is None:
         return
     classe = {r'\d': '[0-9]', r'\D': '[^0-9]',
               r'\w': '[A-Za-z0-9_]', r'\W': '[^A-Za-z0-9_]'}.get(costrutto)
-    consiglio = (f' Usa una classe esplicita ({classe}), che i due motori '
-                 'trattano identica.') if classe else \
-                (' Ancora la condizione con delimitatori espliciti invece del '
-                 'confine di parola.')
+    if classe:
+        consiglio = (f' Usa una classe esplicita ({classe}), che i due motori '
+                     'trattano identica.')
+    elif costrutto in (r'\p', r'\P'):
+        consiglio = (" Usa una classe esplicita, oppure — su una colonna regex — il "
+                     "flag 'u', che allinea `\\p{}` nei due motori (il match non "
+                     'legge i flag).')
+    elif costrutto.startswith('[:'):
+        consiglio = (' Le classi POSIX non esistono in JavaScript: usa una classe '
+                     'esplicita.')
+    else:
+        consiglio = (' Ancora la condizione con delimitatori espliciti invece del '
+                     'confine di parola.')
     raise HTTPException(
         422, f'{dove}: il costrutto regex {costrutto!r} e\' interpretato '
-             f'diversamente fra anteprima (JS, ASCII) e feed (Python, unicode) '
-             f'sul testo non-ASCII (#88).' + consiglio)
+             f'diversamente fra anteprima (JS) e feed (Python) sul testo '
+             f'non-ASCII (#88).' + consiglio)
 
 
 def _flag_regex(flags):
@@ -5175,6 +5205,8 @@ def _valida_config_parser(config):
     # La condizione `match` di tipo `regex` compila il pattern come le colonne,
     # quindi un costrutto divergente (#88) va rifiutato anche qui — non solo nelle
     # colonne. `contains` e' una sottostringa letterale: non e' regex, non diverge.
+    # Il match NON legge i flag (`i` cablato), quindi `\p{}` non puo' allinearsi con
+    # `u` qui: `unicode_ok` resta False.
     if isinstance(match, dict) and match.get('type') == 'regex':
         _vieta_costrutto_regex_divergente('la condizione match', match.get('value') or '')
     colonne = config.get('columns')
@@ -5216,10 +5248,12 @@ def _valida_config_parser(config):
                     422, f'la colonna {nome!r}: flag regex non supportato '
                          f'({flags!r}). Usa solo una stringa con i caratteri '
                          f'{", ".join(FLAG_REGEX_COMUNI)}.')
-            # Costrutti `\w`/`\d`/`\b` divergenti fra i due motori (#88): rifiutati
-            # al Salva come i flag esotici, cosi' l'anteprima non mente al feed.
+            # Costrutti `\w`/`\d`/`\b`/POSIX/`\p{}` divergenti fra i due motori
+            # (#88, #90): rifiutati al Salva come i flag esotici, cosi' l'anteprima
+            # non mente al feed. `\p{}` con `u` in flags si allinea → `unicode_ok`.
+            unicode_ok = isinstance(flags, str) and 'u' in flags
             _vieta_costrutto_regex_divergente(
-                f'la colonna {nome!r}', regola.get('pattern') or '')
+                f'la colonna {nome!r}', regola.get('pattern') or '', unicode_ok=unicode_ok)
     _valida_config_multi(config.get('multi'))
     # Numeri JSON non-finiti (`NaN`, `Infinity`): `request.json()` li accetta e
     # `json.dumps` di default li serializza come JSON NON standard. Verrebbero scritti,
