@@ -153,6 +153,144 @@ def test_senza_header_resta_None_come_prima():
     assert main.parse_message(f'ALTRO TESTO\n{MARCATORE} SQUADRA-A v SQUADRA-B', CFG) is None
 
 
+def test_legacy_localizza_l_handicap_col_punto():
+    """Audit #81 (C1): il percorso legacy non localizzava l'handicap.
+
+    Un parser legacy con `handicap` scritto col punto («0.5») costruiva una riga
+    con «0.5», e `verify_csv` la scartava in SILENZIO perche' il contratto vuole la
+    virgola (#40). Ora `parse_message` passa dallo stesso `_giudica_riga` del motore,
+    che localizza: la riga esce con «0,5» e supera il verificatore.
+
+    Fail-first: sul codice vecchio la riga contiene «0.5» e `verify_csv` SOLLEVA.
+    """
+    cfg = {**CFG, 'handicap': '0.5', 'selection_name': 'Over',
+           'market_name': 'M', 'market_type': 'OVER_UNDER_05'}
+    testo = f'{HEADER}\n{MARCATORE} SQUADRA-A v SQUADRA-B'
+    parsed = main.parse_message(testo, cfg)
+    assert parsed is not None, 'un messaggio valido non deve sparire'
+    documento = parsed['csv']
+    testo_csv = documento.decode('utf-8') if isinstance(documento, bytes) else documento
+    assert '"0,5"' in testo_csv and '"0.5"' not in testo_csv, testo_csv
+    main.verify_csv(documento)  # non deve sollevare: era il difetto C1
+
+
+def test_legacy_diagnostica_l_emoji_invece_di_scartare_muto():
+    """Audit #81 (C2): un'emoji decorativa nell'evento non deve sparire in silenzio.
+
+    Il percorso legacy estraeva l'evento dopo il marcatore senza togliere le emoji
+    decorative finali; `verify_csv` rifiutava la riga e il segnale spariva SENZA una
+    riga di diagnosi (il legacy restituiva sempre `motivi=[]`). Ora `esito_messaggio`
+    passa dal giudizio comune: nessun segnale, ma il PERCHE' viaggia nei `motivi`,
+    che il dispatch scrive in `message_logs`.
+
+    Fail-first: sul codice vecchio `motivi` e' vuoto e `parsed` non e' None (la riga
+    con l'emoji viene costruita e poi scartata a valle).
+    """
+    cfg = {**CFG, 'handicap': '0', 'selection_name': 'Over',
+           'market_name': 'M', 'market_type': 'OVER_UNDER_05'}
+    testo = f'{HEADER}\n{MARCATORE} SQUADRA-A v SQUADRA-B ✅'
+    parsed, motivi = main.esito_messaggio(testo, cfg)
+    assert parsed is None, 'un evento con emoji non deve produrre un segnale valido'
+    assert any('emoji' in m.lower() for m in motivi), (
+        f'il motivo dell\'emoji non e- stato diagnosticato: {motivi!r}')
+
+
+def test_il_profilo_legacy_scrive_la_diagnosi_non_il_generico(tmp_path, monkeypatch):
+    """Audit #81 (C2), verso dispatch del profilo: la diagnosi arriva in fondo.
+
+    `_elabora_profilo` usava `elabora_messaggio`, che scarta i motivi, e tornava
+    `parser_no_match` — il generico, non il perche'. Ora usa `esito_messaggio` e
+    restituisce «scartato: ...emoji...», che il chiamante scrive in `message_logs`.
+    Il verso end-to-end del ramo legacy, oltre all'unita' di `esito_messaggio`.
+    """
+    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'profilo.db'))
+    c = main.db()
+    main.migra(c)
+    c.execute("INSERT INTO parsers(name, header, market_name, market_type,"
+              " selection_name, handicap, bet_type)"
+              " VALUES ('leg', ?, 'M', 'OVER_UNDER_05', 'Over', '0', 'PUNTA')", (HEADER,))
+    c.commit()
+    profilo = {'parser': 'leg', 'name': 'PIERO'}
+
+    # Emoji nell'evento: nessun segnale, ma la CAUSA e' esplicita, non parser_no_match.
+    esito = main._elabora_profilo(c, profilo, f'{HEADER}\n{MARCATORE} A v B ✅')
+    assert isinstance(esito, str) and esito.startswith('scartato:'), esito
+    assert 'emoji' in esito.lower(), esito
+
+    # Un messaggio pulito continua a produrre il segnale (non e- diventato tutto «scartato»).
+    ok = main._elabora_profilo(c, profilo, f'{HEADER}\n{MARCATORE} A v B')
+    assert isinstance(ok, dict) and ok.get('event') == 'A - B', ok
+    c.close()
+
+
+def test_legacy_un_handicap_GIA_localizzato_resta_byte_identico():
+    """Il rovescio di C1: passare dal giudizio comune non deve TOCCARE cio' che e' gia' corretto.
+
+    Il feed di PIERO usa `handicap='0'`, ma un parser legacy puo' avere un handicap
+    gia' scritto con la virgola («0,5»). `_giudica_riga` localizza `.`->`,`: se lo
+    facesse anche su un valore gia' localizzato — o rimpiazzasse in modo ingenuo —
+    «0,5» diventerebbe «0,,5» o peggio, e il segnale di PIERO cambierebbe di byte
+    sotto una riga che «non doveva muoversi». Questo e' il guard che GPT-5.5 ha
+    chiesto sulla PR #84: byte-invarianza sul percorso gia- corretto.
+
+    Non e' coperto dal test C1 sopra (quello parte da «0.5» e verifica che DIVENTI
+    «0,5»); qui il valore entra gia- «0,5» e deve USCIRE identico.
+    """
+    cfg = {**CFG, 'handicap': '0,5', 'selection_name': 'Over',
+           'market_name': 'M', 'market_type': 'OVER_UNDER_05'}
+    testo = f'{HEADER}\n{MARCATORE} SQUADRA-A v SQUADRA-B'
+    parsed = main.parse_message(testo, cfg)
+    assert parsed is not None, 'un messaggio valido non deve sparire'
+    documento = parsed['csv']
+
+    # Byte per byte, non «contiene 0,5»: la riga attesa e' scritta A MANO qui —
+    # indipendente da `_giudica_riga` — quindi l'uguaglianza dimostra che il
+    # giudizio e' un no-op su un input gia' corretto, non solo che l'handicap
+    # sopravvive. GPT-5.5 sulla PR #84: il nome prometteva piu' dell'asserzione.
+    riga_attesa = ['XTrader', '', 'SQUADRA-A - SQUADRA-B', '', 'M', 'OVER_UNDER_05',
+                   '', 'Over', '0,5', '', '', '', 'PUNTA', '']
+    atteso = main.make_csv(riga_attesa)
+    assert documento == atteso, (
+        'il CSV non e- byte-identico alla riga attesa:\n'
+        f'  atteso   : {atteso!r}\n'
+        f'  ottenuto : {documento!r}')
+    main.verify_csv(documento)  # il contratto regge
+
+
+def test_il_profilo_legacy_col_MOTORE_scrive_ancora_il_segnale(tmp_path, monkeypatch):
+    """Regola 2-bis su `_elabora_profilo`: il ramo `config_json` non e' regredito.
+
+    La patch #84 ha riscritto `_elabora_profilo` per usare `esito_messaggio` invece
+    di `elabora_messaggio`. Un profilo il cui parser ha una `config_json` passa dal
+    MOTORE, non dal percorso legacy: questo test — chiesto da GPT-5.5 sulla PR #84 —
+    dimostra che quel ramo continua a produrre il segnale dopo il cambio di dispatch,
+    non solo il ramo legacy coperto sopra.
+    """
+    monkeypatch.setattr(main, 'DB_PATH', str(tmp_path / 'motore.db'))
+    c = main.db()
+    main.migra(c)
+    config = {
+        'match': {'type': 'contains', 'value': 'SEGNALE'},
+        'columns': {
+            'EventName': {'source': 'line', 'anchor': 'evento', 'part': 'after',
+                          'marker': ':', 'transforms': [{'op': 'trim'}]},
+            'MarketType': {'source': 'constant', 'value': 'OVER_UNDER_15'},
+            'SelectionName': {'source': 'constant', 'value': 'Over 1,5 goal'},
+            'BetType': {'source': 'constant', 'value': 'PUNTA'},
+        },
+    }
+    c.execute("INSERT INTO parsers(name, header, market_name, market_type,"
+              " selection_name, handicap, bet_type, config_json)"
+              " VALUES ('mot', '', '', '', '', '', '', ?)", (json.dumps(config),))
+    c.commit()
+    profilo = {'parser': 'mot', 'name': 'PIERO'}
+
+    esito = main._elabora_profilo(c, profilo, 'SEGNALE\nevento: Roma v Lazio\n@ 2.10')
+    assert isinstance(esito, dict), f'il ramo motore non ha prodotto il segnale: {esito!r}'
+    assert esito.get('event') == 'Roma v Lazio', esito
+    c.close()
+
+
 # ------------------------------------------- il giro HTTP vero, sul servizio
 
 def _consegna(base, testo):

@@ -2281,22 +2281,49 @@ def parse_message(message, cfg):
     alla riga (`SQUADRA-A v SQUADRA-B 🆚`): un canale che scrive le squadre prima
     del marcatore faceva cadere il webhook al primo messaggio.
     """
+    return _giudica_legacy(message, cfg)[0]
+
+
+def _giudica_legacy(message, cfg):
+    """`(parsed, motivi)` per il percorso legacy, giudicato come il motore.
+
+    Costruisce la riga dai campi COSTANTI del parser + l'evento estratto dal
+    messaggio, poi la passa a `_giudica_riga` — la STESSA del motore configurabile
+    (regola 3). Cosi' il legacy eredita: la localizzazione decimale (#40), le
+    guardie sui valori (#39) e la diagnosi dell'emoji nell'evento (#42). Prima
+    scriveva la riga grezza e `verify_csv` la scartava in SILENZIO se l'handicap
+    aveva il punto o l'evento un'emoji (audit #81, C1/C2): il segnale spariva senza
+    una riga di causa, perche' il ramo legacy restituiva sempre `motivi=[]`.
+
+    Quando il giudizio trova un motivo non c'e' segnale (`None`), ma il PERCHE'
+    viaggia nel secondo valore, che il dispatch scrive in `message_logs` — come per
+    il motore. Su un messaggio valido i byte non cambiano: `_giudica_riga` localizza
+    solo i numerici e non tocca un valore gia' in forma corretta, quindi il feed di
+    PIERO resta identico.
+    """
     if cfg['header'].lower() not in message.lower():
-        return None
+        return None, []
     line = next((x.strip() for x in message.splitlines() if '🆚' in x), '')
     if not line:
-        return None
+        return None, []
     event = line.split('🆚', 1)[1].strip()
     # Nessun evento dopo il marcatore: non si inventa un nome squadra vuoto.
     if not event:
-        return None
+        return None, []
     # The final " v " is the separator; earlier occurrences remain in a team name.
     ms = list(re.finditer(r'\s+v\s+', event, flags=re.I))
     if ms:
         s = ms[-1]
         event = event[:s.start()].strip() + ' - ' + event[s.end():].strip()
-    row = ['XTrader', '', event, '', cfg['market_name'], cfg['market_type'], '', cfg['selection_name'], cfg['handicap'], '', '', '', cfg['bet_type'], '']
-    return {'event': event, 'csv': make_csv(row)}
+    row = ['XTrader', '', event, '', cfg['market_name'], cfg['market_type'], '',
+           cfg['selection_name'], cfg['handicap'], '', '', '', cfg['bet_type'], '']
+    giudizio = _giudica_riga(row, True)
+    motivi = list(giudizio['scarti'])
+    motivi += ['%s: colonna obbligatoria vuota nel segnale' % c
+               for c in giudizio['missing']]
+    if motivi:
+        return None, motivi
+    return {'event': event, 'csv': make_csv(giudizio['row'])}, []
 
 
 # ============================================================================
@@ -3181,7 +3208,9 @@ def esito_messaggio(message, cfg, risolvi_mappa=None):
     """
     grezzo = cfg.get('config_json')
     if not grezzo:
-        return parse_message(message, cfg), []
+        # Legacy: dal giudizio comune arrivano sia il segnale sia i motivi (audit
+        # #81, C1/C2) — prima qui c'era `[]` fisso e lo scarto era muto.
+        return _giudica_legacy(message, cfg)
     # TUTTO il percorso del motore sta sotto un solo try, e la cattura e' larga di
     # proposito. `config_json` la scrive l'utente (dalla web app): un JSON valido ma
     # malformato per il motore — senza `columns`, con `match` non-dict, un `pattern`
@@ -7085,9 +7114,14 @@ def _elabora_profilo(c, profile, text):
     cfg = parser_se_esiste(c, profile['parser'])
     if cfg is None:
         return 'parser_mancante'
-    parsed = elabora_messaggio(text, cfg)
+    # `esito_messaggio`, non `elabora_messaggio`: il secondo scarterebbe i `motivi` e
+    # il profilo tornerebbe al generico `parser_no_match`. Con i motivi, un segnale
+    # fermato dal giudizio (handicap fuori scala, emoji nell'evento — audit #81 C2)
+    # dice il PERCHE' nel `message_logs` del profilo, come sul percorso per-utente,
+    # invece di sparire in silenzio.
+    parsed, motivi = esito_messaggio(text, cfg)
     if not parsed:
-        return 'parser_no_match'
+        return f'scartato: {motivi[0]}' if motivi else 'parser_no_match'
     try:
         store_signal(c, parsed['csv'], profile['parser'], profile['name'])
     except ValueError:
