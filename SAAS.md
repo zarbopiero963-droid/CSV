@@ -528,6 +528,14 @@ identico dai due lati — nessuna divergenza possibile.
 > accenti) conviene usare **classi esplicite** — `[A-Za-zÀ-ÿ0-9]` — o `\p{L}`/`\p{N}`
 > con `flags:'u'` (che allinea i due motori sulle proprietà unicode). Nei mercati
 > ed eventi Betfair il testo è quasi sempre ASCII, quindi il caso è raro.
+> **Il perimetro di questo consiglio è l'estrazione**: `flags:'u'` ha effetto
+> solo sulle regole di colonna `source: regex`, l'unico percorso che compila
+> davvero i `flags` di una regola. **Sulla condizione `match` non serve e non fa
+> nulla**: come detto sopra, `match` cabla `i` e ignora `flags`, quindi per
+> allineare un `match` su testo non-ASCII vanno usate le **classi esplicite**,
+> non un flag che quel percorso non legge. (Le trasformazioni `replace_all` e
+> `replace_last` non usano regex: sono sostituzioni letterali, i `flags` non le
+> toccano.)
 
 Allo stesso modo `replace_all` con `from` vuoto è un **no-op** in entrambi (E1),
 non l'esplosione carattere-per-carattere del vecchio `split('')`. Il confronto in
