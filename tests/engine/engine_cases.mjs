@@ -325,6 +325,27 @@ caso('estrazione: regola vuota o assente -> stringa vuota', () => {
   return 'ok';
 });
 
+// Il valore ASSOLUTO dei flag, non solo la parita' col gemello: il confronto
+// JS/Python vede solo le DIVERGENZE, quindi un cambio di comportamento
+// COORDINATO (entrambi i motori che passano a case-insensitive) gli
+// sfuggirebbe. Qui si pinna la case sul lato JS; il gemello e'
+// `test_flag_regex_...` in Python. Pattern con maiuscole/minuscole distinte per
+// distinguere case-sensitive da insensitive (audit #81 E2, bloccante Fable 5 #85).
+caso('estrazione: i flag scartati NON cambiano la case (x/gy restano sensitive)', () => {
+  const ex = (flags) => extractValue('xyzABCabc',
+    { source: 'regex', pattern: '(abc)', flags, group: 1 });
+  // flag ASSENTI -> default 'i' (case-insensitive): prima occorrenza = 'ABC'.
+  eq(ex(undefined), 'ABC', 'niente flag: default i');
+  eq(ex(''), 'ABC', 'flag vuoti: default i');
+  // flag PRESENTI ma scartati -> case-SENSITIVE (niente default 'i'): 'abc'.
+  eq(ex('x'), 'abc', 'x scartato ma la case resta sensitive');
+  eq(ex('gy'), 'abc', 'gy scartati ma la case resta sensitive');
+  // flag comuni onorati.
+  eq(ex('i'), 'ABC', 'i onorato');
+  eq(ex('iiu'), 'ABC', 'iiu deduplicato e onorato');
+  return 'ok';
+});
+
 /* ------------------------------------------------------ suggeritore */
 
 caso('suggeritore: ancora tagliata per codepoint, mai mezzo surrogato', () => {
@@ -768,6 +789,89 @@ function casiConfronto() {
       SelectionName: { source: 'constant', value: 'Over' },
       BetType: { source: 'constant', value: 'PUNTA' } },
   });
+  // --- Parita' dei due motori: replace_all e flag regex (audit #81 E1/E2) -----
+  //
+  // Config a quattro obbligatorie costanti + il caso in una colonna facoltativa
+  // (MarketName), cosi' `complete` e' true e la `row` porta il valore da
+  // confrontare direttamente. L'oracolo e' `runParser`: il gemello Python deve
+  // produrre la stessa `row`.
+  const conMercato = (regola, message) => [message, {
+    match: { type: 'contains', value: 'P.Bet.' },
+    columns: { ...soloEmpty,
+      EventName: { source: 'constant', value: 'Juve - Milan' },
+      MarketType: { source: 'constant', value: 'OVER_UNDER_15' },
+      SelectionName: { source: 'constant', value: 'Over' },
+      BetType: { source: 'constant', value: 'PUNTA' },
+      MarketName: regola },
+  }];
+  // E1 (P1): `replace_all` con `from` vuoto. In JS `''.split('')` esplode il
+  // valore carattere per carattere e vi INTERCALA `to` ("abc" -> "aXbXc"); il
+  // gemello Python lo tratta gia' come no-op (`if t.get('from') else v`). Senza
+  // il guard in JS le due `row` divergono. Misurato: JS "aXbXc", Python "abc".
+  aggiungi('E1: replace_all con from VUOTO e- no-op nei due motori',
+    ...conMercato({ source: 'constant', value: 'abc',
+      transforms: [{ op: 'replace_all', from: '', to: 'X' }] }, 'P.Bet.'));
+  // E2 (P3): flag `x` (verbose). JS lo passa a `new RegExp` che SOLLEVA
+  // ("Invalid flags") -> l'estrazione cade a '' ; Python lo mappa su `regex.X`
+  // e la modalita' verbose ignora gli spazi del pattern, quindi combacia. Il
+  // pattern chiede spazi che il messaggio non ha: con `x` onorato solo da un
+  // lato, i due motori divergono. Misurato: JS '', Python "123".
+  aggiungi('E2: flag x (verbose) non onorato in nessuno dei due',
+    ...conMercato({ source: 'regex', pattern: '( [0-9]+ )', flags: 'x', group: 1 },
+      'P.Bet. val123end'));
+  // E2 (P3): flag `y` (sticky). JS ancora il match all'indice 0 e non trova la
+  // cifra dopo "P.Bet. " -> '' ; Python ignora `y` e trova "123". Misurato: JS
+  // '', Python "123".
+  aggiungi('E2: flag y (sticky) non onorato in nessuno dei due',
+    ...conMercato({ source: 'regex', pattern: '([0-9]+)', flags: 'y', group: 1 },
+      'P.Bet. abc123'));
+  // E2 CONTROLLO: `u` (unicode) e' l'unico flag oltre {i,m,s} che i due motori
+  // devono continuare a onorare IDENTICO — Python e' gia' codepoint-native e
+  // JS ha bisogno di `u` per far combaciare `.` su un carattere astrale. Verde
+  // prima e dopo la patch: e' la guardia che vieta di "normalizzare via" anche
+  // `u`, che RIAPRIREBBE la divergenza sui codepoint astrali. Misurato: "🆚"
+  // in entrambi.
+  aggiungi('E2: flag u (unicode) onorato IDENTICO nei due motori',
+    ...conMercato({ source: 'regex', pattern: '(.)', flags: 'u', group: 1 },
+      'P.Bet. \u{1F19A}X'));
+  // E2, flag DUPLICATI: `new RegExp(_, 'ii')` in JS SOLLEVA "Invalid flags", ed
+  // e' il motivo per cui `flagRegex` deduplica con un Set. Senza la dedup questo
+  // caso cadrebbe a '' in JS e divergerebbe da Python. Con `iiu` -> `iu` in JS e
+  // `I` in Python: entrambi case-insensitive, "ABC" combacia. Chiesto da GPT-5.5.
+  aggiungi('E2: flag duplicati (iiu) deduplicati, non un errore',
+    ...conMercato({ source: 'regex', pattern: '(ABC)', flags: 'iiu', group: 1 },
+      'P.Bet. xyzABCabc'));
+  // E2, flag MISTI validi+scartati: `xiu` tiene `iu` (case-insensitive unicode)
+  // e butta `x`. I due motori devono estrarre lo stesso valore. Chiesto da
+  // GPT-5.5 come guardia dell'allineamento reale anteprima/feed.
+  aggiungi('E2: flag misti (xiu) tengono solo i validi comuni',
+    ...conMercato({ source: 'regex', pattern: '(ABC)', flags: 'xiu', group: 1 },
+      'P.Bet. xyzABCabc'));
+  // E2, flag NON-STRINGA (config_json non attendibile): una regola con `flags`
+  // non-stringa e' MALFORMATA → colonna VUOTA (fail-closed) in ENTRAMBI, come un
+  // pattern che non compila. Cosi': niente `TypeError` (Python su `main` faceva
+  // `for f in 5` → crash, Fable), niente fail-open (un config malformato non
+  // produce piu' un segnale che prima non usciva, Sol), niente dipendenza dalla
+  // forma della coercizione a stringa (che diverge fra `str()` e `String()`,
+  // Sol). Qui MarketName e' facoltativa, quindi la riga resta completa ma con la
+  // colonna vuota; l'oracolo e' `runParser` e Python deve dare la stessa riga.
+  aggiungi('E2: flag non-stringa (numero) → colonna vuota, non solleva',
+    ...conMercato({ source: 'regex', pattern: '(abc)', flags: 5, group: 1 },
+      'P.Bet. abcABC'));
+  aggiungi('E2: flag non-stringa (lista di oggetti) → colonna vuota',
+    ...conMercato({ source: 'regex', pattern: '(abc)', flags: [{ a: 1 }], group: 1 },
+      'P.Bet. abcABC'));
+  aggiungi('E2: flag false (non-stringa) → colonna vuota in entrambi',
+    ...conMercato({ source: 'regex', pattern: '(a.b)', flags: false, group: 1 },
+      'P.Bet. a\nb'));
+  aggiungi('E2: flag true (non-stringa) → colonna vuota in entrambi',
+    ...conMercato({ source: 'regex', pattern: '(abc)', flags: true, group: 1 },
+      'P.Bet. ABCabc'));
+  // Un OGGETTO come flags: era la divergenza residua (Python raccoglieva la `i`
+  // della chiave, JS no). Malformato → colonna vuota in entrambi, niente divergenza.
+  aggiungi('E2: flag oggetto {i:1} (non-stringa) → colonna vuota, niente divergenza',
+    ...conMercato({ source: 'regex', pattern: '(abc)', flags: { i: 1 }, group: 1 },
+      'P.Bet. ABCabc'));
   return confronti;
 }
 

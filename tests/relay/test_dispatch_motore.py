@@ -375,3 +375,118 @@ def test_un_parser_config_json_scrive_un_feed_valido(db_isolato):
     # E il feed di PIERO, nello stesso DB, non e' stato toccato dal parser del cliente.
     piero = c.execute('SELECT csv FROM signals WHERE profile=?', ('PIERO',)).fetchone()
     assert piero is None, 'il parser del cliente ha scritto nel feed di PIERO: isolamento rotto'
+
+
+# --------------------------------------------------- parita' dei motori (#81 E1/E2)
+
+def test_flag_regex_onora_il_solo_insieme_comune_ims():
+    """`_flag_regex` (Python) allineato a `flagRegex` (engine.js): {i,m,s}+u.
+
+    Il DEFAULT `'i'` vale SOLO per i flag assenti (come `rule.flags || 'i'`). Un
+    insieme presente ma con soli flag scartati (`'x'`, `'gy'`) NON ricade su `'i'`:
+    tiene 0 bit, cioe' resta CASE-SENSITIVE — cosi' un parser gia' salvato con quei
+    flag non cambia i suoi valori nel feed (bloccante Fable 5, PR #85). Il lato JS
+    e' pinnato dal caso gemello in engine_cases.mjs e il confronto li tiene insieme.
+    """
+    R = main._regex
+    assert main._flag_regex('i') == R.I
+    assert main._flag_regex('ims') == (R.I | R.M | R.S)
+    # `x`/`gy` PRESENTI ma scartati: 0 bit (case-SENSITIVE), NON il default 'i'.
+    # E' la differenza che tiene invariato il feed di un parser salvato con quei
+    # flag: cambia solo il verbose/sticky, non la case.
+    assert main._flag_regex('x') == 0
+    assert main._flag_regex('gy') == 0
+    assert not (main._flag_regex('x') & R.X)   # niente verbose
+    # `u` riconosciuto ma no-op (_regex e' codepoint-native): 0 bit, case-sensitive,
+    # come `new RegExp(_, 'u')` in JS.
+    assert main._flag_regex('u') == 0
+    assert main._flag_regex('iu') == R.I       # 'i' vince, 'u' resta no-op
+    # ASSENTI (None o '') → default 'i', backward-compatible con TUTTI i parser
+    # del wizard, che non emettono flag.
+    assert main._flag_regex('') == R.I
+    assert main._flag_regex(None) == R.I
+
+
+def test_estrai_valore_flags_non_stringa_e_FAIL_CLOSED():
+    """Un `flags` non-stringa (config_json non attendibile) → colonna VUOTA.
+
+    La storia di questo caso, tutta misurata:
+    - su `main` `for f in (5 or 'i')` sollevava `TypeError` → il segnale non
+      usciva (fail-closed per crash) — [REAL_FINDING] Claude Fable 5;
+    - una coercizione `str(flags)` toglieva il crash ma dipendeva dalla FORMA
+      della stringa, che diverge da `String()` di JS (`str({'i':1})`="{'i': 1}"
+      con una `i`, `String({i:1})`="[object Object]" senza) — [REAL_FINDING] Sol;
+    - trattarla come assente (default `i`) chiudeva la divergenza ma cambiava la
+      produzione in fail-OPEN: un config malformato che prima non produceva
+      segnale ora ne produceva uno — [REAL_FINDING] Sol.
+
+    Fix: `flags` non-stringa = regola malformata → estrazione `''` in ENTRAMBI i
+    motori (come un pattern che non compila). Su una colonna obbligatoria il
+    segnale non esce (fail-closed, come `main`), senza crash e senza divergenza.
+    Il gemello JS e' `extractValue` in engine.js, confrontato in engine_cases.mjs.
+    """
+    for cattivo in (5, 0, [], [{'a': 1}], {}, {'i': 1}, ['i'], False, True):
+        regola = {'source': 'regex', 'pattern': '(abc)', 'flags': cattivo, 'group': 1}
+        assert main._estrai_valore('abcABC', regola) == '', (
+            f'flags={cattivo!r}: la regola malformata deve dare colonna vuota, '
+            f'non estrarre col default')
+    # E il verso end-to-end: una OBBLIGATORIA con flags non-stringa → nessun
+    # segnale (fail-closed), non un segnale col default.
+    config = {
+        'match': {'type': 'contains', 'value': 'P.Bet.'},
+        'columns': {
+            'EventName': {'source': 'regex', 'pattern': '(Juve - Milan)',
+                          'flags': 5, 'group': 1},
+            'MarketType': {'source': 'constant', 'value': 'OVER_UNDER_15'},
+            'SelectionName': {'source': 'constant', 'value': 'Over'},
+            'BetType': {'source': 'constant', 'value': 'PUNTA'},
+        },
+    }
+    r = main.esegui_parser('P.Bet. Juve - Milan', config)
+    assert r['matched'] is True, 'la condizione combacia comunque'
+    assert 'EventName' in r['missing'], 'EventName con flags malformato → mancante'
+    assert r['complete'] is False, 'nessun segnale da un config con flags malformato'
+
+
+def test_flag_regex_resta_TOTALE_come_rete_difensiva():
+    """`_flag_regex` non viene mai chiamata con non-stringa (il guard e' a monte),
+    ma resta totale: non deve sollevare se un domani un chiamante salta il guard.
+    """
+    R = main._regex
+    for v in (5, [], {}, False, True, None, ''):
+        assert main._flag_regex(v) == R.I   # difensivo, mai un'eccezione
+    assert main._flag_regex('x') == 0       # stringa presente ma scartata: case-sensitive
+    assert main._flag_regex('ims') == (R.I | R.M | R.S)
+
+
+def test_estrai_valore_col_flag_x_non_va_in_modalita_verbose():
+    """Il verso end-to-end del lato Python: `flags:'x'` non ignora gli spazi.
+
+    Pattern con spazi su un messaggio senza spazi: in verbose combacerebbe
+    ('123'), senza verbose no (''). Dopo la patch Python risponde '' come JS,
+    che su 'x' solleva e cade a '' — i due motori concordano.
+    """
+    regola = {'source': 'regex', 'pattern': '( [0-9]+ )', 'flags': 'x', 'group': 1}
+    assert main._estrai_valore('val123end', regola) == ''
+
+
+def test_estrai_valore_col_flag_y_non_e_sticky():
+    """`flags:'y'` (sticky) e' ignorato: la cifra non all'indice 0 viene trovata.
+
+    In JS 'y' ancora il match a 0 e non trova nulla; Python lo ignora e trova
+    '123'. Dopo la patch JS toglie 'y' e trova '123' anch'esso: parita'.
+    """
+    regola = {'source': 'regex', 'pattern': '([0-9]+)', 'flags': 'y', 'group': 1}
+    assert main._estrai_valore('abc123', regola) == '123'
+
+
+def test_replace_all_con_from_vuoto_e_no_op_in_python():
+    """Il gemello di E1 sul lato Python: `from` vuoto non esplode il valore.
+
+    In JS senza guard `''.split('')` intercala `to` fra ogni carattere; qui il
+    guard `if t.get('from') else v` c'era gia', e questo test lo pinna perche'
+    non regredisca sotto un refactor.
+    """
+    ra = main.TRASFORMAZIONI_MOTORE['replace_all']
+    assert ra('abc', {'from': '', 'to': 'X'}) == 'abc'
+    assert ra('a-b-c', {'from': '-', 'to': ' '}) == 'a b c'

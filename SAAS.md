@@ -473,6 +473,34 @@ le trasformazioni non hanno piu' l'ultima parola: il **confine di scrittura**
 `comma_to_dot` resta legale ma superfluo su quelle colonne — il suggeritore ha
 smesso di proporlo su `Price`.
 
+**I flag della sorgente `regex`** (campo opzionale `flags`) sono onorati solo per
+l'insieme che i due motori — `web/engine.js` in anteprima e `main.py` in
+produzione — trattano **identico**: `i`, `m`, `s`, piu' `u` (unicode). `x`
+(verbose), `y` (sticky) e `g` (globale) sono **ignorati**. È il fix E2 dell'audit
+#81: `new RegExp(_, 'x')` in JavaScript solleva mentre `regex.X` in Python
+funziona, e `y` è sticky solo in JS — un flag onorato da un lato solo faceva
+combaciare l'anteprima e il feed in modo diverso.
+
+Il default `i` (case-insensitive) si applica **solo ai flag assenti** (`flags`
+mancante o vuoto), come lo storico `rule.flags || 'i'` — così tutti i parser del
+wizard, che non emettono `flags`, restano invariati. Un `flags` **presente** ma
+con soli valori scartati (`'x'`, `'gy'`) tiene zero flag, cioè resta
+**case-sensitive**, e non ricade su `i`: un parser già salvato con quei flag non
+cambia i propri valori nel feed, perde solo il verbose/sticky (che comunque
+divergevano fra i motori).
+
+Un `flags` **malformato** (non stringa: numero, lista, oggetto, booleano — il
+`config_json` è dato utente non attendibile) rende la regola `regex`
+**malformata**: la colonna resta **vuota** (fail-closed), come per un pattern che
+non compila, identico nei due motori. Su una colonna obbligatoria il segnale non
+esce — nessun crash e nessun segnale prodotto «per default» da una config non
+valida — e senza dipendere dalla forma della coercizione a stringa, che
+divergerebbe fra `String()` di JS e `str()` di Python.
+
+Allo stesso modo `replace_all` con `from` vuoto è un **no-op** in entrambi (E1),
+non l'esplosione carattere-per-carattere del vecchio `split('')`. Il confronto in
+`tests/engine/engine_cases.mjs` tiene i due motori allineati.
+
 ### Il multi-riga: base + override (#35, pezzo 2)
 
 Un messaggio può generare **N righe** dallo stesso parser. La riga **base** — le

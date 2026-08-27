@@ -2756,15 +2756,51 @@ def _cerca_regex_utente(pattern, message, flags, scadenza=None):
 def _flag_regex(flags):
     """I flag JS (`'i'`, `'im'`, …) tradotti nei flag del modulo `regex`.
 
-    `'i'` e' il default in engine.js (`rule.flags || 'i'`). `'g'` e `'u'` non
-    hanno un equivalente utile qui — la ricerca non e' globale, e le stringhe sono
-    gia' unicode — e vengono ignorati, non tradotti in un errore. I flag sono
-    quelli di `_regex` perche' e' `_regex.search` a riceverli (vedi
-    `_cerca_regex_utente`), non lo `re` di stdlib.
+    Onora il solo insieme che i due motori condividono IDENTICO — `i`, `m`, `s` —
+    col default `'i'` (in engine.js `rule.flags || 'i'`). Gli altri sono ignorati,
+    non tradotti in errore, e il perche' e' MISURATO, non temuto (audit #81 E2):
+
+    - `x` (verbose): qui lo mappava `regex.X`, ma `web/engine.js` passa i flag a
+      `new RegExp`, che su `'x'` SOLLEVA "Invalid flags" e fa cadere l'estrazione
+      a '' — cioe' lo stesso parser con `flags:'x'` scartava gli spazi del pattern
+      di qua e non di la'. Tolto da entrambi i lati per parita';
+    - `u` (unicode): JS ne ha bisogno perche' `.` e `\\p{}` combacino coi
+      codepoint; qui `_regex` e' gia' codepoint-native, quindi `u` e' un no-op
+      innocuo e i due motori restano allineati;
+    - `g` (globale), `y` (sticky): la ricerca non e' globale e non e' ancorata.
+
+    I flag sono quelli di `_regex` perche' e' `_regex.search` a riceverli (vedi
+    `_cerca_regex_utente`), non lo `re` di stdlib. Il gemello e' `flagRegex` in
+    `web/engine.js`, e il confronto in `engine_cases.mjs` tiene i due allineati.
+
+    Il DEFAULT combacia ESATTO con `rule.flags || 'i'` di JS: `'i'` si applica
+    solo quando i flag sono ASSENTI (None o stringa vuota). Un insieme PRESENTE
+    ma con soli flag fuori dal comune (`'x'`, `'gy'`) NON ricade su `'i'`: tiene
+    zero flag, cioe' resta CASE-SENSITIVE — che e' il comportamento che aveva
+    prima di questo fix (pre-fix `_flag_regex('gy')` era `0`, e `'x'` era
+    `regex.X`, entrambi senza `I`). Il fix toglie solo il verbose (`x`) e lo
+    sticky (`y`), gia' divergenti fra i motori; la case NON cambia, cosi' un
+    parser gia' salvato con quei flag non muta i suoi valori nel feed. Cambiarla
+    sarebbe la regressione silenziosa segnalata come bloccante da Claude Fable 5
+    sulla PR #85. `'u'` e' riconosciuto ma no-op (`_regex` e' gia'
+    codepoint-native) e resta case-sensitive, come `new RegExp(_, 'u')` in JS.
+
+    `flags` arriva qui GIA' validato come stringa (o assente): un `flags` presente
+    ma non-stringa viene scartato PRIMA, in `_estrai_valore`, che tratta la regola
+    come malformata e restituisce colonna vuota (fail-closed) — cosi' un config
+    con `flags: 5`/`[{...}]`/`{...}` non fa uscire un segnale che su `main` non
+    usciva, e non si dipende dalla forma della coercizione a stringa (che diverge
+    da `String()` di JS). Bloccanti Claude Fable 5 (niente `TypeError`) e GPT-5.6
+    Sol (niente fail-open), PR #85. Il `isinstance` qui e' una rete difensiva
+    ridondante: tiene la funzione totale se un domani un chiamante la invoca senza
+    passare dal guard. Una STRINGA presente ma con soli flag scartati resta
+    case-sensitive.
     """
-    mappa = {'i': _regex.I, 'm': _regex.M, 's': _regex.S, 'x': _regex.X}
+    if not isinstance(flags, str) or flags == '':
+        return _regex.I
+    mappa = {'i': _regex.I, 'm': _regex.M, 's': _regex.S, 'u': 0}
     risultato = 0
-    for f in (flags or 'i'):
+    for f in flags:
         risultato |= mappa.get(f, 0)
     return risultato
 
@@ -2803,11 +2839,21 @@ def _estrai_valore(message, regola, scadenza=None):
         else:
             v = riga
     elif sorgente == 'regex':
+        # `flags` presente ma NON stringa (dal config_json non attendibile): regola
+        # malformata. Come un pattern che non compila, la colonna resta VUOTA
+        # (fail-closed) invece di girare col default: su una colonna obbligatoria
+        # il segnale non esce, come su `main` (dove un flags non-stringa sollevava
+        # TypeError e il segnale non usciva) — ma senza il crash e senza fail-open.
+        # Simmetrico a `extractValue` in engine.js. [REAL_FINDING] di GPT-5.6 Sol,
+        # PR #85.
+        flags = regola.get('flags')
+        if flags is not None and not isinstance(flags, str):
+            return ''
         # Pattern dell'utente → timeout duro (worker condiviso), dentro il budget di
         # parser. Errore o scadenza danno None, cioe' colonna vuota, come prima
         # faceva `except re.error`.
         m = _cerca_regex_utente(regola.get('pattern', ''), message,
-                                _flag_regex(regola.get('flags')), scadenza)
+                                _flag_regex(flags), scadenza)
         if not m:
             return ''
         gruppo = regola.get('group', 1)

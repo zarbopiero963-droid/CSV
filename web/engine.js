@@ -17,7 +17,7 @@ export const TRANSFORMS = {
   // sotto: qui e' solo catturata, e viene valutata alla chiamata.
   trim:          { label: 'Rimuovi spazi ai lati',        fn: v => v.replace(BORDI_UNIFORMI, '') },
   replace_last:  { label: 'Sostituisci ultima occorrenza', fn: (v, t) => replaceLast(v, t.from, t.to), args: ['from', 'to'] },
-  replace_all:   { label: 'Sostituisci tutto',             fn: (v, t) => v.split(t.from).join(t.to), args: ['from', 'to'] },
+  replace_all:   { label: 'Sostituisci tutto',             fn: (v, t) => (t.from ? v.split(t.from).join(t.to) : v), args: ['from', 'to'] },
   upper:         { label: 'MAIUSCOLO',                     fn: v => v.toUpperCase() },
   lower:         { label: 'minuscolo',                     fn: v => v.toLowerCase() },
   comma_to_dot:  { label: 'Virgola decimale → punto',      fn: v => v.replace(',', '.') },
@@ -37,6 +37,37 @@ function replaceLast(text, from, to) {
   if (!from) return text;
   const i = text.lastIndexOf(from);
   return i < 0 ? text : text.slice(0, i) + to + text.slice(i + from.length);
+}
+
+// I soli flag regex che i due motori onorano IDENTICI. Fuori da questo insieme
+// i motori divergono (audit #81 E2), e la divergenza e' misurata, non temuta:
+//   x (verbose) -> Python lo onora (`regex.X`), in JS `new RegExp(_, 'x')`
+//                  SOLLEVA "Invalid flags" e l'estrazione cade a '' ;
+//   y (sticky)  -> in JS ancora il match all'indice 0, in Python e' ignorato;
+//   g (globale) -> irrilevante su una singola estrazione, tolto per non
+//                  dipendere da `lastIndex`.
+// `u` RESTA: Python e' gia' codepoint-native (modulo `regex`) e JS ha bisogno
+// di `u` perche' `.` e `\p{}` combacino con Python — toglierlo riaprirebbe la
+// divergenza sui caratteri astrali. Il gemello e' `_flag_regex` in main.py.
+//
+// Solo una STRINGA e' un insieme di flag valido. Qualunque altro tipo — numero,
+// lista, oggetto, booleano dal `config_json` non attendibile — e' malformato e
+// vale come ASSENTE: default `'i'`. Cosi' i due motori non dipendono dalla forma
+// della coercizione a stringa, che diverge (`String({i:1})` = "[object Object]"
+// contro `str({'i':1})` = "{'i': 1}", uno senza `i` e uno con): niente eccezioni,
+// niente divergenza. Bloccanti Claude Fable 5 e GPT-5.6 Sol, PR #85.
+//
+// Il default `'i'` si applica agli assenti (`rule.flags || 'i'` storico) E ai
+// non-stringa. Una STRINGA presente ma con soli flag scartati (`'x'`, `'gy'`)
+// tiene stringa vuota, cioe' resta CASE-SENSITIVE — non ricade su `'i'`: un
+// parser gia' salvato con `flags:'x'` non cambia i suoi valori (regressione
+// silenziosa, bloccante Fable 5), perde solo il verbose/sticky gia' divergenti.
+// Il Set deduplica: `new RegExp(_, 'ii')` SOLLEVA "Invalid flags".
+const FLAG_REGEX_COMUNI = 'imsu';
+function flagRegex(flags) {
+  if (typeof flags !== 'string' || flags === '') return 'i';
+  return [...new Set(flags.split(''))]
+    .filter(f => FLAG_REGEX_COMUNI.includes(f)).join('');
 }
 
 // Una regola vuota: la colonna resta vuota nel CSV.
@@ -91,9 +122,15 @@ export function extractValue(message, rule) {
       break;
     }
     case 'regex': {
+      // `flags` presente ma NON stringa (config_json non attendibile): regola
+      // malformata → colonna VUOTA (fail-closed), come un pattern che non
+      // compila. Su una colonna obbligatoria il segnale non esce, senza fail-open
+      // e senza dipendere dalla coercizione. Simmetrico a `_estrai_valore` in
+      // main.py. Bloccante GPT-5.6 Sol, PR #85.
+      if (rule.flags != null && typeof rule.flags !== 'string') return '';
       let m = null;
       try {
-        m = new RegExp(rule.pattern, rule.flags || 'i').exec(message);
+        m = new RegExp(rule.pattern, flagRegex(rule.flags)).exec(message);
       } catch {
         return '';
       }
