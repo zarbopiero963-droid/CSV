@@ -282,6 +282,26 @@ def test_flags_regex_del_comune_ACCETTATI_al_salvataggio(flags):
     main._valida_config_parser(_cfg_flags(flags))  # non deve sollevare
 
 
+def test_un_flags_NON_puo_entrare_da_una_riga_multi():
+    """Review #87 (Fable): un `flags` esotico non passa da un override `multi`.
+
+    Le righe di `config.multi` accettano solo valori SCALARI (str/int/float/bool),
+    non oggetti-regola: una regola `regex` con `flags` in un override e' gia'
+    rifiutata da `_valida_config_multi` (valore non scalare). Quindi non esiste un
+    percorso `flags` nel multi da validare a parte, e l'invariante «nessun nuovo
+    parser con flag fuori da imsu» regge anche li'.
+    """
+    cfg = {'match': {'type': 'contains', 'value': 'x'},
+           'columns': {c: {'source': 'constant', 'value': 'X'}
+                       for c in main.COLONNE_OBBLIGATORIE},
+           'multi': {'markets': [
+               {'selection_name': {'source': 'regex', 'pattern': '(x)', 'flags': 'x'}}]}}
+    with pytest.raises(main.HTTPException) as e:
+        main._valida_config_parser(cfg)
+    assert e.value.status_code == 422
+    assert 'selection_name' in e.value.detail, e.value.detail
+
+
 def test_la_lista_dei_flag_e_FONTE_UNICA():
     """`FLAG_REGEX_COMUNI` e' l'insieme onorato da `_flag_regex`, non una copia.
 

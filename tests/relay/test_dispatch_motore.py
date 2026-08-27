@@ -544,3 +544,40 @@ def test_ramo_motore_uno_SCARTO_prevale_sul_missing():
     assert motivi, 'lo scarto deve produrre un motivo'
     assert not any('colonna obbligatoria vuota' in m for m in motivi), (
         f'con uno scarto presente non si deve aggiungere la diagnosi del missing: {motivi!r}')
+
+
+def test_il_ramo_motore_non_perde_MAI_un_segnale_matched_in_silenzio():
+    """Review #87 (Fable): il residuo `motivi=[]` è SOLO il not-matched corretto.
+
+    `completo = matched and not mancanti and not scarti` (main.py): una riga MATCHED
+    e incompleta ha SEMPRE `mancanti` o `scarti`, quindi un motivo. Il `motivi=[]` →
+    `parser_no_match` capita solo quando la condizione NON è soddisfatta, dove
+    `parser_no_match` è il log GIUSTO (il messaggio non è per questo parser), non una
+    perdita silenziosa. Nessun fallback serve: aggiungerne uno scriverebbe
+    «scartato: parser_no_match», un motivo finto per un messaggio non nostro.
+    Misurato sui tre casi.
+    """
+    req = {c: {'source': 'constant', 'value': v} for c, v in
+           [('EventName', 'Juve - Milan'), ('MarketType', 'OVER_UNDER_15'),
+            ('SelectionName', 'Over'), ('BetType', 'PUNTA')]}
+
+    def esito(msg, cols):
+        return main.esito_messaggio(
+            msg, {'config_json': json.dumps(
+                {'match': {'type': 'contains', 'value': 'P.Bet.'}, 'columns': cols})})
+
+    # (a) MATCHED + tutte costanti: il gate #41 dà un motivo, non il silenzio.
+    parsed, motivi = esito('P.Bet. qualcosa', req)
+    assert parsed is None and motivi, 'un segnale matched non deve cadere muto'
+    assert 'obbligatoria' in ' '.join(motivi).lower(), motivi
+
+    # (b) MATCHED + obbligatoria da regex fallita: nomina la colonna (fix #86).
+    req2 = dict(req)
+    req2['EventName'] = {'source': 'regex', 'pattern': '(NON_ESISTE)', 'group': 1}
+    parsed, motivi = esito('P.Bet. qualcosa', req2)
+    assert parsed is None and any('EventName' in m for m in motivi), motivi
+
+    # (c) NON matched: motivi=[] → parser_no_match, CORRETTO (non è per questo parser).
+    parsed, motivi = esito('un altro messaggio qualsiasi', req)
+    assert parsed is None and motivi == [], (
+        f'un messaggio non-matched deve dare motivi=[] (parser_no_match), non {motivi!r}')
