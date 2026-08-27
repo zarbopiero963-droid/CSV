@@ -813,6 +813,19 @@ function casiConfronto() {
   aggiungi('E2: flag u (unicode) onorato IDENTICO nei due motori',
     ...conMercato({ source: 'regex', pattern: '(.)', flags: 'u', group: 1 },
       'P.Bet. \u{1F19A}X'));
+  // E2, flag DUPLICATI: `new RegExp(_, 'ii')` in JS SOLLEVA "Invalid flags", ed
+  // e' il motivo per cui `flagRegex` deduplica con un Set. Senza la dedup questo
+  // caso cadrebbe a '' in JS e divergerebbe da Python. Con `iiu` -> `iu` in JS e
+  // `I` in Python: entrambi case-insensitive, "ABC" combacia. Chiesto da GPT-5.5.
+  aggiungi('E2: flag duplicati (iiu) deduplicati, non un errore',
+    ...conMercato({ source: 'regex', pattern: '(ABC)', flags: 'iiu', group: 1 },
+      'P.Bet. xyzABCabc'));
+  // E2, flag MISTI validi+scartati: `xiu` tiene `iu` (case-insensitive unicode)
+  // e butta `x`. I due motori devono estrarre lo stesso valore. Chiesto da
+  // GPT-5.5 come guardia dell'allineamento reale anteprima/feed.
+  aggiungi('E2: flag misti (xiu) tengono solo i validi comuni',
+    ...conMercato({ source: 'regex', pattern: '(ABC)', flags: 'xiu', group: 1 },
+      'P.Bet. xyzABCabc'));
   return confronti;
 }
 
