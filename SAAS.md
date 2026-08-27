@@ -528,6 +528,34 @@ identico dai due lati — nessuna divergenza possibile.
 > accenti) conviene usare **classi esplicite** — `[A-Za-zÀ-ÿ0-9]` — o `\p{L}`/`\p{N}`
 > con `flags:'u'` (che allinea i due motori sulle proprietà unicode). Nei mercati
 > ed eventi Betfair il testo è quasi sempre ASCII, quindi il caso è raro.
+>
+> **Al salvataggio** (`_valida_config_parser`) i costrutti **più comuni** che
+> divergono — `\w`, `\W`, `\d`, `\D`, `\b`, `\B` — sono ora **rifiutati con un 422**
+> in ogni regola `regex`: sia nelle colonne `source: regex`, sia nella condizione
+> `match` di tipo `regex` (che compila il pattern come le colonne). Il motivo
+> nomina il costrutto e l'equivalente esplicito (`\d` → `[0-9]`, `\w` →
+> `[A-Za-z0-9_]`), così un **nuovo** parser non può nascere con **quei** costrutti,
+> che sono quelli che un utente scrive per sbaglio pensando all'ASCII. È la stessa
+> scelta dei flag esotici (#86), estesa al linguaggio del pattern; opzione B del
+> proprietario al gate finale della #89. `.` **non** è rifiutato (è allineato da
+> `u` e pinnato dal contratto in `test_engine_contract.py`), e nemmeno `\s`/`\S`
+> (i due motori concordano in pratica sugli spazi tipici). Il giudice è fonte
+> unica: `_costrutto_regex_divergente` in `main.py`, che conta i backslash per non
+> confondere la classe `\d` con un backslash letterale `\\d`. Le config **già
+> salvate** restano gestite a runtime (grandfathering): il rifiuto è solo al
+> confine di scrittura, `_estrai_valore` e `condizione_soddisfatta` non cambiano.
+>
+> **Il gate non è una prova di completezza**, ed è onesto dirlo: altri costrutti
+> più esotici divergono e **non** sono intercettati — le classi POSIX
+> `[[:alpha:]]` (che JS legge come una char-class letterale) e `\p{L}`/`\p{N}`
+> **senza** `flags:'u'` (in JS un `\p` senza `u` è la lettera `p`). Misurato:
+> `([[:alpha:]]+)` su `abc123` dà `abc` nel feed e `''` in anteprima. Non sono
+> rifiutati di proposito: sono rari, fuori dall'ambito della #89 (che mira ai
+> `\w`/`\d`/`\b` scritti per abitudine ASCII), e la forma **consigliata** —
+> `\p{L}`/`\p{N}` **con** `flags:'u'` — allinea i due motori invece di divergere.
+> Inoltre `[\b]` (backspace, ASCII, allineato) è rifiutato in modo
+> **conservativo** insieme al `\b` confine-di-parola: il gate preferisce un raro
+> falso positivo su un carattere patologico a un buco su un pattern reale.
 > **Il perimetro di questo consiglio è l'estrazione**: `flags:'u'` ha effetto
 > solo sulle regole di colonna `source: regex`, l'unico percorso che compila
 > davvero i `flags` di una regola. **Sulla condizione `match` non serve e non fa
