@@ -407,6 +407,30 @@ def test_flag_regex_onora_il_solo_insieme_comune_ims():
     assert main._flag_regex(None) == R.I
 
 
+def test_flag_regex_non_stringa_degrada_e_non_solleva():
+    """`flags` viene dal config_json non attendibile: non deve MAI sollevare.
+
+    Prima iterava `flags` diretto: `for f in 5` → `TypeError: 'int' object is not
+    iterable`, e `mappa.get({})` → `TypeError: unhashable type: 'dict'`. Il
+    dispatch di quel parser si interrompeva invece di degradare, mentre `flagRegex`
+    in JS coercizza con `String()`. Ora `str(flags)` fa lo stesso. Bloccante Fable 5,
+    PR #85. Misurato ROSSO sul codice vecchio (TypeError su 5 e su [{...}]).
+    """
+    R = main._regex
+    # Nessuna eccezione, e il valore coerente con la coercizione a stringa:
+    # nessun carattere i/m/s/u nella forma di questi valori → 0 bit, case-sensitive.
+    assert main._flag_regex(5) == 0
+    assert main._flag_regex([{'a': 1}]) == 0
+    assert main._flag_regex({}) == 0
+    # `0` e `[]` NON sono flag assenti (None/''), quindi NON ricadono su 'i':
+    # str(0)='0', str([])='[]' → nessun flag comune → case-sensitive, come in JS.
+    assert main._flag_regex(0) == 0
+    assert main._flag_regex([]) == 0
+    # Una lista che coerciziona a una stringa CON un flag comune lo raccoglie,
+    # come `String(['i'])` == 'i' in JS.
+    assert main._flag_regex(['i']) == R.I
+
+
 def test_estrai_valore_col_flag_x_non_va_in_modalita_verbose():
     """Il verso end-to-end del lato Python: `flags:'x'` non ignora gli spazi.
 

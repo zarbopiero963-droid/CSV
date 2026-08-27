@@ -489,6 +489,11 @@ con soli valori scartati (`'x'`, `'gy'`) tiene zero flag, cioè resta
 cambia i propri valori nel feed, perde solo il verbose/sticky (che comunque
 divergevano fra i motori).
 
+Un `flags` **malformato** (non stringa: numero, lista, oggetto — il `config_json`
+è dato utente non attendibile) **degrada** senza errore in entrambi i motori: JS
+lo coercizza con `String()`, Python con `str()`, e i caratteri fuori dal comune
+vengono ignorati. Non solleva mai — un parser storto non interrompe il dispatch.
+
 Allo stesso modo `replace_all` con `from` vuoto è un **no-op** in entrambi (E1),
 non l'esplosione carattere-per-carattere del vecchio `split('')`. Il confronto in
 `tests/engine/engine_cases.mjs` tiene i due motori allineati.

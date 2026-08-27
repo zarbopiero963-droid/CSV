@@ -2784,12 +2784,21 @@ def _flag_regex(flags):
     sarebbe la regressione silenziosa segnalata come bloccante da Claude Fable 5
     sulla PR #85. `'u'` e' riconosciuto ma no-op (`_regex` e' gia'
     codepoint-native) e resta case-sensitive, come `new RegExp(_, 'u')` in JS.
+
+    `flags` viene dal `config_json` dell'utente, quindi NON e' garantito una
+    stringa: un JSON con `flags: 5` o `flags: [{...}]` iterato direttamente
+    solleverebbe `TypeError` durante il dispatch, mentre `flagRegex` in JS lo
+    coercizza con `String()` e degrada. Qui si fa lo stesso con `str()`: mai
+    un'eccezione, come dall'altra parte. Il default `'i'` resta legato ai soli
+    valori ASSENTI (`None` o `''`), non a `str(flags)`, cosi' `flags: 0` o `[]`
+    non diventano case-insensitive. [REAL_FINDING] di Claude Fable 5, PR #85.
     """
-    if not flags:
+    if flags is None or flags == '':
         return _regex.I
+    testo = flags if isinstance(flags, str) else str(flags)
     mappa = {'i': _regex.I, 'm': _regex.M, 's': _regex.S, 'u': 0}
     risultato = 0
-    for f in flags:
+    for f in testo:
         risultato |= mappa.get(f, 0)
     return risultato
 

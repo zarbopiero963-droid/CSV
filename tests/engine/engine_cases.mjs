@@ -847,6 +847,18 @@ function casiConfronto() {
   aggiungi('E2: flag misti (xiu) tengono solo i validi comuni',
     ...conMercato({ source: 'regex', pattern: '(ABC)', flags: 'xiu', group: 1 },
       'P.Bet. xyzABCabc'));
+  // E2, flag NON-STRINGA (config_json non attendibile): JS coercizza con
+  // `String()` e degrada; Python iterava `flags` diretto e SOLLEVAVA `TypeError`
+  // (`for f in 5`, o `mappa.get({})` unhashable), interrompendo il dispatch di
+  // quel parser invece di degradare. Ora `str(flags)` di qua come `String()` di
+  // la': entrambi case-sensitive -> 'abc'. Bloccante Fable 5, PR #85. Misurato
+  // ROSSO sul codice vecchio: Python sollevava TypeError.
+  aggiungi('E2: flag non-stringa (numero) degrada, non solleva',
+    ...conMercato({ source: 'regex', pattern: '(abc)', flags: 5, group: 1 },
+      'P.Bet. abcABC'));
+  aggiungi('E2: flag non-stringa (lista di oggetti) degrada, non solleva',
+    ...conMercato({ source: 'regex', pattern: '(abc)', flags: [{ a: 1 }], group: 1 },
+      'P.Bet. abcABC'));
   return confronti;
 }
 
