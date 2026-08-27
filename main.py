@@ -2786,19 +2786,22 @@ def _flag_regex(flags):
     codepoint-native) e resta case-sensitive, come `new RegExp(_, 'u')` in JS.
 
     `flags` viene dal `config_json` dell'utente, quindi NON e' garantito una
-    stringa: un JSON con `flags: 5` o `flags: [{...}]` iterato direttamente
-    solleverebbe `TypeError` durante il dispatch, mentre `flagRegex` in JS lo
-    coercizza con `String()` e degrada. Qui si fa lo stesso con `str()`: mai
-    un'eccezione, come dall'altra parte. Il default `'i'` resta legato ai soli
-    valori ASSENTI (`None` o `''`), non a `str(flags)`, cosi' `flags: 0` o `[]`
-    non diventano case-insensitive. [REAL_FINDING] di Claude Fable 5, PR #85.
+    stringa. Solo una STRINGA e' un insieme di flag valido: un JSON con `flags: 5`,
+    `flags: [{...}]` o `flags: {...}` e' malformato e vale come ASSENTE -> `'i'`.
+    Cosi' non si itera un non-iterabile (era un `TypeError` durante il dispatch,
+    [REAL_FINDING] di Claude Fable 5) e non si dipende dalla forma della
+    coercizione a stringa, che diverge da `String()` di JS: `str({'i': 1})` =
+    "{'i': 1}" raccoglierebbe una `i` (case-insensitive), mentre
+    `String({i:1})` = "[object Object]" no (case-sensitive). Trattare ogni
+    non-stringa come assente chiude la divergenza ([REAL_FINDING] di GPT-5.6 Sol,
+    PR #85). Una STRINGA presente ma con soli flag scartati resta case-sensitive,
+    come sopra.
     """
-    if flags is None or flags == '':
+    if not isinstance(flags, str) or flags == '':
         return _regex.I
-    testo = flags if isinstance(flags, str) else str(flags)
     mappa = {'i': _regex.I, 'm': _regex.M, 's': _regex.S, 'u': 0}
     risultato = 0
-    for f in testo:
+    for f in flags:
         risultato |= mappa.get(f, 0)
     return risultato
 

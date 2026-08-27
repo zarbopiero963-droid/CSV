@@ -50,17 +50,23 @@ function replaceLast(text, from, to) {
 // di `u` perche' `.` e `\p{}` combacino con Python — toglierlo riaprirebbe la
 // divergenza sui caratteri astrali. Il gemello e' `_flag_regex` in main.py.
 //
-// Il default `'i'` si applica SOLO ai flag ASSENTI (come `rule.flags || 'i'`
-// storico): un insieme PRESENTE ma con soli flag scartati (`'x'`, `'gy'`) tiene
-// stringa vuota, cioe' resta CASE-SENSITIVE — non ricade su `'i'`. Cosi' un
-// parser gia' salvato con quei flag non cambia i suoi valori (regressione
-// silenziosa segnalata come bloccante da Claude Fable 5, PR #85); si toglie
-// solo il verbose/sticky, gia' divergenti. Il Set deduplica: `new RegExp(_,
-// 'ii')` SOLLEVA "Invalid flags".
+// Solo una STRINGA e' un insieme di flag valido. Qualunque altro tipo — numero,
+// lista, oggetto, booleano dal `config_json` non attendibile — e' malformato e
+// vale come ASSENTE: default `'i'`. Cosi' i due motori non dipendono dalla forma
+// della coercizione a stringa, che diverge (`String({i:1})` = "[object Object]"
+// contro `str({'i':1})` = "{'i': 1}", uno senza `i` e uno con): niente eccezioni,
+// niente divergenza. Bloccanti Claude Fable 5 e GPT-5.6 Sol, PR #85.
+//
+// Il default `'i'` si applica agli assenti (`rule.flags || 'i'` storico) E ai
+// non-stringa. Una STRINGA presente ma con soli flag scartati (`'x'`, `'gy'`)
+// tiene stringa vuota, cioe' resta CASE-SENSITIVE — non ricade su `'i'`: un
+// parser gia' salvato con `flags:'x'` non cambia i suoi valori (regressione
+// silenziosa, bloccante Fable 5), perde solo il verbose/sticky gia' divergenti.
+// Il Set deduplica: `new RegExp(_, 'ii')` SOLLEVA "Invalid flags".
 const FLAG_REGEX_COMUNI = 'imsu';
 function flagRegex(flags) {
-  if (flags == null || flags === '') return 'i';
-  return [...new Set(String(flags).split(''))]
+  if (typeof flags !== 'string' || flags === '') return 'i';
+  return [...new Set(flags.split(''))]
     .filter(f => FLAG_REGEX_COMUNI.includes(f)).join('');
 }
 

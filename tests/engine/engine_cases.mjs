@@ -847,31 +847,34 @@ function casiConfronto() {
   aggiungi('E2: flag misti (xiu) tengono solo i validi comuni',
     ...conMercato({ source: 'regex', pattern: '(ABC)', flags: 'xiu', group: 1 },
       'P.Bet. xyzABCabc'));
-  // E2, flag NON-STRINGA (config_json non attendibile): JS coercizza con
-  // `String()` e degrada; Python iterava `flags` diretto e SOLLEVAVA `TypeError`
-  // (`for f in 5`, o `mappa.get({})` unhashable), interrompendo il dispatch di
-  // quel parser invece di degradare. Ora `str(flags)` di qua come `String()` di
-  // la': entrambi case-sensitive -> 'abc'. Bloccante Fable 5, PR #85. Misurato
-  // ROSSO sul codice vecchio: Python sollevava TypeError.
-  aggiungi('E2: flag non-stringa (numero) degrada, non solleva',
+  // E2, flag NON-STRINGA (config_json non attendibile): Python iterava `flags`
+  // diretto e SOLLEVAVA `TypeError` (`for f in 5`, o `mappa.get({})` unhashable),
+  // interrompendo il dispatch di quel parser. Ora ogni non-stringa vale come
+  // ASSENTE → default `i` in entrambi: mai un'eccezione, mai una divergenza.
+  // Bloccante Fable 5, PR #85. Misurato ROSSO sul codice vecchio: TypeError.
+  aggiungi('E2: flag non-stringa (numero) → default i, non solleva',
     ...conMercato({ source: 'regex', pattern: '(abc)', flags: 5, group: 1 },
       'P.Bet. abcABC'));
-  aggiungi('E2: flag non-stringa (lista di oggetti) degrada, non solleva',
+  aggiungi('E2: flag non-stringa (lista di oggetti) → default i, non solleva',
     ...conMercato({ source: 'regex', pattern: '(abc)', flags: [{ a: 1 }], group: 1 },
       'P.Bet. abcABC'));
-  // E2, flag FALSY non-vuoti: `false` coercizza a "false"/"False", che CONTIENE
-  // una `s` -> flag `s` (dotAll) in ENTRAMBI. Il default `'i'` non deve scattare
-  // su `false` (non e' None ne' ''): pre-fix Python faceva `not False` -> I e
-  // divergeva dal JS `'s'`. Qui il pattern `(a.b)` su `a\nb` distingue dotAll (che
-  // matcha) da default i (che non matcha). Bloccante GPT-5.6 Sol, PR #85.
-  // Misurato ROSSO su 6fa87a9: Python 'I' -> nessun match, JS 's' -> 'a\nb'.
-  aggiungi('E2: flag false (dotAll via "false") uguale nei due motori',
+  // E2, flag NON-STRINGA falsy/truthy: `false`, `true` e un OGGETTO non sono
+  // stringhe → valgono come ASSENTI → default `'i'` in ENTRAMBI. Prima
+  // dipendevano dalla coercizione: `false`→"false" prendeva la `s` (dotAll) e
+  // un oggetto divergeva (`String({i:1})`="[object Object]" senza `i` contro
+  // `str({'i':1})`="{'i': 1}" con `i`). Trattarli come assenti chiude la
+  // divergenza. Bloccante GPT-5.6 Sol, PR #85. Il pattern `(a.b)` su `a\nb`
+  // vede il default `i` (niente dotAll → nessun match), l'oracolo e' `runParser`.
+  aggiungi('E2: flag false (non-stringa) → default i in entrambi',
     ...conMercato({ source: 'regex', pattern: '(a.b)', flags: false, group: 1 },
       'P.Bet. a\nb'));
-  // `true` coercizza a "true"/"True" -> `u`: entrambi case-sensitive, e su un
-  // pattern piano `u` e' innocuo. Il default `'i'` non scatta.
-  aggiungi('E2: flag true (u via "true") case-sensitive uguale nei due motori',
+  aggiungi('E2: flag true (non-stringa) → default i in entrambi',
     ...conMercato({ source: 'regex', pattern: '(abc)', flags: true, group: 1 },
+      'P.Bet. ABCabc'));
+  // Un OGGETTO come flags: era la divergenza residua (Python raccoglieva la `i`
+  // della chiave, JS no). Trattato come assente → `i` in entrambi.
+  aggiungi('E2: flag oggetto {i:1} (non-stringa) → default i, niente divergenza',
+    ...conMercato({ source: 'regex', pattern: '(abc)', flags: { i: 1 }, group: 1 },
       'P.Bet. ABCabc'));
   return confronti;
 }
