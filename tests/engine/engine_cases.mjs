@@ -908,6 +908,22 @@ caso('motore: quali codepoint sono spazio per il motore JS', () => {
   }));
 });
 
+// Divergenze note fra i due motori (Issue #88), esportate perche' il gemello
+// Python le confronti: la condizione `match` IGNORA i flag (come `_regex.I`
+// cablato in Python), e `\w`/`\d` in JS sono ASCII (in Python unicode).
+caso('divergenze #88: match ignora flags, e le classi \\w/\\d in JS sono ASCII', () => {
+  const m = (flags) => E.matches('PBET LIVE', { type: 'regex', value: 'pbet', flags });
+  const senza = E.matches('PBET LIVE', { type: 'regex', value: 'pbet' });
+  return {
+    // match con qualunque flag == match senza flag (i cablato): flag ignorati.
+    matchIgnoraFlags: ['x', 'ims', 'u', 'gy'].every(f => m(f) === senza) && senza === true,
+    // \w ASCII in JS: su 'café' prende 'caf' (Python prende 'café').
+    wSuCafe: E.extractValue('café', { source: 'regex', pattern: '(\\w+)', group: 1 }),
+    // \d ASCII in JS: le cifre arabo-indiane non sono \d (Python si').
+    dSuArabo: E.extractValue('numero ٤٢ qui', { source: 'regex', pattern: '(\\d+)', group: 1 }),
+  };
+});
+
 // La guardia numerica validava il testo CANONICO, ma il CSV del relay
 // serializzava il valore Python originale: `Points=0.000001` (JSON) passava
 // la guardia e usciva `1e-06` nel feed e `0.000001` nell'anteprima — e un
