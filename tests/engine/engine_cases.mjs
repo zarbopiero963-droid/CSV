@@ -859,6 +859,20 @@ function casiConfronto() {
   aggiungi('E2: flag non-stringa (lista di oggetti) degrada, non solleva',
     ...conMercato({ source: 'regex', pattern: '(abc)', flags: [{ a: 1 }], group: 1 },
       'P.Bet. abcABC'));
+  // E2, flag FALSY non-vuoti: `false` coercizza a "false"/"False", che CONTIENE
+  // una `s` -> flag `s` (dotAll) in ENTRAMBI. Il default `'i'` non deve scattare
+  // su `false` (non e' None ne' ''): pre-fix Python faceva `not False` -> I e
+  // divergeva dal JS `'s'`. Qui il pattern `(a.b)` su `a\nb` distingue dotAll (che
+  // matcha) da default i (che non matcha). Bloccante GPT-5.6 Sol, PR #85.
+  // Misurato ROSSO su 6fa87a9: Python 'I' -> nessun match, JS 's' -> 'a\nb'.
+  aggiungi('E2: flag false (dotAll via "false") uguale nei due motori',
+    ...conMercato({ source: 'regex', pattern: '(a.b)', flags: false, group: 1 },
+      'P.Bet. a\nb'));
+  // `true` coercizza a "true"/"True" -> `u`: entrambi case-sensitive, e su un
+  // pattern piano `u` e' innocuo. Il default `'i'` non scatta.
+  aggiungi('E2: flag true (u via "true") case-sensitive uguale nei due motori',
+    ...conMercato({ source: 'regex', pattern: '(abc)', flags: true, group: 1 },
+      'P.Bet. ABCabc'));
   return confronti;
 }
 

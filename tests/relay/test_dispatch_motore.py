@@ -429,6 +429,12 @@ def test_flag_regex_non_stringa_degrada_e_non_solleva():
     # Una lista che coerciziona a una stringa CON un flag comune lo raccoglie,
     # come `String(['i'])` == 'i' in JS.
     assert main._flag_regex(['i']) == R.I
+    # I FALSY non-vuoti NON sono flag assenti (None/''): coercizzano e filtrano.
+    # `False` -> "False" contiene una `s` -> dotAll; `True` -> "True" -> solo `u`
+    # (no-op) -> 0. Come `String(false)`='false'->'s' e `String(true)`='true'->'u'
+    # in JS. Il default 'i' NON scatta su false/true (bloccante GPT-5.6 Sol, PR #85).
+    assert main._flag_regex(False) == R.S
+    assert main._flag_regex(True) == 0
 
 
 def test_estrai_valore_col_flag_x_non_va_in_modalita_verbose():
