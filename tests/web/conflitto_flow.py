@@ -241,8 +241,12 @@ with sync_playwright() as pw:
     # strada «Guarda quello nuovo»: ricarica dal server, il draft stantio si
     # perde, e il parser ricreato NON viene toccato.
     pg.click('[data-act="ricreato-guarda"]')
+    # Il velo si chiude quando la versione vera e' pronta a ridisegnarsi (dopo il
+    # reload): si aspetta la sua chiusura, NON si assume che sia gia' via — con la
+    # correzione Sol (#91) il velo resta su durante la GET, e `#test-msg`, gia'
+    # presente da prima, non basta come attesa.
+    pg.wait_for_selector('.veil', state='detached')
     pg.wait_for_selector('#test-msg')                    # wizard ricaricato sul parser che c'e'
-    assert pg.query_selector('.veil') is None, 'la modale doveva chiudersi'
     assert config_sul_server(pg, slug)['match']['value'] == 'RICREATO', \
         'guardare quello nuovo non deve sovrascriverlo'
     shot(pg, '06-guarda-quello-nuovo')
@@ -295,6 +299,7 @@ with sync_playwright() as pw:
     assert config_sul_server(pg, slug)['match']['value'] == 'RICREATO3', \
         'la prova non deve salvare-sovrascrivere di nascosto'
     pg.click('[data-act="ricreato-guarda"]')             # pulizia: torna sul ricreato
+    pg.wait_for_selector('.veil', state='detached')      # il velo si chiude a reload finito (#91)
     pg.wait_for_selector('#test-msg')
     shot(pg, '08-anche-la-prova-conferma')
 
@@ -449,6 +454,56 @@ with sync_playwright() as pw:
     assert pg.query_selector('.veil') is None, \
         'bloccante Fable: la conferma si e- armata sul parser SBAGLIATO dopo la navigazione'
     shot(pg, '11-navigazione-durante-await')
+
+    # ---------------- bloccante Sol (PR #91): «Guarda quello nuovo» tiene il VELO
+    # su DURANTE il reload, cosi' il wizard sotto non e' editabile nella finestra
+    # di rete e non si perdono modifiche. Prima `closeModal()` girava PRIMA della
+    # await della ricarica: il velo spariva subito e il wizard restava editabile
+    # finche' la GET non tornava. Fail-first misurato: con la GET rallentata, sul
+    # codice vecchio `.veil` e' gia' sparito durante l'attesa (asserzione rossa);
+    # col fix resta su finche' la versione vera non e' pronta a ridisegnarsi.
+    slugG = crea_parser('GuardaLenta')
+    pg.reload()                                              # cache = server: draft valido
+    pg.wait_for_selector('#test-msg')
+    pg.evaluate(f"location.hash = '#/parsers/{slugG}/config'")
+    pg.wait_for_selector('#test-msg')
+    cfgG = dict(CONFIG_BASE)
+    cfgG['match'] = {'type': 'contains', 'value': 'GUARDA_RIC'}
+    esito = pg.evaluate(
+        """async ([slug, config]) => {
+             const d = await fetch(`/api/me/parsers/${slug}`, {method: 'DELETE'});
+             const c = await fetch('/api/me/parsers', {method: 'POST',
+               headers: {'Content-Type': 'application/json'},
+               body: JSON.stringify({titolo: slug, config, active: true})});
+             return [d.status, c.status, (await c.json()).slug];
+           }""", [slugG, cfgG])
+    assert esito == [200, 200, slugG], esito
+    pg.wait_for_selector('.toast', state='detached')
+    pg.click('[data-act="wiz-save"]')                        # 409 identita → toast + flag
+    pg.wait_for_selector('.toast:has-text("Eliminato e ricreato altrove")')
+    pg.click('[data-act="wiz-save"]')                        # flag → modale
+    pg.wait_for_selector('.veil')
+
+    # rallento la GET del reload; clicco «Guarda quello nuovo»: durante l'attesa
+    # il velo DEVE restare su (blocca l'editing del wizard sottostante).
+    def _lento_guarda(route):
+        if route.request.method == 'GET':
+            time.sleep(0.7)
+        route.continue_()
+
+    pg.route('**/api/me/parsers', _lento_guarda)
+    with pg.expect_request(
+            lambda r: r.method == 'GET' and r.url.split('?')[0].endswith('/api/me/parsers')):
+        pg.click('[data-act="ricreato-guarda"]')            # reload in hold
+    assert pg.query_selector('.veil') is not None, \
+        'bloccante Sol: il velo e- sparito durante il reload, il wizard resta editabile'
+    pg.unroute('**/api/me/parsers', _lento_guarda)
+
+    pg.wait_for_selector('.veil', state='detached')         # a reload finito, si chiude
+    pg.wait_for_selector('#test-msg')                       # e mostra la versione vera
+    assert config_sul_server(pg, slugG)['match']['value'] == 'GUARDA_RIC', \
+        'guardare non deve toccare il parser ricreato'
+    shot(pg, '12-guarda-velo-durante-reload')
 
     b.close()
 

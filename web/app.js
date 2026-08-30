@@ -2051,15 +2051,20 @@ const actions = {
   async 'ricreato-guarda'() {
     const ctx = ctxRicreato;
     ctxRicreato = null;
-    closeModal();
-    if (!ctx) return;   // gia' risolto (doppio click)
-    // Rilegge la versione vera dal server. NON `go()`: se siamo ancora su
-    // `#/parsers/<slug>/config`, `go` alla STESSA hash non scatena `hashchange`
-    // e non ridisegna. Si ridisegna a mano; `initWiz` riparte sul parser
-    // aggiornato — ma solo se il wizard e' ancora quello del conflitto, per non
-    // buttare via il draft di un parser diverso su cui l'utente e' navigato.
+    if (!ctx) { closeModal(); return; }   // gia' risolto (doppio click)
+    // Il velo resta su DURANTE il reload e si chiude solo quando la versione vera
+    // e' pronta a ridisegnarsi: `.veil` copre la viewport (fixed, inset:0), quindi
+    // il wizard sottostante non e' cliccabile ne' editabile nella finestra di rete
+    // — senza, si potrebbero perdere modifiche fatte in quella finestra (Sol,
+    // PR #91). E' la stessa via di `del-parser-ok`, che chiude la modale DOPO le
+    // sue await, non prima. NON `go()`: se siamo ancora su `#/parsers/<slug>/config`,
+    // `go` alla STESSA hash non scatena `hashchange` e non ridisegna. Si ridisegna
+    // a mano; `initWiz` riparte sul parser aggiornato — ma solo se il wizard e'
+    // ancora quello del conflitto, per non buttare via il draft di un parser
+    // diverso su cui l'utente e' navigato.
     try { await api.ricaricaParser(ctx.slug); } catch { /* la vista mostra la cache */ }
     if (wiz && wiz.parserId === ctx.slug) wiz = null;
+    closeModal();
     render();
   },
   'ricreato-sovrascrivi'() {
