@@ -42,6 +42,11 @@ def _console(m):
         # Il 409 della PUT e' il contratto sotto verifica, non un guasto.
         if '409' in m.text and '/api/me/parsers/' in percorso:
             return
+        # Il reload di «Guarda» abortito DI PROPOSITO nel test del ramo d'errore
+        # (#91): la GET a /api/me/parsers viene fatta fallire per provare che il
+        # draft resta e l'errore viene detto. Solo questo endpoint esatto.
+        if percorso.endswith('/api/me/parsers'):
+            return
     errors.append(f'console.{m.type}: {m.text}')
 
 
@@ -564,6 +569,58 @@ with sync_playwright() as pw:
     assert config_sul_server(pg, slugD)['match']['value'] == 'GUARDA_DOPPIO', \
         'guardare non deve toccare il parser ricreato'
     shot(pg, '13-guarda-velo-non-chiudibile')
+
+    # ---------------- bloccante Sol (PR #91): «Guarda quello nuovo» con reload
+    # FALLITO non deve buttare il draft in silenzio. Prima il `catch` ingoiava
+    # l'errore, azzerava `wiz` e ridisegnava dalla cache: un guasto di rete perdeva
+    # le modifiche senza dirlo. Ora, se il reload fallisce, il draft resta, la
+    # conferma si ri-arma e un toast lo dice. Fail-first: sul codice vecchio non
+    # compare nessun toast d'errore (il draft e' gia' stato buttato).
+    slugE = crea_parser('GuardaFallita')
+    pg.reload()
+    pg.wait_for_selector('#test-msg')
+    pg.evaluate(f"location.hash = '#/parsers/{slugE}/config'")
+    pg.wait_for_selector('#test-msg')
+    cfgE = dict(CONFIG_BASE)
+    cfgE['match'] = {'type': 'contains', 'value': 'GUARDA_ERR'}
+    esito = pg.evaluate(
+        """async ([slug, config]) => {
+             const d = await fetch(`/api/me/parsers/${slug}`, {method: 'DELETE'});
+             const c = await fetch('/api/me/parsers', {method: 'POST',
+               headers: {'Content-Type': 'application/json'},
+               body: JSON.stringify({titolo: slug, config, active: true})});
+             return [d.status, c.status, (await c.json()).slug];
+           }""", [slugE, cfgE])
+    assert esito == [200, 200, slugE], esito
+    pg.wait_for_selector('.toast', state='detached')
+    pg.click('[data-act="wiz-save"]')                       # 409 identita → toast + flag
+    pg.wait_for_selector('.toast:has-text("Eliminato e ricreato altrove")')
+    pg.click('[data-act="wiz-save"]')                       # flag → modale
+    pg.wait_for_selector('.veil')
+
+    # faccio FALLIRE il reload di «Guarda» (GET abortita)
+    def _fallisci_reload(route):
+        if route.request.method == 'GET':
+            route.abort()
+        else:
+            route.continue_()
+
+    pg.route('**/api/me/parsers', _fallisci_reload)
+    pg.wait_for_selector('.toast', state='detached')
+    pg.click('[data-act="ricreato-guarda"]')               # reload fallisce
+    pg.wait_for_selector('.toast:has-text("Non sono riuscito a caricare")')  # errore detto
+    pg.unroute('**/api/me/parsers', _fallisci_reload)
+    # il draft e' ancora qui (wizard non buttato) e la conferma e' ancora armata:
+    assert pg.query_selector('#test-msg') is not None, \
+        'il reload fallito ha buttato il wizard/draft'
+    pg.wait_for_selector('.toast', state='detached')
+    pg.click('[data-act="wiz-save"]')                       # conferma ancora armata → modale
+    pg.wait_for_selector('.veil')
+    assert config_sul_server(pg, slugE)['match']['value'] == 'GUARDA_ERR', \
+        'il parser ricreato non deve essere stato toccato'
+    pg.click('[data-act="ricreato-sovrascrivi"]')          # pulizia: chiude il flusso
+    pg.wait_for_selector('.toast:has-text("salvata")')
+    shot(pg, '14-guarda-reload-fallito')
 
     b.close()
 

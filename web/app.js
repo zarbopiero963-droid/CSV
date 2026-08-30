@@ -2064,9 +2064,20 @@ const actions = {
     // quello del conflitto, per non buttare via il draft di un parser diverso su cui
     // l'utente e' navigato.
     openModal('<h2>Carico la versione aggiornata…</h2>', { sticky: true });
-    try { await api.ricaricaParser(ctx.slug); } catch { /* la vista mostra la cache */ }
-    if (wiz && wiz.parserId === ctx.slug) wiz = null;
+    let caricato = true;
+    try { await api.ricaricaParser(ctx.slug); } catch { caricato = false; }
     closeModal();
+    if (!caricato) {
+      // Reload FALLITO (rete/server): non ho la versione vera da mostrare, quindi
+      // NON butto il draft. Lo tengo, RI-ARMO la conferma (il prossimo Salva la
+      // ripropone) e dico l'errore — cosi' un guasto non fa perdere il lavoro in
+      // silenzio mostrando la cache come se fosse la versione aggiornata (Sol, #91).
+      if (wiz && wiz.parserId === ctx.slug) wiz.confermaRicreato = ctx.azione || 'wiz-save';
+      toast('Non sono riuscito a caricare la versione aggiornata: le tue modifiche sono ancora qui, riprova.');
+      render();
+      return;
+    }
+    if (wiz && wiz.parserId === ctx.slug) wiz = null;
     render();
   },
   'ricreato-sovrascrivi'() {

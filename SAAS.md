@@ -1263,7 +1263,10 @@ altro parser»*, con due strade:
   primario). Mentre rilegge, la modale mostra un breve avviso *«Carico la versione
   aggiornata…»* **non interrompibile** (né dal click sull'overlay né da un secondo
   click): finché il velo è su, il wizard sotto non è editabile, così nessuna
-  modifica fatta nella finestra di rete va persa di nascosto (#91).
+  modifica fatta nella finestra di rete va persa di nascosto (#91). Se la rilettura
+  **fallisce** (rete/server), il draft **non** viene buttato: resta, la conferma si
+  ri-arma e un toast dice *«Non sono riuscito a caricare la versione aggiornata: le
+  tue modifiche sono ancora qui, riprova.»* (#91).
 - **«Sovrascrivi comunque»** — sovrascrive il parser ricreato con le proprie
   modifiche: resta possibile, ma è una scelta deliberata, non un click silenzioso
   (bottone `danger`).
