@@ -15,6 +15,7 @@ import json
 import pathlib
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 from playwright.sync_api import sync_playwright
@@ -374,6 +375,81 @@ with sync_playwright() as pw:
     assert rimasti == [s for s in prima if s != slug], \
         f'la DELETE ha cambiato piu- dello slug conteso: prima {prima}, dopo {rimasti}'
     shot(pg, '10-delete-dopo-riallineamento')
+
+    # ---------------- bloccante Fable (PR #91): la NAVIGAZIONE durante l'await
+    # non deve armare la conferma sul parser SBAGLIATO. Il flag `confermaRicreato`
+    # si scriveva nel `catch` DOPO `await conflittoOFallita`, leggendo il `wiz`
+    # VIVO: se durante quella GET (il riallineamento della cache) l'utente naviga
+    # a un ALTRO parser, il flag finiva sul wizard nuovo — al salvataggio
+    # successivo di QUEL parser si apriva una conferma spuria, o si crashava su
+    # `wiz` nullo. Ora il wizard dell'operazione e' fissato in `w` e il flag si
+    # arma solo se `wiz === w`. Fail-first misurato: sul codice vecchio, salvare
+    # il parser B dopo la corsa apriva `.veil`; qui si prova, in Chromium vero,
+    # che B si salva senza modale.
+    def crea_parser(nome):
+        pg.evaluate("location.hash = '#/parsers'")           # il pulsante «nuovo» sta nella lista
+        pg.wait_for_selector('[data-act="new-parser"]')
+        pg.click('[data-act="new-parser"]')
+        pg.wait_for_selector('#np-name')
+        pg.fill('#np-name', nome)
+        pg.click('[data-act="create-parser"]')
+        pg.wait_for_selector('#paste-msg')
+        s = pg.evaluate('location.hash').split('/')[2]
+        pg.fill('#paste-msg', MSG)
+        pg.click('[data-act="start-wizard"]')
+        pg.wait_for_selector('#match-val')
+        st = pg.evaluate(
+            """async ([slug, config]) => (await fetch(`/api/me/parsers/${slug}`, {
+                 method: 'PUT', headers: {'Content-Type': 'application/json'},
+                 body: JSON.stringify({titolo: slug, config, active: true})})).status""",
+            [s, CONFIG_BASE])
+        assert st == 200, f'PUT {nome}: {st}'
+        return s
+
+    pg.wait_for_selector('[data-act="new-parser"]')          # siamo nella lista
+    slugA = crea_parser('RaceA')                             # A: il conflitto
+    slugB = crea_parser('RaceB')                             # B: dove navigo
+    pg.reload()                                              # cache = server: A e B validi
+    pg.wait_for_selector('#test-msg')
+    pg.evaluate(f"location.hash = '#/parsers/{slugA}/config'")
+    pg.wait_for_selector('#test-msg')
+
+    # innesco l'identita' su A: eliminato e ricreato con un valore diverso
+    cfgA = dict(CONFIG_BASE)
+    cfgA['match'] = {'type': 'contains', 'value': 'RACE_A'}
+    esito = pg.evaluate(
+        """async ([slug, config]) => {
+             const d = await fetch(`/api/me/parsers/${slug}`, {method: 'DELETE'});
+             const c = await fetch('/api/me/parsers', {method: 'POST',
+               headers: {'Content-Type': 'application/json'},
+               body: JSON.stringify({titolo: slug, config, active: true})});
+             return [d.status, c.status, (await c.json()).slug];
+           }""", [slugA, cfgA])
+    assert esito == [200, 200, slugA], esito
+
+    # rallento la GET del riallineamento (solo la lista, non la PUT/POST col
+    # suffisso) e, mentre e' IN VOLO, navigo su B: e' la finestra della corsa.
+    def _lenta(route):
+        if route.request.method == 'GET':
+            time.sleep(0.7)
+        route.continue_()
+
+    pg.route('**/api/me/parsers', _lenta)
+    pg.wait_for_selector('.toast', state='detached')
+    with pg.expect_request(
+            lambda r: r.method == 'GET' and r.url.split('?')[0].endswith('/api/me/parsers')):
+        pg.click('[data-act="wiz-save"]')                    # A: PUT 409, poi GET (in hold)
+    pg.evaluate(f"location.hash = '#/parsers/{slugB}/config'")   # naviga durante l'await
+    pg.wait_for_selector('.toast:has-text("Eliminato e ricreato altrove")')  # catch ripreso
+    pg.unroute('**/api/me/parsers', _lenta)
+
+    pg.wait_for_selector('#test-msg')                        # siamo su B
+    assert f'parsers/{slugB}' in pg.evaluate('location.hash'), pg.evaluate('location.hash')
+    pg.click('[data-act="wiz-save"]')                        # B si salva: il flag NON e' suo
+    pg.wait_for_selector('.toast:has-text("salvata")')       # vecchio codice: qui apriva `.veil`
+    assert pg.query_selector('.veil') is None, \
+        'bloccante Fable: la conferma si e- armata sul parser SBAGLIATO dopo la navigazione'
+    shot(pg, '11-navigazione-durante-await')
 
     b.close()
 

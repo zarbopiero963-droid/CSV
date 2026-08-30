@@ -73,7 +73,8 @@ async function conflittoOFallita(e, slug) {
 let ctxRicreato = null;
 
 function modalConfermaRicreato() {
-  ctxRicreato = { slug: wiz.parserId, azione: wiz.confermaRicreato };
+  // `openModal` chiama `closeModal`, che AZZERA `ctxRicreato`: il contesto va
+  // quindi catturato DOPO l'apertura, non prima, o verrebbe subito cancellato.
   openModal(`
     <h2>Questo nome ora è di un altro parser</h2>
     <p class="muted small">Mentre lo modificavi, questo parser è stato eliminato e
@@ -83,6 +84,9 @@ function modalConfermaRicreato() {
       <button class="primary" data-act="ricreato-guarda">Guarda quello nuovo</button>
       <button class="danger" data-act="ricreato-sovrascrivi">Sovrascrivi comunque</button>
     </div>`);
+  // DOPO `openModal` (che azzera il contesto in `closeModal`): cosi' non viene
+  // subito cancellato. Vive finche' la modale e' aperta.
+  ctxRicreato = { slug: wiz.parserId, azione: wiz.confermaRicreato };
 }
 
 async function copy(text, label = 'Copiato') {
@@ -124,6 +128,11 @@ function openModal(html, opts = {}) {
 function closeModal() {
   if (modalEl) modalEl.remove();
   modalEl = null;
+  // #77: il contesto della conferma di identita' (`ctxRicreato`) vive SOLO
+  // mentre la sua modale e' aperta. Chiuderla in QUALSIASI modo — bottone,
+  // click sull'overlay, apertura di un'altra modale — lo azzera, cosi' non
+  // resta un contesto stantio nel globale (Fable, PR #91).
+  ctxRicreato = null;
 }
 
 /* ---------------------------------------------------------------- router */
@@ -1987,9 +1996,15 @@ const actions = {
     coerenzaBetfair();
     leggiTeamSource();
     leggiMulti();
-    try { await api.updateParser(wiz.parserId, { config: wiz.draft }); }
+    // #77: `wiz` e' un globale e puo' cambiare durante gli await (una navigazione
+    // ridisegna e re-inizializza il wizard, o lo azzera). Si fissa il wizard di
+    // QUESTA operazione in `w`; il flag di conferma si arma solo se `wiz` e'
+    // ancora lo stesso oggetto — altrimenti si armerebbe sul parser sbagliato o
+    // si crasherebbe su `wiz` nullo (Fable, PR #91).
+    const w = wiz;
+    try { await api.updateParser(w.parserId, { config: w.draft }); }
     catch (e) {
-      if (await conflittoOFallita(e, wiz.parserId) === 'ricreato') wiz.confermaRicreato = 'wiz-save';
+      if (await conflittoOFallita(e, w.parserId) === 'ricreato' && wiz === w) w.confermaRicreato = 'wiz-save';
       return;
     }
     toast('Configurazione salvata sul server.');
@@ -2014,14 +2029,18 @@ const actions = {
     // sovrascrittura. Un conflitto della prova arriva a salvataggio riuscito
     // (uid combaciante, quindi non stantio): si arma comunque la conferma, cosi'
     // il prossimo salvataggio chiede, ma senza confondere le due fasi.
-    try { await api.updateParser(wiz.parserId, { config: wiz.draft }); }
+    // #77: stessa cattura di `wiz-save` — `wiz` puo' cambiare durante gli await,
+    // quindi si fissa il wizard di questa operazione in `w` e il flag si arma
+    // solo se `wiz` e' ancora lo stesso oggetto (Fable, PR #91).
+    const w = wiz;
+    try { await api.updateParser(w.parserId, { config: w.draft }); }
     catch (e) {
-      if (await conflittoOFallita(e, wiz.parserId) === 'ricreato') wiz.confermaRicreato = 'run-test';
+      if (await conflittoOFallita(e, w.parserId) === 'ricreato' && wiz === w) w.confermaRicreato = 'run-test';
       return;
     }
-    try { wiz.test = await api.testParser(wiz.parserId, msg); }
+    try { w.test = await api.testParser(w.parserId, msg); }
     catch (e) {
-      if (await conflittoOFallita(e, wiz.parserId) === 'ricreato') wiz.confermaRicreato = 'run-test';
+      if (await conflittoOFallita(e, w.parserId) === 'ricreato' && wiz === w) w.confermaRicreato = 'run-test';
       return;
     }
     render();
