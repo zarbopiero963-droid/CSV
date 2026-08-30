@@ -505,6 +505,66 @@ with sync_playwright() as pw:
         'guardare non deve toccare il parser ricreato'
     shot(pg, '12-guarda-velo-durante-reload')
 
+    # ---------------- bloccante Sol (doppio click) + nota Fable (overlay), PR #91:
+    # durante il reload di «Guarda quello nuovo» il velo non deve poter essere
+    # chiuso in anticipo. Prima restava su la CONFERMA con i suoi bottoni: un
+    # secondo click su «Guarda» entrava nel ramo `!ctx` e chiudeva il velo,
+    # riaprendo la finestra di editing; un click sull'overlay faceva lo stesso. Ora
+    # durante il reload la conferma diventa un avviso STICKY senza bottoni: niente
+    # bottone da ripremere, e l'overlay non chiude. Fail-first misurato: sul codice
+    # vecchio il bottone «Guarda» e' ancora li' durante il reload (asserzione rossa).
+    slugD = crea_parser('GuardaDoppio')
+    pg.reload()
+    pg.wait_for_selector('#test-msg')
+    pg.evaluate(f"location.hash = '#/parsers/{slugD}/config'")
+    pg.wait_for_selector('#test-msg')
+    cfgD = dict(CONFIG_BASE)
+    cfgD['match'] = {'type': 'contains', 'value': 'GUARDA_DOPPIO'}
+    esito = pg.evaluate(
+        """async ([slug, config]) => {
+             const d = await fetch(`/api/me/parsers/${slug}`, {method: 'DELETE'});
+             const c = await fetch('/api/me/parsers', {method: 'POST',
+               headers: {'Content-Type': 'application/json'},
+               body: JSON.stringify({titolo: slug, config, active: true})});
+             return [d.status, c.status, (await c.json()).slug];
+           }""", [slugD, cfgD])
+    assert esito == [200, 200, slugD], esito
+    pg.wait_for_selector('.toast', state='detached')
+    pg.click('[data-act="wiz-save"]')                        # 409 identita → toast + flag
+    pg.wait_for_selector('.toast:has-text("Eliminato e ricreato altrove")')
+    pg.click('[data-act="wiz-save"]')                        # flag → modale
+    pg.wait_for_selector('.veil')
+
+    # La GET del reload viene rallentata cosi' il velo resta su mentre controllo la
+    # sua natura. Durante il reload la conferma diventa un avviso di caricamento
+    # STICKY e SENZA bottoni: e' la chiave che chiude entrambe le corse — niente
+    # bottone «Guarda» da ripremere (bloccante Sol, doppio click) e nessun bottone
+    # ne' overlay dismissibile (nota Fable). Il `sticky` e' nel codice; qui si prova
+    # in browser che l'avviso senza bottoni sostituisce la conferma durante l'attesa.
+    def _lento_guarda_doppio(route):
+        if route.request.method == 'GET':
+            time.sleep(1.5)
+        route.continue_()
+
+    pg.route('**/api/me/parsers', _lento_guarda_doppio)
+    with pg.expect_request(
+            lambda r: r.method == 'GET' and r.url.split('?')[0].endswith('/api/me/parsers')):
+        pg.click('[data-act="ricreato-guarda"]')            # reload in hold (1.5s)
+    # avviso di caricamento al posto della conferma (vecchio codice: la conferma coi
+    # suoi bottoni resta su → questo `wait` va in timeout, fail-first).
+    pg.wait_for_selector('.veil:has-text("Carico la versione aggiornata")', timeout=10000)
+    assert pg.query_selector('[data-act="ricreato-guarda"]') is None, \
+        'bloccante Sol: il bottone «Guarda» e- ancora li- durante il reload, un doppio click chiuderebbe il velo'
+    assert pg.query_selector('.veil .foot') is None, \
+        'l-avviso di caricamento non deve avere bottoni: niente da cliccare, ne- overlay dismissibile'
+    pg.unroute('**/api/me/parsers', _lento_guarda_doppio)
+
+    pg.wait_for_selector('.veil', state='detached')         # a reload finito, si chiude
+    pg.wait_for_selector('#test-msg')                       # e mostra la versione vera
+    assert config_sul_server(pg, slugD)['match']['value'] == 'GUARDA_DOPPIO', \
+        'guardare non deve toccare il parser ricreato'
+    shot(pg, '13-guarda-velo-non-chiudibile')
+
     b.close()
 
 if errors:

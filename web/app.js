@@ -2051,17 +2051,19 @@ const actions = {
   async 'ricreato-guarda'() {
     const ctx = ctxRicreato;
     ctxRicreato = null;
-    if (!ctx) { closeModal(); return; }   // gia' risolto (doppio click)
-    // Il velo resta su DURANTE il reload e si chiude solo quando la versione vera
-    // e' pronta a ridisegnarsi: `.veil` copre la viewport (fixed, inset:0), quindi
-    // il wizard sottostante non e' cliccabile ne' editabile nella finestra di rete
-    // — senza, si potrebbero perdere modifiche fatte in quella finestra (Sol,
-    // PR #91). E' la stessa via di `del-parser-ok`, che chiude la modale DOPO le
-    // sue await, non prima. NON `go()`: se siamo ancora su `#/parsers/<slug>/config`,
-    // `go` alla STESSA hash non scatena `hashchange` e non ridisegna. Si ridisegna
-    // a mano; `initWiz` riparte sul parser aggiornato — ma solo se il wizard e'
-    // ancora quello del conflitto, per non buttare via il draft di un parser
-    // diverso su cui l'utente e' navigato.
+    if (!ctx) return;   // secondo click o invocazione stantia: il primo gestisce gia'
+    // Durante il reload la conferma diventa un avviso STICKY senza bottoni: il velo
+    // copre la viewport (fixed, inset:0), quindi il wizard sottostante non e'
+    // cliccabile ne' editabile, e nessuna via lo riapre finche' la versione vera non
+    // e' pronta — ne' un click sull'overlay (velo `sticky`), ne' un secondo click
+    // (niente piu' bottone da premere), le due corse segnalate al gate (Sol e Fable,
+    // PR #91). E' la stessa via di `del-parser-ok`, che chiude la modale DOPO le sue
+    // await, non prima. NON `go()`: se siamo ancora su `#/parsers/<slug>/config`,
+    // `go` alla STESSA hash non scatena `hashchange` e non ridisegna. Si ridisegna a
+    // mano; `initWiz` riparte sul parser aggiornato — ma solo se il wizard e' ancora
+    // quello del conflitto, per non buttare via il draft di un parser diverso su cui
+    // l'utente e' navigato.
+    openModal('<h2>Carico la versione aggiornata…</h2>', { sticky: true });
     try { await api.ricaricaParser(ctx.slug); } catch { /* la vista mostra la cache */ }
     if (wiz && wiz.parserId === ctx.slug) wiz = null;
     closeModal();
