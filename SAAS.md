@@ -1248,15 +1248,35 @@ alla PR #76 quel percorso passava dal gestore d'errore generico, quindi la
 DELETE stantia stampava il testo interno del server e non riallineava niente:
 segnalato da CodeRabbit, e ora vincolato dallo scenario in browser.
 
-**Cosa il toast NON impedisce, e va detto.** Dopo il 409 la cache viene
+**La conferma esplicita al secondo Salva (#77).** Dopo il 409 la cache viene
 riallineata (senza, ogni salvataggio successivo fallirebbe per sempre — il bug
-del toggle, CodeRabbit PR #71), quindi un **secondo** click su Salva porta
-l'`uid` nuovo e sovrascrive il parser ricreato. Il salvataggio silenzioso è
-chiuso — c'è il 409 e c'è l'avviso — ma la sovrascrittura resta a un click, e
-chiuderla vuole una **conferma esplicita**, cioè UI nuova. Segnalato da Claude
-Fable 5 sulla PR #76, fotografato dal flusso in browser (che diventerà rosso il
-giorno in cui la conferma arriva) e registrato come issue per la decisione del
-proprietario.
+del toggle, CodeRabbit PR #71), quindi il click successivo porterebbe l'`uid`
+nuovo e sovrascriverebbe il parser ricreato: il salvataggio silenzioso era
+chiuso — c'è il 409 e c'è l'avviso — ma la sovrascrittura restava a un click.
+La chiude una **conferma esplicita** (issue #77, opzione A). Dopo un conflitto di
+**identità** (`eliminato e ricreato`) il salvataggio — e la **prova**, che salva
+anche lei — non procede: apre una **modale** intitolata *«Questo nome ora è di un
+altro parser»*, con due strade:
+
+- **«Guarda quello nuovo»** — rilegge la versione vera dal server e riapre il
+  wizard su di essa; il draft stantìo si perde. È la via consigliata (bottone
+  primario). Mentre rilegge, la modale mostra un breve avviso *«Carico la versione
+  aggiornata…»* **non interrompibile** (né dal click sull'overlay né da un secondo
+  click): finché il velo è su, il wizard sotto non è editabile, così nessuna
+  modifica fatta nella finestra di rete va persa di nascosto (#91). Se la rilettura
+  **fallisce** (rete/server), il draft **non** viene buttato: resta, la conferma si
+  ri-arma e un toast dice *«Non sono riuscito a caricare la versione aggiornata: le
+  tue modifiche sono ancora qui, riprova.»* (#91).
+- **«Sovrascrivi comunque»** — sovrascrive il parser ricreato con le proprie
+  modifiche: resta possibile, ma è una scelta deliberata, non un click silenzioso
+  (bottone `danger`).
+
+Cliccare fuori dalla modale la chiude senza fare nulla (il flag resta, il
+prossimo Salva la ripropone). Il conflitto di **versione** («modificato
+altrove», #51) **non** apre la modale: lì risalvare è una sovrascrittura
+legittima della propria riga, e il toast basta. Fotografato e ora **invertito**
+dal flusso in browser (`tests/web/conflitto_flow.py`), che prova la modale e
+tutte e due le strade.
 
 **L'identità della riga: `uid` (#73).** `versione` risponde alla domanda «è
 cambiato mentre lo modificavo?». Ne esiste una seconda, diversa: «è ancora lo

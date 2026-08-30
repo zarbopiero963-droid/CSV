@@ -39,8 +39,9 @@ function fallita(e) {
 // Prende lo SLUG e non legge `wiz`: vale per OGNI chiamante di
 // `updateParser`, anche il toggle Sospendi/Riattiva fuori dal wizard —
 // senza il riallineamento, ogni toggle successivo rimandava la stessa
-// versione vecchia e falliva per sempre (CodeRabbit, PR #71). Restituisce
-// true se era un conflitto gestito, cosi' il chiamante ridisegna.
+// versione vecchia e falliva per sempre (CodeRabbit, PR #71). Restituisce il
+// TIPO di conflitto — `'ricreato'` o `'modificato'`, entrambi truthy — oppure
+// `false`, cosi' il chiamante ridisegna e, per l'identita', arma la conferma (#77).
 async function conflittoOFallita(e, slug) {
   if (!e || e.status !== 409 || !slug) { fallita(e); return false; }
   try { await api.ricaricaParser(slug); } catch { /* resta il 409 */ }
@@ -56,7 +57,36 @@ async function conflittoOFallita(e, slug) {
       + 'Le tue modifiche sono ancora qui — controlla quello nuovo prima di salvare.'
     : 'Modificato altrove: le tue modifiche sono ancora qui — '
       + 'ricontrolla e salva di nuovo per sovrascrivere.');
-  return true;
+  return ricreato ? 'ricreato' : 'modificato';
+}
+
+// #77: dopo un conflitto di IDENTITA' (parser eliminato e ricreato altrove) il
+// riallineamento di `conflittoOFallita` porta in cache l'uid del parser NUOVO —
+// serve, altrimenti ogni salvataggio successivo fallirebbe per sempre (il bug del
+// toggle, PR #71) — ma cosi' il salvataggio dopo il 409 sovrascriverebbe quel
+// parser nuovo con il draft stantio, a un solo click e con un toast che sparisce.
+// La guardia che mancava e' questa modale: dopo l'identita', il salvataggio (o la
+// prova, che salva anche lei) chiede una scelta ESPLICITA invece di procedere.
+// Il contesto e' CATTURATO all'apertura, non riletto da `wiz` al click: una
+// navigazione puo' cambiare `wiz` mentre la modale e' aperta (Fable/GPT-5.5), e
+// un doppio click non deve rilanciare l'azione — il primo lo azzera.
+let ctxRicreato = null;
+
+function modalConfermaRicreato() {
+  // `openModal` chiama `closeModal`, che AZZERA `ctxRicreato`: il contesto va
+  // quindi catturato DOPO l'apertura, non prima, o verrebbe subito cancellato.
+  openModal(`
+    <h2>Questo nome ora è di un altro parser</h2>
+    <p class="muted small">Mentre lo modificavi, questo parser è stato eliminato e
+      ricreato altrove: adesso questo nome appartiene a un parser diverso. Salvando
+      ora lo sovrascriveresti con le tue modifiche. Le tue modifiche sono ancora qui.</p>
+    <div class="foot">
+      <button class="primary" data-act="ricreato-guarda">Guarda quello nuovo</button>
+      <button class="danger" data-act="ricreato-sovrascrivi">Sovrascrivi comunque</button>
+    </div>`);
+  // DOPO `openModal` (che azzera il contesto in `closeModal`): cosi' non viene
+  // subito cancellato. Vive finche' la modale e' aperta.
+  ctxRicreato = { slug: wiz.parserId, azione: wiz.confermaRicreato };
 }
 
 async function copy(text, label = 'Copiato') {
@@ -98,6 +128,11 @@ function openModal(html, opts = {}) {
 function closeModal() {
   if (modalEl) modalEl.remove();
   modalEl = null;
+  // #77: il contesto della conferma di identita' (`ctxRicreato`) vive SOLO
+  // mentre la sua modale e' aperta. Chiuderla in QUALSIASI modo — bottone,
+  // click sull'overlay, apertura di un'altra modale — lo azzera, cosi' non
+  // resta un contesto stantio nel globale (Fable, PR #91).
+  ctxRicreato = null;
 }
 
 /* ---------------------------------------------------------------- router */
@@ -773,6 +808,7 @@ function initWiz(p) {
     parserId: p.slug,
     step: campione ? (configured ? 15 : 0) : 0,
     started: !!campione,
+    confermaRicreato: null,   // #77: azione in attesa di conferma dopo un 409 di identita'
     draft: JSON.parse(JSON.stringify(draft)),
     message: campione,
     mode: 'message',
@@ -1952,17 +1988,32 @@ const actions = {
     render();
   },
   async 'wiz-save'() {
+    // #77: dopo un conflitto di identita' la cache e' riallineata al parser
+    // ricreato; salvare ora lo sovrascriverebbe in silenzio. Serve una scelta.
+    if (wiz.confermaRicreato) { modalConfermaRicreato(); return; }
     const msg = document.getElementById('test-msg')?.value ?? wiz.message;
     api.saveSampleMessage(wiz.parserId, msg);
     coerenzaBetfair();
     leggiTeamSource();
     leggiMulti();
-    try { await api.updateParser(wiz.parserId, { config: wiz.draft }); }
-    catch (e) { await conflittoOFallita(e, wiz.parserId); return; }
+    // #77: `wiz` e' un globale e puo' cambiare durante gli await (una navigazione
+    // ridisegna e re-inizializza il wizard, o lo azzera). Si fissa il wizard di
+    // QUESTA operazione in `w`; il flag di conferma si arma solo se `wiz` e'
+    // ancora lo stesso oggetto — altrimenti si armerebbe sul parser sbagliato o
+    // si crasherebbe su `wiz` nullo (Fable, PR #91).
+    const w = wiz;
+    try { await api.updateParser(w.parserId, { config: w.draft }); }
+    catch (e) {
+      if (await conflittoOFallita(e, w.parserId) === 'ricreato' && wiz === w) w.confermaRicreato = 'wiz-save';
+      return;
+    }
     toast('Configurazione salvata sul server.');
     render();
   },
   async 'run-test'() {
+    // #77: la prova salva anche lei (sotto), quindi anche qui l'identita' va
+    // confermata — altrimenti «Prova» resterebbe una porta di sovrascrittura.
+    if (wiz.confermaRicreato) { modalConfermaRicreato(); return; }
     const msg = document.getElementById('test-msg').value;
     wiz.message = msg;
     api.saveSampleMessage(wiz.parserId, msg);
@@ -1971,12 +2022,76 @@ const actions = {
     leggiMulti();
     // Prima si salva la config, poi si prova: la prova gira sul server, che
     // conosce solo cio' che e' stato salvato — provare un draft non salvato
-    // mostrerebbe l'esito di un'altra configurazione.
-    try {
-      await api.updateParser(wiz.parserId, { config: wiz.draft });
-      wiz.test = await api.testParser(wiz.parserId, msg);
-    } catch (e) { await conflittoOFallita(e, wiz.parserId); return; }
+    // mostrerebbe l'esito di un'altra configurazione. I due try/catch sono
+    // SEPARATI (Fable, #91): se il SALVATAGGIO va in conflitto di identita', il
+    // draft NON e' stato scritto e si arma la conferma — nessuna finestra in cui
+    // un errore della prova, a salvataggio gia' avvenuto, lascia passare una
+    // sovrascrittura. Un conflitto della prova arriva a salvataggio riuscito
+    // (uid combaciante, quindi non stantio): si arma comunque la conferma, cosi'
+    // il prossimo salvataggio chiede, ma senza confondere le due fasi.
+    // #77: stessa cattura di `wiz-save` — `wiz` puo' cambiare durante gli await,
+    // quindi si fissa il wizard di questa operazione in `w` e il flag si arma
+    // solo se `wiz` e' ancora lo stesso oggetto (Fable, PR #91).
+    const w = wiz;
+    try { await api.updateParser(w.parserId, { config: w.draft }); }
+    catch (e) {
+      if (await conflittoOFallita(e, w.parserId) === 'ricreato' && wiz === w) w.confermaRicreato = 'run-test';
+      return;
+    }
+    try { w.test = await api.testParser(w.parserId, msg); }
+    catch (e) {
+      if (await conflittoOFallita(e, w.parserId) === 'ricreato' && wiz === w) w.confermaRicreato = 'run-test';
+      return;
+    }
     render();
+  },
+  // #77: le due strade della conferma di identita'. Usano il contesto CATTURATO
+  // (`ctxRicreato`), non il `wiz` vivo, e lo azzerano: cosi' un doppio click e'
+  // un no-op e una navigazione a modale aperta non agisce sul parser sbagliato.
+  async 'ricreato-guarda'() {
+    const ctx = ctxRicreato;
+    ctxRicreato = null;
+    if (!ctx) return;   // secondo click o invocazione stantia: il primo gestisce gia'
+    // Durante il reload la conferma diventa un avviso STICKY senza bottoni: il velo
+    // copre la viewport (fixed, inset:0), quindi il wizard sottostante non e'
+    // cliccabile ne' editabile, e nessuna via lo riapre finche' la versione vera non
+    // e' pronta — ne' un click sull'overlay (velo `sticky`), ne' un secondo click
+    // (niente piu' bottone da premere), le due corse segnalate al gate (Sol e Fable,
+    // PR #91). E' la stessa via di `del-parser-ok`, che chiude la modale DOPO le sue
+    // await, non prima. NON `go()`: se siamo ancora su `#/parsers/<slug>/config`,
+    // `go` alla STESSA hash non scatena `hashchange` e non ridisegna. Si ridisegna a
+    // mano; `initWiz` riparte sul parser aggiornato — ma solo se il wizard e' ancora
+    // quello del conflitto, per non buttare via il draft di un parser diverso su cui
+    // l'utente e' navigato.
+    openModal('<h2>Carico la versione aggiornata…</h2>', { sticky: true });
+    let caricato = true;
+    try { await api.ricaricaParser(ctx.slug); } catch { caricato = false; }
+    closeModal();
+    if (!caricato) {
+      // Reload FALLITO (rete/server): non ho la versione vera da mostrare, quindi
+      // NON butto il draft. Lo tengo, RI-ARMO la conferma (il prossimo Salva la
+      // ripropone) e dico l'errore — cosi' un guasto non fa perdere il lavoro in
+      // silenzio mostrando la cache come se fosse la versione aggiornata (Sol, #91).
+      if (wiz && wiz.parserId === ctx.slug) wiz.confermaRicreato = ctx.azione || 'wiz-save';
+      toast('Non sono riuscito a caricare la versione aggiornata: le tue modifiche sono ancora qui, riprova.');
+      render();
+      return;
+    }
+    if (wiz && wiz.parserId === ctx.slug) wiz = null;
+    render();
+  },
+  'ricreato-sovrascrivi'() {
+    const ctx = ctxRicreato;
+    ctxRicreato = null;
+    closeModal();
+    if (!ctx) return;   // gia' risolto (doppio click)
+    // Scelta deliberata, ma solo se siamo ANCORA sul parser del conflitto: se
+    // l'utente ha navigato altrove, il contesto e' cambiato e sovrascrivere
+    // sarebbe sull'oggetto sbagliato.
+    if (wiz && wiz.parserId === ctx.slug && wiz.confermaRicreato) {
+      wiz.confermaRicreato = false;
+      actions[ctx.azione]();
+    }
   },
 
   // ------- token del feed (dell'utente)

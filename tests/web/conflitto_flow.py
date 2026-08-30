@@ -15,6 +15,7 @@ import json
 import pathlib
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 from playwright.sync_api import sync_playwright
@@ -40,6 +41,11 @@ def _console(m):
             return
         # Il 409 della PUT e' il contratto sotto verifica, non un guasto.
         if '409' in m.text and '/api/me/parsers/' in percorso:
+            return
+        # Il reload di «Guarda» abortito DI PROPOSITO nel test del ramo d'errore
+        # (#91): la GET a /api/me/parsers viene fatta fallire per provare che il
+        # draft resta e l'errore viene detto. Solo questo endpoint esatto.
+        if percorso.endswith('/api/me/parsers'):
             return
     errors.append(f'console.{m.type}: {m.text}')
 
@@ -220,25 +226,87 @@ with sync_playwright() as pw:
         f'il parser ricreato e- stato sovrascritto: {json.dumps(salvata)[:120]}'
     shot(pg, '04-eliminato-e-ricreato')
 
-    # ---------------- il RESIDUO, fotografato: il SECONDO salvataggio passa
-    # `conflittoOFallita` riallinea la cache (serve: senza, ogni salvataggio
-    # successivo fallirebbe per sempre — il bug del toggle, CodeRabbit PR #71),
-    # quindi il click dopo il 409 porta l'uid NUOVO e sovrascrive il parser
-    # ricreato. Il primo salvataggio non e' piu' silenzioso — c'e' il 409 e il
-    # toast che dice di guardare quello nuovo — ma il secondo e' a un click.
-    # Segnalato da Claude Fable 5 sulla PR #76 e registrato come issue: chiuderlo
-    # vuole una conferma esplicita, cioe' UI nuova, non un filtro.
-    # Questo test NON approva il comportamento: lo inchioda, come quello della
-    # #74 che fotografava la finestra client. Il giorno in cui la conferma
-    # arriva, questo diventa rosso — ed e' esattamente il punto.
-    pg.click('[data-act="wiz-save"]')
-    pg.wait_for_selector('.toast:has-text("Configurazione salvata")')
-    salvata = config_sul_server(pg, slug)
-    assert salvata['match']['value'] == 'P.Bet.', \
-        ('residuo cambiato: il secondo salvataggio NON sovrascrive piu-. '
-         'Se e- arrivata la conferma esplicita, invertire questo test: '
-         f'{json.dumps(salvata)[:120]}')
-    shot(pg, '05-residuo-secondo-salvataggio')
+    # ---------------- il RESIDUO CHIUSO (#77 opzione A): il SECONDO salvataggio
+    # ora CHIEDE conferma invece di sovrascrivere in silenzio. `conflittoOFallita`
+    # riallinea la cache (serve: senza, ogni salvataggio fallirebbe per sempre —
+    # il bug del toggle, PR #71), quindi il click dopo il 409 porterebbe l'uid
+    # NUOVO: la guardia che mancava e' la modale di conferma. Questo test PRIMA
+    # fotografava la sovrascrittura a un click; ora, arrivata la conferma (Fable
+    # sulla PR #76 → issue #77), e' INVERTITO e ne e' la prova.
+    pg.click('[data-act="wiz-save"]')                    # secondo salva
+    pg.wait_for_selector('.veil')                        # la modale, non una sovrascrittura
+    modale = pg.inner_text('.veil')
+    assert 'un altro parser' in modale, \
+        f'la conferma deve spiegare il conflitto di identita-: {modale!r}'
+    # aprire la conferma, da sola, non salva niente: il ricreato resta intatto
+    assert config_sul_server(pg, slug)['match']['value'] == 'RICREATO', \
+        'aprire la conferma non deve toccare il parser ricreato'
+    shot(pg, '05-conferma-esplicita')
+
+    # strada «Guarda quello nuovo»: ricarica dal server, il draft stantio si
+    # perde, e il parser ricreato NON viene toccato.
+    pg.click('[data-act="ricreato-guarda"]')
+    # Il velo si chiude quando la versione vera e' pronta a ridisegnarsi (dopo il
+    # reload): si aspetta la sua chiusura, NON si assume che sia gia' via — con la
+    # correzione Sol (#91) il velo resta su durante la GET, e `#test-msg`, gia'
+    # presente da prima, non basta come attesa.
+    pg.wait_for_selector('.veil', state='detached')
+    pg.wait_for_selector('#test-msg')                    # wizard ricaricato sul parser che c'e'
+    assert config_sul_server(pg, slug)['match']['value'] == 'RICREATO', \
+        'guardare quello nuovo non deve sovrascriverlo'
+    shot(pg, '06-guarda-quello-nuovo')
+
+    # strada «Sovrascrivi comunque»: ri-provoco il conflitto (ricreo come
+    # RICREATO2) e stavolta scelgo di sovrascrivere. La scheda porta il draft del
+    # parser che stava guardando (RICREATO), diverso da RICREATO2: se vince, l'ho
+    # sovrascritto DAVVERO — e per scelta, non a un click silenzioso.
+    config_ric2 = dict(CONFIG_BASE)
+    config_ric2['match'] = {'type': 'contains', 'value': 'RICREATO2'}
+    esito = pg.evaluate(
+        """async ([slug, config]) => {
+             const d = await fetch(`/api/me/parsers/${slug}`, {method: 'DELETE'});
+             const c = await fetch('/api/me/parsers', {
+               method: 'POST', headers: {'Content-Type': 'application/json'},
+               body: JSON.stringify({titolo: 'Conteso', config, active: true})});
+             return [d.status, c.status, (await c.json()).slug];
+           }""", [slug, config_ric2])
+    assert esito == [200, 200, slug], esito
+    pg.wait_for_selector('.toast', state='detached')     # via l'eventuale toast di prima
+    pg.click('[data-act="wiz-save"]')                    # 409 identita- → toast + flag
+    pg.wait_for_selector('.toast:has-text("Eliminato e ricreato altrove")')
+    pg.click('[data-act="wiz-save"]')                    # flag alzato → modale
+    pg.wait_for_selector('.veil')
+    pg.click('[data-act="ricreato-sovrascrivi"]')        # scelta deliberata
+    pg.wait_for_selector('.toast:has-text("salvata")')
+    assert config_sul_server(pg, slug)['match']['value'] == 'RICREATO', \
+        'sovrascrivi comunque deve far vincere il draft della scheda vecchia'
+    shot(pg, '07-sovrascrivi-comunque')
+
+    # anche «Prova» (run-test) salva prima di provare, quindi anche lei apre la
+    # conferma dopo un conflitto di identita' (#77): la stessa guardia sul secondo
+    # percorso di salvataggio, non solo su «Salva».
+    config_ric3 = dict(CONFIG_BASE)
+    config_ric3['match'] = {'type': 'contains', 'value': 'RICREATO3'}
+    esito = pg.evaluate(
+        """async ([slug, config]) => {
+             const d = await fetch(`/api/me/parsers/${slug}`, {method: 'DELETE'});
+             const c = await fetch('/api/me/parsers', {
+               method: 'POST', headers: {'Content-Type': 'application/json'},
+               body: JSON.stringify({titolo: 'Conteso', config, active: true})});
+             return [d.status, c.status, (await c.json()).slug];
+           }""", [slug, config_ric3])
+    assert esito == [200, 200, slug], esito
+    pg.wait_for_selector('.toast', state='detached')
+    pg.click('[data-act="run-test"]')                    # 409 identita- → toast + flag
+    pg.wait_for_selector('.toast:has-text("Eliminato e ricreato altrove")')
+    pg.click('[data-act="run-test"]')                    # flag alzato → modale, non prova
+    pg.wait_for_selector('.veil')
+    assert config_sul_server(pg, slug)['match']['value'] == 'RICREATO3', \
+        'la prova non deve salvare-sovrascrivere di nascosto'
+    pg.click('[data-act="ricreato-guarda"]')             # pulizia: torna sul ricreato
+    pg.wait_for_selector('.veil', state='detached')      # il velo si chiude a reload finito (#91)
+    pg.wait_for_selector('#test-msg')
+    shot(pg, '08-anche-la-prova-conferma')
 
     # ---------------- la DELETE stantia, vista dalla scheda vecchia (#75)
     # La PUT aveva la sua voce, la DELETE no: `del-parser-ok` gestiva l'errore
@@ -289,7 +357,7 @@ with sync_playwright() as pw:
         'dopo il conflitto la scheda del parser non si e- ridisegnata'
     assert pg.query_selector('#test-msg') is not None, \
         'il wizard e- sparito: il draft dell-utente non deve essere buttato via'
-    shot(pg, '06-delete-stantia')
+    shot(pg, '09-delete-stantia')
 
     # E la prova che il riallineamento ha funzionato DAVVERO, non solo che la
     # pagina e' sopravvissuta: la stessa conferma, rifatta subito, adesso deve
@@ -316,7 +384,243 @@ with sync_playwright() as pw:
     # nessuna asserzione lo pretendeva).
     assert rimasti == [s for s in prima if s != slug], \
         f'la DELETE ha cambiato piu- dello slug conteso: prima {prima}, dopo {rimasti}'
-    shot(pg, '07-delete-dopo-riallineamento')
+    shot(pg, '10-delete-dopo-riallineamento')
+
+    # ---------------- bloccante Fable (PR #91): la NAVIGAZIONE durante l'await
+    # non deve armare la conferma sul parser SBAGLIATO. Il flag `confermaRicreato`
+    # si scriveva nel `catch` DOPO `await conflittoOFallita`, leggendo il `wiz`
+    # VIVO: se durante quella GET (il riallineamento della cache) l'utente naviga
+    # a un ALTRO parser, il flag finiva sul wizard nuovo — al salvataggio
+    # successivo di QUEL parser si apriva una conferma spuria, o si crashava su
+    # `wiz` nullo. Ora il wizard dell'operazione e' fissato in `w` e il flag si
+    # arma solo se `wiz === w`. Fail-first misurato: sul codice vecchio, salvare
+    # il parser B dopo la corsa apriva `.veil`; qui si prova, in Chromium vero,
+    # che B si salva senza modale.
+    def crea_parser(nome):
+        pg.evaluate("location.hash = '#/parsers'")           # il pulsante «nuovo» sta nella lista
+        pg.wait_for_selector('[data-act="new-parser"]')
+        pg.click('[data-act="new-parser"]')
+        pg.wait_for_selector('#np-name')
+        pg.fill('#np-name', nome)
+        pg.click('[data-act="create-parser"]')
+        pg.wait_for_selector('#paste-msg')
+        s = pg.evaluate('location.hash').split('/')[2]
+        pg.fill('#paste-msg', MSG)
+        pg.click('[data-act="start-wizard"]')
+        pg.wait_for_selector('#match-val')
+        st = pg.evaluate(
+            """async ([slug, config]) => (await fetch(`/api/me/parsers/${slug}`, {
+                 method: 'PUT', headers: {'Content-Type': 'application/json'},
+                 body: JSON.stringify({titolo: slug, config, active: true})})).status""",
+            [s, CONFIG_BASE])
+        assert st == 200, f'PUT {nome}: {st}'
+        return s
+
+    slugA = crea_parser('RaceA')                             # A: il conflitto (naviga da se' alla lista)
+    slugB = crea_parser('RaceB')                             # B: dove navigo
+    pg.reload()                                              # cache = server: A e B validi
+    pg.wait_for_selector('#test-msg')
+    pg.evaluate(f"location.hash = '#/parsers/{slugA}/config'")
+    pg.wait_for_selector('#test-msg')
+
+    # innesco l'identita' su A: eliminato e ricreato con un valore diverso
+    cfgA = dict(CONFIG_BASE)
+    cfgA['match'] = {'type': 'contains', 'value': 'RACE_A'}
+    esito = pg.evaluate(
+        """async ([slug, config]) => {
+             const d = await fetch(`/api/me/parsers/${slug}`, {method: 'DELETE'});
+             const c = await fetch('/api/me/parsers', {method: 'POST',
+               headers: {'Content-Type': 'application/json'},
+               body: JSON.stringify({titolo: slug, config, active: true})});
+             return [d.status, c.status, (await c.json()).slug];
+           }""", [slugA, cfgA])
+    assert esito == [200, 200, slugA], esito
+
+    # rallento la GET del riallineamento (solo la lista, non la PUT/POST col
+    # suffisso) e, mentre e' IN VOLO, navigo su B: e' la finestra della corsa.
+    def _lenta(route):
+        if route.request.method == 'GET':
+            time.sleep(0.7)
+        route.continue_()
+
+    pg.route('**/api/me/parsers', _lenta)
+    pg.wait_for_selector('.toast', state='detached')
+    with pg.expect_request(
+            lambda r: r.method == 'GET' and r.url.split('?')[0].endswith('/api/me/parsers')):
+        pg.click('[data-act="wiz-save"]')                    # A: PUT 409, poi GET (in hold)
+    pg.evaluate(f"location.hash = '#/parsers/{slugB}/config'")   # naviga durante l'await
+    pg.wait_for_selector('.toast:has-text("Eliminato e ricreato altrove")')  # catch ripreso
+    pg.unroute('**/api/me/parsers', _lenta)
+
+    pg.wait_for_selector('#test-msg')                        # siamo su B
+    assert f'parsers/{slugB}' in pg.evaluate('location.hash'), pg.evaluate('location.hash')
+    pg.click('[data-act="wiz-save"]')                        # B si salva: il flag NON e' suo
+    pg.wait_for_selector('.toast:has-text("salvata")')       # vecchio codice: qui apriva `.veil`
+    assert pg.query_selector('.veil') is None, \
+        'bloccante Fable: la conferma si e- armata sul parser SBAGLIATO dopo la navigazione'
+    shot(pg, '11-navigazione-durante-await')
+
+    # ---------------- bloccante Sol (PR #91): «Guarda quello nuovo» tiene il VELO
+    # su DURANTE il reload, cosi' il wizard sotto non e' editabile nella finestra
+    # di rete e non si perdono modifiche. Prima `closeModal()` girava PRIMA della
+    # await della ricarica: il velo spariva subito e il wizard restava editabile
+    # finche' la GET non tornava. Fail-first misurato: con la GET rallentata, sul
+    # codice vecchio `.veil` e' gia' sparito durante l'attesa (asserzione rossa);
+    # col fix resta su finche' la versione vera non e' pronta a ridisegnarsi.
+    slugG = crea_parser('GuardaLenta')
+    pg.reload()                                              # cache = server: draft valido
+    pg.wait_for_selector('#test-msg')
+    pg.evaluate(f"location.hash = '#/parsers/{slugG}/config'")
+    pg.wait_for_selector('#test-msg')
+    cfgG = dict(CONFIG_BASE)
+    cfgG['match'] = {'type': 'contains', 'value': 'GUARDA_RIC'}
+    esito = pg.evaluate(
+        """async ([slug, config]) => {
+             const d = await fetch(`/api/me/parsers/${slug}`, {method: 'DELETE'});
+             const c = await fetch('/api/me/parsers', {method: 'POST',
+               headers: {'Content-Type': 'application/json'},
+               body: JSON.stringify({titolo: slug, config, active: true})});
+             return [d.status, c.status, (await c.json()).slug];
+           }""", [slugG, cfgG])
+    assert esito == [200, 200, slugG], esito
+    pg.wait_for_selector('.toast', state='detached')
+    pg.click('[data-act="wiz-save"]')                        # 409 identita → toast + flag
+    pg.wait_for_selector('.toast:has-text("Eliminato e ricreato altrove")')
+    pg.click('[data-act="wiz-save"]')                        # flag → modale
+    pg.wait_for_selector('.veil')
+
+    # rallento la GET del reload; clicco «Guarda quello nuovo»: durante l'attesa
+    # il velo DEVE restare su (blocca l'editing del wizard sottostante).
+    def _lento_guarda(route):
+        if route.request.method == 'GET':
+            time.sleep(0.7)
+        route.continue_()
+
+    pg.route('**/api/me/parsers', _lento_guarda)
+    with pg.expect_request(
+            lambda r: r.method == 'GET' and r.url.split('?')[0].endswith('/api/me/parsers')):
+        pg.click('[data-act="ricreato-guarda"]')            # reload in hold
+    assert pg.query_selector('.veil') is not None, \
+        'bloccante Sol: il velo e- sparito durante il reload, il wizard resta editabile'
+    pg.unroute('**/api/me/parsers', _lento_guarda)
+
+    pg.wait_for_selector('.veil', state='detached')         # a reload finito, si chiude
+    pg.wait_for_selector('#test-msg')                       # e mostra la versione vera
+    assert config_sul_server(pg, slugG)['match']['value'] == 'GUARDA_RIC', \
+        'guardare non deve toccare il parser ricreato'
+    shot(pg, '12-guarda-velo-durante-reload')
+
+    # ---------------- bloccante Sol (doppio click) + nota Fable (overlay), PR #91:
+    # durante il reload di «Guarda quello nuovo» il velo non deve poter essere
+    # chiuso in anticipo. Prima restava su la CONFERMA con i suoi bottoni: un
+    # secondo click su «Guarda» entrava nel ramo `!ctx` e chiudeva il velo,
+    # riaprendo la finestra di editing; un click sull'overlay faceva lo stesso. Ora
+    # durante il reload la conferma diventa un avviso STICKY senza bottoni: niente
+    # bottone da ripremere, e l'overlay non chiude. Fail-first misurato: sul codice
+    # vecchio il bottone «Guarda» e' ancora li' durante il reload (asserzione rossa).
+    slugD = crea_parser('GuardaDoppio')
+    pg.reload()
+    pg.wait_for_selector('#test-msg')
+    pg.evaluate(f"location.hash = '#/parsers/{slugD}/config'")
+    pg.wait_for_selector('#test-msg')
+    cfgD = dict(CONFIG_BASE)
+    cfgD['match'] = {'type': 'contains', 'value': 'GUARDA_DOPPIO'}
+    esito = pg.evaluate(
+        """async ([slug, config]) => {
+             const d = await fetch(`/api/me/parsers/${slug}`, {method: 'DELETE'});
+             const c = await fetch('/api/me/parsers', {method: 'POST',
+               headers: {'Content-Type': 'application/json'},
+               body: JSON.stringify({titolo: slug, config, active: true})});
+             return [d.status, c.status, (await c.json()).slug];
+           }""", [slugD, cfgD])
+    assert esito == [200, 200, slugD], esito
+    pg.wait_for_selector('.toast', state='detached')
+    pg.click('[data-act="wiz-save"]')                        # 409 identita → toast + flag
+    pg.wait_for_selector('.toast:has-text("Eliminato e ricreato altrove")')
+    pg.click('[data-act="wiz-save"]')                        # flag → modale
+    pg.wait_for_selector('.veil')
+
+    # La GET del reload viene rallentata cosi' il velo resta su mentre controllo la
+    # sua natura. Durante il reload la conferma diventa un avviso di caricamento
+    # STICKY e SENZA bottoni: e' la chiave che chiude entrambe le corse — niente
+    # bottone «Guarda» da ripremere (bloccante Sol, doppio click) e nessun bottone
+    # ne' overlay dismissibile (nota Fable). Il `sticky` e' nel codice; qui si prova
+    # in browser che l'avviso senza bottoni sostituisce la conferma durante l'attesa.
+    def _lento_guarda_doppio(route):
+        if route.request.method == 'GET':
+            time.sleep(1.5)
+        route.continue_()
+
+    pg.route('**/api/me/parsers', _lento_guarda_doppio)
+    with pg.expect_request(
+            lambda r: r.method == 'GET' and r.url.split('?')[0].endswith('/api/me/parsers')):
+        pg.click('[data-act="ricreato-guarda"]')            # reload in hold (1.5s)
+    # avviso di caricamento al posto della conferma (vecchio codice: la conferma coi
+    # suoi bottoni resta su → questo `wait` va in timeout, fail-first).
+    pg.wait_for_selector('.veil:has-text("Carico la versione aggiornata")', timeout=10000)
+    assert pg.query_selector('[data-act="ricreato-guarda"]') is None, \
+        'bloccante Sol: il bottone «Guarda» e- ancora li- durante il reload, un doppio click chiuderebbe il velo'
+    assert pg.query_selector('.veil .foot') is None, \
+        'l-avviso di caricamento non deve avere bottoni: niente da cliccare, ne- overlay dismissibile'
+    pg.unroute('**/api/me/parsers', _lento_guarda_doppio)
+
+    pg.wait_for_selector('.veil', state='detached')         # a reload finito, si chiude
+    pg.wait_for_selector('#test-msg')                       # e mostra la versione vera
+    assert config_sul_server(pg, slugD)['match']['value'] == 'GUARDA_DOPPIO', \
+        'guardare non deve toccare il parser ricreato'
+    shot(pg, '13-guarda-velo-non-chiudibile')
+
+    # ---------------- bloccante Sol (PR #91): «Guarda quello nuovo» con reload
+    # FALLITO non deve buttare il draft in silenzio. Prima il `catch` ingoiava
+    # l'errore, azzerava `wiz` e ridisegnava dalla cache: un guasto di rete perdeva
+    # le modifiche senza dirlo. Ora, se il reload fallisce, il draft resta, la
+    # conferma si ri-arma e un toast lo dice. Fail-first: sul codice vecchio non
+    # compare nessun toast d'errore (il draft e' gia' stato buttato).
+    slugE = crea_parser('GuardaFallita')
+    pg.reload()
+    pg.wait_for_selector('#test-msg')
+    pg.evaluate(f"location.hash = '#/parsers/{slugE}/config'")
+    pg.wait_for_selector('#test-msg')
+    cfgE = dict(CONFIG_BASE)
+    cfgE['match'] = {'type': 'contains', 'value': 'GUARDA_ERR'}
+    esito = pg.evaluate(
+        """async ([slug, config]) => {
+             const d = await fetch(`/api/me/parsers/${slug}`, {method: 'DELETE'});
+             const c = await fetch('/api/me/parsers', {method: 'POST',
+               headers: {'Content-Type': 'application/json'},
+               body: JSON.stringify({titolo: slug, config, active: true})});
+             return [d.status, c.status, (await c.json()).slug];
+           }""", [slugE, cfgE])
+    assert esito == [200, 200, slugE], esito
+    pg.wait_for_selector('.toast', state='detached')
+    pg.click('[data-act="wiz-save"]')                       # 409 identita → toast + flag
+    pg.wait_for_selector('.toast:has-text("Eliminato e ricreato altrove")')
+    pg.click('[data-act="wiz-save"]')                       # flag → modale
+    pg.wait_for_selector('.veil')
+
+    # faccio FALLIRE il reload di «Guarda» (GET abortita)
+    def _fallisci_reload(route):
+        if route.request.method == 'GET':
+            route.abort()
+        else:
+            route.continue_()
+
+    pg.route('**/api/me/parsers', _fallisci_reload)
+    pg.wait_for_selector('.toast', state='detached')
+    pg.click('[data-act="ricreato-guarda"]')               # reload fallisce
+    pg.wait_for_selector('.toast:has-text("Non sono riuscito a caricare")')  # errore detto
+    pg.unroute('**/api/me/parsers', _fallisci_reload)
+    # il draft e' ancora qui (wizard non buttato) e la conferma e' ancora armata:
+    assert pg.query_selector('#test-msg') is not None, \
+        'il reload fallito ha buttato il wizard/draft'
+    pg.wait_for_selector('.toast', state='detached')
+    pg.click('[data-act="wiz-save"]')                       # conferma ancora armata → modale
+    pg.wait_for_selector('.veil')
+    assert config_sul_server(pg, slugE)['match']['value'] == 'GUARDA_ERR', \
+        'il parser ricreato non deve essere stato toccato'
+    pg.click('[data-act="ricreato-sovrascrivi"]')          # pulizia: chiude il flusso
+    pg.wait_for_selector('.toast:has-text("salvata")')
+    shot(pg, '14-guarda-reload-fallito')
 
     b.close()
 
