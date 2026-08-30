@@ -406,8 +406,7 @@ with sync_playwright() as pw:
         assert st == 200, f'PUT {nome}: {st}'
         return s
 
-    pg.wait_for_selector('[data-act="new-parser"]')          # siamo nella lista
-    slugA = crea_parser('RaceA')                             # A: il conflitto
+    slugA = crea_parser('RaceA')                             # A: il conflitto (naviga da se' alla lista)
     slugB = crea_parser('RaceB')                             # B: dove navigo
     pg.reload()                                              # cache = server: A e B validi
     pg.wait_for_selector('#test-msg')
