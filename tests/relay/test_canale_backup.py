@@ -27,11 +27,21 @@ RADICE = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(RADICE))
 
 import main  # noqa: E402
-from tests.relay.test_accesso import _admin  # noqa: E402
+from tests.relay.test_accesso import _CorpoFinto, _admin  # noqa: E402
 from tests.relay.test_login import ADMIN_FINTO, BOT_FINTO  # noqa: E402
 
 CANALE = -1001234567890          # i canali hanno id negativi -100…
 ALTRO_CANALE = -1009876543210
+
+
+def _conferma(sessione, chat_id):
+    """Chiama la rotta async di conferma con la precondizione dal client (Sol #56).
+
+    La conferma ora e' `async def` e legge `{chat_id}` dal corpo — l'id del candidato che il
+    pannello ha mostrato. `_CorpoFinto` usa l'interfaccia reale (`headers` + `stream()`), come
+    le altre rotte che leggono il corpo a mano."""
+    return asyncio.run(
+        main.conferma_canale_backup(_CorpoFinto(sessione, {'chat_id': str(chat_id)})))
 
 
 def _abilita_webhook(monkeypatch):
@@ -136,7 +146,7 @@ def test_una_riconsegna_del_canale_gia_configurato_non_lo_ripropone(tmp_path, mo
     monkeypatch.setattr(main, 'invia_messaggio_telegram',
                         lambda chat_id, testo, bot_token=None: (True, None))
     _webhook(_promozione(CANALE, 'Backup'))
-    main.conferma_canale_backup(admin_s)
+    _conferma(admin_s, CANALE)
     assert _impostazione(percorso, main.CHIAVE_CANALE_BACKUP_ID) == str(CANALE)
 
     esito = _webhook(_promozione(CANALE, 'Backup'))  # la riconsegna
@@ -177,7 +187,7 @@ def test_la_cattura_e_atomica_con_la_conferma(tmp_path, monkeypatch):
 
     def conferma():
         try:
-            main.conferma_canale_backup(admin_s)
+            _conferma(admin_s, CANALE)
             esiti['conferma'] = 'ok'
         except Exception as e:  # noqa: BLE001
             esiti['conferma'] = repr(e)
@@ -304,7 +314,7 @@ def test_conferma_con_prova_riuscita_configura_e_traccia(tmp_path, monkeypatch):
         return True, None
 
     monkeypatch.setattr(main, 'invia_messaggio_telegram', finto_invio)
-    corpo = _corpo(main.conferma_canale_backup(admin_s))
+    corpo = _corpo(_conferma(admin_s, CANALE))
 
     assert inviato['chat_id'] == str(CANALE), 'la prova non e- andata al canale candidato'
     assert corpo['configurato'] == {'chat_id': str(CANALE), 'titolo': 'Backup BetRelay'}
@@ -329,7 +339,7 @@ def test_conferma_con_prova_FALLITA_non_salva_e_mostra_errore(tmp_path, monkeypa
 
     monkeypatch.setattr(main, 'invia_messaggio_telegram', finto_invio)
     with pytest.raises(HTTPException) as errore:
-        main.conferma_canale_backup(admin_s)
+        _conferma(admin_s, CANALE)
     assert errore.value.status_code == 400
     assert 'Telegram ha rifiutato la consegna' in str(errore.value.detail), \
         'il motivo dell-invio fallito non e- visibile nella risposta'
@@ -362,7 +372,7 @@ def test_conferma_abbandona_se_il_candidato_cambia_durante_la_prova(tmp_path, mo
 
     monkeypatch.setattr(main, 'invia_messaggio_telegram', invio_che_cambia_candidato)
     with pytest.raises(HTTPException) as errore:
-        main.conferma_canale_backup(admin_s)
+        _conferma(admin_s, CANALE)
     assert errore.value.status_code == 409, f'{errore.value.status_code} invece di 409'
     assert _impostazione(percorso, main.CHIAVE_CANALE_BACKUP_ID) is None, \
         'e- stato configurato il candidato vecchio nonostante fosse cambiato'
@@ -370,11 +380,39 @@ def test_conferma_abbandona_se_il_candidato_cambia_durante_la_prova(tmp_path, mo
         'il candidato NUOVO e- stato cancellato dalla conferma del vecchio'
 
 
+def test_la_conferma_rifiuta_un_candidato_diverso_da_quello_mostrato(tmp_path, monkeypatch):
+    """Precondizione dal client (Sol, gate finale #56): la conferma porta l'`chat_id` che il
+    pannello ha mostrato. Se fra il GET e il POST una riconsegna ha cambiato il candidato,
+    confermare l'id vecchio configurerebbe una destinazione che l'admin NON ha approvato → 409,
+    nessun invio di prova, niente configurato, candidato corrente intatto. Fail-first: senza il
+    confronto `candidato['chat_id'] != dati.chat_id` la conferma manderebbe la prova al candidato
+    corrente e lo configurerebbe, ignorando l'id approvato."""
+    from fastapi import HTTPException
+    percorso, admin_s, _c, _u = _admin(tmp_path, monkeypatch, 'precond.db')
+    # Il pannello aveva mostrato CANALE; una riconsegna ha poi cambiato il candidato corrente.
+    _metti_candidato(ALTRO_CANALE, 'Canale nuovo')
+    inviato = {}
+
+    def finto_invio(chat_id, testo, bot_token=None):
+        inviato['chat_id'] = chat_id
+        return True, None
+
+    monkeypatch.setattr(main, 'invia_messaggio_telegram', finto_invio)
+    with pytest.raises(HTTPException) as errore:
+        _conferma(admin_s, CANALE)   # l'admin conferma quello che aveva visto: CANALE
+    assert errore.value.status_code == 409, f'{errore.value.status_code} invece di 409'
+    assert 'chat_id' not in inviato, 'la prova e- partita verso un candidato non approvato'
+    assert _impostazione(percorso, main.CHIAVE_CANALE_BACKUP_ID) is None, \
+        'e- stato configurato un candidato diverso da quello approvato dall-admin'
+    assert _impostazione(percorso, main.CHIAVE_CANALE_CANDIDATO_ID) == str(ALTRO_CANALE), \
+        'il candidato corrente e- stato toccato'
+
+
 def test_conferma_senza_candidato_e_400(tmp_path, monkeypatch):
     from fastapi import HTTPException
     _p, admin_s, _c, _u = _admin(tmp_path, monkeypatch, 'senza.db')
     with pytest.raises(HTTPException) as errore:
-        main.conferma_canale_backup(admin_s)
+        _conferma(admin_s, CANALE)
     assert errore.value.status_code == 400
 
 
@@ -390,7 +428,7 @@ def test_prova_sul_configurato_e_rimozione(tmp_path, monkeypatch):
     _metti_candidato(CANALE, 'Backup')
     monkeypatch.setattr(main, 'invia_messaggio_telegram',
                         lambda chat_id, testo, bot_token=None: (True, None))
-    main.conferma_canale_backup(admin_s)
+    _conferma(admin_s, CANALE)
     assert _corpo(main.prova_canale_backup(admin_s)) == {'inviato': True}
 
     # rimozione
@@ -409,7 +447,7 @@ def test_un_NON_admin_non_vede_il_canale_di_backup(tmp_path, monkeypatch):
     from fastapi import HTTPException
     _p, _admin_s, cliente_s, _cliente = _admin(tmp_path, monkeypatch, 'estraneo_rotte.db')
     for chiamata in (lambda: main.stato_canale_backup(cliente_s),
-                     lambda: main.conferma_canale_backup(cliente_s),
+                     lambda: _conferma(cliente_s, CANALE),
                      lambda: main.prova_canale_backup(cliente_s),
                      lambda: main.rimuovi_canale_backup(cliente_s)):
         with pytest.raises(HTTPException) as errore:

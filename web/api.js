@@ -188,6 +188,38 @@ export function adminReminder() {
   return http('POST', '/api/admin/promemoria');
 }
 
+/* --------------------------------------------------------- canale di backup */
+
+// La configurazione del canale privato dove finiranno i backup automatici (#56).
+// Rispondono 404 a chi non e' l'amministratore, come tutto il pannello. Il `chat_id`
+// che tornano e' del proprietario (i canali hanno id negativi che Telegram non mostra):
+// non e' un token, e non esce mai dalle rotte 404.
+
+// Lo stato: `{configurato: {chat_id, titolo} | null, candidato: {chat_id, titolo} | null}`.
+export function statoCanaleBackup() {
+  return http('GET', '/api/admin/canale-backup');
+}
+
+// La conferma porta l'`chat_id` del candidato che la CARD ha mostrato: e' una
+// precondizione dal client, come `uid` sui parser (#75). Se fra la lettura dello stato e
+// questa conferma una riconsegna ha cambiato il candidato server-side, il server risponde
+// 409 e la card rilegge — cosi' non si configura una destinazione diversa da quella che
+// l'amministratore ha visto e approvato. Bloccante di GPT-5.6 Sol al gate finale (#56).
+export function confermaCanaleBackup(chatId) {
+  return http('POST', '/api/admin/canale-backup/conferma', { chat_id: chatId });
+}
+
+// Rimanda il messaggio di prova al canale gia' configurato. Un invio fallito torna
+// visibile col motivo (400), mai ingoiato.
+export function provaCanaleBackup() {
+  return http('POST', '/api/admin/canale-backup/prova');
+}
+
+// Rimuove il canale configurato (e l'eventuale candidato).
+export function rimuoviCanaleBackup() {
+  return http('DELETE', '/api/admin/canale-backup');
+}
+
 /* ----------------------------------------------------------------- parser */
 
 // La lista va sempre al server: e' il modo in cui un secondo dispositivo

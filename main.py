@@ -5100,20 +5100,48 @@ def stato_canale_backup(request: Request):
     return _rispondi_con_sessione(amministratore['id'], amministratore['versione'], corpo)
 
 
+class ConfermaCanaleIn(BaseModel):
+    """L'`chat_id` del candidato che il pannello ha mostrato all'amministratore.
+
+    E' una precondizione dal client, come `uid` sui parser (#75): fra il GET che mostra il
+    candidato e questo POST una riconsegna del webhook puo' aver cambiato il candidato
+    server-side, e senza l'id la conferma configurerebbe una destinazione DIVERSA da quella
+    approvata. Bloccante di GPT-5.6 Sol al gate finale del pezzo 2a (#56)."""
+    chat_id: str
+
+
 @app.post('/api/admin/canale-backup/conferma')
-def conferma_canale_backup(request: Request):
+async def conferma_canale_backup(request: Request):
     """Conferma il canale CANDIDATO come canale di backup, dopo un invio di PROVA riuscito.
 
-    Il messaggio di prova E' la verifica: se il bot non riesce a scrivere nel canale
-    (non e' amministratore, canale sbagliato, rete giu'), NON si salva niente e l'errore
-    torna VISIBILE (400 col motivo, che `invia_messaggio_telegram` garantisce senza
-    token). Solo su invio riuscito il candidato diventa il canale configurato e il
-    candidato si azzera — un solo canale di backup alla volta. Tracciato in `admin_audit`.
+    **Il corpo porta l'`chat_id` del candidato che il pannello ha mostrato** — una precondizione
+    dal client, come `uid` sui parser (#75). Fra il GET che mostra il candidato e questo POST una
+    riconsegna puo' averlo cambiato server-side; confermare l'id vecchio configurerebbe una
+    destinazione che l'amministratore non ha approvato. Se l'id non combacia col candidato
+    corrente → 409, e il pannello rilegge e rimostra. Bloccante di GPT-5.6 Sol (#56).
 
-    L'invio (rete) sta FUORI dalla transazione, come nel giro dei promemoria: non si
-    tiene un lock del database mentre si aspetta Telegram.
+    **Il corpo si legge DOPO `_solo_amministratore`**, non nella firma: con un parametro tipizzato
+    FastAPI validerebbe il corpo prima del controllo di sessione, e un estraneo riceverebbe 422
+    invece di 404 — la stessa ragione di `approva_richiesta`.
+
+    Il messaggio di prova E' la verifica: se il bot non riesce a scrivere nel canale (non e'
+    amministratore, canale sbagliato, rete giu'), NON si salva niente e l'errore torna VISIBILE
+    (400 col motivo, che `invia_messaggio_telegram` garantisce senza token). Solo su invio riuscito
+    il candidato diventa il canale configurato e il candidato si azzera — un solo canale di backup
+    alla volta. Tracciato in `admin_audit`.
+
+    L'invio (rete) sta FUORI dalla transazione, come nel giro dei promemoria: non si tiene un lock
+    del database mentre si aspetta Telegram.
     """
     amministratore = _solo_amministratore(request)
+    try:
+        dati = ConfermaCanaleIn(**(await _json_dal_corpo(request)))
+    except HTTPException:
+        raise
+    except Exception:
+        # Corpo assente, non JSON, o senza `chat_id`: 422, come farebbe FastAPI. Il messaggio
+        # non riporta il corpo ricevuto.
+        raise HTTPException(422, 'corpo non valido: serve {"chat_id": "<id del candidato>"}')
     c = db()
     try:
         candidato = _canale_candidato(c)
@@ -5121,7 +5149,12 @@ def conferma_canale_backup(request: Request):
         c.close()
     if not candidato:
         raise HTTPException(400, 'nessun canale candidato: aggiungi il bot come amministratore'
-                                 ' del canale, oppure inoltragli un messaggio del canale')
+                                 ' del canale privato')
+    if candidato['chat_id'] != dati.chat_id:
+        # Il candidato che l'admin ha approvato non e' piu' quello corrente: una riconsegna l'ha
+        # cambiato fra il GET e questo POST. Non si conferma una destinazione non approvata — il
+        # pannello rilegge e rimostra quella nuova. Precondizione dal client (Sol, #56).
+        raise HTTPException(409, 'il candidato e- cambiato: ricontrolla il canale proposto e riprova')
     riuscito, motivo = invia_messaggio_telegram(candidato['chat_id'], MESSAGGIO_PROVA_BACKUP)
     if not riuscito:
         raise HTTPException(400, f'invio di prova fallito: {motivo}')
@@ -5133,7 +5166,6 @@ def conferma_canale_backup(request: Request):
         # si configura quello vecchio — cancellerebbe il nuovo candidato senza traccia:
         # si abbandona con 409 e l'amministratore riconferma. Segnalato da GPT-5.5 e Fable 5.
         if leggi_impostazione(c, CHIAVE_CANALE_CANDIDATO_ID) != candidato['chat_id']:
-            c.rollback()
             raise HTTPException(409, 'il candidato e- cambiato durante la verifica: riprova')
         scrivi_impostazione(c, CHIAVE_CANALE_BACKUP_ID, candidato['chat_id'])
         scrivi_impostazione(c, CHIAVE_CANALE_BACKUP_TITOLO, candidato['titolo'])
@@ -5142,8 +5174,15 @@ def conferma_canale_backup(request: Request):
         _annota_admin(c, amministratore['id'], 'canale_backup_configurato')
         c.commit()
         corpo = {'configurato': _canale_configurato(c), 'candidato': None}
-    finally:
+    except Exception:
+        # Rollback e close ESPLICITI (come `rimuovi_canale_backup`): sotto contesa
+        # `BEGIN IMMEDIATE` stesso puo' sollevare `database is locked`, e senza questo ramo
+        # la connessione resterebbe aperta con una transazione mai chiusa. Include il 409
+        # qui sopra, che annulla la transazione non committata. Nota di Claude Fable 5 (#56).
+        c.rollback()
         c.close()
+        raise
+    c.close()
     return _rispondi_con_sessione(amministratore['id'], amministratore['versione'], corpo)
 
 

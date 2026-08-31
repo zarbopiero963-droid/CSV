@@ -344,6 +344,12 @@ async function viewRichieste() {
   try { richieste = await api.adminRequests(); }
   catch (e) { if (invocazione === generazione) fallita(e); return; }
   if (invocazione !== generazione) return;
+  // Lo stato del canale di backup (#56 pezzo 2). In un `try` a parte: durante un
+  // deploy parziale una rotta assente non deve rompere la vista Richieste — la card
+  // sparisce, il resto resta.
+  let canaleBackup = null;
+  try { canaleBackup = await api.statoCanaleBackup(); } catch { /* card assente */ }
+  if (invocazione !== generazione) return;
 
   const righe = richieste.map(r => `
     <div class="list-item">
@@ -387,7 +393,48 @@ async function viewRichieste() {
         log). Custodiscila come il database stesso — contiene i dati dei clienti.
       </p>
       <div class="row"><button data-act="scarica-backup">Scarica backup</button></div>
-    </div>`);
+    </div>
+    ${cardCanaleBackup(canaleBackup)}`);
+}
+
+// La card «Canale di backup» (#56 pezzo 2): il canale PRIVATO dove finiranno i backup
+// automatici. Il bot va aggiunto amministratore del canale; il webhook lo cattura come
+// candidato e la card lo fa confermare. La conferma manda l'`chat_id` che ha mostrato —
+// precondizione dal client, cosi' una riconsegna che cambia il candidato server-side non
+// configura di soppiatto una destinazione diversa (409, bloccante di GPT-5.6 Sol #56).
+function cardCanaleBackup(stato) {
+  const conf = stato && stato.configurato;
+  const cand = stato && stato.candidato;
+  const nome = c => esc(c.titolo || 'Canale senza titolo');
+  const riga = (etichetta, c) => `<span class="grow">${etichetta}
+      <span class="name">${nome(c)}</span>
+      <span class="dim small mono"> ${esc(c.chat_id)}</span></span>`;
+  return `
+    <div class="card stack" style="margin-top:18px">
+      <strong class="small">Canale di backup</strong>
+      <p class="dim small" style="margin:0">
+        Il canale Telegram <strong>privato</strong> dove finiranno i backup automatici.
+        Aggiungi il bot come <strong>amministratore</strong> del canale: comparirà qui come
+        proposta da confermare. La conferma manda prima un messaggio di prova. Un solo canale
+        alla volta.
+      </p>
+      ${conf ? `<div class="row" style="align-items:center;gap:8px">
+        <span class="pill on">configurato</span>
+        ${riga('', conf)}
+        <button class="small" data-act="prova-canale-backup">Manda una prova</button>
+        <button class="danger small" data-act="rimuovi-canale-backup">Rimuovi</button>
+      </div>` : ''}
+      ${cand ? `<div class="banner" style="margin:0"><div class="row"
+          style="align-items:center;gap:8px">
+        ${riga('Proposto:', cand)}
+        <button class="primary small" data-act="conferma-canale-backup"
+                data-chat="${esc(cand.chat_id)}">Conferma</button>
+      </div></div>` : ''}
+      ${!conf && !cand ? `<p class="dim small" style="margin:0">
+        Nessun canale configurato: aggiungi il bot come amministratore di un canale privato
+        e ricarica questa pagina.
+      </p>` : ''}
+    </div>`;
 }
 
 /* --------------------------------------------------------------- overview */
@@ -2166,6 +2213,35 @@ const actions = {
     // browser scarica il file senza lasciare la pagina. Nessuna funzione in
     // `api.js` — non e' un dato da mettere in cache, e' un file da salvare.
     window.location.href = '/api/admin/backup';
+  },
+  async 'conferma-canale-backup'(el) {
+    // Manda l'`chat_id` che la card ha MOSTRATO: se il candidato e' cambiato server-side
+    // il server risponde 409, `fallita` lo mostra e `render()` rilegge lo stato nuovo —
+    // non si configura una destinazione diversa da quella vista. Precondizione client (#56).
+    try { await api.confermaCanaleBackup(el.dataset.chat); }
+    catch (e) { fallita(e); render(); return; }
+    toast('Canale di backup configurato: la prova è partita.');
+    render();
+  },
+  async 'prova-canale-backup'() {
+    // Un invio fallito torna col motivo (mai il token): lo mostra `fallita`.
+    try { await api.provaCanaleBackup(); }
+    catch (e) { fallita(e); return; }
+    toast('Messaggio di prova inviato al canale.');
+  },
+  'rimuovi-canale-backup'() {
+    openModal(`<h2>Rimuovere il canale di backup?</h2>
+      <p class="muted small">I backup automatici non avranno più una destinazione finché
+      non ne configuri un altro. Il canale su Telegram non viene toccato.</p>
+      <div class="foot"><button data-act="close">Annulla</button>
+        <button class="danger" data-act="rimuovi-canale-backup-ok">Rimuovi</button></div>`);
+  },
+  async 'rimuovi-canale-backup-ok'() {
+    closeModal();
+    try { await api.rimuoviCanaleBackup(); }
+    catch (e) { fallita(e); return; }
+    toast('Canale di backup rimosso.');
+    render();
   },
 
   'ask-token'() {

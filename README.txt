@@ -738,16 +738,25 @@ canale CONFIGURATO:
     #56, e' stato scartato: qualunque post inoltrato al bot avrebbe riconfigurato il
     candidato di soppiatto.) Una riconsegna del my_chat_member dopo la conferma non
     ripropone un canale gia' configurato.
-  - CONFERMA: la conferma nel pannello manda un MESSAGGIO DI PROVA al candidato; solo
-    se l'invio riesce il candidato diventa il canale configurato. Se la prova fallisce
-    non si salva niente e l'errore e' VISIBILE nel pannello (mai ingoiato). Il candidato
-    si rilegge dentro la transazione: se e' cambiato durante la prova la conferma si
-    ferma (409) invece di configurare quello vecchio. Un solo canale di backup alla volta.
+  - CONFERMA: la card «Conferma» nel pannello manda al server, nel corpo, il chat_id del
+    candidato che ha MOSTRATO ({chat_id}) — una precondizione dal client, come uid sui
+    parser (#75): se fra la lettura dello stato e la conferma una riconsegna ha cambiato
+    il candidato server-side, il server risponde 409 e la card rilegge, invece di
+    configurare una destinazione che l'amministratore non ha approvato. Poi la conferma
+    manda un MESSAGGIO DI PROVA al candidato; solo se l'invio riesce il candidato diventa
+    il canale configurato. Se la prova fallisce non si salva niente e l'errore e' VISIBILE
+    nel pannello (mai ingoiato). Il candidato si rilegge anche dentro la transazione: se e'
+    cambiato durante la prova la conferma si ferma (409) invece di configurare quello
+    vecchio. Un solo canale di backup alla volta.
   Rotte, tutte 404 fuori dall'amministratore come il resto di /api/admin/*:
     GET    /api/admin/canale-backup            stato: {configurato, candidato}
-    POST   /api/admin/canale-backup/conferma   promuove il candidato dopo la prova
+    POST   /api/admin/canale-backup/conferma   corpo {chat_id}; promuove il candidato dopo
+                                               la prova (422 senza chat_id, 409 se non
+                                               combacia col candidato corrente)
     POST   /api/admin/canale-backup/prova      riprova l'invio sul canale configurato
     DELETE /api/admin/canale-backup            rimuove il canale configurato
+  Nel pannello admin la card «Canale di backup» (in fondo alla vista Richieste) mostra i tre
+  stati (proposto / configurato / vuoto) con Conferma, Manda una prova e Rimuovi.
   Configurare, confermare e rimuovere lasciano una riga in admin_audit. Il canale sta
   nella tabella impostazioni (chiave→valore), NON in chats: chats sono le SORGENTI dei
   segnali, e mettere li' la destinazione dei backup la iscriverebbe all'instradamento
