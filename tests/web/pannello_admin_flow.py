@@ -107,6 +107,24 @@ with sync_playwright() as pw:
     assert 'avvisati: 0' in promemoria and 'falliti: 0' in promemoria, promemoria
     pg.screenshot(path=str(OUT / '04-promemoria.png'), full_page=True)
 
+    # Il backup (#56): il pulsante nella card «Backup del database», e il click
+    # scarica davvero un file betrelay-backup-...db. La rotta /api/admin/backup e'
+    # protetta dal cookie di sessione (questo contesto porta quello dell'admin);
+    # la risposta e' Content-Disposition attachment, quindi il browser scarica.
+    pg.wait_for_selector('[data-act="scarica-backup"]')
+    with pg.expect_download() as scarico:
+        pg.click('[data-act="scarica-backup"]')
+    scaricato = scarico.value
+    nome = scaricato.suggested_filename
+    assert nome.startswith('betrelay-backup-') and nome.endswith('.db'), \
+        f'nome del backup inatteso: {nome!r}'
+    percorso_backup = OUT / 'backup-scaricato.db'
+    scaricato.save_as(str(percorso_backup))
+    with open(percorso_backup, 'rb') as f:
+        primi = f.read(16)
+    assert primi == b'SQLite format 3\x00', f'il backup scaricato non e- SQLite: {primi!r}'
+    pg.screenshot(path=str(OUT / '04b-backup.png'), full_page=True)
+
     # ---- la race ABA della guardia anti-stantio (bloccante GPT-5.6 Sol, #53):
     # uscire e RIENTRARE nello stesso hash lascia l'hash identico, quindi un
     # confronto sull'hash non basta — una risposta della visita PRECEDENTE,
