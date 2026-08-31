@@ -4,11 +4,11 @@ Il backup del database (#56 pezzo 1) va a finire da qualche parte: il proprietar
 decide un **canale Telegram privato** e ci aggiunge il bot come amministratore. Qui si
 verifica la parte backend di quella configurazione:
 
-- la **cattura**: il webhook riconosce il canale — dal bot promosso amministratore
-  (`my_chat_member`) o da un messaggio inoltrato (`forward_from_chat`) — ma **solo** se
-  l'azione viene dall'amministratore, e scrive solo un CANDIDATO. Non tocca `chats`: il
-  canale di backup e' una destinazione, non una sorgente di segnali, e finire in `chats`
-  lo iscriverebbe all'instradamento del webhook;
+- la **cattura**: il webhook riconosce il canale quando il proprietario promuove il bot
+  amministratore (`my_chat_member`) — ma **solo** se l'azione viene dall'amministratore,
+  e scrive solo un CANDIDATO. Non tocca `chats`: il canale di backup e' una destinazione,
+  non una sorgente di segnali, e finire in `chats` lo iscriverebbe all'instradamento
+  del webhook;
 - la **conferma**: promuove il candidato a canale configurato **solo dopo** un invio di
   prova riuscito; se la prova fallisce non salva niente e l'errore torna visibile;
 - l'**isolamento**: tutte le rotte sono 404 per chi non e' l'amministratore.
