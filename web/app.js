@@ -378,6 +378,15 @@ async function viewRichieste() {
       </p>
       <div class="row"><button data-act="giro-promemoria">Manda il giro di promemoria</button>
         <span class="small dim" id="esito-promemoria"></span></div>
+    </div>
+    <div class="card stack" style="margin-top:18px">
+      <strong class="small">Backup del database</strong>
+      <p class="dim small" style="margin:0">
+        Scarica una copia completa e consistente di tutti i dati del servizio
+        (<span class="mono">signals.db</span>: utenti, parser, mercati, hash dei token,
+        log). Custodiscila come il database stesso — contiene i dati dei clienti.
+      </p>
+      <div class="row"><button data-act="scarica-backup">Scarica backup</button></div>
     </div>`);
 }
 
@@ -2149,6 +2158,14 @@ const actions = {
              : '');
       }
     } catch (e) { fallita(e); }
+  },
+  'scarica-backup'() {
+    // Il download passa dalla navigazione del browser, non da `fetch`: la rotta
+    // `/api/admin/backup` e' protetta dal cookie di sessione (404 per chi non e'
+    // amministratore) e risponde con `Content-Disposition: attachment`, quindi il
+    // browser scarica il file senza lasciare la pagina. Nessuna funzione in
+    // `api.js` — non e' un dato da mettere in cache, e' un file da salvare.
+    window.location.href = '/api/admin/backup';
   },
 
   'ask-token'() {

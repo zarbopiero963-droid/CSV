@@ -107,6 +107,9 @@ ROTTE_CON_AUTENTICAZIONE_PROPRIA = {
     ('POST', '/api/admin/requests/{richiesta}/approva'): 404,
     ('POST', '/api/admin/requests/{richiesta}/rifiuta'): 404,
     ('POST', '/api/admin/promemoria'): 404,
+    # Scarica l'intero database (#56): copia dei dati dei clienti, quindi **404** a
+    # chi non e' l'amministratore, come il resto di `/api/admin/*`.
+    ('GET', '/api/admin/backup'): 404,
     # I parser dell'utente: autenticazione a SESSIONE, non col token del feed. Senza
     # cookie valido → 401 come `/api/me`. Le due rotte col corpo (POST, PUT) lo leggono
     # a mano DOPO il controllo della sessione, o FastAPI risponderebbe 422 al corpo

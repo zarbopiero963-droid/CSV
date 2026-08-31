@@ -678,6 +678,59 @@ Il parser attuale riconosce un messaggio contenente "P.Bet. PREMACHT 0,5HT", cer
 CSV: 14 colonne, virgola, campi tra virgolette, terminatore CRLF, UTF-8 con BOM,
      colonna finale Points. Verificato da verify_csv() prima di ogni scrittura.
 
+PRIMA DI UN DEPLOY
+Un deploy NON tocca i dati: il database vive nel volume montato su /data
+(DB_PATH=/data/signals.db) e il volume sopravvive al riavvio del container. Ma un
+riavvio ferma il servizio per qualche secondo, e in quei secondi un segnale live
+arriva in ritardo. Quindi, in ordine:
+- SCEGLI UN ORARIO TRANQUILLO, mai nel pieno delle partite: un ritardo di pochi
+  secondi su un segnale live puo' far perdere l'ingresso. Le ore piccole vanno bene.
+- PRIMA DI UNA MODIFICA RISCHIOSA (migrazione di schema, cambio di variabili
+  d'ambiente) scarica un backup fresco (vedi BACKUP): se qualcosa va storto, hai la
+  copia di com'era prima.
+- DOPO IL RIAVVIO verifica /health come scritto sopra (status ok, webhook_registrato
+  true, aspettando fino a un minuto), poi manda un segnale di prova dal canale.
+
+BACKUP
+Tutti i dati del servizio stanno in UN file: signals.db, dentro il volume — utenti,
+parser, libreria mercati, hash dei token, log, richieste di accesso. Le VARIABILI
+D'AMBIENTE non stanno nel database ne' nel repository (bot token, CSV_ACCESS_TOKEN,
+ADMIN_PASSWORD_HASH, DB_PATH: vedi VARIABILI RAILWAY): vanno salvate a parte dal
+proprietario una volta sola, perche' un backup del database non le contiene.
+
+COPIA MANUALE, DAL PANNELLO. Nella vista Richieste (solo amministratore) il pulsante
+"Scarica backup" consegna una copia completa e CONSISTENTE del database, col nome
+betrelay-backup-AAAA-MM-GG-HHMM.db. La copia e' presa con l'API di backup di SQLite,
+non con un cp del file a caldo: una copia grezza mentre il servizio scrive puo'
+uscire a meta' di una transazione, e un backup corrotto e' peggio di nessuno perche'
+lo si scopre solo il giorno in cui serve. La rotta e' GET /api/admin/backup e
+risponde 404 a chi non e' l'amministratore, come tutto /api/admin/*. Ogni download
+lascia una riga in admin_audit, scritta DOPO che la copia e' riuscita (una copia
+fallita non lascia la traccia di un download mai avvenuto). La copia e' pesante in
+memoria, quindi ne gira UNA per volta: click ravvicinati o richieste concorrenti si
+mettono in coda invece di moltiplicare il picco di RAM. E poiche' e' una GET che
+avvia un lavoro costoso, la rotta rifiuta (403) le navigazioni che il browser marca
+come provenienti da un altro sito (Sec-Fetch-Site cross-site/same-site): il pulsante
+del pannello e' same-origin e continua a funzionare, ma una pagina ostile non puo'
+indurre il browser dell'amministratore a generare backup a ripetizione.
+
+RUNTIME. La copia consistente usa sqlite3.Connection.serialize(), comparso in Python
+3.11: su un interprete piu' vecchio la rotta fallirebbe solo in produzione, al primo
+download. Per questo il runtime e' pinnato: .python-version in radice dice 3.11, la
+stessa versione su cui gira la CI, cosi' Railway/Nixpacks non deriva a una Python mai
+testata. Una guardia (tests/safety/test_python_deploy.py) impedisce di abbassare il
+pin sotto quella provata dai test.
+
+SNAPSHOT DEL VOLUME SU RAILWAY. Railway offre snapshot del volume dal suo pannello:
+sono una copia indipendente dal servizio, che un deploy non tocca. Attivali come
+rete di sicurezza aggiuntiva - e' un'azione una-tantum del proprietario dal pannello
+Railway, gia' possibile ora.
+
+SICUREZZA DEL BACKUP. Il file contiene i dati dei clienti - i token solo come hash,
+mai in chiaro, ma comunque dati da proteggere. Va custodito come il database stesso:
+chi ha il backup ha i dati. Non lasciarlo in cartelle condivise o allegati non
+protetti.
+
 TEST E CI
 python -m pytest -q esegue la suite. Le dipendenze dei soli test stanno in
 requirements-dev.txt, separate da quelle del deploy:
