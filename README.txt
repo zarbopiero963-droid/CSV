@@ -707,6 +707,13 @@ lo si scopre solo il giorno in cui serve. La rotta e' GET /api/admin/backup e
 risponde 404 a chi non e' l'amministratore, come tutto /api/admin/*. Ogni download
 lascia una riga in admin_audit.
 
+RUNTIME. La copia consistente usa sqlite3.Connection.serialize(), comparso in Python
+3.11: su un interprete piu' vecchio la rotta fallirebbe solo in produzione, al primo
+download. Per questo il runtime e' pinnato: .python-version in radice dice 3.11, la
+stessa versione su cui gira la CI, cosi' Railway/Nixpacks non deriva a una Python mai
+testata. Una guardia (tests/safety/test_python_deploy.py) impedisce di abbassare il
+pin sotto quella provata dai test.
+
 SNAPSHOT DEL VOLUME SU RAILWAY. Railway offre snapshot del volume dal suo pannello:
 sono una copia indipendente dal servizio, che un deploy non tocca. Attivali come
 rete di sicurezza aggiuntiva - e' un'azione una-tantum del proprietario dal pannello
