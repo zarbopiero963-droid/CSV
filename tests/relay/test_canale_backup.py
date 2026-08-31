@@ -129,6 +129,55 @@ def test_una_riconsegna_del_canale_gia_configurato_non_lo_ripropone(tmp_path, mo
         'una riconsegna ha riproposto un canale gia- configurato'
 
 
+def test_la_cattura_e_atomica_con_la_conferma(tmp_path, monkeypatch):
+    """Una riconsegna concorrente con la conferma non deve mai lasciare un candidato per
+    un canale GIA' configurato: il check-e-scrivi della cattura e' atomico (BEGIN
+    IMMEDIATE), quindi si serializza con la conferma. Si allarga la finestra fra check e
+    scrittura (uno sleep durante la lettura del configurato) e si lanciano due thread.
+    Fail-first: senza BEGIN IMMEDIATE la conferma si intreccia nella finestra e resta un
+    candidato per il canale configurato. Bloccante di GPT-5.6 Sol al gate finale (#56)."""
+    import threading
+    import time as _time
+    percorso, admin_s, _c, _u = _admin(tmp_path, monkeypatch, 'atomica.db')
+    _abilita_webhook(monkeypatch)
+    monkeypatch.setattr(main, 'invia_messaggio_telegram',
+                        lambda chat_id, testo, bot_token=None: (True, None))
+    _metti_candidato(CANALE, 'X')  # candidato presente, non ancora configurato
+
+    reale = main.leggi_impostazione
+
+    def lenta(c, chiave, default=None):
+        valore = reale(c, chiave, default)
+        if chiave == main.CHIAVE_CANALE_BACKUP_ID:
+            _time.sleep(0.25)  # allarga la finestra fra il check e la scrittura
+        return valore
+
+    monkeypatch.setattr(main, 'leggi_impostazione', lenta)
+
+    def riconsegna():
+        _webhook(_promozione(CANALE, 'X'))
+
+    def conferma():
+        try:
+            main.conferma_canale_backup(admin_s)
+        except Exception:  # noqa: BLE001 - l'esito non conta, conta l'invariante finale
+            pass
+
+    t_cap = threading.Thread(target=riconsegna)
+    t_con = threading.Thread(target=conferma)
+    t_cap.start()
+    _time.sleep(0.05)  # la cattura entra per prima nella finestra
+    t_con.start()
+    t_cap.join()
+    t_con.join()
+
+    configurato = _impostazione(percorso, main.CHIAVE_CANALE_BACKUP_ID)
+    candidato = _impostazione(percorso, main.CHIAVE_CANALE_CANDIDATO_ID)
+    assert not (configurato == str(CANALE) and candidato == str(CANALE)), (
+        'un canale CONFIGURATO ha ancora un candidato per se stesso: la cattura non e- '
+        'atomica con la conferma')
+
+
 def test_la_cattura_non_disturba_un_segnale_normale(tmp_path, monkeypatch):
     """Un `channel_post` normale (nessun my_chat_member, nessun forward) prosegue verso
     il dispatch: la cattura non intercetta i messaggi dei canali sorgente."""

@@ -7234,10 +7234,18 @@ def _cattura_canale_backup(payload):
     titolo = (ch.get('title') or '').strip()
     c = db()
     try:
-        # Riconsegna dopo la conferma: Telegram riconsegna gli update e questa cattura gira
-        # PRIMA del dedup di `webhook_seen`. Se il canale e' GIA' quello configurato, una
-        # riconsegna non deve riproporre nel pannello una proposta gia' consumata (Fable 5).
+        # Controllo e scrittura ATOMICI, sotto `BEGIN IMMEDIATE`. Senza, la coppia
+        # «leggi il configurato / scrivi il candidato» ha una finestra: questa cattura gira
+        # nel loop e PRIMA del dedup di `webhook_seen`, mentre la conferma gira in un thread
+        # del pool — e sqlite rilascia il GIL durante l'I/O. Una riconsegna poteva leggere
+        # «non configurato», la conferma configurare nel frattempo, e la riconsegna riscrivere
+        # il candidato gia' consumato. BEGIN IMMEDIATE prende il lock di scrittura e serializza
+        # con la conferma (anch'essa BEGIN IMMEDIATE): o l'una o l'altra, mai intrecciate.
+        # Se il canale e' GIA' quello configurato, una riconsegna non ripropone una proposta
+        # gia' consumata. Bloccante di GPT-5.6 Sol; la guardia sequenziale l'aveva vista Fable.
+        c.execute('BEGIN IMMEDIATE')
         if leggi_impostazione(c, CHIAVE_CANALE_BACKUP_ID) == chat_id:
+            c.rollback()
             return {'ok': True, 'canale_backup_gia_configurato': True}
         scrivi_impostazione(c, CHIAVE_CANALE_CANDIDATO_ID, chat_id)
         scrivi_impostazione(c, CHIAVE_CANALE_CANDIDATO_TITOLO, titolo)
@@ -7304,8 +7312,8 @@ async def telegram_webhook(request: Request):
         raise HTTPException(403, 'Forbidden')
     payload = await request.json()
     # Cattura del canale di backup (#56 pezzo 2): il bot promosso amministratore di un
-    # canale, o un messaggio del canale inoltrato al bot, dall'amministratore. Registra
-    # solo un CANDIDATO da confermare nel pannello — non e' un percorso verso i segnali.
+    # canale dall'amministratore. Registra solo un CANDIDATO da confermare nel pannello —
+    # non e' un percorso verso i segnali.
     catturato = _cattura_canale_backup(payload)
     if catturato is not None:
         return catturato
