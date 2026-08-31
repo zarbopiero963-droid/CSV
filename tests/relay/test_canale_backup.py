@@ -408,6 +408,34 @@ def test_la_conferma_rifiuta_un_candidato_diverso_da_quello_mostrato(tmp_path, m
         'il candidato corrente e- stato toccato'
 
 
+def test_la_conferma_manda_la_prova_fuori_dall_event_loop(tmp_path, monkeypatch):
+    """La rotta di conferma e' `async`, quindi gira sul loop: l'invio di prova e' un I/O di rete
+    SINCRONO e va off-loaded, o l'attesa di Telegram bloccherebbe TUTTE le richieste del servizio
+    (webhook, feed CSV) fino al timeout. Deve girare su un thread diverso da quello del loop.
+    Fail-first: chiamando `invia_messaggio_telegram` direttamente, i due identificativi di thread
+    coincidono. Bloccante di GPT-5.6 Sol al gate finale (#56)."""
+    import threading
+    _p, admin_s, _c, _u = _admin(tmp_path, monkeypatch, 'offload_conferma.db')
+    _metti_candidato(CANALE, 'Backup')
+    identita = {}
+
+    def invio_spia(chat_id, testo, bot_token=None):
+        identita['invio'] = threading.get_ident()
+        return True, None
+
+    monkeypatch.setattr(main, 'invia_messaggio_telegram', invio_spia)
+
+    async def guida():
+        identita['loop'] = threading.get_ident()
+        return await main.conferma_canale_backup(_CorpoFinto(admin_s, {'chat_id': str(CANALE)}))
+
+    esito = asyncio.run(guida())
+    assert _corpo(esito)['configurato'] == {'chat_id': str(CANALE), 'titolo': 'Backup'}
+    assert identita.get('invio') is not None, 'l-invio di prova non e- stato chiamato'
+    assert identita['invio'] != identita['loop'], \
+        'l-invio di prova ha girato sull-event loop invece che su un thread'
+
+
 def test_conferma_senza_corpo_valido_e_422_non_404(tmp_path, monkeypatch):
     """La conferma legge `{chat_id}` dal corpo DOPO il controllo di sessione: un admin con un
     corpo senza `chat_id` riceve 422 (validazione), non 404 — il 404 e' la risposta al

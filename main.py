@@ -5155,7 +5155,12 @@ async def conferma_canale_backup(request: Request):
         # cambiato fra il GET e questo POST. Non si conferma una destinazione non approvata — il
         # pannello rilegge e rimostra quella nuova. Precondizione dal client (Sol, #56).
         raise HTTPException(409, 'il candidato e- cambiato: ricontrolla il canale proposto e riprova')
-    riuscito, motivo = invia_messaggio_telegram(candidato['chat_id'], MESSAGGIO_PROVA_BACKUP)
+    # In un thread: questa rotta e' `async`, quindi gira sul loop, e `invia_messaggio_telegram`
+    # e' un I/O di rete SINCRONO — chiamarlo direttamente terrebbe l'event loop bloccato fino al
+    # timeout di Telegram, fermando webhook, feed CSV e le richieste di tutti gli utenti. E' lo
+    # stesso motivo e la stessa forma di `approva_richiesta`. Bloccante di GPT-5.6 Sol (#56).
+    riuscito, motivo = await asyncio.to_thread(
+        invia_messaggio_telegram, candidato['chat_id'], MESSAGGIO_PROVA_BACKUP)
     if not riuscito:
         raise HTTPException(400, f'invio di prova fallito: {motivo}')
     c = db()
