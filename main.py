@@ -2081,6 +2081,14 @@ def _travasa_nel_multiutente(c):
 # resta parcheggiata sul future di `to_thread` e il servizio continua a rispondere.
 _lucchetto_backup = threading.Lock()
 
+# Un solo INVIO del backup al canale per volta (#56 pezzo 3). `_lucchetto_backup` serializza la
+# COPIA, ma non l'orchestrazione intera: due invii simultanei (il bottone admin e il giro del cron
+# che si sovrappongono) copierebbero uno alla volta ma poi caricherebbero DUE documenti sul canale
+# e scriverebbero DUE righe di audit. Questo lucchetto, preso in modo NON bloccante, fa passare il
+# primo e fa rispondere «gia' in corso» al secondo, senza consegne ne' audit doppi. Segnalato da
+# GPT-5.5 sulla PR #101.
+_lucchetto_invio_backup = threading.Lock()
+
 
 def _serializza_db():
     """I byte di `signals.db` via l'API di backup di SQLite — senza politica di accesso.
@@ -5382,41 +5390,53 @@ def _invia_backup_al_canale(amministratore_id=None):
     `admin_audit` con l'admin che ha premuto il bottone, o `NULL` per il giro del cron.
     """
     import tempfile
-    c = db()
+    # Un solo invio alla volta: se un altro e' in corso (bottone e cron sovrapposti) si esce senza
+    # consegnare ne' tracciare due volte. NON bloccante di proposito — il secondo non deve
+    # accodarsi e mandare un secondo backup, deve semplicemente saltare. GPT-5.5, PR #101.
+    if not _lucchetto_invio_backup.acquire(blocking=False):
+        return False, 'un backup e- gia- in corso: riprova fra poco'
     try:
-        configurato = _canale_configurato(c)
-    finally:
-        c.close()
-    if not configurato:
-        return False, 'nessun canale di backup configurato'
-    chat_id = configurato['chat_id']
-    ok, dati = leggi_chat_telegram(chat_id)
-    if not ok:
-        return False, f'verifica del canale fallita: {dati}'
-    if dati.get('username'):
-        return False, ('il canale e- diventato pubblico: rimuovilo e configura un canale privato'
-                       ' prima di inviare il backup')
-    fd, percorso = tempfile.mkstemp(prefix='betrelay-backup-', suffix='.db')
-    os.close(fd)
-    try:
-        copia_backup_su_file(percorso)
-        nome = f'betrelay-backup-{time.strftime("%Y-%m-%d-%H%M", time.gmtime())}.db'
-        riuscito, motivo = invia_documento_telegram(
-            chat_id, percorso, nome, didascalia='BetRelay: backup automatico del database.')
-    finally:
+        c = db()
         try:
-            os.unlink(percorso)
-        except OSError:
-            pass
-    if not riuscito:
-        return False, f'invio del documento fallito: {motivo}'
-    c = db()
-    try:
-        _annota_admin(c, amministratore_id, 'backup_inviato')
-        c.commit()
+            configurato = _canale_configurato(c)
+        finally:
+            c.close()
+        if not configurato:
+            return False, 'nessun canale di backup configurato'
+        chat_id = configurato['chat_id']
+        ok, dati = leggi_chat_telegram(chat_id)
+        if not ok:
+            return False, f'verifica del canale fallita: {dati}'
+        # Deve essere ANCORA un canale PRIVATO: `type == 'channel'` e senza `username`. Un canale
+        # reso pubblico (ha uno username) o convertito in gruppo/supergruppo non deve ricevere il
+        # backup coi dati dei clienti. La cattura lo garantiva alla configurazione; qui si riverifica
+        # prima di OGNI invio. Sol al gate del pezzo 2, rafforzato da GPT-5.5 sulla PR #101.
+        if (dati.get('type') or '') != 'channel' or dati.get('username'):
+            return False, ('il canale non e- piu- un canale privato: rimuovilo e configura un'
+                           ' canale privato prima di inviare il backup')
+        fd, percorso = tempfile.mkstemp(prefix='betrelay-backup-', suffix='.db')
+        os.close(fd)
+        try:
+            copia_backup_su_file(percorso)
+            nome = f'betrelay-backup-{time.strftime("%Y-%m-%d-%H%M", time.gmtime())}.db'
+            riuscito, motivo = invia_documento_telegram(
+                chat_id, percorso, nome, didascalia='BetRelay: backup automatico del database.')
+        finally:
+            try:
+                os.unlink(percorso)
+            except OSError:
+                pass
+        if not riuscito:
+            return False, f'invio del documento fallito: {motivo}'
+        c = db()
+        try:
+            _annota_admin(c, amministratore_id, 'backup_inviato')
+            c.commit()
+        finally:
+            c.close()
+        return True, None
     finally:
-        c.close()
-    return True, None
+        _lucchetto_invio_backup.release()
 
 
 @app.post('/api/admin/backup/invia')

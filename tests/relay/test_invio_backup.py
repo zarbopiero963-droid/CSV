@@ -161,19 +161,35 @@ def test_backup_al_canale_senza_canale_configurato(tmp_path, monkeypatch):
 
 
 def test_backup_al_canale_rifiuta_un_canale_diventato_PUBBLICO(tmp_path, monkeypatch):
-    """Riverifica privacy con getChat: se il canale ora ha uno `username` (pubblico) NON si
-    invia — il backup coi dati dei clienti non deve finire dove chiunque puo' leggerlo. Fail-first:
-    senza il controllo su `username` il documento partirebbe lo stesso. Sol, gate del pezzo 2."""
+    """Riverifica privacy con getChat: un canale reso pubblico (ha uno `username`) NON riceve il
+    backup — i dati dei clienti non devono finire dove chiunque puo' leggerli. Fail-first: senza il
+    controllo su `username` il documento partirebbe lo stesso. Sol, gate del pezzo 2."""
     _p, _a, _c, _u = _admin(tmp_path, monkeypatch, 'pubblico.db')
     _configura_canale()
-    monkeypatch.setattr(main, 'leggi_chat_telegram',
-                        lambda chat_id, bot_token=None: (True, {'id': CANALE, 'username': 'ora_pubblico'}))
+    monkeypatch.setattr(main, 'leggi_chat_telegram', lambda chat_id, bot_token=None: (
+        True, {'id': CANALE, 'type': 'channel', 'username': 'ora_pubblico'}))
     inviato = {}
     monkeypatch.setattr(main, 'invia_documento_telegram',
                         lambda *a, **k: inviato.setdefault('si', True) or (True, None))
     riuscito, motivo = main._invia_backup_al_canale()
-    assert riuscito is False and 'pubblico' in motivo, (riuscito, motivo)
+    assert riuscito is False and 'privat' in motivo, (riuscito, motivo)
     assert 'si' not in inviato, 'il backup e- partito verso un canale diventato pubblico'
+
+
+def test_backup_al_canale_rifiuta_una_destinazione_non_channel(tmp_path, monkeypatch):
+    """Difesa in profondita' (GPT-5.5, PR #101): la destinazione deve essere `type == 'channel'`.
+    Se getChat riporta un gruppo/privato (canale convertito, o config errata) NON si invia. Fail-
+    first: senza il controllo su `type` una destinazione non-channel riceverebbe il backup."""
+    _p, _a, _c, _u = _admin(tmp_path, monkeypatch, 'nonchannel.db')
+    _configura_canale()
+    monkeypatch.setattr(main, 'leggi_chat_telegram',
+                        lambda chat_id, bot_token=None: (True, {'id': CANALE, 'type': 'group'}))
+    inviato = {}
+    monkeypatch.setattr(main, 'invia_documento_telegram',
+                        lambda *a, **k: inviato.setdefault('si', True) or (True, None))
+    riuscito, motivo = main._invia_backup_al_canale()
+    assert riuscito is False and 'privat' in motivo, (riuscito, motivo)
+    assert 'si' not in inviato, 'il backup e- partito verso una destinazione non-channel'
 
 
 def test_backup_al_canale_invia_e_traccia(tmp_path, monkeypatch):
@@ -202,6 +218,47 @@ def test_backup_al_canale_invia_e_traccia(tmp_path, monkeypatch):
     assert righe == [(7,)], f'audit inatteso per l-invio del backup: {righe}'
 
 
+def test_un_solo_invio_di_backup_alla_volta(tmp_path, monkeypatch):
+    """Due invii simultanei (bottone + cron sovrapposti) non devono consegnare due documenti ne'
+    scrivere due audit: il lucchetto NON bloccante fa passare uno e fa saltare l'altro con «gia' in
+    corso». Fail-first: senza il lucchetto entrambi inviano e restano due righe di audit."""
+    import time as _time
+    percorso, _a, _c, _u = _admin(tmp_path, monkeypatch, 'concorrenza_invio.db')
+    _configura_canale()
+    monkeypatch.setattr(main, 'leggi_chat_telegram',
+                        lambda chat_id, bot_token=None: (True, {'id': CANALE, 'type': 'channel'}))
+    invii = []
+
+    def invio_lento(chat_id, percorso_file, nome, didascalia=None, bot_token=None):
+        invii.append(1)
+        _time.sleep(0.3)   # allarga la finestra perche' i due thread si sovrappongano
+        return True, None
+
+    monkeypatch.setattr(main, 'invia_documento_telegram', invio_lento)
+    esiti = {}
+
+    def uno(chiave):
+        esiti[chiave] = main._invia_backup_al_canale(amministratore_id=1)
+
+    t1 = threading.Thread(target=uno, args=('a',))
+    t2 = threading.Thread(target=uno, args=('b',))
+    t1.start()
+    _time.sleep(0.05)   # il primo entra nel lucchetto per primo
+    t2.start()
+    t1.join()
+    t2.join()
+
+    riusciti = [k for k, v in esiti.items() if v == (True, None)]
+    saltati = [k for k, v in esiti.items() if v[0] is False and 'gia' in v[1]]
+    assert len(riusciti) == 1 and len(saltati) == 1, esiti
+    assert len(invii) == 1, f'{len(invii)} invii: il lucchetto non serializza l-orchestrazione'
+    c = sqlite3.connect(percorso)
+    righe = c.execute("SELECT COUNT(*) FROM admin_audit"
+                      " WHERE action='backup_inviato'").fetchone()[0]
+    c.close()
+    assert righe == 1, f'{righe} righe di audit per due invii concorrenti'
+
+
 # --------------------------------------------------------------- la rotta
 
 def test_invia_backup_con_sessione_admin(tmp_path, monkeypatch):
@@ -220,7 +277,7 @@ def test_invia_backup_col_token_del_cron_traccia_senza_admin(tmp_path, monkeypat
     _configura_canale()
     monkeypatch.setattr(main, 'BACKUP_CRON_TOKEN', 'segreto-del-cron')
     monkeypatch.setattr(main, 'leggi_chat_telegram',
-                        lambda chat_id, bot_token=None: (True, {'id': CANALE}))
+                        lambda chat_id, bot_token=None: (True, {'id': CANALE, 'type': 'channel'}))
     monkeypatch.setattr(main, 'invia_documento_telegram',
                         lambda *a, **k: (True, None))
     corpo = _corpo(asyncio.run(main.invia_backup(_RichiestaCron('segreto-del-cron'))))
