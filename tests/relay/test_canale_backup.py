@@ -154,14 +154,17 @@ def test_la_cattura_e_atomica_con_la_conferma(tmp_path, monkeypatch):
 
     monkeypatch.setattr(main, 'leggi_impostazione', lenta)
 
+    esiti = {}
+
     def riconsegna():
         _webhook(_promozione(CANALE, 'X'))
 
     def conferma():
         try:
             main.conferma_canale_backup(admin_s)
-        except Exception:  # noqa: BLE001 - l'esito non conta, conta l'invariante finale
-            pass
+            esiti['conferma'] = 'ok'
+        except Exception as e:  # noqa: BLE001
+            esiti['conferma'] = repr(e)
 
     t_cap = threading.Thread(target=riconsegna)
     t_con = threading.Thread(target=conferma)
@@ -173,9 +176,14 @@ def test_la_cattura_e_atomica_con_la_conferma(tmp_path, monkeypatch):
 
     configurato = _impostazione(percorso, main.CHIAVE_CANALE_BACKUP_ID)
     candidato = _impostazione(percorso, main.CHIAVE_CANALE_CANDIDATO_ID)
-    assert not (configurato == str(CANALE) and candidato == str(CANALE)), (
-        'un canale CONFIGURATO ha ancora un candidato per se stesso: la cattura non e- '
-        'atomica con la conferma')
+    # La conferma DEVE essere riuscita, o l'assert sull'invariante passerebbe a vuoto:
+    # senza configurazione `configurato` resterebbe None e la race non sarebbe esercitata.
+    # Cosi' invece il test prova INSIEME che la conferma configura e che la cattura
+    # concorrente non lascia un candidato per il canale configurato (nota di GPT-5.5).
+    assert esiti.get('conferma') == 'ok', f'la conferma non e- riuscita: {esiti.get("conferma")}'
+    assert configurato == str(CANALE), f'la conferma non ha configurato il canale: {configurato}'
+    assert candidato is None, (
+        'un canale CONFIGURATO ha ancora un candidato: la cattura non e- atomica con la conferma')
 
 
 def test_la_cattura_non_disturba_un_segnale_normale(tmp_path, monkeypatch):
