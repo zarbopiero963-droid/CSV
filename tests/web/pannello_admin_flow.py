@@ -125,6 +125,17 @@ with sync_playwright() as pw:
     assert primi == b'SQLite format 3\x00', f'il backup scaricato non e- SQLite: {primi!r}'
     pg.screenshot(path=str(OUT / '04b-backup.png'), full_page=True)
 
+    # La card «Canale di backup» (#56 pezzo 2) col BACKEND VERO, non stubbato: qui non c'e'
+    # nessun candidato ne' configurato, quindi la rotta reale `GET /api/admin/canale-backup`
+    # risponde `{configurato: null, candidato: null}` e la card mostra lo stato vuoto — senza
+    # errori in console (il collettore sopra e' senza filtri). E' la copertura E2E su rotta
+    # reale chiesta da GPT-5.5 sulla PR #100; i tre stati pieni li pilota
+    # `tests/web/canale_backup_flow.py`.
+    card_backup = pg.locator('.card', has_text='Canale di backup')
+    card_backup.wait_for()
+    assert 'Nessun canale configurato' in card_backup.inner_text(), (
+        'la card del canale di backup non mostra lo stato vuoto col backend vero')
+
     # ---- la race ABA della guardia anti-stantio (bloccante GPT-5.6 Sol, #53):
     # uscire e RIENTRARE nello stesso hash lascia l'hash identico, quindi un
     # confronto sull'hash non basta — una risposta della visita PRECEDENTE,

@@ -115,6 +115,14 @@ export async function adminApprove() { _non_admin(); }
 export async function adminReject() { _non_admin(); }
 export async function adminReminder() { _non_admin(); }
 
+// Il canale di backup (#56): parita' di superficie. La demo non ha un amministratore,
+// quindi la card non compare mai; se qualcosa le chiamasse, rispondono come il server
+// a un non-admin (404).
+export async function statoCanaleBackup() { _non_admin(); }
+export async function confermaCanaleBackup() { _non_admin(); }
+export async function provaCanaleBackup() { _non_admin(); }
+export async function rimuoviCanaleBackup() { _non_admin(); }
+
 /* ----------------------------------------------------------------- parser */
 
 export async function listParsers() {

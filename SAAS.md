@@ -1543,7 +1543,7 @@ passare inosservata.
 | `POST /api/admin/promemoria` | avvisa chi scade entro 5 giorni | **`404`** |
 | `GET /api/admin/backup` | scarica una copia consistente del database (#56 pezzo 1) | **`404`**; `403` su navigazione cross-site (`Sec-Fetch-Site`) |
 | `GET /api/admin/canale-backup` | stato del canale di backup: `{configurato, candidato}` (#56 pezzo 2) | **`404`** a chi non è l'amministratore |
-| `POST /api/admin/canale-backup/conferma` | promuove il candidato a configurato, **solo dopo** un messaggio di prova riuscito | **`404`**; `400` col motivo VISIBILE se la prova fallisce o manca il candidato; `409` se il candidato è cambiato durante la prova |
+| `POST /api/admin/canale-backup/conferma` | corpo `{chat_id}` = il candidato che il pannello ha **mostrato**; promuove il candidato a configurato **solo dopo** un messaggio di prova riuscito | **`404`**; `422` senza `chat_id`; `409` se `chat_id` non combacia col candidato corrente (una riconsegna l'ha cambiato fra GET e POST — precondizione dal client, come `uid` sui parser #75) **o** se cambia durante la prova; `400` col motivo VISIBILE se la prova fallisce o manca il candidato |
 | `POST /api/admin/canale-backup/prova` | riprova l'invio sul canale configurato | **`404`**; `400` se non configurato o l'invio fallisce |
 | `DELETE /api/admin/canale-backup` | rimuove il canale configurato (e il candidato) | **`404`** |
 | *le rotte del pannello* | | `404` e non `403`, perché un `403` conferma a un estraneo che il pannello sta lì. Per la stessa ragione corpo e `id` di percorso si leggono **a mano dopo** il controllo della sessione: lasciati a FastAPI, un estraneo riceveva `422`, cioè la stessa conferma per un'altra via — trovato dalla guardia sulle rotte, PR #26 |
@@ -2076,6 +2076,7 @@ senza doppio ruolo.
 | Fatto | **Multi-riga, pezzo 3** (#35): la card «Output e condizioni» nel riepilogo del wizard — righe di override editabili, prova col k su N per riga, CSV composto anche nell'anteprima locale (`componiFeed`), persistenza della `config.multi` nel draft. Chiude la #35. Test browser in `tests/web/test_multiriga_web.py` |
 | Fatto | **Backup del database, pezzo 1** (#56): copia CONSISTENTE via l'API di backup di SQLite (`copia_backup_db` — mai una copia grezza del file a caldo, che può uscire corrotta) e download **solo-amministratore** `GET /api/admin/backup` → `betrelay-backup-AAAA-MM-GG-HHMM.db` (**404** per chi non è admin, tracciato in `admin_audit`), col pulsante «Scarica backup» nella card **Backup del database** in fondo alla vista Richieste. `README.txt`: checklist **prima di un deploy** + strategia di **backup** (copia manuale, snapshot del volume Railway, variabili d'ambiente fuori dal backup, sicurezza del file). I pezzi **2** (canale privato di destinazione, configurato dal pannello) e **3** (backup notturno automatico via Telegram) restano da fare. Test in `tests/relay/test_backup.py` |
 | Fatto | **Backup del database, pezzo 2a — backend del canale** (#56): tabella `impostazioni` (chiave→valore, config GLOBALE del proprietario, **non** in `chats`), cattura del canale privato dal webhook quando il proprietario promuove il bot amministratore (`my_chat_member`, **solo se** `from.id == TELEGRAM_ADMIN_ID` e **solo canali PRIVATI** — quelli pubblici hanno uno `username` e i backup coi dati dei clienti non devono finirci) → scrive un CANDIDATO (una riconsegna dopo la conferma non lo ripropone), e rotte admin (**404** fuori dall'admin): `GET /api/admin/canale-backup` (stato configurato+candidato), `POST …/conferma` (promuove il candidato **solo dopo** un messaggio di prova riuscito, errore visibile se fallisce, `409` se il candidato è cambiato durante la prova), `POST …/prova`, `DELETE …/canale-backup` — configurare/rimuovere tracciato in `admin_audit`. La consegna automatica al canale è il pezzo **3**. Test in `tests/relay/test_canale_backup.py` |
+| Fatto | **Backup del database, pezzo 2b — card nel pannello** (#56): la card «Canale di backup» in fondo alla vista Richieste mostra i tre stati (candidato proposto → configurato → vuoto), con «Conferma», «Manda una prova» e «Rimuovi» (con conferma nel modale). La conferma manda al server l'`chat_id` che la card ha **mostrato** — precondizione dal client (come `uid` sui parser #75), così una riconsegna che cambia il candidato server-side dà `409` e la card rilegge invece di configurare una destinazione non approvata (bloccante di GPT-5.6 Sol al gate del pezzo 2a). Backend: `conferma_canale_backup` ora legge `{chat_id}` dal corpo dopo il controllo di sessione, con rollback/close espliciti. Test browser `tests/web/test_canale_backup_web.py` (zero errori in console, layout stretto), parità `api.js`/`api_finta.js` in `tests/web/test_api_parita.py`. La consegna automatica al canale è il pezzo **3**. |
 | M3 | «Entra come» e lo storico di `admin_audit` nel pannello: servono rotte nuove lato server |
 | M4 | Log persistenti, sospensione, suggerimento AI lato server, abbonamenti |
 
@@ -2354,6 +2355,23 @@ La voce e la vista esistono solo con `admin` vero; il server risponde comunque
 - **Promemoria di scadenza**: la card spiega che non c'è uno scheduler e il giro
   parte dal pulsante «Manda il giro di promemoria»; l'esito è «avvisati: N ·
   falliti: M» accanto al pulsante.
+- **Backup del database** (#56 pezzo 1): il pulsante «Scarica backup» scarica una
+  copia consistente del database (`GET /api/admin/backup`).
+- **Canale di backup** (#56 pezzo 2): la card mostra il canale privato **dove
+  finiranno i backup automatici**, in tre stati.
+  - *Vuoto*: «Nessun canale configurato: aggiungi il bot come amministratore di un
+    canale privato e ricarica questa pagina.» — è il webhook che cattura la
+    promozione e propone il candidato.
+  - *Proposto*: un banner «Proposto: <titolo> <chat_id>» con **«Conferma»**. La
+    conferma manda al server l'`chat_id` che la card ha **mostrato** (precondizione
+    dal client, come `uid` sui parser #77/#75): se una riconsegna ha cambiato il
+    candidato server-side, il server risponde `409` e la card rilegge invece di
+    configurare una destinazione non approvata. La conferma manda **prima** un
+    messaggio di prova; se fallisce, l'errore è visibile e non si salva niente.
+  - *Configurato*: la pillola «configurato», titolo e `chat_id`, con **«Manda una
+    prova»** (riverifica l'invio) e **«Rimuovi»** (con conferma nel modale; il canale
+    su Telegram non viene toccato). Un solo canale alla volta.
+  - La consegna automatica dei backup al canale è il pezzo **3**.
 
 **Non ancora nel pannello** (restano in M3): «Entra come» e lo storico di
 `admin_audit` — servono rotte nuove, non esistono lato server.
