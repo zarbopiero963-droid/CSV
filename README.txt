@@ -728,7 +728,10 @@ canale CONFIGURATO:
   - CATTURA: quando il proprietario aggiunge il bot come amministratore del canale,
     Telegram manda un my_chat_member; il webhook lo riconosce e registra il canale come
     candidato — ma SOLO se e' l'amministratore ad averlo promosso (from.id ==
-    TELEGRAM_ADMIN_ID), altrimenti il canale di chiunque comparirebbe come proposta.
+    TELEGRAM_ADMIN_ID), altrimenti il canale di chiunque comparirebbe come proposta, e
+    SOLO se e' un canale PRIVATO. Un canale pubblico ha uno username e i backup —
+    dati dei clienti — non devono finire dove chiunque puo' leggerli: quelli con username
+    sono rifiutati gia' alla cattura.
     Registra solo un candidato: nessun backup parte da qui. I canali hanno id negativi
     (-100...) che l'app Telegram non mostra, ed e' il motivo per cui il chat_id si
     cattura cosi' invece di digitarlo. (L'inoltro di un messaggio, l'altra opzione della

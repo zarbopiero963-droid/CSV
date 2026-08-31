@@ -65,11 +65,16 @@ def _corpo(risposta):
     return json.loads(bytes(risposta.body).decode())
 
 
-def _promozione(chat_id, titolo, attore=None):
-    """Un update `my_chat_member`: il bot promosso amministratore di un canale."""
+def _promozione(chat_id, titolo, attore=None, username=None):
+    """Un update `my_chat_member`: il bot promosso amministratore di un canale.
+
+    `username` presente = canale PUBBLICO (i privati non ne hanno)."""
+    chat = {'id': chat_id, 'type': 'channel', 'title': titolo}
+    if username:
+        chat['username'] = username
     return {'my_chat_member': {
         'from': {'id': int(attore if attore is not None else ADMIN_FINTO)},
-        'chat': {'id': chat_id, 'type': 'channel', 'title': titolo},
+        'chat': chat,
         'new_chat_member': {'status': 'administrator'}}}
 
 
@@ -110,6 +115,17 @@ def test_un_ESTRANEO_non_puo_proporre_un_canale(tmp_path, monkeypatch):
 
     assert _impostazione(percorso, main.CHIAVE_CANALE_CANDIDATO_ID) is None, \
         'un estraneo ha potuto proporre un canale di backup'
+
+
+def test_un_canale_PUBBLICO_non_diventa_candidato(tmp_path, monkeypatch):
+    """Solo canali PRIVATI: un canale pubblico (con `username`) esporrebbe il backup —
+    dati dei clienti — a chiunque. Fail-first: senza il vincolo su `username` un canale
+    pubblico diventerebbe candidato. Bloccante di GPT-5.6 Sol al gate finale (#56)."""
+    percorso, _admin_s, _cliente_s, _cliente = _admin(tmp_path, monkeypatch, 'pubblico.db')
+    _abilita_webhook(monkeypatch)
+    _webhook(_promozione(CANALE, 'Canale pubblico', username='canale_pubblico'))
+    assert _impostazione(percorso, main.CHIAVE_CANALE_CANDIDATO_ID) is None, \
+        'un canale PUBBLICO e- diventato candidato: il backup finirebbe in chiaro'
 
 
 def test_una_riconsegna_del_canale_gia_configurato_non_lo_ripropone(tmp_path, monkeypatch):

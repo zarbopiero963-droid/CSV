@@ -7225,8 +7225,13 @@ def _cattura_canale_backup(payload):
     attore = str((aggiornamento.get('from') or {}).get('id') or '')
     stato = (aggiornamento.get('new_chat_member') or {}).get('status') or ''
     ch = aggiornamento.get('chat') or {}
+    # SOLO canali PRIVATI. Il backup contiene i dati dei clienti (token come hash); un
+    # canale pubblico li esporrebbe a chiunque. Un canale pubblico ha uno `username`
+    # (e' cosi' che lo si raggiunge), uno privato no: rifiutare quelli con username tiene
+    # la destinazione privata gia' alla cattura, prima ancora della conferma. Bloccante
+    # di GPT-5.6 Sol al gate finale (#56).
     if not (attore == TELEGRAM_ADMIN_ID and (ch.get('type') or '') == 'channel'
-            and stato in ('administrator', 'creator')):
+            and stato in ('administrator', 'creator') and not ch.get('username')):
         return None
     chat_id = str(ch.get('id') or '')
     if not chat_id:
