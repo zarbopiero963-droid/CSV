@@ -221,36 +221,42 @@ def test_backup_al_canale_invia_e_traccia(tmp_path, monkeypatch):
 def test_un_solo_invio_di_backup_alla_volta(tmp_path, monkeypatch):
     """Due invii simultanei (bottone + cron sovrapposti) non devono consegnare due documenti ne'
     scrivere due audit: il lucchetto NON bloccante fa passare uno e fa saltare l'altro con «gia' in
-    corso». Fail-first: senza il lucchetto entrambi inviano e restano due righe di audit."""
-    import time as _time
+    corso». Fail-first: senza il lucchetto entrambi inviano e restano due righe di audit.
+
+    DETERMINISTICO, non a orologio (nota di Fable): il primo thread SEGNALA di essere entrato nel
+    lucchetto (`dentro`) e ci resta finche' il thread principale non lo libera (`libera`); nel mezzo
+    il principale prova il secondo invio, che DEVE trovare il lucchetto occupato. Nessuna `sleep`,
+    nessuna finestra da indovinare."""
     percorso, _a, _c, _u = _admin(tmp_path, monkeypatch, 'concorrenza_invio.db')
     _configura_canale()
     monkeypatch.setattr(main, 'leggi_chat_telegram',
                         lambda chat_id, bot_token=None: (True, {'id': CANALE, 'type': 'channel'}))
+    dentro = threading.Event()
+    libera = threading.Event()
     invii = []
 
-    def invio_lento(chat_id, percorso_file, nome, didascalia=None, bot_token=None):
+    def invio_bloccante(chat_id, percorso_file, nome, didascalia=None, bot_token=None):
         invii.append(1)
-        _time.sleep(0.3)   # allarga la finestra perche' i due thread si sovrappongano
+        dentro.set()          # sono dentro il lucchetto
+        assert libera.wait(5), 'il thread principale non ha liberato il primo invio'
         return True, None
 
-    monkeypatch.setattr(main, 'invia_documento_telegram', invio_lento)
+    monkeypatch.setattr(main, 'invia_documento_telegram', invio_bloccante)
     esiti = {}
 
-    def uno(chiave):
-        esiti[chiave] = main._invia_backup_al_canale(amministratore_id=1)
+    def primo():
+        esiti['a'] = main._invia_backup_al_canale(amministratore_id=1)
 
-    t1 = threading.Thread(target=uno, args=('a',))
-    t2 = threading.Thread(target=uno, args=('b',))
+    t1 = threading.Thread(target=primo)
     t1.start()
-    _time.sleep(0.05)   # il primo entra nel lucchetto per primo
-    t2.start()
+    assert dentro.wait(5), 'il primo invio non e- mai entrato nel lucchetto'
+    # Ora t1 TIENE il lucchetto: il secondo invio deve trovarlo occupato e saltare.
+    esiti['b'] = main._invia_backup_al_canale(amministratore_id=1)
+    libera.set()
     t1.join()
-    t2.join()
 
-    riusciti = [k for k, v in esiti.items() if v == (True, None)]
-    saltati = [k for k, v in esiti.items() if v[0] is False and 'gia' in v[1]]
-    assert len(riusciti) == 1 and len(saltati) == 1, esiti
+    assert esiti['a'] == (True, None), esiti
+    assert esiti['b'][0] is False and 'gia' in esiti['b'][1], esiti
     assert len(invii) == 1, f'{len(invii)} invii: il lucchetto non serializza l-orchestrazione'
     c = sqlite3.connect(percorso)
     righe = c.execute("SELECT COUNT(*) FROM admin_audit"
