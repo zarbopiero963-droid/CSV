@@ -2053,19 +2053,29 @@ def _travasa_nel_multiutente(c):
               f' ON chats ({CHIAVE_CHAT})')
 
 
-def copia_backup_db():
-    """Copia CONSISTENTE del database, come byte del file `.db` (#56).
+# Un solo backup per volta nel processo. La copia materializza l'intero DB in memoria
+# (snapshot `:memory:` + byte di `serialize()`): download concorrenti ne terrebbero N
+# copie insieme e su Railway il picco di RAM potrebbe abbattere il servizio. Il
+# lucchetto serializza le copie — operazione rara, amministratore unico — tenendo il
+# picco a una copia sola. Segnalato da GPT-5.6 Sol al gate finale (#56).
+#
+# E' un `threading.Lock`, non un `asyncio.Lock`, di proposito: la copia gira in un
+# thread via `asyncio.to_thread`, quindi il lucchetto va preso li' (un `asyncio.Lock`
+# si legherebbe per giunta a un solo event loop, rompendo i test che ne creano uno
+# nuovo per chiamata). Un thread in attesa non blocca il loop: la coroutine chiamante
+# resta parcheggiata sul future di `to_thread` e il servizio continua a rispondere.
+_lucchetto_backup = threading.Lock()
 
-    Presa con l'API di backup di SQLite (`Connection.backup`), NON con una copia
-    grezza del file: mentre il servizio scrive, `cp signals.db` puo' catturare il
-    file a meta' di una transazione, e un backup corrotto e' peggio di nessun
-    backup — lo si scopre solo il giorno in cui serve. L'API copia pagina per
-    pagina prendendo il lock giusto, quindi lo snapshot e' coerente anche sotto
-    scrittura. `serialize()` restituisce i byte del formato su disco (Python 3.11+).
 
-    Sincrona (apre connessioni sqlite e materializza tutto il file in memoria): i
-    chiamanti `async` la passano a `asyncio.to_thread`, come per ogni I/O bloccante
-    che altrimenti fermerebbe il loop — feed compreso.
+def _serializza_db():
+    """I byte di `signals.db` via l'API di backup di SQLite — senza politica di accesso.
+
+    Presa con `Connection.backup`, NON con una copia grezza del file: mentre il
+    servizio scrive, `cp signals.db` puo' catturare il file a meta' di una transazione,
+    e un backup corrotto e' peggio di nessun backup — lo si scopre solo il giorno in
+    cui serve. L'API copia pagina per pagina prendendo il lock giusto, quindi lo
+    snapshot e' coerente anche sotto scrittura. `serialize()` restituisce i byte del
+    formato su disco (Python 3.11+).
     """
     sorgente = sqlite3.connect(DB_PATH)
     sorgente.execute('PRAGMA busy_timeout = 5000')
@@ -2078,6 +2088,20 @@ def copia_backup_db():
             istantanea.close()
     finally:
         sorgente.close()
+
+
+def copia_backup_db():
+    """Copia CONSISTENTE del database, come byte del file `.db`, UNA per volta (#56).
+
+    Il `_serializza_db` sotto lucchetto: la copia e' pesante in memoria, e il lucchetto
+    la tiene a una sola alla volta (vedi il commento su `_lucchetto_backup`).
+
+    Sincrona (apre connessioni sqlite e materializza tutto il file in memoria): i
+    chiamanti `async` la passano a `asyncio.to_thread`, come per ogni I/O bloccante che
+    altrimenti fermerebbe il loop — feed compreso — ed e' li' che il lucchetto va preso.
+    """
+    with _lucchetto_backup:
+        return _serializza_db()
 
 
 def db():
@@ -4965,8 +4989,26 @@ async def scarica_backup(request: Request):
     `to_thread`: la copia legge tutto il file e la rotta e' `async`; eseguirla sul
     loop fermerebbe ogni altra richiesta del processo, feed compreso — lo stesso
     motivo per cui l'invio Telegram dell'approvazione gira in un thread.
+
+    **Anti-CSRF.** E' una GET che avvia un'operazione costosa, e il cookie di sessione
+    e' `SameSite=Lax`: una navigazione top-level da un altro sito se lo porterebbe
+    dietro, quindi una pagina ostile potrebbe indurre il browser dell'amministratore a
+    generare backup a ripetizione (amplificando il picco di RAM di sopra) e a sporcare
+    l'audit. `Sec-Fetch-Site` lo impostano i browser e la pagina non lo puo'
+    falsificare: la navigazione del pulsante e' `same-origin`, l'indirizzo digitato o un
+    segnalibro `none`, un innesco da un altro sito `cross-site`/`same-site` — che
+    rifiutiamo con 403. Il controllo sta DOPO `_solo_amministratore`, cosi' un estraneo
+    continua a vedere 404 e non l'esistenza della rotta. Segnalato da GPT-5.6 Sol (#56).
     """
     amministratore = _solo_amministratore(request)
+    sito = request.headers.get('sec-fetch-site')
+    if sito in ('cross-site', 'same-site'):
+        raise HTTPException(403, 'richiesta di backup da un contesto non consentito')
+    # La copia gira in un thread (un solo backup per volta: il lucchetto e' dentro
+    # `copia_backup_db`) per non fermare il loop mentre legge tutto il file.
+    dati = await asyncio.to_thread(copia_backup_db)
+    # Traccia DOPO la copia riuscita: una copia fallita non deve lasciare in
+    # `admin_audit` la riga di un download mai avvenuto (nota di Claude Fable 5, #56).
     c = db()
     try:
         c.execute('BEGIN IMMEDIATE')
@@ -4977,7 +5019,6 @@ async def scarica_backup(request: Request):
         c.close()
         raise
     c.close()
-    dati = await asyncio.to_thread(copia_backup_db)
     nome = 'betrelay-backup-' + time.strftime('%Y-%m-%d-%H%M', time.gmtime()) + '.db'
     risposta = Response(content=dati, media_type='application/x-sqlite3', headers={
         'Content-Disposition': f'attachment; filename="{nome}"',

@@ -705,7 +705,14 @@ non con un cp del file a caldo: una copia grezza mentre il servizio scrive puo'
 uscire a meta' di una transazione, e un backup corrotto e' peggio di nessuno perche'
 lo si scopre solo il giorno in cui serve. La rotta e' GET /api/admin/backup e
 risponde 404 a chi non e' l'amministratore, come tutto /api/admin/*. Ogni download
-lascia una riga in admin_audit.
+lascia una riga in admin_audit, scritta DOPO che la copia e' riuscita (una copia
+fallita non lascia la traccia di un download mai avvenuto). La copia e' pesante in
+memoria, quindi ne gira UNA per volta: click ravvicinati o richieste concorrenti si
+mettono in coda invece di moltiplicare il picco di RAM. E poiche' e' una GET che
+avvia un lavoro costoso, la rotta rifiuta (403) le navigazioni che il browser marca
+come provenienti da un altro sito (Sec-Fetch-Site cross-site/same-site): il pulsante
+del pannello e' same-origin e continua a funzionare, ma una pagina ostile non puo'
+indurre il browser dell'amministratore a generare backup a ripetizione.
 
 RUNTIME. La copia consistente usa sqlite3.Connection.serialize(), comparso in Python
 3.11: su un interprete piu' vecchio la rotta fallirebbe solo in produzione, al primo

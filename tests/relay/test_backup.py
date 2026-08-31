@@ -58,6 +58,96 @@ def test_il_backup_e_una_copia_CONSISTENTE_e_scaricabile(tmp_path, monkeypatch):
     assert utenti >= 1, 'il backup non contiene gli utenti del database vivo'
 
 
+def _con_sito(admin_s, sito):
+    """La stessa sessione dell'admin, ma con l'header Sec-Fetch-Site di una navigazione.
+
+    Il browser lo impone e la pagina non lo puo' falsificare: e' cio' che distingue il
+    click sul pulsante del pannello (`same-origin`) da un innesco da un altro sito.
+    """
+    class Richiesta:
+        cookies = admin_s.cookies
+        headers = {'sec-fetch-site': sito}
+    return Richiesta()
+
+
+def test_una_navigazione_cross_site_e_rifiutata(tmp_path, monkeypatch):
+    """Anti-CSRF: col cookie SameSite=Lax una navigazione top-level da un altro sito si
+    porterebbe dietro la sessione e indurrebbe un backup costoso. Sec-Fetch-Site la
+    smaschera: `cross-site` e `same-site` → 403, senza generare la copia."""
+    from fastapi import HTTPException
+    _p, admin_s, _cliente_s, _cliente = _admin(tmp_path, monkeypatch, 'csrf.db')
+    for sito in ('cross-site', 'same-site'):
+        with pytest.raises(HTTPException) as errore:
+            asyncio.run(main.scarica_backup(_con_sito(admin_s, sito)))
+        assert errore.value.status_code == 403, \
+            f'{sito}: {errore.value.status_code} invece di 403'
+
+
+def test_la_navigazione_legittima_scarica(tmp_path, monkeypatch):
+    """`same-origin` (il pulsante del pannello), `none` (indirizzo digitato o segnalibro)
+    e l'header assente (client che non lo manda) scaricano tutti la copia."""
+    _p, admin_s, _cliente_s, _cliente = _admin(tmp_path, monkeypatch, 'legit.db')
+    for richiesta in (_con_sito(admin_s, 'same-origin'),
+                      _con_sito(admin_s, 'none'),
+                      admin_s):  # admin_s: headers vuoti, sec-fetch-site assente
+        risposta = asyncio.run(main.scarica_backup(richiesta))
+        assert bytes(risposta.body)[:16] == b'SQLite format 3\x00', \
+            'una navigazione legittima non ha scaricato un file SQLite valido'
+
+
+def test_un_solo_backup_alla_volta_sotto_il_lucchetto(tmp_path, monkeypatch):
+    """Due download concorrenti non materializzano il DB in memoria insieme.
+
+    Si sostituisce la sola serializzazione con una lenta che conta i thread simultanei;
+    il lucchetto VERO dentro `copia_backup_db` resta in gioco. Fail-first: senza il
+    lucchetto i due `to_thread` girano insieme e il massimo osservato e' 2."""
+    import threading
+    import time as _time
+    _p, admin_s, _cliente_s, _cliente = _admin(tmp_path, monkeypatch, 'concorrenza.db')
+
+    stato = {'attivi': 0, 'massimo': 0}
+    guardia = threading.Lock()
+
+    def serializza_lento():
+        with guardia:
+            stato['attivi'] += 1
+            stato['massimo'] = max(stato['massimo'], stato['attivi'])
+        _time.sleep(0.2)
+        with guardia:
+            stato['attivi'] -= 1
+        return b'SQLite format 3\x00' + b'\x00' * 64
+
+    monkeypatch.setattr(main, '_serializza_db', serializza_lento)
+
+    async def due_insieme():
+        await asyncio.gather(main.scarica_backup(admin_s),
+                             main.scarica_backup(admin_s))
+
+    asyncio.run(due_insieme())
+    assert stato['massimo'] == 1, \
+        f"{stato['massimo']} copie in RAM insieme: il lucchetto non serializza i backup"
+
+
+def test_una_copia_fallita_non_lascia_audit(tmp_path, monkeypatch):
+    """La riga di audit va scritta DOPO la copia riuscita: se la copia fallisce non
+    deve restare la traccia di un download mai avvenuto (nota di Fable 5). Fail-first:
+    con l'audit committato prima della copia, una copia fallita lascia comunque la riga."""
+    percorso, admin_s, _cliente_s, _cliente = _admin(tmp_path, monkeypatch, 'fallita.db')
+
+    def esplode():
+        raise RuntimeError('backup fallito di proposito')
+
+    monkeypatch.setattr(main, '_serializza_db', esplode)
+    with pytest.raises(RuntimeError):
+        asyncio.run(main.scarica_backup(admin_s))
+
+    c = sqlite3.connect(percorso)
+    quante = c.execute("SELECT COUNT(*) FROM admin_audit"
+                       " WHERE action='scarica_backup'").fetchone()[0]
+    c.close()
+    assert quante == 0, f'{quante} righe di audit per un download mai avvenuto'
+
+
 def test_un_NON_admin_riceve_404(tmp_path, monkeypatch):
     """404 e non 403: un estraneo non deve nemmeno sapere che il backup esiste."""
     from fastapi import HTTPException

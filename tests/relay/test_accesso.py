@@ -598,16 +598,24 @@ def _admin(tmp_path, monkeypatch, nome='admin.db'):
     return percorso, sessione_admin, sessione_cliente, cliente
 
 
-def _cookie(risposta):
-    """Una richiesta finta che porta il cookie di quella risposta."""
+def _cookie(risposta, sec_fetch_site=None):
+    """Una richiesta finta che porta il cookie di quella risposta.
+
+    `headers` c'e' sempre (le rotte reali leggono `request.headers`): vuoto per
+    default, cosi' `.get('sec-fetch-site')` torna `None` — il caso della navigazione
+    diretta, che le rotte accettano. `sec_fetch_site` lo imposta per i test anti-CSRF.
+    """
     valore = None
     for pezzo in (risposta.headers.get('set-cookie') or '').split(';'):
         chiave, _, v = pezzo.strip().partition('=')
         if chiave == main.NOME_COOKIE:
             valore = v
 
+    intestazioni = {'sec-fetch-site': sec_fetch_site} if sec_fetch_site else {}
+
     class Richiesta:
         cookies = {main.NOME_COOKIE: valore}
+        headers = intestazioni
 
     return Richiesta()
 
