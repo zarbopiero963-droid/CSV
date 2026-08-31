@@ -755,13 +755,37 @@ canale CONFIGURATO:
                                                combacia col candidato corrente)
     POST   /api/admin/canale-backup/prova      riprova l'invio sul canale configurato
     DELETE /api/admin/canale-backup            rimuove il canale configurato
+    POST   /api/admin/backup/invia             manda il backup al canale configurato (pezzo 3)
   Nel pannello admin la card «Canale di backup» (in fondo alla vista Richieste) mostra i tre
   stati (proposto / configurato / vuoto) con Conferma, Manda una prova e Rimuovi.
   Configurare, confermare e rimuovere lasciano una riga in admin_audit. Il canale sta
   nella tabella impostazioni (chiave→valore), NON in chats: chats sono le SORGENTI dei
   segnali, e mettere li' la destinazione dei backup la iscriverebbe all'instradamento
-  del webhook (il filtro delle chat). La consegna automatica al canale e' il pezzo
-  successivo (#56 pezzo 3).
+  del webhook (il filtro delle chat).
+
+INVIO DEL BACKUP AL CANALE (#56 pezzo 3). `POST /api/admin/backup/invia` manda una copia
+  del database al canale privato configurato, via sendDocument di Telegram. Due modi di
+  autorizzarsi:
+  - la SESSIONE dell'amministratore - il bottone «Invia backup ora» nel pannello (pezzo 3b);
+  - il TOKEN del cron nell'header X-Backup-Cron-Token, per il giro NOTTURNO.
+  Senza nessuno dei due -> 404, come tutto /api/admin/*. Il confronto del token e' a tempo
+  costante e solo se il token e' configurato: BACKUP_CRON_TOKEN vuoto NON autorizza nessuno
+  (fail-closed), quindi il percorso automatico resta spento finche' non lo imposti.
+  Come funziona: la copia va su un FILE temporaneo (non in RAM, per non tenere l'intero .db
+  in memoria durante l'upload) e si manda in streaming; il file si cancella comunque. Prima
+  di inviare, un getChat RIVERIFICA che il canale sia ancora PRIVATO: se e' diventato
+  pubblico (ha uno username) NON si invia - il backup coi dati dei clienti non deve finire
+  dove chiunque puo' leggerlo. Un invio riuscito lascia una riga in admin_audit
+  (admin_user_id NULL quando e' stato il cron). L'invio (rete + I/O) gira fuori dall'event
+  loop, o bloccherebbe webhook e feed.
+  IL GIRO NOTTURNO. Il servizio NON ha uno scheduler interno (come i promemoria): serve un
+  job esterno che chiami l'endpoint. Configuralo cosi', una volta sola:
+    1. imposta la variabile BACKUP_CRON_TOKEN su un valore lungo e casuale (e' un secret,
+       come CSV_ACCESS_TOKEN: non committarlo, non stamparlo);
+    2. crea un cron su Railway (o un pinger esterno) che ogni notte faccia:
+         curl -fsS -X POST https://<il-tuo-dominio>/api/admin/backup/invia \
+              -H "X-Backup-Cron-Token: $BACKUP_CRON_TOKEN"
+       Il token va nell'HEADER, mai nell'URL (l'URL finisce nei log).
 
 SNAPSHOT DEL VOLUME SU RAILWAY. Railway offre snapshot del volume dal suo pannello:
 sono una copia indipendente dal servizio, che un deploy non tocca. Attivali come

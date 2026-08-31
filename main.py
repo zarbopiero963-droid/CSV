@@ -667,6 +667,15 @@ TELEGRAM_ADMIN_ID = os.getenv('TELEGRAM_ADMIN_ID', '').strip()
 # il motivo, che e' l'unico caso in cui un dato non puo' distinguere due situazioni.
 TELEGRAM_ADMIN_RECONCILE = os.getenv('TELEGRAM_ADMIN_RECONCILE', '').strip()
 
+# Il token che autorizza il job NOTTURNO di backup a chiamare `/api/admin/backup/invia` senza
+# una sessione: un cron su Railway lo porta in un header e il servizio manda il backup al canale
+# configurato. E' un secret del deploy, come `CSV_ACCESS_TOKEN`; non entra mai nei log ne' nelle
+# risposte. Assente, la rotta accetta SOLO la sessione dell'amministratore (il bottone «Invia
+# backup ora»): il percorso automatico resta spento fail-closed finche' il proprietario non lo
+# configura, esattamente come i promemoria che «aspettano» di essere chiamati. Scelta del
+# proprietario (#56 pezzo 3): cron Railway + token dedicato.
+BACKUP_CRON_TOKEN = os.getenv('BACKUP_CRON_TOKEN', '').strip()
+
 
 # Un `TELEGRAM_ADMIN_ID` malformato non solleva e non collega: il confronto con l'`id` che
 # Telegram manda non combacia mai, quindi il proprietario ottiene un account vuoto e la
@@ -2108,6 +2117,122 @@ def copia_backup_db():
     """
     with _lucchetto_backup:
         return _serializza_db()
+
+
+def copia_backup_su_file(percorso):
+    """Copia CONSISTENTE del database su un FILE, non in memoria (#56 pezzo 3).
+
+    `scarica_backup` puo' materializzare i byte (`copia_backup_db`) perche' li passa subito a una
+    risposta HTTP. L'invio notturno al canale invece li carica su Telegram con `sendDocument`, e
+    tenere in RAM l'intero `.db` mentre lo si carica raddoppierebbe la memoria sul container
+    condiviso — il rischio OOM sollevato al gate del pezzo 1. Qui la copia va su un file temporaneo
+    con l'API di backup di SQLite (coerente sotto scrittura, come `_serializza_db`, mai un `cp`
+    grezzo a caldo), che poi si manda in streaming e si cancella.
+
+    Sincrona (I/O su disco e lock sqlite): i chiamanti `async` la passano a `asyncio.to_thread`.
+    Sotto lo stesso `_lucchetto_backup` di `copia_backup_db`: una copia pesante alla volta.
+    """
+    with _lucchetto_backup:
+        sorgente = sqlite3.connect(DB_PATH)
+        sorgente.execute('PRAGMA busy_timeout = 5000')
+        try:
+            destinazione = sqlite3.connect(percorso)
+            try:
+                sorgente.backup(destinazione)
+            finally:
+                destinazione.close()
+        finally:
+            sorgente.close()
+
+
+def leggi_chat_telegram(chat_id, bot_token=None):
+    """`getChat` di un canale: `(ok, dati_o_motivo)`. Non solleva, senza token nel motivo.
+
+    Serve a RIVERIFICARE la privacy prima di ogni invio: la cattura garantisce un canale privato,
+    ma un canale reso pubblico DOPO la conferma esporrebbe i dati dei clienti, e la sola assenza di
+    `username` nel vecchio `my_chat_member` non lo direbbe. Come `invia_messaggio_telegram`, il
+    motivo e' il TIPO dell'eccezione — mai il testo, che porterebbe l'URL col token del bot.
+    """
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    token = bot_token or BOT_TOKEN
+    if not token:
+        return False, 'bot non configurato'
+    if not chat_id:
+        return False, 'destinatario sconosciuto'
+    query = urllib.parse.urlencode({'chat_id': chat_id})
+    try:
+        with urllib.request.urlopen(  # noqa: S310
+                f'https://api.telegram.org/bot{token}/getChat?{query}', timeout=10) as risposta:
+            esito = json.loads(risposta.read().decode('utf-8'))
+    except Exception as e:
+        return False, f'getChat fallito ({type(e).__name__})'
+    if not esito.get('ok'):
+        return False, 'Telegram ha rifiutato getChat'
+    return True, esito.get('result') or {}
+
+
+def invia_documento_telegram(chat_id, percorso, nome_file, didascalia=None, bot_token=None):
+    """Manda un FILE al canale via `sendDocument`. `(riuscito, motivo)`, non solleva, senza token.
+
+    Stessa forma di `invia_messaggio_telegram`: il `motivo` e' il TIPO dell'eccezione (mai il testo,
+    che porterebbe l'URL col token del bot), e `ok: false` di Telegram e' un rifiuto anche con HTTP
+    200. Il corpo multipart si costruisce su un FILE temporaneo con `copyfileobj` (il `.db` passa a
+    pezzi, non tutto in RAM) e si manda in STREAMING passando il file aperto a `urlopen` con un
+    `Content-Length` preciso: e' il senso del pezzo 3 — non tenere l'intero database in memoria
+    durante l'upload. `nome_file` e' generato dal servizio (mai input dell'utente), quindi non puo'
+    iniettare intestazioni nel multipart.
+    """
+    import shutil
+    import tempfile
+    import urllib.error
+    import urllib.request
+    token = bot_token or BOT_TOKEN
+    if not token:
+        return False, 'bot non configurato'
+    if not chat_id:
+        return False, 'destinatario sconosciuto'
+    confine = '----betrelay' + secrets.token_hex(16)
+
+    def campo(nome, valore):
+        return (f'--{confine}\r\nContent-Disposition: form-data; name="{nome}"\r\n\r\n'
+                f'{valore}\r\n').encode('utf-8')
+
+    preambolo = campo('chat_id', str(chat_id))
+    if didascalia:
+        preambolo += campo('caption', didascalia)
+    preambolo += (
+        f'--{confine}\r\nContent-Disposition: form-data; name="document"; '
+        f'filename="{nome_file}"\r\nContent-Type: application/octet-stream\r\n\r\n'
+    ).encode('utf-8')
+    epilogo = f'\r\n--{confine}--\r\n'.encode('utf-8')
+    fd, corpo_path = tempfile.mkstemp(prefix='betrelay-mp-')
+    os.close(fd)
+    try:
+        with open(corpo_path, 'wb') as out:
+            out.write(preambolo)
+            with open(percorso, 'rb') as src:
+                shutil.copyfileobj(src, out)   # il .db passa a pezzi, non tutto in RAM
+            out.write(epilogo)
+        dimensione = os.path.getsize(corpo_path)
+        with open(corpo_path, 'rb') as corpo:
+            richiesta = urllib.request.Request(
+                f'https://api.telegram.org/bot{token}/sendDocument', data=corpo, method='POST',
+                headers={'Content-Type': f'multipart/form-data; boundary={confine}',
+                         'Content-Length': str(dimensione)})
+            with urllib.request.urlopen(richiesta, timeout=30) as risposta:  # noqa: S310
+                esito = json.loads(risposta.read().decode('utf-8'))
+    except Exception as e:
+        return False, f'invio fallito ({type(e).__name__})'
+    finally:
+        try:
+            os.unlink(corpo_path)
+        except OSError:
+            pass
+    if not esito.get('ok'):
+        return False, 'Telegram ha rifiutato il documento'
+    return True, None
 
 
 def db():
@@ -4701,6 +4826,16 @@ def _solo_amministratore(request):
     return utente
 
 
+def _amministratore_o_none(request):
+    """L'utente della sessione se e' l'amministratore, altrimenti `None` — SENZA sollevare.
+
+    Per le rotte con un secondo modo di autenticarsi oltre alla sessione (il token del cron di
+    backup): si prova prima l'admin, e se non c'e' si prova l'altro. `_solo_amministratore`
+    solleverebbe 404 e non lascerebbe provare il token."""
+    utente = utente_dalla_sessione(request)
+    return utente if utente and utente['is_admin'] else None
+
+
 def _identificativo_o_404(valore):
     """L'identificativo numerico di una richiesta, o `404`.
 
@@ -5232,6 +5367,89 @@ def rimuovi_canale_backup(request: Request):
     c.close()
     return _rispondi_con_sessione(amministratore['id'], amministratore['versione'],
                                   {'configurato': None, 'candidato': None})
+
+
+def _invia_backup_al_canale(amministratore_id=None):
+    """Manda il backup al canale CONFIGURATO. `(riuscito, motivo)`, non solleva.
+
+    Sincrona (I/O su disco, rete): il chiamante `async` la passa a `asyncio.to_thread`, come
+    ogni carico bloccante che altrimenti fermerebbe il loop — feed e webhook compresi.
+
+    Riverifica la privacy con `getChat` PRIMA di inviare (Sol #56): la cattura garantisce un canale
+    privato, ma un canale reso pubblico DOPO la conferma esporrebbe i dati dei clienti; se ora
+    riporta uno `username` NON si invia. Poi la copia va su un FILE temporaneo (non in RAM,
+    `copia_backup_su_file`) e si manda in streaming; il file si cancella comunque vada. Traccia in
+    `admin_audit` con l'admin che ha premuto il bottone, o `NULL` per il giro del cron.
+    """
+    import tempfile
+    c = db()
+    try:
+        configurato = _canale_configurato(c)
+    finally:
+        c.close()
+    if not configurato:
+        return False, 'nessun canale di backup configurato'
+    chat_id = configurato['chat_id']
+    ok, dati = leggi_chat_telegram(chat_id)
+    if not ok:
+        return False, f'verifica del canale fallita: {dati}'
+    if dati.get('username'):
+        return False, ('il canale e- diventato pubblico: rimuovilo e configura un canale privato'
+                       ' prima di inviare il backup')
+    fd, percorso = tempfile.mkstemp(prefix='betrelay-backup-', suffix='.db')
+    os.close(fd)
+    try:
+        copia_backup_su_file(percorso)
+        nome = f'betrelay-backup-{time.strftime("%Y-%m-%d-%H%M", time.gmtime())}.db'
+        riuscito, motivo = invia_documento_telegram(
+            chat_id, percorso, nome, didascalia='BetRelay: backup automatico del database.')
+    finally:
+        try:
+            os.unlink(percorso)
+        except OSError:
+            pass
+    if not riuscito:
+        return False, f'invio del documento fallito: {motivo}'
+    c = db()
+    try:
+        _annota_admin(c, amministratore_id, 'backup_inviato')
+        c.commit()
+    finally:
+        c.close()
+    return True, None
+
+
+@app.post('/api/admin/backup/invia')
+async def invia_backup(request: Request):
+    """Manda il backup al canale configurato. Due modi di autorizzarsi (#56 pezzo 3):
+
+    - la **sessione dell'amministratore** — il bottone «Invia backup ora» nel pannello;
+    - il **token del cron** (`BACKUP_CRON_TOKEN`) nell'header `X-Backup-Cron-Token`, per il job
+      notturno di Railway che gira senza sessione.
+
+    L'admin si prova per PRIMO e senza sollevare (`_amministratore_o_none`), cosi' il token puo'
+    fare da secondo tentativo. Senza nessuno dei due → **404**, come tutto `/api/admin/*`: un 403
+    confermerebbe a un estraneo che la rotta esiste. Il confronto del token e' a tempo costante e
+    solo se il token e' configurato (stringa vuota non autorizza nessuno — fail-closed).
+
+    L'invio (rete + I/O) gira in un thread (`asyncio.to_thread`): questa rotta e' `async`, e
+    tenerlo sul loop bloccherebbe webhook e feed di tutti gli utenti. Un fallimento torna
+    **400** col motivo, mai ingoiato e mai con il token dentro.
+    """
+    amministratore = _amministratore_o_none(request)
+    cron = bool(BACKUP_CRON_TOKEN) and secrets.compare_digest(
+        request.headers.get('X-Backup-Cron-Token', '').encode('utf-8'),
+        BACKUP_CRON_TOKEN.encode('utf-8'))
+    if not amministratore and not cron:
+        raise HTTPException(404, 'not found')
+    riuscito, motivo = await asyncio.to_thread(
+        _invia_backup_al_canale, amministratore['id'] if amministratore else None)
+    if not riuscito:
+        raise HTTPException(400, f'invio del backup fallito: {motivo}')
+    if amministratore:
+        return _rispondi_con_sessione(amministratore['id'], amministratore['versione'],
+                                      {'inviato': True})
+    return {'inviato': True}
 
 
 def _giro_di_promemoria(c, adesso):
