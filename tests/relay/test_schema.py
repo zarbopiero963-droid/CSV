@@ -186,13 +186,14 @@ def test_la_migrazione_e_IDEMPOTENTE_su_un_database_popolato(tmp_path):
     assert dopo_due == dopo_una, 'la seconda migrazione ha cambiato il database'
 
 
-def test_le_nove_tabelle_nuove_esistono_dopo_la_migrazione(tmp_path):
+def test_le_tabelle_nuove_esistono_dopo_la_migrazione(tmp_path):
     c = _database_di_produzione(tmp_path / 'signals.db')
     main.migra(c)
     presenti = {r[0] for r in c.execute(
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     attese = {'users', 'chats', 'parser_chats', 'message_logs', 'chat_verifications',
               'access_requests', 'admin_audit', 'feed_reads', 'webhook_seen',
+              'impostazioni',  # #56 pezzo 2: config globale (canale di backup)
               'signals', 'parsers', 'profiles'}
     assert attese <= presenti, f'tabelle mancanti: {sorted(attese - presenti)}'
 

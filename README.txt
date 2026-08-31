@@ -721,6 +721,39 @@ stessa versione su cui gira la CI, cosi' Railway/Nixpacks non deriva a una Pytho
 testata. Una guardia (tests/safety/test_python_deploy.py) impedisce di abbassare il
 pin sotto quella provata dai test.
 
+CANALE DI BACKUP (destinazione). Il proprietario crea un canale Telegram privato e ci
+aggiunge il bot come amministratore; da li' i backup automatici (in arrivo) verranno
+consegnati. La configurazione vive nel pannello admin e passa da un CANDIDATO a un
+canale CONFIGURATO:
+  - CATTURA: quando il proprietario aggiunge il bot come amministratore del canale,
+    Telegram manda un my_chat_member; il webhook lo riconosce e registra il canale come
+    candidato — ma SOLO se e' l'amministratore ad averlo promosso (from.id ==
+    TELEGRAM_ADMIN_ID), altrimenti il canale di chiunque comparirebbe come proposta, e
+    SOLO se e' un canale PRIVATO. Un canale pubblico ha uno username e i backup —
+    dati dei clienti — non devono finire dove chiunque puo' leggerli: quelli con username
+    sono rifiutati gia' alla cattura.
+    Registra solo un candidato: nessun backup parte da qui. I canali hanno id negativi
+    (-100...) che l'app Telegram non mostra, ed e' il motivo per cui il chat_id si
+    cattura cosi' invece di digitarlo. (L'inoltro di un messaggio, l'altra opzione della
+    #56, e' stato scartato: qualunque post inoltrato al bot avrebbe riconfigurato il
+    candidato di soppiatto.) Una riconsegna del my_chat_member dopo la conferma non
+    ripropone un canale gia' configurato.
+  - CONFERMA: la conferma nel pannello manda un MESSAGGIO DI PROVA al candidato; solo
+    se l'invio riesce il candidato diventa il canale configurato. Se la prova fallisce
+    non si salva niente e l'errore e' VISIBILE nel pannello (mai ingoiato). Il candidato
+    si rilegge dentro la transazione: se e' cambiato durante la prova la conferma si
+    ferma (409) invece di configurare quello vecchio. Un solo canale di backup alla volta.
+  Rotte, tutte 404 fuori dall'amministratore come il resto di /api/admin/*:
+    GET    /api/admin/canale-backup            stato: {configurato, candidato}
+    POST   /api/admin/canale-backup/conferma   promuove il candidato dopo la prova
+    POST   /api/admin/canale-backup/prova      riprova l'invio sul canale configurato
+    DELETE /api/admin/canale-backup            rimuove il canale configurato
+  Configurare, confermare e rimuovere lasciano una riga in admin_audit. Il canale sta
+  nella tabella impostazioni (chiave→valore), NON in chats: chats sono le SORGENTI dei
+  segnali, e mettere li' la destinazione dei backup la iscriverebbe all'instradamento
+  del webhook (il filtro delle chat). La consegna automatica al canale e' il pezzo
+  successivo (#56 pezzo 3).
+
 SNAPSHOT DEL VOLUME SU RAILWAY. Railway offre snapshot del volume dal suo pannello:
 sono una copia indipendente dal servizio, che un deploy non tocca. Attivali come
 rete di sicurezza aggiuntiva - e' un'azione una-tantum del proprietario dal pannello

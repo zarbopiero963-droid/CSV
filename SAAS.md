@@ -121,6 +121,13 @@ webhook_seen
   il dedup delle riconsegne di Telegram: senza, una riconsegna riscrive il
   segnale e fa ripartire il TTL
 
+impostazioni       ← config GLOBALE del servizio, chiave→valore (#56 pezzo 2)
+  chiave (primary key), valore
+  nasce col canale di backup: una destinazione sola, del proprietario, che non
+  appartiene a nessun utente. Sta QUI e non in chats — chats sono le SORGENTI dei
+  segnali — perché il canale di backup finito in chats verrebbe instradato come un
+  canale di segnali (il filtro delle chat, regola non negoziabile)
+
 profiles           ← tabella PREESISTENTE, invariata
   name (primary key), chat_ids, parser
   dal dispatch multi-parser (PR 2 di #2) è la SORGENTE dei link di parser_chats,
@@ -1534,7 +1541,12 @@ passare inosservata.
 | `POST /api/admin/requests/{id}/approva` | concede `{"giorni": n}` | **`404`**; `422` sui giorni fuori da `1..3650` o sul corpo malformato |
 | `POST /api/admin/requests/{id}/rifiuta` | torna `registrato`, così può richiedere | **`404`** |
 | `POST /api/admin/promemoria` | avvisa chi scade entro 5 giorni | **`404`** |
-| *le quattro del pannello* | | `404` e non `403`, perché un `403` conferma a un estraneo che il pannello sta lì. Per la stessa ragione corpo e `id` di percorso si leggono **a mano dopo** il controllo della sessione: lasciati a FastAPI, un estraneo riceveva `422`, cioè la stessa conferma per un'altra via — trovato dalla guardia sulle rotte, PR #26 |
+| `GET /api/admin/backup` | scarica una copia consistente del database (#56 pezzo 1) | **`404`**; `403` su navigazione cross-site (`Sec-Fetch-Site`) |
+| `GET /api/admin/canale-backup` | stato del canale di backup: `{configurato, candidato}` (#56 pezzo 2) | **`404`** a chi non è l'amministratore |
+| `POST /api/admin/canale-backup/conferma` | promuove il candidato a configurato, **solo dopo** un messaggio di prova riuscito | **`404`**; `400` col motivo VISIBILE se la prova fallisce o manca il candidato; `409` se il candidato è cambiato durante la prova |
+| `POST /api/admin/canale-backup/prova` | riprova l'invio sul canale configurato | **`404`**; `400` se non configurato o l'invio fallisce |
+| `DELETE /api/admin/canale-backup` | rimuove il canale configurato (e il candidato) | **`404`** |
+| *le rotte del pannello* | | `404` e non `403`, perché un `403` conferma a un estraneo che il pannello sta lì. Per la stessa ragione corpo e `id` di percorso si leggono **a mano dopo** il controllo della sessione: lasciati a FastAPI, un estraneo riceveva `422`, cioè la stessa conferma per un'altra via — trovato dalla guardia sulle rotte, PR #26 |
 | `POST /api/me/token` | conia (o rigenera) il token del feed; il token in chiaro esiste solo qui | `401` senza sessione |
 | `GET /feed/{slug}.csv` | il feed dell'utente, autenticato dal **suo** token (`?token=xt_…`) | **`404` uniforme**: slug inesistente, token assente, sbagliato o altrui — un `401` su uno slug esistente direbbe a chi enumera che quel cliente esiste |
 
@@ -2063,6 +2075,7 @@ senza doppio ruolo.
 | Fatto | **Multi-riga, pezzi 1–2** (#35): feed a N righe vive (`store_signal` a lista, `componi_feed`, TTL per riga) e motore base+override nei due motori (somma mercati+selezioni, eredità, `enabled`, punteggi dinamici col tetto, gate #41 per riga, `config.multi` validata col 422 e `MAX_RIGHE_MULTI`). Test in `tests/relay/test_multiriga.py` e `tests/engine/` |
 | Fatto | **Multi-riga, pezzo 3** (#35): la card «Output e condizioni» nel riepilogo del wizard — righe di override editabili, prova col k su N per riga, CSV composto anche nell'anteprima locale (`componiFeed`), persistenza della `config.multi` nel draft. Chiude la #35. Test browser in `tests/web/test_multiriga_web.py` |
 | Fatto | **Backup del database, pezzo 1** (#56): copia CONSISTENTE via l'API di backup di SQLite (`copia_backup_db` — mai una copia grezza del file a caldo, che può uscire corrotta) e download **solo-amministratore** `GET /api/admin/backup` → `betrelay-backup-AAAA-MM-GG-HHMM.db` (**404** per chi non è admin, tracciato in `admin_audit`), col pulsante «Scarica backup» nella card **Backup del database** in fondo alla vista Richieste. `README.txt`: checklist **prima di un deploy** + strategia di **backup** (copia manuale, snapshot del volume Railway, variabili d'ambiente fuori dal backup, sicurezza del file). I pezzi **2** (canale privato di destinazione, configurato dal pannello) e **3** (backup notturno automatico via Telegram) restano da fare. Test in `tests/relay/test_backup.py` |
+| Fatto | **Backup del database, pezzo 2a — backend del canale** (#56): tabella `impostazioni` (chiave→valore, config GLOBALE del proprietario, **non** in `chats`), cattura del canale privato dal webhook quando il proprietario promuove il bot amministratore (`my_chat_member`, **solo se** `from.id == TELEGRAM_ADMIN_ID` e **solo canali PRIVATI** — quelli pubblici hanno uno `username` e i backup coi dati dei clienti non devono finirci) → scrive un CANDIDATO (una riconsegna dopo la conferma non lo ripropone), e rotte admin (**404** fuori dall'admin): `GET /api/admin/canale-backup` (stato configurato+candidato), `POST …/conferma` (promuove il candidato **solo dopo** un messaggio di prova riuscito, errore visibile se fallisce, `409` se il candidato è cambiato durante la prova), `POST …/prova`, `DELETE …/canale-backup` — configurare/rimuovere tracciato in `admin_audit`. La consegna automatica al canale è il pezzo **3**. Test in `tests/relay/test_canale_backup.py` |
 | M3 | «Entra come» e lo storico di `admin_audit` nel pannello: servono rotte nuove lato server |
 | M4 | Log persistenti, sospensione, suggerimento AI lato server, abbonamenti |
 
