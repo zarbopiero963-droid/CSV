@@ -65,6 +65,14 @@ def _corpo(risposta):
     return json.loads(bytes(risposta.body).decode())
 
 
+def _promozione(chat_id, titolo, attore=None):
+    """Un update `my_chat_member`: il bot promosso amministratore di un canale."""
+    return {'my_chat_member': {
+        'from': {'id': int(attore if attore is not None else ADMIN_FINTO)},
+        'chat': {'id': chat_id, 'type': 'channel', 'title': titolo},
+        'new_chat_member': {'status': 'administrator'}}}
+
+
 # ---------------------------------------------------------------- la cattura
 
 def test_il_bot_promosso_amministratore_dal_proprietario_diventa_candidato(tmp_path, monkeypatch):
@@ -75,10 +83,7 @@ def test_il_bot_promosso_amministratore_dal_proprietario_diventa_candidato(tmp_p
     percorso, _admin_s, _cliente_s, _cliente = _admin(tmp_path, monkeypatch, 'cattura.db')
     _abilita_webhook(monkeypatch)
 
-    esito = _webhook({'my_chat_member': {
-        'from': {'id': int(ADMIN_FINTO)},
-        'chat': {'id': CANALE, 'type': 'channel', 'title': 'Backup BetRelay'},
-        'new_chat_member': {'status': 'administrator'}}})
+    esito = _webhook(_promozione(CANALE, 'Backup BetRelay'))
 
     assert esito.get('canale_backup_candidato') is True, esito
     assert _impostazione(percorso, main.CHIAVE_CANALE_CANDIDATO_ID) == str(CANALE)
@@ -91,23 +96,8 @@ def test_il_bot_promosso_amministratore_dal_proprietario_diventa_candidato(tmp_p
     assert in_chats == 0, 'il canale di backup e- finito in chats: verrebbe instradato come segnale'
 
 
-def test_un_messaggio_del_canale_inoltrato_dal_proprietario_diventa_candidato(tmp_path, monkeypatch):
-    """`forward_from_chat` in un messaggio inoltrato dall'amministratore → candidato."""
-    percorso, _a, _c, _u = _admin(tmp_path, monkeypatch, 'inoltro.db')
-    _abilita_webhook(monkeypatch)
-
-    esito = _webhook({'message': {
-        'from': {'id': int(ADMIN_FINTO)},
-        'chat': {'id': int(ADMIN_FINTO), 'type': 'private'},
-        'text': 'guarda questo',
-        'forward_from_chat': {'id': ALTRO_CANALE, 'type': 'channel', 'title': 'Il canale'}}})
-
-    assert esito.get('canale_backup_candidato') is True, esito
-    assert _impostazione(percorso, main.CHIAVE_CANALE_CANDIDATO_ID) == str(ALTRO_CANALE)
-
-
 def test_un_ESTRANEO_non_puo_proporre_un_canale(tmp_path, monkeypatch):
-    """Stessi update, ma `from.id` non e' l'amministratore → nessun candidato.
+    """`my_chat_member` con `from.id` diverso dall'amministratore → nessun candidato.
 
     Senza questa guardia il canale di CHIUNQUE aggiunga il bot comparirebbe come
     proposta nel pannello del proprietario."""
@@ -116,18 +106,27 @@ def test_un_ESTRANEO_non_puo_proporre_un_canale(tmp_path, monkeypatch):
 
     estraneo = '111222333'
     assert estraneo != ADMIN_FINTO
-    _webhook({'my_chat_member': {
-        'from': {'id': int(estraneo)},
-        'chat': {'id': CANALE, 'type': 'channel', 'title': 'Canale altrui'},
-        'new_chat_member': {'status': 'administrator'}}})
-    _webhook({'message': {
-        'from': {'id': int(estraneo)},
-        'chat': {'id': int(estraneo), 'type': 'private'},
-        'text': 'ciao',
-        'forward_from_chat': {'id': ALTRO_CANALE, 'type': 'channel', 'title': 'Altro'}}})
+    _webhook(_promozione(CANALE, 'Canale altrui', attore=estraneo))
 
     assert _impostazione(percorso, main.CHIAVE_CANALE_CANDIDATO_ID) is None, \
         'un estraneo ha potuto proporre un canale di backup'
+
+
+def test_una_riconsegna_del_canale_gia_configurato_non_lo_ripropone(tmp_path, monkeypatch):
+    """Telegram riconsegna gli update, e la cattura gira prima del dedup: una riconsegna
+    del `my_chat_member` dopo la conferma NON deve riproporre un canale gia' configurato."""
+    percorso, admin_s, _c, _u = _admin(tmp_path, monkeypatch, 'riconsegna.db')
+    _abilita_webhook(monkeypatch)
+    monkeypatch.setattr(main, 'invia_messaggio_telegram',
+                        lambda chat_id, testo, bot_token=None: (True, None))
+    _webhook(_promozione(CANALE, 'Backup'))
+    main.conferma_canale_backup(admin_s)
+    assert _impostazione(percorso, main.CHIAVE_CANALE_BACKUP_ID) == str(CANALE)
+
+    esito = _webhook(_promozione(CANALE, 'Backup'))  # la riconsegna
+    assert esito.get('canale_backup_gia_configurato') is True, esito
+    assert _impostazione(percorso, main.CHIAVE_CANALE_CANDIDATO_ID) is None, \
+        'una riconsegna ha riproposto un canale gia- configurato'
 
 
 def test_la_cattura_non_disturba_un_segnale_normale(tmp_path, monkeypatch):
@@ -211,6 +210,31 @@ def test_conferma_con_prova_FALLITA_non_salva_e_mostra_errore(tmp_path, monkeypa
                        " WHERE action='canale_backup_configurato'").fetchone()[0]
     c.close()
     assert quante == 0, 'una prova fallita ha lasciato una traccia di configurazione'
+
+
+def test_conferma_abbandona_se_il_candidato_cambia_durante_la_prova(tmp_path, monkeypatch):
+    """Race TOCTOU: la prova (rete) avviene fuori transazione. Se una cattura concorrente
+    scrive un ALTRO candidato mentre la prova e' in volo, la conferma NON deve configurare
+    quello vecchio (cancellerebbe il nuovo senza traccia): 409, niente configurato, il
+    candidato NUOVO resta. Fail-first: senza la rilettura in transazione, il vecchio viene
+    salvato e il nuovo cancellato. Segnalato da GPT-5.5 e Fable 5."""
+    from fastapi import HTTPException
+    percorso, admin_s, _c, _u = _admin(tmp_path, monkeypatch, 'race.db')
+    _metti_candidato(CANALE, 'Canale A')
+
+    def invio_che_cambia_candidato(chat_id, testo, bot_token=None):
+        # simula una cattura concorrente che scrive un altro candidato durante la prova
+        _metti_candidato(ALTRO_CANALE, 'Canale B')
+        return True, None
+
+    monkeypatch.setattr(main, 'invia_messaggio_telegram', invio_che_cambia_candidato)
+    with pytest.raises(HTTPException) as errore:
+        main.conferma_canale_backup(admin_s)
+    assert errore.value.status_code == 409, f'{errore.value.status_code} invece di 409'
+    assert _impostazione(percorso, main.CHIAVE_CANALE_BACKUP_ID) is None, \
+        'e- stato configurato il candidato vecchio nonostante fosse cambiato'
+    assert _impostazione(percorso, main.CHIAVE_CANALE_CANDIDATO_ID) == str(ALTRO_CANALE), \
+        'il candidato NUOVO e- stato cancellato dalla conferma del vecchio'
 
 
 def test_conferma_senza_candidato_e_400(tmp_path, monkeypatch):

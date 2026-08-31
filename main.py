@@ -5128,6 +5128,13 @@ def conferma_canale_backup(request: Request):
     c = db()
     try:
         c.execute('BEGIN IMMEDIATE')
+        # Il candidato si rilegge DENTRO la transazione: la prova (rete) e' avvenuta fuori,
+        # e una cattura concorrente puo' averlo cambiato nel frattempo. Se e' cambiato NON
+        # si configura quello vecchio — cancellerebbe il nuovo candidato senza traccia:
+        # si abbandona con 409 e l'amministratore riconferma. Segnalato da GPT-5.5 e Fable 5.
+        if leggi_impostazione(c, CHIAVE_CANALE_CANDIDATO_ID) != candidato['chat_id']:
+            c.rollback()
+            raise HTTPException(409, 'il candidato e- cambiato durante la verifica: riprova')
         scrivi_impostazione(c, CHIAVE_CANALE_BACKUP_ID, candidato['chat_id'])
         scrivi_impostazione(c, CHIAVE_CANALE_BACKUP_TITOLO, candidato['titolo'])
         cancella_impostazione(c, CHIAVE_CANALE_CANDIDATO_ID)
@@ -5135,11 +5142,8 @@ def conferma_canale_backup(request: Request):
         _annota_admin(c, amministratore['id'], 'canale_backup_configurato')
         c.commit()
         corpo = {'configurato': _canale_configurato(c), 'candidato': None}
-    except Exception:
-        c.rollback()
+    finally:
         c.close()
-        raise
-    c.close()
     return _rispondi_con_sessione(amministratore['id'], amministratore['versione'], corpo)
 
 
@@ -7196,15 +7200,15 @@ def _valida_betfair(c, user_id, config):
 
 
 def _cattura_canale_backup(payload):
-    """Se l'update dice qual e' il canale di backup, lo registra come CANDIDATO (#56 pezzo 2).
+    """Se il bot e' stato promosso amministratore di un canale, lo propone come CANDIDATO (#56 pezzo 2).
 
-    Due strade, entrambe valide **solo se l'azione viene dall'amministratore**
-    (`from.id == TELEGRAM_ADMIN_ID`), perche' un canale altrui non deve poter comparire
-    come proposta nel pannello del proprietario:
-
-    - il bot aggiunto o promosso **amministratore** di un canale — `my_chat_member`,
-      che e' esattamente l'atto richiesto perche' il bot possa poi pubblicarci i backup;
-    - un messaggio del canale **inoltrato** al bot — `forward_from_chat` su un `message`.
+    Un `my_chat_member` con status administrator/creator, e **solo se e' l'amministratore
+    ad averlo promosso** (`from.id == TELEGRAM_ADMIN_ID`): un canale altrui non deve poter
+    comparire come proposta nel pannello del proprietario. E' esattamente l'atto richiesto
+    perche' il bot possa poi pubblicare i backup nel canale — il proprietario lo descrive
+    cosi': «il bot rileva il proprio ingresso nel canale e lo propone nel pannello per
+    conferma». (L'inoltro di un messaggio, l'altra opzione della #56, e' scartato: qualunque
+    post di canale inoltrato al bot avrebbe riconfigurato il candidato di soppiatto.)
 
     Scrive **solo un candidato**: nessun backup parte da qui, e la conferma nel pannello
     manda un messaggio di prova prima di salvarlo come canale configurato. Non tocca
@@ -7217,29 +7221,24 @@ def _cattura_canale_backup(payload):
     """
     if not TELEGRAM_ADMIN_ID:
         return None
-    canale = None
-    aggiornamento = payload.get('my_chat_member')
-    if aggiornamento:
-        attore = str((aggiornamento.get('from') or {}).get('id') or '')
-        stato = (aggiornamento.get('new_chat_member') or {}).get('status') or ''
-        ch = aggiornamento.get('chat') or {}
-        if (attore == TELEGRAM_ADMIN_ID and (ch.get('type') or '') == 'channel'
-                and stato in ('administrator', 'creator')):
-            canale = ch
-    else:
-        msg = payload.get('message') or {}
-        attore = str((msg.get('from') or {}).get('id') or '')
-        inoltrato = msg.get('forward_from_chat') or {}
-        if attore == TELEGRAM_ADMIN_ID and (inoltrato.get('type') or '') == 'channel':
-            canale = inoltrato
-    if not canale:
+    aggiornamento = payload.get('my_chat_member') or {}
+    attore = str((aggiornamento.get('from') or {}).get('id') or '')
+    stato = (aggiornamento.get('new_chat_member') or {}).get('status') or ''
+    ch = aggiornamento.get('chat') or {}
+    if not (attore == TELEGRAM_ADMIN_ID and (ch.get('type') or '') == 'channel'
+            and stato in ('administrator', 'creator')):
         return None
-    chat_id = str(canale.get('id') or '')
+    chat_id = str(ch.get('id') or '')
     if not chat_id:
         return None
-    titolo = (canale.get('title') or '').strip()
+    titolo = (ch.get('title') or '').strip()
     c = db()
     try:
+        # Riconsegna dopo la conferma: Telegram riconsegna gli update e questa cattura gira
+        # PRIMA del dedup di `webhook_seen`. Se il canale e' GIA' quello configurato, una
+        # riconsegna non deve riproporre nel pannello una proposta gia' consumata (Fable 5).
+        if leggi_impostazione(c, CHIAVE_CANALE_BACKUP_ID) == chat_id:
+            return {'ok': True, 'canale_backup_gia_configurato': True}
         scrivi_impostazione(c, CHIAVE_CANALE_CANDIDATO_ID, chat_id)
         scrivi_impostazione(c, CHIAVE_CANALE_CANDIDATO_TITOLO, titolo)
         c.commit()
