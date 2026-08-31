@@ -408,6 +408,18 @@ def test_la_conferma_rifiuta_un_candidato_diverso_da_quello_mostrato(tmp_path, m
         'il candidato corrente e- stato toccato'
 
 
+def test_conferma_senza_corpo_valido_e_422_non_404(tmp_path, monkeypatch):
+    """La conferma legge `{chat_id}` dal corpo DOPO il controllo di sessione: un admin con un
+    corpo senza `chat_id` riceve 422 (validazione), non 404 — il 404 e' la risposta al
+    NON-admin, e leggere il corpo prima della sessione lo trasformerebbe nell'oracolo «questa
+    rotta esiste» (stessa ragione di `approva_richiesta`). Segnalato da GPT-5.5 sulla PR #100."""
+    from fastapi import HTTPException
+    _p, admin_s, _c, _u = _admin(tmp_path, monkeypatch, 'corpo.db')
+    with pytest.raises(HTTPException) as errore:
+        asyncio.run(main.conferma_canale_backup(_CorpoFinto(admin_s, {'altro': 'x'})))
+    assert errore.value.status_code == 422, f'{errore.value.status_code} invece di 422'
+
+
 def test_conferma_senza_candidato_e_400(tmp_path, monkeypatch):
     from fastapi import HTTPException
     _p, admin_s, _c, _u = _admin(tmp_path, monkeypatch, 'senza.db')
