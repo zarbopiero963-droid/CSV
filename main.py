@@ -7218,6 +7218,10 @@ def _cattura_canale_backup(payload):
 
     Restituisce un dict da consegnare a Telegram se ha catturato qualcosa, altrimenti
     `None` e il webhook prosegue col suo percorso normale.
+
+    SINCRONA e da chiamare FUORI dall'event loop (`asyncio.to_thread`): prende il lock di
+    scrittura con `BEGIN IMMEDIATE`, e sull'event loop l'attesa del lock sotto contesa
+    fermerebbe tutte le consegne (vedi il chiamante in `telegram_webhook`).
     """
     if not TELEGRAM_ADMIN_ID:
         return None
@@ -7319,9 +7323,17 @@ async def telegram_webhook(request: Request):
     # Cattura del canale di backup (#56 pezzo 2): il bot promosso amministratore di un
     # canale dall'amministratore. Registra solo un CANDIDATO da confermare nel pannello —
     # non e' un percorso verso i segnali.
-    catturato = _cattura_canale_backup(payload)
-    if catturato is not None:
-        return catturato
+    #
+    # Gira SOLO sugli aggiornamenti `my_chat_member` (gli altri non la riguardano, e cosi' la
+    # stragrande maggioranza delle consegne — i messaggi dei canali — non paga nemmeno un salto
+    # di thread) e FUORI dall'event loop, come `_processa_messaggio_canale` piu' sotto: il suo
+    # `BEGIN IMMEDIATE` prende il lock di scrittura e, sotto contesa con la conferma (anch'essa
+    # `BEGIN IMMEDIATE`), attenderebbe fino al busy_timeout. Sull'event loop quell'attesa fermerebbe
+    # TUTTE le consegne webhook, non solo questa. Bloccante di Claude Fable 5 al gate finale (#56).
+    if 'my_chat_member' in payload:
+        catturato = await asyncio.to_thread(_cattura_canale_backup, payload)
+        if catturato is not None:
+            return catturato
     msg = payload.get('message') or payload.get('channel_post') or {}
     chat = msg.get('chat') or {}
     chat_id = str(chat.get('id', ''))

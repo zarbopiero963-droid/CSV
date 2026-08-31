@@ -214,6 +214,66 @@ def test_la_cattura_non_disturba_un_segnale_normale(tmp_path, monkeypatch):
     assert _impostazione(percorso, main.CHIAVE_CANALE_CANDIDATO_ID) is None
 
 
+def test_la_cattura_del_canale_gira_fuori_dall_event_loop(tmp_path, monkeypatch):
+    """Il `BEGIN IMMEDIATE` della cattura non deve girare sull'event loop: sotto contesa con la
+    conferma attenderebbe il busy_timeout bloccando TUTTE le consegne webhook. Deve girare su un
+    thread diverso da quello che serve la consegna. Fail-first: chiamata direttamente sul loop
+    (senza `asyncio.to_thread`), i due identificativi di thread coincidono. Bloccante di Claude
+    Fable 5 al gate finale (#56)."""
+    import threading
+    _p, _a, _c, _u = _admin(tmp_path, monkeypatch, 'offload.db')
+    _abilita_webhook(monkeypatch)
+    identita = {}
+    reale = main._cattura_canale_backup
+
+    def spia(payload):
+        identita['cattura'] = threading.get_ident()
+        return reale(payload)
+
+    monkeypatch.setattr(main, '_cattura_canale_backup', spia)
+
+    async def guida():
+        identita['loop'] = threading.get_ident()
+
+        class Richiesta:
+            headers = {'X-Telegram-Bot-Api-Secret-Token': main.webhook_secret(BOT_FINTO)}
+
+            async def json(self):
+                return _promozione(CANALE, 'Backup')
+
+        return await main.telegram_webhook(Richiesta())
+
+    esito = asyncio.run(guida())
+    assert esito.get('canale_backup_candidato') is True, esito
+    assert identita.get('cattura') is not None, 'la cattura non e- stata chiamata'
+    assert identita['cattura'] != identita['loop'], \
+        'la cattura ha girato sull-event loop invece che su un thread separato'
+
+
+def test_un_my_chat_member_ignorato_passa_senza_scrivere_nulla(tmp_path, monkeypatch):
+    """Un `my_chat_member` che la cattura ignora (qui il bot RIMOSSO, status `left`) prosegue nel
+    percorso normale con `msg` vuoto e si ferma su `no_text` PRIMA di ogni scrittura: niente
+    candidato, e niente riga in `webhook_seen` (il dedup vive dentro `_processa_messaggio_canale`,
+    mai raggiunto perche' `if not text` torna prima). Copre il passthrough segnalato da Claude
+    Fable 5 al gate finale (#56)."""
+    percorso, _a, _c, _u = _admin(tmp_path, monkeypatch, 'passthrough.db')
+    _abilita_webhook(monkeypatch)
+    rimozione = {'update_id': 777, 'my_chat_member': {
+        'from': {'id': int(ADMIN_FINTO)},
+        'chat': {'id': CANALE, 'type': 'channel', 'title': 'X'},
+        'new_chat_member': {'status': 'left'}}}
+    esito = _webhook(rimozione)
+    assert esito == {'ok': True, 'ignored': 'no_text'}, esito
+    assert _impostazione(percorso, main.CHIAVE_CANALE_CANDIDATO_ID) is None, \
+        'un my_chat_member ignorato ha scritto un candidato'
+    c = sqlite3.connect(percorso)
+    try:
+        n = c.execute('SELECT COUNT(*) FROM webhook_seen').fetchone()[0]
+    finally:
+        c.close()
+    assert n == 0, 'un my_chat_member ignorato ha lasciato una riga in webhook_seen con chat_id vuoto'
+
+
 # ---------------------------------------------------------------- le rotte
 
 def _metti_candidato(chat_id, titolo):
