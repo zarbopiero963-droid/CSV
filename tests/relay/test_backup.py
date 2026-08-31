@@ -58,14 +58,14 @@ def test_il_backup_e_una_copia_CONSISTENTE_e_scaricabile(tmp_path, monkeypatch):
     assert utenti >= 1, 'il backup non contiene gli utenti del database vivo'
 
 
-def _con_sito(admin_s, sito):
-    """La stessa sessione dell'admin, ma con l'header Sec-Fetch-Site di una navigazione.
+def _con_sito(sessione, sito):
+    """La stessa sessione, ma con l'header Sec-Fetch-Site di una navigazione.
 
     Il browser lo impone e la pagina non lo puo' falsificare: e' cio' che distingue il
     click sul pulsante del pannello (`same-origin`) da un innesco da un altro sito.
     """
     class Richiesta:
-        cookies = admin_s.cookies
+        cookies = sessione.cookies
         headers = {'sec-fetch-site': sito}
     return Richiesta()
 
@@ -93,6 +93,19 @@ def test_la_navigazione_legittima_scarica(tmp_path, monkeypatch):
         risposta = asyncio.run(main.scarica_backup(richiesta))
         assert bytes(risposta.body)[:16] == b'SQLite format 3\x00', \
             'una navigazione legittima non ha scaricato un file SQLite valido'
+
+
+def test_un_NON_admin_con_cross_site_vede_404_non_403(tmp_path, monkeypatch):
+    """L'ordine dei controlli conta: `_solo_amministratore` PRIMA dell'anti-CSRF, cosi'
+    un estraneo vede 404 (rotta inesistente) e non 403 (rotta esistente, contesto
+    vietato) nemmeno con Sec-Fetch-Site cross-site. Fail-first: invertendo l'ordine il
+    non-admin riceverebbe 403. Suggerito da GPT-5.5 al gate finale (#56)."""
+    from fastapi import HTTPException
+    _p, _admin_s, cliente_s, _cliente = _admin(tmp_path, monkeypatch, 'ordine.db')
+    with pytest.raises(HTTPException) as errore:
+        asyncio.run(main.scarica_backup(_con_sito(cliente_s, 'cross-site')))
+    assert errore.value.status_code == 404, \
+        f'{errore.value.status_code}: un non-admin non deve mai vedere che la rotta esiste'
 
 
 def test_un_solo_backup_alla_volta_sotto_il_lucchetto(tmp_path, monkeypatch):
