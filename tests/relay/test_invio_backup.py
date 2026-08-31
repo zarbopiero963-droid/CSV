@@ -192,6 +192,46 @@ def test_backup_al_canale_rifiuta_una_destinazione_non_channel(tmp_path, monkeyp
     assert 'si' not in inviato, 'il backup e- partito verso una destinazione non-channel'
 
 
+def test_backup_al_canale_non_solleva_se_la_copia_fallisce(tmp_path, monkeypatch):
+    """`copia_backup_su_file` puo' sollevare (disco pieno, errore sqlite). Il contratto e' «non
+    solleva»: torna `(False, motivo)` e la rotta risponde 400, non 500. Il motivo e' il TIPO
+    dell'eccezione, mai un percorso o dato del DB. Fail-first: senza il try/except attorno alla copia
+    l'eccezione risale e la chiamata solleva. Bloccante di Claude Fable 5 (#101)."""
+    _p, _a, _c, _u = _admin(tmp_path, monkeypatch, 'copia_ko.db')
+    _configura_canale()
+
+    def esplode(percorso):
+        raise sqlite3.OperationalError('disk I/O error')
+
+    monkeypatch.setattr(main, 'copia_backup_su_file', esplode)
+    riuscito, motivo = main._invia_backup_al_canale()
+    assert riuscito is False, (riuscito, motivo)
+    assert 'copia' in motivo and 'OperationalError' in motivo, motivo
+    assert 'disk I/O' not in motivo, 'il motivo non deve riportare il testo dell-eccezione'
+
+
+def test_backup_inviato_ma_audit_fallito_resta_successo(tmp_path, monkeypatch):
+    """L'audit e' BEST-EFFORT: se il documento e' partito, un errore SQLite in `_annota_admin` NON
+    deve tornare «fallito» — il cron ritenterebbe e manderebbe un SECONDO backup identico. Ritorna
+    `(True, None)`. Fail-first: senza il try/except attorno all'audit l'eccezione risale. Bloccante
+    di GPT-5.6 Sol (#101)."""
+    _p, _a, _c, _u = _admin(tmp_path, monkeypatch, 'audit_ko.db')
+    _configura_canale()
+    monkeypatch.setattr(main, 'leggi_chat_telegram',
+                        lambda chat_id, bot_token=None: (True, {'id': CANALE, 'type': 'channel'}))
+    inviati = []
+    monkeypatch.setattr(main, 'invia_documento_telegram',
+                        lambda *a, **k: inviati.append(1) or (True, None))
+
+    def audit_rotto(c, chi, azione, bersaglio=None):
+        raise sqlite3.OperationalError('audit ko')
+
+    monkeypatch.setattr(main, '_annota_admin', audit_rotto)
+    esito = main._invia_backup_al_canale(amministratore_id=1)
+    assert esito == (True, None), esito
+    assert len(inviati) == 1, 'il documento non e- partito una volta sola'
+
+
 def test_backup_al_canale_invia_e_traccia(tmp_path, monkeypatch):
     """Canale privato: si copia su file, si manda al chat_id giusto, e resta una riga di audit."""
     percorso, _a, _c, _u = _admin(tmp_path, monkeypatch, 'invia.db')

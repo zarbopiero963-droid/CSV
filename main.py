@@ -5404,20 +5404,29 @@ def _invia_backup_al_canale(amministratore_id=None):
         if not configurato:
             return False, 'nessun canale di backup configurato'
         chat_id = configurato['chat_id']
-        ok, dati = leggi_chat_telegram(chat_id)
-        if not ok:
-            return False, f'verifica del canale fallita: {dati}'
-        # Deve essere ANCORA un canale PRIVATO: `type == 'channel'` e senza `username`. Un canale
-        # reso pubblico (ha uno username) o convertito in gruppo/supergruppo non deve ricevere il
-        # backup coi dati dei clienti. La cattura lo garantiva alla configurazione; qui si riverifica
-        # prima di OGNI invio. Sol al gate del pezzo 2, rafforzato da GPT-5.5 sulla PR #101.
-        if (dati.get('type') or '') != 'channel' or dati.get('username'):
-            return False, ('il canale non e- piu- un canale privato: rimuovilo e configura un'
-                           ' canale privato prima di inviare il backup')
         fd, percorso = tempfile.mkstemp(prefix='betrelay-backup-', suffix='.db')
         os.close(fd)
         try:
-            copia_backup_su_file(percorso)
+            try:
+                copia_backup_su_file(percorso)
+            except Exception as e:
+                # `copia_backup_su_file` puo' sollevare (disco pieno, errore sqlite). Il contratto di
+                # questa funzione e' «non solleva»: qui l'eccezione diventa `(False, motivo)` e la
+                # rotta risponde 400 col motivo, non un 500. Il motivo e' il TIPO, mai un percorso o
+                # dato del DB. Bloccante di Claude Fable 5 (#101).
+                return False, f'copia del backup fallita ({type(e).__name__})'
+            # La riverifica della privacy sta SUBITO PRIMA dell'invio, DOPO la copia: cosi' la
+            # finestra fra «il canale e' privato» e il `sendDocument` e' minima — la copia, che puo'
+            # durare, non la allarga piu'. Deve essere ancora un canale PRIVATO (`type == 'channel'`
+            # e senza `username`): un canale reso pubblico o convertito in gruppo non riceve il backup
+            # coi dati dei clienti. Una TOCTOU residua sub-secondo e' inevitabile con un'API remota
+            # che non offre un invio condizionato. Sol e Fable al gate finale (#101).
+            ok, dati = leggi_chat_telegram(chat_id)
+            if not ok:
+                return False, f'verifica del canale fallita: {dati}'
+            if (dati.get('type') or '') != 'channel' or dati.get('username'):
+                return False, ('il canale non e- piu- un canale privato: rimuovilo e configura un'
+                               ' canale privato prima di inviare il backup')
             nome = f'betrelay-backup-{time.strftime("%Y-%m-%d-%H%M", time.gmtime())}.db'
             riuscito, motivo = invia_documento_telegram(
                 chat_id, percorso, nome, didascalia='BetRelay: backup automatico del database.')
@@ -5428,12 +5437,20 @@ def _invia_backup_al_canale(amministratore_id=None):
                 pass
         if not riuscito:
             return False, f'invio del documento fallito: {motivo}'
-        c = db()
+        # L'audit e' BEST-EFFORT: il documento E' gia' partito, e un errore SQLite qui NON deve far
+        # tornare «fallito» — il cron ritenterebbe e manderebbe un SECONDO backup identico (manca
+        # un'idempotenza persistente, e questa e' la scelta at-least-vs-at-most-once). Si logga e si
+        # ritorna successo: un backup mandato senza la sua riga di audit e' molto meglio di due
+        # backup mandati. Bloccante di GPT-5.6 Sol (#101).
         try:
-            _annota_admin(c, amministratore_id, 'backup_inviato')
-            c.commit()
-        finally:
-            c.close()
+            c = db()
+            try:
+                _annota_admin(c, amministratore_id, 'backup_inviato')
+                c.commit()
+            finally:
+                c.close()
+        except Exception:
+            logging.exception("backup inviato ma la traccia in admin_audit e' fallita")
         return True, None
     finally:
         _lucchetto_invio_backup.release()
