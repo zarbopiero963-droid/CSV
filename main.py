@@ -955,6 +955,12 @@ SCHEMA_MULTIUTENTE = (
     # viene committato niente e il prossimo avvio riprova.
     'CREATE TABLE IF NOT EXISTS migrazioni (nome TEXT PRIMARY KEY,'
     ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP)',
+    # Impostazioni GLOBALI del servizio, chiave→valore. Nasce col canale di backup
+    # (#56 pezzo 2): la destinazione dei backup e' una sola, del proprietario, e non
+    # appartiene a nessun utente ne' a `chats` — che sono le SORGENTI dei segnali, e
+    # mettercela dentro la iscriverebbe all'instradamento del webhook (regola del
+    # filtro chat). Tabella separata, additiva e idempotente come le altre.
+    'CREATE TABLE IF NOT EXISTS impostazioni (chiave TEXT PRIMARY KEY, valore TEXT)',
 )
 
 # «Nessun topic» si scrive NULL, e in SQL `NULL != NULL`: ogni confronto fra chat
@@ -4098,6 +4104,32 @@ def _annota_admin(c, chi, azione, bersaglio=None):
               ' VALUES (?,?,?)', (chi, bersaglio, azione))
 
 
+# Le chiavi delle impostazioni globali. Il canale di backup (#56 pezzo 2) e' salvato
+# in due tempi: prima un CANDIDATO — proposto dalla cattura via webhook — poi il
+# canale CONFIGURATO, che la conferma scrive solo dopo un invio di prova riuscito.
+CHIAVE_CANALE_BACKUP_ID = 'canale_backup_chat_id'
+CHIAVE_CANALE_BACKUP_TITOLO = 'canale_backup_titolo'
+CHIAVE_CANALE_CANDIDATO_ID = 'canale_backup_candidato_chat_id'
+CHIAVE_CANALE_CANDIDATO_TITOLO = 'canale_backup_candidato_titolo'
+
+
+def leggi_impostazione(c, chiave, default=None):
+    """Il valore di un'impostazione globale, o `default` se non c'e'."""
+    riga = c.execute('SELECT valore FROM impostazioni WHERE chiave=?', (chiave,)).fetchone()
+    return riga[0] if riga else default
+
+
+def scrivi_impostazione(c, chiave, valore):
+    """Imposta (o sovrascrive) un'impostazione globale. Non committa: lo fa il chiamante."""
+    c.execute('INSERT INTO impostazioni(chiave, valore) VALUES (?,?)'
+              ' ON CONFLICT(chiave) DO UPDATE SET valore=excluded.valore', (chiave, valore))
+
+
+def cancella_impostazione(c, chiave):
+    """Rimuove un'impostazione globale. Non committa: lo fa il chiamante."""
+    c.execute('DELETE FROM impostazioni WHERE chiave=?', (chiave,))
+
+
 def utente_dalla_sessione(request):
     """L'utente della sessione, o `None`. **`user_id` viene DA QUI e mai dalla richiesta.**
 
@@ -5026,6 +5058,132 @@ async def scarica_backup(request: Request):
     # Rinnova il cookie di sessione sulla risposta-file, come ogni rotta autenticata.
     return _rispondi_con_sessione(amministratore['id'], amministratore['versione'],
                                   risposta=risposta)
+
+
+# Il testo del messaggio di prova verso il canale di backup. ASCII puro di proposito:
+# e' una stringa che parte verso Telegram, non un marcatore di parser, e tenerla senza
+# non-ASCII evita ogni rischio di codifica (vedi «REGOLA CODIFICA»).
+MESSAGGIO_PROVA_BACKUP = ('BetRelay: canale di backup collegato. Qui arriveranno i backup'
+                          ' del database del servizio.')
+
+
+def _canale_configurato(c):
+    """Il canale di backup CONFIGURATO come `{chat_id, titolo}`, o `None`."""
+    cid = leggi_impostazione(c, CHIAVE_CANALE_BACKUP_ID)
+    if not cid:
+        return None
+    return {'chat_id': cid, 'titolo': leggi_impostazione(c, CHIAVE_CANALE_BACKUP_TITOLO, '')}
+
+
+def _canale_candidato(c):
+    """Il canale CANDIDATO (catturato dal webhook, da confermare) come `{chat_id, titolo}`."""
+    cid = leggi_impostazione(c, CHIAVE_CANALE_CANDIDATO_ID)
+    if not cid:
+        return None
+    return {'chat_id': cid, 'titolo': leggi_impostazione(c, CHIAVE_CANALE_CANDIDATO_TITOLO, '')}
+
+
+@app.get('/api/admin/canale-backup')
+def stato_canale_backup(request: Request):
+    """Lo stato del canale di backup: il configurato e l'eventuale candidato (#56 pezzo 2).
+
+    Solo amministratore (404 altrimenti). Il `chat_id` torna al proprietario — e' il suo
+    canale, e i canali hanno id negativi che l'app Telegram non mostra, quindi vederlo
+    aiuta a riconoscerlo — mai a nessun altro, perche' la rotta e' 404 fuori dall'admin.
+    """
+    amministratore = _solo_amministratore(request)
+    c = db()
+    try:
+        corpo = {'configurato': _canale_configurato(c), 'candidato': _canale_candidato(c)}
+    finally:
+        c.close()
+    return _rispondi_con_sessione(amministratore['id'], amministratore['versione'], corpo)
+
+
+@app.post('/api/admin/canale-backup/conferma')
+def conferma_canale_backup(request: Request):
+    """Conferma il canale CANDIDATO come canale di backup, dopo un invio di PROVA riuscito.
+
+    Il messaggio di prova E' la verifica: se il bot non riesce a scrivere nel canale
+    (non e' amministratore, canale sbagliato, rete giu'), NON si salva niente e l'errore
+    torna VISIBILE (400 col motivo, che `invia_messaggio_telegram` garantisce senza
+    token). Solo su invio riuscito il candidato diventa il canale configurato e il
+    candidato si azzera — un solo canale di backup alla volta. Tracciato in `admin_audit`.
+
+    L'invio (rete) sta FUORI dalla transazione, come nel giro dei promemoria: non si
+    tiene un lock del database mentre si aspetta Telegram.
+    """
+    amministratore = _solo_amministratore(request)
+    c = db()
+    try:
+        candidato = _canale_candidato(c)
+    finally:
+        c.close()
+    if not candidato:
+        raise HTTPException(400, 'nessun canale candidato: aggiungi il bot come amministratore'
+                                 ' del canale, oppure inoltragli un messaggio del canale')
+    riuscito, motivo = invia_messaggio_telegram(candidato['chat_id'], MESSAGGIO_PROVA_BACKUP)
+    if not riuscito:
+        raise HTTPException(400, f'invio di prova fallito: {motivo}')
+    c = db()
+    try:
+        c.execute('BEGIN IMMEDIATE')
+        scrivi_impostazione(c, CHIAVE_CANALE_BACKUP_ID, candidato['chat_id'])
+        scrivi_impostazione(c, CHIAVE_CANALE_BACKUP_TITOLO, candidato['titolo'])
+        cancella_impostazione(c, CHIAVE_CANALE_CANDIDATO_ID)
+        cancella_impostazione(c, CHIAVE_CANALE_CANDIDATO_TITOLO)
+        _annota_admin(c, amministratore['id'], 'canale_backup_configurato')
+        c.commit()
+        corpo = {'configurato': _canale_configurato(c), 'candidato': None}
+    except Exception:
+        c.rollback()
+        c.close()
+        raise
+    c.close()
+    return _rispondi_con_sessione(amministratore['id'], amministratore['versione'], corpo)
+
+
+@app.post('/api/admin/canale-backup/prova')
+def prova_canale_backup(request: Request):
+    """Manda un messaggio di prova al canale GIA' configurato, per riverificarlo.
+
+    Non cambia la configurazione. Se non c'e' un canale → 400; un invio fallito torna
+    visibile col motivo, mai ingoiato.
+    """
+    amministratore = _solo_amministratore(request)
+    c = db()
+    try:
+        configurato = _canale_configurato(c)
+    finally:
+        c.close()
+    if not configurato:
+        raise HTTPException(400, 'nessun canale di backup configurato')
+    riuscito, motivo = invia_messaggio_telegram(configurato['chat_id'], MESSAGGIO_PROVA_BACKUP)
+    if not riuscito:
+        raise HTTPException(400, f'invio di prova fallito: {motivo}')
+    return _rispondi_con_sessione(amministratore['id'], amministratore['versione'],
+                                  {'inviato': True})
+
+
+@app.delete('/api/admin/canale-backup')
+def rimuovi_canale_backup(request: Request):
+    """Rimuove il canale di backup configurato (e l'eventuale candidato). Tracciato."""
+    amministratore = _solo_amministratore(request)
+    c = db()
+    try:
+        c.execute('BEGIN IMMEDIATE')
+        for chiave in (CHIAVE_CANALE_BACKUP_ID, CHIAVE_CANALE_BACKUP_TITOLO,
+                       CHIAVE_CANALE_CANDIDATO_ID, CHIAVE_CANALE_CANDIDATO_TITOLO):
+            cancella_impostazione(c, chiave)
+        _annota_admin(c, amministratore['id'], 'canale_backup_rimosso')
+        c.commit()
+    except Exception:
+        c.rollback()
+        c.close()
+        raise
+    c.close()
+    return _rispondi_con_sessione(amministratore['id'], amministratore['versione'],
+                                  {'configurato': None, 'candidato': None})
 
 
 def _giro_di_promemoria(c, adesso):
@@ -7037,6 +7195,59 @@ def _valida_betfair(c, user_id, config):
                 422, f'{colonna} non coincide con il mercato scelto: rifai la scelta dal wizard')
 
 
+def _cattura_canale_backup(payload):
+    """Se l'update dice qual e' il canale di backup, lo registra come CANDIDATO (#56 pezzo 2).
+
+    Due strade, entrambe valide **solo se l'azione viene dall'amministratore**
+    (`from.id == TELEGRAM_ADMIN_ID`), perche' un canale altrui non deve poter comparire
+    come proposta nel pannello del proprietario:
+
+    - il bot aggiunto o promosso **amministratore** di un canale — `my_chat_member`,
+      che e' esattamente l'atto richiesto perche' il bot possa poi pubblicarci i backup;
+    - un messaggio del canale **inoltrato** al bot — `forward_from_chat` su un `message`.
+
+    Scrive **solo un candidato**: nessun backup parte da qui, e la conferma nel pannello
+    manda un messaggio di prova prima di salvarlo come canale configurato. Non tocca
+    `signals`, non cerca parser, non scrive in `chats`: il canale di backup e' una
+    DESTINAZIONE, non una sorgente di segnali, e finire in `chats` lo iscriverebbe
+    all'instradamento del webhook — la regola non negoziabile del filtro delle chat.
+
+    Restituisce un dict da consegnare a Telegram se ha catturato qualcosa, altrimenti
+    `None` e il webhook prosegue col suo percorso normale.
+    """
+    if not TELEGRAM_ADMIN_ID:
+        return None
+    canale = None
+    aggiornamento = payload.get('my_chat_member')
+    if aggiornamento:
+        attore = str((aggiornamento.get('from') or {}).get('id') or '')
+        stato = (aggiornamento.get('new_chat_member') or {}).get('status') or ''
+        ch = aggiornamento.get('chat') or {}
+        if (attore == TELEGRAM_ADMIN_ID and (ch.get('type') or '') == 'channel'
+                and stato in ('administrator', 'creator')):
+            canale = ch
+    else:
+        msg = payload.get('message') or {}
+        attore = str((msg.get('from') or {}).get('id') or '')
+        inoltrato = msg.get('forward_from_chat') or {}
+        if attore == TELEGRAM_ADMIN_ID and (inoltrato.get('type') or '') == 'channel':
+            canale = inoltrato
+    if not canale:
+        return None
+    chat_id = str(canale.get('id') or '')
+    if not chat_id:
+        return None
+    titolo = (canale.get('title') or '').strip()
+    c = db()
+    try:
+        scrivi_impostazione(c, CHIAVE_CANALE_CANDIDATO_ID, chat_id)
+        scrivi_impostazione(c, CHIAVE_CANALE_CANDIDATO_TITOLO, titolo)
+        c.commit()
+    finally:
+        c.close()
+    return {'ok': True, 'canale_backup_candidato': True}
+
+
 @app.post('/telegram/webhook')
 async def telegram_webhook(request: Request):
     """Riceve le consegne di Telegram, e SOLO quelle.
@@ -7093,6 +7304,12 @@ async def telegram_webhook(request: Request):
             logging.exception('webhook: il ritentativo di registrazione e\' fallito')
         raise HTTPException(403, 'Forbidden')
     payload = await request.json()
+    # Cattura del canale di backup (#56 pezzo 2): il bot promosso amministratore di un
+    # canale, o un messaggio del canale inoltrato al bot, dall'amministratore. Registra
+    # solo un CANDIDATO da confermare nel pannello — non e' un percorso verso i segnali.
+    catturato = _cattura_canale_backup(payload)
+    if catturato is not None:
+        return catturato
     msg = payload.get('message') or payload.get('channel_post') or {}
     chat = msg.get('chat') or {}
     chat_id = str(chat.get('id', ''))

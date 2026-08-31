@@ -721,6 +721,31 @@ stessa versione su cui gira la CI, cosi' Railway/Nixpacks non deriva a una Pytho
 testata. Una guardia (tests/safety/test_python_deploy.py) impedisce di abbassare il
 pin sotto quella provata dai test.
 
+CANALE DI BACKUP (destinazione). Il proprietario crea un canale Telegram privato e ci
+aggiunge il bot come amministratore; da li' i backup automatici (in arrivo) verranno
+consegnati. La configurazione vive nel pannello admin e passa da un CANDIDATO a un
+canale CONFIGURATO:
+  - CATTURA: il webhook riconosce il canale in due modi, e solo se l'azione viene
+    dall'AMMINISTRATORE (from.id == TELEGRAM_ADMIN_ID) — il bot promosso amministratore
+    del canale (my_chat_member), oppure un messaggio del canale inoltrato al bot
+    (forward_from_chat). Registra solo un candidato: nessun backup parte da qui.
+    I canali hanno id negativi (-100...) che l'app Telegram non mostra, ed e' il motivo
+    per cui il chat_id si cattura cosi' invece di digitarlo.
+  - CONFERMA: la conferma nel pannello manda un MESSAGGIO DI PROVA al candidato; solo
+    se l'invio riesce il candidato diventa il canale configurato. Se la prova fallisce
+    non si salva niente e l'errore e' VISIBILE nel pannello (mai ingoiato). Un solo
+    canale di backup alla volta.
+  Rotte, tutte 404 fuori dall'amministratore come il resto di /api/admin/*:
+    GET    /api/admin/canale-backup            stato: {configurato, candidato}
+    POST   /api/admin/canale-backup/conferma   promuove il candidato dopo la prova
+    POST   /api/admin/canale-backup/prova      riprova l'invio sul canale configurato
+    DELETE /api/admin/canale-backup            rimuove il canale configurato
+  Configurare, confermare e rimuovere lasciano una riga in admin_audit. Il canale sta
+  nella tabella impostazioni (chiave→valore), NON in chats: chats sono le SORGENTI dei
+  segnali, e mettere li' la destinazione dei backup la iscriverebbe all'instradamento
+  del webhook (il filtro delle chat). La consegna automatica al canale e' il pezzo
+  successivo (#56 pezzo 3).
+
 SNAPSHOT DEL VOLUME SU RAILWAY. Railway offre snapshot del volume dal suo pannello:
 sono una copia indipendente dal servizio, che un deploy non tocca. Attivali come
 rete di sicurezza aggiuntiva - e' un'azione una-tantum del proprietario dal pannello
