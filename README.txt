@@ -740,11 +740,12 @@ canale CONFIGURATO:
     ripropone un canale gia' configurato. Le riconsegne sono dedotte per update_id sullo
     stesso registro del percorso segnali (webhook_seen): lo stesso update elaborato due
     volte esce come duplicate e non riscrive niente (#56 pezzo 3b).
-  - RIMOZIONE (#56 pezzo 3b): se il bot ESCE dal canale (left/kicked) — che sia il
-    configurato o il candidato — la configurazione si azzera. Senza, il pannello
-    continuerebbe a mostrare una destinazione dove il bot non puo' piu' postare e ogni
-    backup fallirebbe in silenzio. Agisce SOLO sul canale nostro (match sul chat_id): un
-    left da un canale estraneo non spegne il backup del proprietario.
+  - RIMOZIONE (#56 pezzo 3b): se il bot non puo' piu' pubblicare nel canale — uscito
+    (left/kicked) o RETROCESSO da amministratore a member/restricted (in un canale solo gli
+    admin postano) — la configurazione si azzera, che sia il configurato o il candidato.
+    Senza, il pannello continuerebbe a mostrare una destinazione dove il bot non puo' piu'
+    postare e ogni backup fallirebbe in silenzio. Agisce SOLO sul canale nostro (match sul
+    chat_id): un left da un canale estraneo non spegne il backup del proprietario.
   - CONFERMA: la card «Conferma» nel pannello manda al server, nel corpo, il chat_id del
     candidato che ha MOSTRATO ({chat_id}) — una precondizione dal client, come uid sui
     parser (#75): se fra la lettura dello stato e la conferma una riconsegna ha cambiato

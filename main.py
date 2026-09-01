@@ -7546,7 +7546,11 @@ def _cattura_canale_backup(payload):
     update_id = str(payload.get('update_id') or '')
     promozione = (attore == TELEGRAM_ADMIN_ID and (ch.get('type') or '') == 'channel'
                   and stato in ('administrator', 'creator') and not ch.get('username'))
-    rimozione = stato in ('left', 'kicked')
+    # Il bot non puo' piu' pubblicare nel canale: uscito (`left`/`kicked`) o RETROCESSO da
+    # amministratore a semplice `member`/`restricted` (in un canale solo gli admin postano).
+    # Tutti e quattro vanno trattati come rimozione, o un canale configurato resterebbe
+    # tale mentre i backup falliscono in silenzio. Bloccante di GPT-5.6 Sol al gate finale (#56).
+    rimozione = stato in ('left', 'kicked', 'member', 'restricted')
     if not (promozione or rimozione):
         return None
     titolo = (ch.get('title') or '').strip()

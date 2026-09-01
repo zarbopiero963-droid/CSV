@@ -373,6 +373,24 @@ def test_il_bot_rimosso_dal_canale_CANDIDATO_pulisce_il_candidato(tmp_path, monk
         'il candidato e- rimasto dopo che il bot e- uscito dal canale'
 
 
+def test_il_bot_RETROCESSO_ad_member_pulisce_la_config(tmp_path, monkeypatch):
+    """Il bot RETROCESSO da amministratore a `member` (o `restricted`) nel canale configurato
+    non puo' piu' pubblicare: la config va azzerata come per `left`/`kicked` (Sol, gate finale #56).
+
+    In un canale solo gli amministratori postano: un bot `member` e' muto, e lasciare il canale
+    configurato darebbe backup che falliscono in silenzio. Fail-first: con la sola pulizia su
+    `left`/`kicked`, uno stato `member` non ripulisce niente."""
+    percorso, admin_s, _c, _u = _admin(tmp_path, monkeypatch, 'retrocessione.db')
+    _abilita_webhook(monkeypatch)
+    _configura(admin_s, monkeypatch, CANALE, 'Backup')
+    assert _impostazione(percorso, main.CHIAVE_CANALE_BACKUP_ID) == str(CANALE)
+
+    esito = _webhook(_rimozione(CANALE, stato='member'))
+    assert esito.get('canale_backup_rimosso') is True, esito
+    assert _impostazione(percorso, main.CHIAVE_CANALE_BACKUP_ID) is None, \
+        'il canale e- rimasto configurato dopo la retrocessione del bot a member'
+
+
 def test_il_bot_rimosso_da_un_canale_ESTRANEO_non_tocca_la_config(tmp_path, monkeypatch):
     """La pulizia agisce SOLO sul canale nostro: un `left` da un canale diverso da quello
     configurato/candidato non deve azzerare niente, e prosegue nel percorso normale (`no_text`).
