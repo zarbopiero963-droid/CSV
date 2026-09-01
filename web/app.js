@@ -421,9 +421,14 @@ function cardCanaleBackup(stato) {
       ${conf ? `<div class="row" style="align-items:center;gap:8px">
         <span class="pill on">configurato</span>
         ${riga('', conf)}
+        <button class="small" data-act="invia-backup-ora">Invia backup ora</button>
         <button class="small" data-act="prova-canale-backup">Manda una prova</button>
         <button class="danger small" data-act="rimuovi-canale-backup">Rimuovi</button>
-      </div>` : ''}
+      </div>
+      <p class="dim small" style="margin:0">
+        «Invia backup ora» manda subito una copia del database a questo canale. Di norma
+        ci pensa il giro notturno; questo è l'invio manuale.
+      </p>` : ''}
       ${cand ? `<div class="banner" style="margin:0"><div class="row"
           style="align-items:center;gap:8px">
         ${riga('Proposto:', cand)}
@@ -2242,6 +2247,25 @@ const actions = {
     catch (e) { fallita(e); return; }
     toast('Canale di backup rimosso.');
     render();
+  },
+  'invia-backup-ora'() {
+    // Conferma esplicita: manda una copia completa del database — dati dei clienti — su
+    // Telegram. È lo stesso endpoint del cron, qui azionato a mano dalla sessione admin.
+    openModal(`<h2>Inviare il backup adesso?</h2>
+      <p class="muted small">Una copia completa del database viene mandata subito al canale
+      di backup configurato. Contiene i dati dei clienti: assicurati che il canale sia
+      privato.</p>
+      <div class="foot"><button data-act="close">Annulla</button>
+        <button class="primary" data-act="invia-backup-ora-ok">Invia adesso</button></div>`);
+  },
+  async 'invia-backup-ora-ok'() {
+    closeModal();
+    // L'invio copia il DB e lo carica su Telegram: può durare qualche secondo. Un fallimento
+    // torna col motivo (mai il token) via `fallita`; un successo lascia una riga in admin_audit.
+    toast('Invio del backup in corso…');
+    try { await api.inviaBackupOra(); }
+    catch (e) { fallita(e); return; }
+    toast('Backup inviato al canale.');
   },
 
   'ask-token'() {

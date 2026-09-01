@@ -131,6 +131,11 @@ with sync_playwright() as pw:
     # ...e l'eliminazione di UNA selezione non tocca l'altra.
     pg.click('.list-item:has-text("Under 0,5 goal") [data-act="sel-del"]')
     pg.wait_for_selector('.list-item .name:text-is("Under 0,5 goal")', state='detached')
+    # Aspetta il RIATTACCO di "Over" prima di contarlo: l'eliminazione ricostruisce la lista
+    # (clear + rebuild), e fra i due "Over" e' transitoriamente staccato. Contarlo subito e'
+    # una corsa che su un runner CI carico perde (count()==0). Stesso schema gia' usato in
+    # squadre_flow.py dopo un'eliminazione.
+    pg.wait_for_selector('.list-item .name:text-is("Over 0,5 goal")')
     assert pg.locator('.list-item .name:text-is("Over 0,5 goal")').count() == 1
     # La si rimette: serve al wizard qui sotto.
     pg.fill('#sel-nome', 'Under 0,5 goal')

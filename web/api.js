@@ -220,6 +220,13 @@ export function rimuoviCanaleBackup() {
   return http('DELETE', '/api/admin/canale-backup');
 }
 
+// Manda SUBITO il backup del database al canale configurato (#56 pezzo 3b): e' lo stesso
+// endpoint che il cron notturno chiama col token, qui azionato dalla sessione admin. Un invio
+// fallito torna col motivo (400), mai col token dentro.
+export function inviaBackupOra() {
+  return http('POST', '/api/admin/backup/invia');
+}
+
 /* ----------------------------------------------------------------- parser */
 
 // La lista va sempre al server: e' il modo in cui un secondo dispositivo

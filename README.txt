@@ -737,7 +737,15 @@ canale CONFIGURATO:
     cattura cosi' invece di digitarlo. (L'inoltro di un messaggio, l'altra opzione della
     #56, e' stato scartato: qualunque post inoltrato al bot avrebbe riconfigurato il
     candidato di soppiatto.) Una riconsegna del my_chat_member dopo la conferma non
-    ripropone un canale gia' configurato.
+    ripropone un canale gia' configurato. Le riconsegne sono dedotte per update_id sullo
+    stesso registro del percorso segnali (webhook_seen): lo stesso update elaborato due
+    volte esce come duplicate e non riscrive niente (#56 pezzo 3b).
+  - RIMOZIONE (#56 pezzo 3b): se il bot non puo' piu' pubblicare nel canale — uscito
+    (left/kicked) o RETROCESSO da amministratore a member/restricted (in un canale solo gli
+    admin postano) — la configurazione si azzera, che sia il configurato o il candidato.
+    Senza, il pannello continuerebbe a mostrare una destinazione dove il bot non puo' piu'
+    postare e ogni backup fallirebbe in silenzio. Agisce SOLO sul canale nostro (match sul
+    chat_id): un left da un canale estraneo non spegne il backup del proprietario.
   - CONFERMA: la card «Conferma» nel pannello manda al server, nel corpo, il chat_id del
     candidato che ha MOSTRATO ({chat_id}) — una precondizione dal client, come uid sui
     parser (#75): se fra la lettura dello stato e la conferma una riconsegna ha cambiato
@@ -757,7 +765,9 @@ canale CONFIGURATO:
     DELETE /api/admin/canale-backup            rimuove il canale configurato
     POST   /api/admin/backup/invia             manda il backup al canale configurato (pezzo 3)
   Nel pannello admin la card «Canale di backup» (in fondo alla vista Richieste) mostra i tre
-  stati (proposto / configurato / vuoto) con Conferma, Manda una prova e Rimuovi.
+  stati (proposto / configurato / vuoto) con Conferma, Invia backup ora, Manda una prova e
+  Rimuovi. «Invia backup ora» (pezzo 3b) e' l'invio manuale dalla sessione admin: chiede
+  conferma nel modale e poi chiama lo stesso POST /api/admin/backup/invia del cron.
   Configurare, confermare e rimuovere lasciano una riga in admin_audit. Il canale sta
   nella tabella impostazioni (chiave→valore), NON in chats: chats sono le SORGENTI dei
   segnali, e mettere li' la destinazione dei backup la iscriverebbe all'instradamento
@@ -786,6 +796,9 @@ INVIO DEL BACKUP AL CANALE (#56 pezzo 3). `POST /api/admin/backup/invia` manda u
          curl -fsS -X POST https://<il-tuo-dominio>/api/admin/backup/invia \
               -H "X-Backup-Cron-Token: $BACKUP_CRON_TOKEN"
        Il token va nell'HEADER, mai nell'URL (l'URL finisce nei log).
+    Un servizio cron D'ESEMPIO gia' pronto sta in deploy/cron-backup/ (lo script
+    invia_backup.sh + il suo README): nessun segreto dentro, legge BACKUP_BASE_URL e
+    BACKUP_CRON_TOKEN dalle Variables del servizio cron su Railway.
 
 SNAPSHOT DEL VOLUME SU RAILWAY. Railway offre snapshot del volume dal suo pannello:
 sono una copia indipendente dal servizio, che un deploy non tocca. Attivali come

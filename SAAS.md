@@ -2079,6 +2079,7 @@ senza doppio ruolo.
 | Fatto | **Backup del database, pezzo 2a — backend del canale** (#56): tabella `impostazioni` (chiave→valore, config GLOBALE del proprietario, **non** in `chats`), cattura del canale privato dal webhook quando il proprietario promuove il bot amministratore (`my_chat_member`, **solo se** `from.id == TELEGRAM_ADMIN_ID` e **solo canali PRIVATI** — quelli pubblici hanno uno `username` e i backup coi dati dei clienti non devono finirci) → scrive un CANDIDATO (una riconsegna dopo la conferma non lo ripropone), e rotte admin (**404** fuori dall'admin): `GET /api/admin/canale-backup` (stato configurato+candidato), `POST …/conferma` (promuove il candidato **solo dopo** un messaggio di prova riuscito, errore visibile se fallisce, `409` se il candidato è cambiato durante la prova), `POST …/prova`, `DELETE …/canale-backup` — configurare/rimuovere tracciato in `admin_audit`. La consegna automatica al canale è il pezzo **3**. Test in `tests/relay/test_canale_backup.py` |
 | Fatto | **Backup del database, pezzo 2b — card nel pannello** (#56): la card «Canale di backup» in fondo alla vista Richieste mostra i tre stati (candidato proposto → configurato → vuoto), con «Conferma», «Manda una prova» e «Rimuovi» (con conferma nel modale). La conferma manda al server l'`chat_id` che la card ha **mostrato** — precondizione dal client (come `uid` sui parser #75), così una riconsegna che cambia il candidato server-side dà `409` e la card rilegge invece di configurare una destinazione non approvata (bloccante di GPT-5.6 Sol al gate del pezzo 2a). Backend: `conferma_canale_backup` ora legge `{chat_id}` dal corpo dopo il controllo di sessione, con rollback/close espliciti. Test browser `tests/web/test_canale_backup_web.py` (zero errori in console, layout stretto), parità `api.js`/`api_finta.js` in `tests/web/test_api_parita.py`. La consegna automatica al canale è il pezzo **3**. |
 | Fatto | **Backup del database, pezzo 3a — invio al canale** (#56): `POST /api/admin/backup/invia` manda una copia del database al canale privato configurato via `sendDocument`. La copia va su un **file** temporaneo e si carica in **streaming** (non in RAM — il rischio OOM del gate di pezzo 1), e un **`getChat` riverifica la privacy** prima di inviare (un canale reso pubblico dopo la conferma **non** riceve il backup — Sol, gate di pezzo 2). Due autenticazioni: la **sessione admin** (il bottone, pezzo 3b) **o** il token `BACKUP_CRON_TOKEN` nell'header `X-Backup-Cron-Token`, per il **cron notturno di Railway** (scelta del proprietario: il servizio non ha scheduler interno, come i promemoria; `BACKUP_CRON_TOKEN` vuoto è fail-closed). L'invio gira **fuori dall'event loop**; un successo lascia una riga in `admin_audit` (`admin_user_id` NULL per il cron). Test in `tests/relay/test_invio_backup.py`. Restano: il bottone «Invia backup ora» nel pannello (**3b**) e l'indurimento del ciclo di vita della cattura (dedup `update_id`, pulizia su `left`/`kicked` — deferral approvati). |
+| Fatto | **Backup del database, pezzo 3b — bottone + indurimento cattura** (#56): il bottone **«Invia backup ora»** nella card del pannello (invio manuale dalla sessione admin, con conferma nel modale, verso lo stesso `POST /api/admin/backup/invia` del cron); dedup delle riconsegne della cattura per `update_id` su `webhook_seen`, nella stessa transazione dell'effetto (Sol B1); pulizia della config quando il bot non può più pubblicare nel canale configurato o candidato — `left`/`kicked` o retrocessione a `member`/`restricted` — solo sul canale nostro (Fable; la retrocessione aggiunta al gate finale su nota di Sol). Servizio cron d'esempio in `deploy/cron-backup/` (script + README, nessun segreto dentro). Test: `tests/relay/test_canale_backup.py` (dedup + pulizia, fail-first misurati rossi), browser `tests/web/test_canale_backup_web.py` (il bottone), parità `api.js`/`api_finta.js`. Resta il pezzo **idempotenza persistente** (marcatore in transazione + dedup cron), che chiude i bloccanti residui di Sol al gate di 3a (S1/S2/S3). |
 | M3 | «Entra come» e lo storico di `admin_audit` nel pannello: servono rotte nuove lato server |
 | M4 | Log persistenti, sospensione, suggerimento AI lato server, abbonamenti |
 
@@ -2370,10 +2371,20 @@ La voce e la vista esistono solo con `admin` vero; il server risponde comunque
     candidato server-side, il server risponde `409` e la card rilegge invece di
     configurare una destinazione non approvata. La conferma manda **prima** un
     messaggio di prova; se fallisce, l'errore è visibile e non si salva niente.
-  - *Configurato*: la pillola «configurato», titolo e `chat_id`, con **«Manda una
-    prova»** (riverifica l'invio) e **«Rimuovi»** (con conferma nel modale; il canale
-    su Telegram non viene toccato). Un solo canale alla volta.
-  - La consegna automatica dei backup al canale è il pezzo **3**.
+  - *Configurato*: la pillola «configurato», titolo e `chat_id`, con **«Invia backup
+    ora»**, **«Manda una prova»** (riverifica l'invio) e **«Rimuovi»** (con conferma nel
+    modale; il canale su Telegram non viene toccato). Un solo canale alla volta.
+  - **«Invia backup ora»** (#56 pezzo 3b): l'invio manuale dalla sessione admin. Chiede
+    conferma in un modale («Inviare il backup adesso? … contiene i dati dei clienti»),
+    poi chiama lo **stesso** `POST /api/admin/backup/invia` del cron notturno; un toast
+    conferma l'esito, un fallimento mostra il motivo (mai il token). Sotto i pulsanti una
+    riga spiega che di norma ci pensa il giro notturno e questo è l'invio manuale.
+  - Se il bot non può più pubblicare nel canale — **esce** (`left`/`kicked`) o viene
+    **retrocesso** da amministratore a `member`/`restricted` — la config si azzera da sola
+    (pezzo 3b): la card torna allo stato *vuoto* alla ricarica, invece di mostrare una
+    destinazione morta.
+  - Il **cron notturno** che chiama l'endpoint non vive nel pannello: è un servizio
+    esterno (esempio pronto in `deploy/cron-backup/`), documentato in `README.txt`.
 
 **Non ancora nel pannello** (restano in M3): «Entra come» e lo storico di
 `admin_audit` — servono rotte nuove, non esistono lato server.
