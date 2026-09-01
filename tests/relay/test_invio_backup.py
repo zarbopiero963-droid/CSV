@@ -305,13 +305,83 @@ def test_un_solo_invio_di_backup_alla_volta(tmp_path, monkeypatch):
     assert righe == 1, f'{righe} righe di audit per due invii concorrenti'
 
 
+# ------------------------------------ idempotenza persistente del giro notturno (#56)
+
+def _finto_canale_ok(monkeypatch):
+    monkeypatch.setattr(main, 'leggi_chat_telegram',
+                        lambda chat_id, bot_token=None: (True, {'id': CANALE, 'type': 'channel'}))
+
+
+def test_il_cron_non_reinvia_lo_stesso_periodo(tmp_path, monkeypatch):
+    """Idempotenza persistente (#56, Sol B3): due giri del cron per lo STESSO periodo mandano UN
+    solo backup — la prenotazione in `backup_inviato` fa uscire il secondo come no-op `(True,
+    None)`. Chiude il retry notturno che rimandava un secondo file identico. Fail-first: senza la
+    prenotazione (o forzandola a passare sempre) partono due invii."""
+    percorso, _a, _c, _u = _admin(tmp_path, monkeypatch, 'cron_dedup.db')
+    _configura_canale()
+    _finto_canale_ok(monkeypatch)
+    invii = []
+    monkeypatch.setattr(main, 'invia_documento_telegram',
+                        lambda *a, **k: invii.append(1) or (True, None))
+    r1 = main._invia_backup_al_canale(periodo='2026-09-01')
+    r2 = main._invia_backup_al_canale(periodo='2026-09-01')
+    assert r1 == (True, None) and r2 == (True, None), (r1, r2)
+    assert len(invii) == 1, f'{len(invii)} invii per lo stesso periodo: la prenotazione non deduplica'
+    c = sqlite3.connect(percorso)
+    n = c.execute("SELECT COUNT(*) FROM backup_inviato WHERE periodo='2026-09-01'").fetchone()[0]
+    c.close()
+    assert n == 1, f'prenotazione del periodo non registrata: {n}'
+
+
+def test_il_cron_libera_il_periodo_se_l_invio_fallisce(tmp_path, monkeypatch):
+    """Se l'invio prenotato FALLISCE, la prenotazione si LIBERA: la notte non resta segnata come
+    fatta e un retry riparte. Fail-first: senza la liberazione il periodo resta preso e il retry
+    esce come no-op senza mai mandare il backup."""
+    percorso, _a, _c, _u = _admin(tmp_path, monkeypatch, 'cron_libera.db')
+    _configura_canale()
+    _finto_canale_ok(monkeypatch)
+    tentativi = []
+
+    def invio(*a, **k):
+        tentativi.append(1)
+        return (False, 'Telegram giu') if len(tentativi) == 1 else (True, None)
+
+    monkeypatch.setattr(main, 'invia_documento_telegram', invio)
+    r1 = main._invia_backup_al_canale(periodo='2026-09-02')
+    assert r1[0] is False, r1
+    c = sqlite3.connect(percorso)
+    n = c.execute("SELECT COUNT(*) FROM backup_inviato WHERE periodo='2026-09-02'").fetchone()[0]
+    c.close()
+    assert n == 0, 'il periodo e- rimasto prenotato dopo un invio fallito: nessun retry ripartirebbe'
+    r2 = main._invia_backup_al_canale(periodo='2026-09-02')
+    assert r2 == (True, None), r2
+    assert len(tentativi) == 2, 'il retry non ha rimandato il backup dopo il fallimento'
+
+
+def test_il_bottone_admin_invia_anche_se_il_periodo_e_gia_fatto(tmp_path, monkeypatch):
+    """Il bottone «Invia backup ora» e' un intento umano esplicito: invia SEMPRE, anche se il cron
+    ha gia' mandato il backup di oggi. Solo il cron (`periodo` non-None) rispetta la prenotazione;
+    l'admin (`periodo` None) la ignora."""
+    percorso, _a, _c, _u = _admin(tmp_path, monkeypatch, 'admin_bypassa.db')
+    _configura_canale()
+    _finto_canale_ok(monkeypatch)
+    invii = []
+    monkeypatch.setattr(main, 'invia_documento_telegram',
+                        lambda *a, **k: invii.append(1) or (True, None))
+    r_cron = main._invia_backup_al_canale(periodo='2026-09-03')
+    assert r_cron == (True, None) and len(invii) == 1, (r_cron, invii)
+    r_admin = main._invia_backup_al_canale(amministratore_id=1, periodo=None)
+    assert r_admin == (True, None), r_admin
+    assert len(invii) == 2, 'il bottone admin non ha inviato perche- il periodo era gia- fatto'
+
+
 # --------------------------------------------------------------- la rotta
 
 def test_invia_backup_con_sessione_admin(tmp_path, monkeypatch):
     percorso, admin_s, _c, _u = _admin(tmp_path, monkeypatch, 'rotta_admin.db')
     _configura_canale()
     monkeypatch.setattr(main, '_invia_backup_al_canale',
-                        lambda amministratore_id=None: (True, None))
+                        lambda amministratore_id=None, periodo=None: (True, None))
     corpo = _corpo(asyncio.run(main.invia_backup(admin_s)))
     assert corpo == {'inviato': True}, corpo
 
@@ -372,7 +442,7 @@ def test_invia_backup_gira_fuori_dall_event_loop(tmp_path, monkeypatch):
     _p, admin_s, _c, _u = _admin(tmp_path, monkeypatch, 'rotta_offload.db')
     identita = {}
 
-    def spia(amministratore_id=None):
+    def spia(amministratore_id=None, periodo=None):
         identita['invio'] = threading.get_ident()
         return True, None
 

@@ -970,6 +970,12 @@ SCHEMA_MULTIUTENTE = (
     # mettercela dentro la iscriverebbe all'instradamento del webhook (regola del
     # filtro chat). Tabella separata, additiva e idempotente come le altre.
     'CREATE TABLE IF NOT EXISTS impostazioni (chiave TEXT PRIMARY KEY, valore TEXT)',
+    # Idempotenza persistente dell'invio notturno (#56, pezzo idempotenza): un periodo
+    # (la data UTC del giro) e' PRIMARY KEY, prenotato PRIMA dell'invio dal solo percorso
+    # cron. Due repliche o un retry non mandano due copie: la seconda INSERT va in conflitto.
+    # Su invio fallito la riga si cancella, cosi' un retry della stessa notte riprova.
+    'CREATE TABLE IF NOT EXISTS backup_inviato (periodo TEXT PRIMARY KEY,'
+    ' created_at DATETIME DEFAULT CURRENT_TIMESTAMP)',
 )
 
 # «Nessun topic» si scrive NULL, e in SQL `NULL != NULL`: ogni confronto fra chat
@@ -4244,6 +4250,13 @@ CHIAVE_CANALE_BACKUP_ID = 'canale_backup_chat_id'
 CHIAVE_CANALE_BACKUP_TITOLO = 'canale_backup_titolo'
 CHIAVE_CANALE_CANDIDATO_ID = 'canale_backup_candidato_chat_id'
 CHIAVE_CANALE_CANDIDATO_TITOLO = 'canale_backup_candidato_titolo'
+# PREFISSO della chiave dell'`update_id` piu' alto gia' processato, tenuto PER CANALE come
+# `canale_backup_ultimo_update_id:<chat_id>` (#56, pezzo idempotenza). Gli `update_id` di
+# Telegram crescono in modo monotono, quindi un evento con id <= a quello del suo canale e'
+# una riconsegna o un fuori-ordine (una promozione tardiva dopo una rimozione piu' nuova dello
+# STESSO canale) e va ignorato. Per-canale e non globale: l'ordine di un canale non deve
+# sopprimere gli eventi di un altro (bloccante di Fable, gate finale #56).
+CHIAVE_CANALE_ULTIMO_UPDATE = 'canale_backup_ultimo_update_id'
 
 
 def leggi_impostazione(c, chiave, default=None):
@@ -5377,11 +5390,53 @@ def rimuovi_canale_backup(request: Request):
                                   {'configurato': None, 'candidato': None})
 
 
-def _invia_backup_al_canale(amministratore_id=None):
+def _prenota_periodo_backup(periodo):
+    """Prenota `periodo` in `backup_inviato` sotto `BEGIN IMMEDIATE`. `True` se appena
+    prenotato, `False` se gia' presente (backup gia' inviato per quel periodo).
+
+    E' l'idempotenza PERSISTENTE del giro notturno (#56): la prenotazione avviene PRIMA
+    dell'invio, quindi due repliche o un retry non mandano due copie — la seconda trova il
+    periodo gia' preso. Crash-safe fra le repliche: l'unica INSERT che vince e' quella
+    committata per prima."""
+    c = db()
+    try:
+        c.execute('BEGIN IMMEDIATE')
+        if c.execute('SELECT 1 FROM backup_inviato WHERE periodo=?', (periodo,)).fetchone():
+            c.rollback()
+            return False
+        c.execute('INSERT INTO backup_inviato(periodo) VALUES (?)', (periodo,))
+        c.commit()
+        return True
+    finally:
+        c.close()
+
+
+def _libera_periodo_backup(periodo):
+    """Cancella la prenotazione di `periodo` (best-effort). Serve quando l'invio prenotato
+    FALLISCE: senza, la notte resterebbe segnata come fatta e un retry non ripartirebbe."""
+    try:
+        c = db()
+        try:
+            c.execute('DELETE FROM backup_inviato WHERE periodo=?', (periodo,))
+            c.commit()
+        finally:
+            c.close()
+    except Exception:
+        logging.exception('impossibile liberare la prenotazione del backup per il periodo')
+
+
+def _invia_backup_al_canale(amministratore_id=None, periodo=None):
     """Manda il backup al canale CONFIGURATO. `(riuscito, motivo)`, non solleva.
 
     Sincrona (I/O su disco, rete): il chiamante `async` la passa a `asyncio.to_thread`, come
     ogni carico bloccante che altrimenti fermerebbe il loop — feed e webhook compresi.
+
+    `periodo` non-None = percorso CRON (#56, idempotenza persistente): si PRENOTA il periodo
+    prima di inviare, e se e' gia' preso si esce come no-op idempotente `(True, None)` — cosi'
+    un retry del cron o una seconda replica non mandano un secondo backup. Su invio fallito la
+    prenotazione si LIBERA, per permettere un nuovo tentativo della stessa notte. `periodo`
+    None = il BOTTONE dell'amministratore: intento umano esplicito, invia SEMPRE, senza toccare
+    la prenotazione del cron.
 
     Riverifica la privacy con `getChat` PRIMA di inviare (Sol #56): la cattura garantisce un canale
     privato, ma un canale reso pubblico DOPO la conferma esporrebbe i dati dei clienti; se ora
@@ -5404,54 +5459,67 @@ def _invia_backup_al_canale(amministratore_id=None):
         if not configurato:
             return False, 'nessun canale di backup configurato'
         chat_id = configurato['chat_id']
-        fd, percorso = tempfile.mkstemp(prefix='betrelay-backup-', suffix='.db')
-        os.close(fd)
+        # Idempotenza persistente del giro notturno: si PRENOTA il periodo prima di inviare.
+        # Se e' gia' preso (retry del cron, o una seconda replica) si esce come no-op
+        # idempotente — nessun secondo backup. Il bottone dell'amministratore (`periodo` None)
+        # non passa di qui: invia sempre. Bloccante di GPT-5.6 Sol (#56).
+        if periodo is not None and not _prenota_periodo_backup(periodo):
+            return True, None
+        inviato_ok = False
         try:
+            fd, percorso = tempfile.mkstemp(prefix='betrelay-backup-', suffix='.db')
+            os.close(fd)
             try:
-                copia_backup_su_file(percorso)
-            except Exception as e:
-                # `copia_backup_su_file` puo' sollevare (disco pieno, errore sqlite). Il contratto di
-                # questa funzione e' «non solleva»: qui l'eccezione diventa `(False, motivo)` e la
-                # rotta risponde 400 col motivo, non un 500. Il motivo e' il TIPO, mai un percorso o
-                # dato del DB. Bloccante di Claude Fable 5 (#101).
-                return False, f'copia del backup fallita ({type(e).__name__})'
-            # La riverifica della privacy sta SUBITO PRIMA dell'invio, DOPO la copia: cosi' la
-            # finestra fra «il canale e' privato» e il `sendDocument` e' minima — la copia, che puo'
-            # durare, non la allarga piu'. Deve essere ancora un canale PRIVATO (`type == 'channel'`
-            # e senza `username`): un canale reso pubblico o convertito in gruppo non riceve il backup
-            # coi dati dei clienti. Una TOCTOU residua sub-secondo e' inevitabile con un'API remota
-            # che non offre un invio condizionato. Sol e Fable al gate finale (#101).
-            ok, dati = leggi_chat_telegram(chat_id)
-            if not ok:
-                return False, f'verifica del canale fallita: {dati}'
-            if (dati.get('type') or '') != 'channel' or dati.get('username'):
-                return False, ('il canale non e- piu- un canale privato: rimuovilo e configura un'
-                               ' canale privato prima di inviare il backup')
-            nome = f'betrelay-backup-{time.strftime("%Y-%m-%d-%H%M", time.gmtime())}.db'
-            riuscito, motivo = invia_documento_telegram(
-                chat_id, percorso, nome, didascalia='BetRelay: backup automatico del database.')
-        finally:
-            try:
-                os.unlink(percorso)
-            except OSError:
-                pass
-        if not riuscito:
-            return False, f'invio del documento fallito: {motivo}'
-        # L'audit e' BEST-EFFORT: il documento E' gia' partito, e un errore SQLite qui NON deve far
-        # tornare «fallito» — il cron ritenterebbe e manderebbe un SECONDO backup identico (manca
-        # un'idempotenza persistente, e questa e' la scelta at-least-vs-at-most-once). Si logga e si
-        # ritorna successo: un backup mandato senza la sua riga di audit e' molto meglio di due
-        # backup mandati. Bloccante di GPT-5.6 Sol (#101).
-        try:
-            c = db()
-            try:
-                _annota_admin(c, amministratore_id, 'backup_inviato')
-                c.commit()
+                try:
+                    copia_backup_su_file(percorso)
+                except Exception as e:
+                    # `copia_backup_su_file` puo' sollevare (disco pieno, errore sqlite). Il contratto
+                    # e' «non solleva»: l'eccezione diventa `(False, motivo)` e la rotta risponde 400,
+                    # non 500. Il motivo e' il TIPO, mai un percorso o dato del DB. Fable 5 (#101).
+                    return False, f'copia del backup fallita ({type(e).__name__})'
+                # La riverifica della privacy sta SUBITO PRIMA dell'invio, DOPO la copia: cosi' la
+                # finestra fra «il canale e' privato» e il `sendDocument` e' minima — la copia, che
+                # puo' durare, non la allarga piu'. Deve essere ancora un canale PRIVATO
+                # (`type == 'channel'` e senza `username`): un canale reso pubblico o convertito in
+                # gruppo non riceve il backup coi dati dei clienti. Una TOCTOU residua sub-secondo e'
+                # inevitabile con un'API remota senza invio condizionato. Sol e Fable (#101).
+                ok, dati = leggi_chat_telegram(chat_id)
+                if not ok:
+                    return False, f'verifica del canale fallita: {dati}'
+                if (dati.get('type') or '') != 'channel' or dati.get('username'):
+                    return False, ('il canale non e- piu- un canale privato: rimuovilo e configura un'
+                                   ' canale privato prima di inviare il backup')
+                nome = f'betrelay-backup-{time.strftime("%Y-%m-%d-%H%M", time.gmtime())}.db'
+                riuscito, motivo = invia_documento_telegram(
+                    chat_id, percorso, nome, didascalia='BetRelay: backup automatico del database.')
             finally:
-                c.close()
-        except Exception:
-            logging.exception("backup inviato ma la traccia in admin_audit e' fallita")
-        return True, None
+                try:
+                    os.unlink(percorso)
+                except OSError:
+                    pass
+            if not riuscito:
+                return False, f'invio del documento fallito: {motivo}'
+            # L'audit e' BEST-EFFORT: il documento E' gia' partito, e un errore SQLite qui NON deve
+            # tornare «fallito» — con la prenotazione persistente un fallimento farebbe LIBERARE il
+            # periodo e il cron rimanderebbe un SECONDO backup identico. Si logga e si ritorna
+            # successo: un backup senza la sua riga di audit e' meglio di due backup. Sol (#101).
+            try:
+                c = db()
+                try:
+                    _annota_admin(c, amministratore_id, 'backup_inviato')
+                    c.commit()
+                finally:
+                    c.close()
+            except Exception:
+                logging.exception("backup inviato ma la traccia in admin_audit e' fallita")
+            inviato_ok = True
+            return True, None
+        finally:
+            # Invio non riuscito con un periodo prenotato: si LIBERA, o la notte resterebbe
+            # segnata come fatta e nessun retry ripartirebbe. Su successo la prenotazione resta,
+            # ed e' cio' che rende idempotente il retry del cron.
+            if periodo is not None and not inviato_ok:
+                _libera_periodo_backup(periodo)
     finally:
         _lucchetto_invio_backup.release()
 
@@ -5479,8 +5547,12 @@ async def invia_backup(request: Request):
         BACKUP_CRON_TOKEN.encode('utf-8'))
     if not amministratore and not cron:
         raise HTTPException(404, 'not found')
+    # Idempotenza persistente (#56): solo il CRON passa un `periodo` (la data UTC del giro),
+    # cosi' un retry o una seconda replica non mandano due backup. Il BOTTONE dell'admin
+    # invia sempre (periodo None): e' un'azione umana esplicita «invia ora».
+    periodo = None if amministratore else time.strftime('%Y-%m-%d', time.gmtime())
     riuscito, motivo = await asyncio.to_thread(
-        _invia_backup_al_canale, amministratore['id'] if amministratore else None)
+        _invia_backup_al_canale, amministratore['id'] if amministratore else None, periodo)
     if not riuscito:
         raise HTTPException(400, f'invio del backup fallito: {motivo}')
     if amministratore:
@@ -7569,6 +7641,22 @@ def _cattura_canale_backup(payload):
                                    (update_id,)).fetchone():
             c.rollback()
             return {'ok': True, 'ignored': 'duplicate'}
+        # Ordinamento (#56, pezzo idempotenza — Sol B1): gli `update_id` di Telegram crescono
+        # monotoni, ma l'offload su thread puo' elaborarli fuori ordine. Un evento con id <= a
+        # quello piu' alto gia' processato PER QUESTO CANALE e' una promozione tardiva dopo una
+        # rimozione piu' nuova dello stesso canale: applicarla farebbe risorgere un candidato
+        # ormai invalido. Si ignora.
+        #
+        # L'high-water-mark e' PER `chat_id`, non globale: altrimenti la promozione di un ALTRO
+        # canale (un secondo candidato) alzerebbe il contatore e sopprimerebbe come `out_of_order`
+        # una rimozione LEGITTIMA — con id inferiore ma di un canale diverso — del canale
+        # configurato, lasciandolo puntato a un canale da cui il bot e' uscito. Bloccante di
+        # Claude Fable 5 al gate finale (#56). Si aggiorna solo quando agiamo sul canale (in
+        # `_segna_update_visto`), quindi eventi di canali estranei non lasciano traccia.
+        ultimo = leggi_impostazione(c, CHIAVE_CANALE_ULTIMO_UPDATE + ':' + chat_id)
+        if update_id.isdigit() and (ultimo or '').isdigit() and int(update_id) <= int(ultimo):
+            c.rollback()
+            return {'ok': True, 'ignored': 'out_of_order'}
         if rimozione:
             # Pulizia SOLO del canale nostro: se il `left`/`kicked` non riguarda ne' il
             # configurato ne' il candidato, non e' affar nostro — rollback e passthrough.
@@ -7583,32 +7671,40 @@ def _cattura_canale_backup(payload):
             if tocca_cand:
                 cancella_impostazione(c, CHIAVE_CANALE_CANDIDATO_ID)
                 cancella_impostazione(c, CHIAVE_CANALE_CANDIDATO_TITOLO)
-            _segna_update_visto(c, update_id)
+            _segna_update_visto(c, update_id, chat_id)
             c.commit()
             return {'ok': True, 'canale_backup_rimosso': True}
         # promozione: se il canale e' GIA' quello configurato, una riconsegna non ripropone
         # una proposta gia' consumata.
         if leggi_impostazione(c, CHIAVE_CANALE_BACKUP_ID) == chat_id:
-            _segna_update_visto(c, update_id)
+            _segna_update_visto(c, update_id, chat_id)
             c.commit()
             return {'ok': True, 'canale_backup_gia_configurato': True}
         scrivi_impostazione(c, CHIAVE_CANALE_CANDIDATO_ID, chat_id)
         scrivi_impostazione(c, CHIAVE_CANALE_CANDIDATO_TITOLO, titolo)
-        _segna_update_visto(c, update_id)
+        _segna_update_visto(c, update_id, chat_id)
         c.commit()
     finally:
         c.close()
     return {'ok': True, 'canale_backup_candidato': True}
 
 
-def _segna_update_visto(c, update_id):
-    """Marca un `update_id` come gia' elaborato, nella transazione in corso. No-op se vuoto.
+def _segna_update_visto(c, update_id, chat_id):
+    """Marca un `update_id` come elaborato per `chat_id`, nella transazione in corso. No-op se
+    l'`update_id` e' vuoto.
 
-    Stesso registro (`webhook_seen`) e stessa `INSERT OR IGNORE` del percorso segnali: un
-    `update_id` e' unico per update in tutto Telegram, quindi un `my_chat_member` e un
-    messaggio non collidono mai."""
+    Due registri, entrambi nel commit dell'effetto:
+    - `webhook_seen` (INSERT OR IGNORE) — il dedup della riconsegna esatta, come nel percorso
+      segnali; un `update_id` e' unico per update in tutto Telegram, quindi un `my_chat_member`
+      e un messaggio non collidono mai;
+    - l'high-water-mark `CHIAVE_CANALE_ULTIMO_UPDATE:<chat_id>` — l'ordinamento (#56, Sol B1),
+      tenuto PER CANALE cosi' l'ordine di un canale non sopprime gli eventi di un altro (Fable).
+      Si scrive SOLO qui, cioe' solo quando abbiamo agito su QUEL canale. Chi arriva col
+      controllo di ordine ha gia' `update_id > ultimo`, quindi sovrascrivere col valore corrente
+      lo tiene monotono."""
     if update_id:
         c.execute('INSERT OR IGNORE INTO webhook_seen(update_id) VALUES (?)', (update_id,))
+        scrivi_impostazione(c, CHIAVE_CANALE_ULTIMO_UPDATE + ':' + chat_id, update_id)
 
 
 @app.post('/telegram/webhook')

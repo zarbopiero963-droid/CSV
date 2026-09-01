@@ -739,7 +739,14 @@ canale CONFIGURATO:
     candidato di soppiatto.) Una riconsegna del my_chat_member dopo la conferma non
     ripropone un canale gia' configurato. Le riconsegne sono dedotte per update_id sullo
     stesso registro del percorso segnali (webhook_seen): lo stesso update elaborato due
-    volte esce come duplicate e non riscrive niente (#56 pezzo 3b).
+    volte esce come duplicate e non riscrive niente (#56 pezzo 3b). E in piu' l'ORDINE
+    (#56, Sol B1): gli update_id di Telegram crescono monotoni, ma l'offload su thread puo'
+    elaborarli fuori ordine; si tiene l'update_id piu' alto gia' processato PER CANALE
+    (canale_backup_ultimo_update_id:<chat_id>) e un evento con id inferiore per lo STESSO
+    canale - una promozione tardiva dopo una rimozione piu' nuova - esce come out_of_order,
+    cosi' non risorge un candidato ormai invalido. Per-canale e non globale: l'ordine di un
+    canale non sopprime gli eventi di un altro (un altro candidato non blocca la pulizia del
+    configurato).
   - RIMOZIONE (#56 pezzo 3b): se il bot non puo' piu' pubblicare nel canale — uscito
     (left/kicked) o RETROCESSO da amministratore a member/restricted (in un canale solo gli
     admin postano) — la configurazione si azzera, che sia il configurato o il candidato.
@@ -788,6 +795,14 @@ INVIO DEL BACKUP AL CANALE (#56 pezzo 3). `POST /api/admin/backup/invia` manda u
   dove chiunque puo' leggerlo. Un invio riuscito lascia una riga in admin_audit
   (admin_user_id NULL quando e' stato il cron). L'invio (rete + I/O) gira fuori dall'event
   loop, o bloccherebbe webhook e feed.
+  IDEMPOTENZA (#56, chiude i bloccanti di Sol). Il percorso CRON prenota un PERIODO (la data
+  UTC del giro) nella tabella backup_inviato PRIMA di inviare: due repliche o un retry non
+  mandano due copie - la seconda trova il periodo gia' preso ed esce come no-op. Se l'invio
+  fallisce la prenotazione si LIBERA, cosi' un retry della stessa notte riparte. Il BOTTONE
+  dell'amministratore (nessun periodo) e' esente: e' un'azione umana esplicita e invia SEMPRE,
+  anche se il cron ha gia' mandato il backup di oggi. (Baratto dichiarato: un crash fra la
+  prenotazione e l'invio salta al massimo UNA notte - il giro dopo riparte, e il bottone
+  resta disponibile - preferito a mandarne due.)
   IL GIRO NOTTURNO. Il servizio NON ha uno scheduler interno (come i promemoria): serve un
   job esterno che chiami l'endpoint. Configuralo cosi', una volta sola:
     1. imposta la variabile BACKUP_CRON_TOKEN su un valore lungo e casuale (e' un secret,
