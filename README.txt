@@ -222,6 +222,23 @@ fare), piu' uno solo nuovo per l'obbligatoria vuota - cosi' non esiste un second
 catalogo da tenere allineato fra i due motori. La diagnosi nasce DENTRO il motore
 (non accanto), quindi la prova non puo' divergere dal webhook, e il test di parita'
 JS<->Python la confronta per intero.
+COME SI COSTRUISCE, e perche' conta. La diagnosi si calcola sui motivi FINALI di UNA
+riga - i suoi missing, i suoi scarti, i suoi avvisi - agganciati alla colonna che
+nominano in testa ("Price: ..."). E' l'unica regola d'attribuzione, la stessa per
+scarti e avvisi, in Python come in JS. Calcolarla a meta' strada la faceva mentire:
+il gate #41 e le cause delle righe di override arrivano DOPO, e la tabella diceva
+«0 colonne bloccano» mentre il CSV non usciva.
+DIAGNOSI PER RIGA. Col multi-riga (#35) il verdetto e' di ogni riga, quindi ogni
+elemento di `righe` porta la SUA `diagnosi`: la tabella top-level descrive la BASE,
+che con config.multi non e' una riga del feed. Il pannello mostra una tabella per
+riga generata, e la tabella unica solo quando il multi non e' attivo.
+CAUSE DI RIGA. Uno scarto che non nomina nessuna colonna - oggi il gate di contenuto
+#41, che parla del parser nel suo insieme - non finisce in nessuna voce: attribuirlo
+a una colonna sarebbe falso. Non si perde: resta in `scarti`, il pannello lo mostra
+sotto la tabella, e il conteggio del riepilogo lo include ("N sulla riga").
+MESSAGGIO NON RICONOSCIUTO. Nessuna colonna «blocca»: la riga non esce perche' la
+condizione non ha combaciato, e accusare le obbligatorie vuote manderebbe l'utente a
+mappare colonne mentre il difetto e' nella condizione.
 
 MERCATI BETFAIR DELL'UTENTE (#33, SESSIONE)
 La libreria sport -> mercato (MarketType + MarketName) -> selezioni (SelectionName),

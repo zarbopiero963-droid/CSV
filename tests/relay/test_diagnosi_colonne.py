@@ -175,3 +175,145 @@ def test_senza_riconoscimento_non_si_inventano_scarti_per_colonna():
     assert esito['matched'] is False
     assert _voce(esito, 'Price')['stato'] != 'blocca', _voce(esito, 'Price')
     assert esito['scarti'] == []
+
+
+# --------------------------------- i tre buchi trovati dai reviewer sulla PR #104
+#
+# Claude Fable 5 e GPT-5.5 hanno fermato la prima versione di questa funzione con
+# lo stesso bloccante, da due angoli: la diagnosi nasceva dentro `_giudica_riga`,
+# cioe' PRIMA che il verdetto della riga fosse completo. Misurato allora, sul
+# codice di `ce6af4c`:
+#
+#   A) gate di contenuto (#41): `complete=False`, 1 scarto, «0 colonne bloccano»;
+#   B) multi-riga: la sola riga generata scartata per `Price`, e la diagnosi —
+#      quella della BASE, sana — diceva ancora «0 bloccano»; le righe non avevano
+#      diagnosi propria;
+#   C) messaggio NON riconosciuto: `EventName` marcata `blocca` benche' nessuna
+#      riga fosse in gioco: la causa vera era la condizione, non la colonna.
+#
+# Sono la stessa classe: una tabella che esiste per dire «quale colonna blocca il
+# CSV» non puo' essere calcolata su un verdetto parziale. Questi test la tengono.
+
+
+def test_A_il_gate_di_contenuto_non_sparisce_dalla_tabella():
+    """Il gate #41 e' una causa di RIGA — non nomina una colonna, perche' parla
+    del parser nel suo insieme. Non puo' finire in una voce senza mentire su
+    quale colonna sia il problema, e non puo' sparire: la tabella direbbe
+    «nessuna colonna blocca» mentre la riga non esce.
+
+    Fail-first (misurato su `ce6af4c`): `complete=False`, `blocca=0`, e NESSUN
+    posto dove leggere il motivo — `cause_di_riga` non esisteva."""
+    # tutte e quattro le obbligatorie costanti: il gate #41 scatta per definizione
+    esito = main.esegui_parser('GOL adesso', _config())
+    assert esito['complete'] is False
+    assert not esito['missing']
+    cause = main.cause_di_riga(esito['scarti'])
+    assert len(cause) == 1, esito['scarti']
+    assert 'nessuna colonna obbligatoria viene estratta' in cause[0]
+    # e non e' stata attribuita per sbaglio a una colonna
+    assert [v['colonna'] for v in esito['diagnosi'] if v['stato'] == 'blocca'] == []
+
+
+def test_B_ogni_riga_generata_porta_la_PROPRIA_diagnosi():
+    """Col multi-riga (#35) il verdetto e' PER RIGA: base sana, riga di override
+    rotta. La diagnosi della riga deve accusare la colonna della RIGA.
+
+    Fail-first (misurato su `ce6af4c`): `righe[0]` non aveva nessuna chiave
+    `diagnosi`, e la sola diagnosi disponibile — quella della base — diceva
+    «0 bloccano» mentre l'unica riga generata veniva scartata."""
+    cfg = {'match': {'value': 'GOL'},
+           'columns': {
+               'EventName': {'source': 'regex',
+                             'pattern': r'([A-Za-z]+ - [A-Za-z]+)', 'group': 1},
+               'MarketType': {'source': 'constant', 'value': 'OVER_UNDER_15'},
+               'SelectionName': {'source': 'constant', 'value': 'Over 1,5 goal'},
+               'BetType': {'source': 'constant', 'value': 'PUNTA'}},
+           # quota fuori intervallo SOLO sulla riga di override
+           'multi': {'markets': [{'market_type': 'CORRECT_SCORE', 'price': '0.5'}]}}
+    esito = main.esegui_parser('Juventus - Milan GOL', cfg)
+    assert len(esito['righe']) == 1
+    riga = esito['righe'][0]
+    assert riga['complete'] is False, riga
+    bloccanti = [v['colonna'] for v in riga['diagnosi'] if v['stato'] == 'blocca']
+    assert bloccanti == ['Price'], riga['diagnosi']
+    motivo = next(v for v in riga['diagnosi'] if v['colonna'] == 'Price')['motivo']
+    assert "fuori dall'intervallo" in motivo, motivo
+    # la BASE resta sana, ed e' giusto: il difetto era mostrare SOLO lei
+    assert [v['colonna'] for v in esito['diagnosi'] if v['stato'] == 'blocca'] == []
+
+
+def test_B_anche_la_riga_rifiutata_dai_delimitatori_ha_la_sua_diagnosi():
+    """Le righe scartate PRIMA del giudizio (selezione vuota + delimitatori su un
+    mercato che non e' di punteggio) sarebbero state le uniche senza tabella,
+    proprio dove serve. Lo scarto nomina `SelectionName`, quindi la voce di quella
+    colonna deve bloccare."""
+    cfg = {'match': {'value': 'GOL'},
+           'columns': {
+               'EventName': {'source': 'regex',
+                             'pattern': r'([A-Za-z]+ - [A-Za-z]+)', 'group': 1},
+               'MarketType': {'source': 'constant', 'value': 'OVER_UNDER_15'},
+               'SelectionName': {'source': 'constant', 'value': 'Over 1,5 goal'},
+               'BetType': {'source': 'constant', 'value': 'PUNTA'}},
+           'multi': {'markets': [{'market_type': 'MATCH_ODDS',
+                                  'start_after': 'GOL', 'end_before': 'fine'}]}}
+    esito = main.esegui_parser('Juventus - Milan GOL 1-0 fine', cfg)
+    riga = esito['righe'][0]
+    assert riga['complete'] is False
+    assert riga['diagnosi'], 'riga senza diagnosi'
+    voce = next(v for v in riga['diagnosi'] if v['colonna'] == 'SelectionName')
+    assert voce['stato'] == 'blocca', voce
+    assert 'CORRECT_SCORE' in voce['motivo'], voce['motivo']
+
+
+def test_C_il_messaggio_ignorato_non_accusa_le_colonne_obbligatorie():
+    """Se la condizione non combacia la riga non esce PER QUELLO. Marcare le
+    obbligatorie vuote come `blocca` indicherebbe all'utente la causa sbagliata:
+    andrebbe a mappare colonne mentre il difetto e' nella condizione.
+
+    Fail-first (misurato su `ce6af4c`): `blocca = ['EventName']` su un messaggio
+    che il parser aveva ignorato."""
+    cfg = {'match': {'value': 'GOL'},
+           'columns': {'EventName': {'source': 'regex', 'pattern': r'(GOL .+)',
+                                     'group': 1}}}
+    esito = main.esegui_parser('messaggio qualunque', cfg)
+    assert esito['matched'] is False
+    assert esito['missing'], 'il caso non e- stato esercitato: nessuna obbligatoria vuota'
+    assert [v['stato'] for v in esito['diagnosi'] if v['stato'] == 'blocca'] == []
+    assert _voce(esito, 'EventName')['stato'] == 'vuota'
+
+
+# ------------------------------------------- la regola d'attribuzione, da sola
+
+
+def test_l_attribuzione_e_per_nome_esatto_della_colonna_in_testa():
+    """`_motivi_di` aggancia sul nome ESATTO prima dei due punti. `MinPrice` e
+    `Price` condividono la coda, non la testa: un motivo di `MinPrice` non deve
+    finire su `Price`, o la tabella accuserebbe la colonna sbagliata."""
+    motivi = ['MinPrice: fuori intervallo', 'Price: fuori intervallo']
+    assert main._motivi_di(motivi, 'Price') == ['Price: fuori intervallo']
+    assert main._motivi_di(motivi, 'MinPrice') == ['MinPrice: fuori intervallo']
+
+
+def test_uno_scarto_che_non_nomina_una_colonna_resta_visibile_come_causa_di_riga():
+    """Il rischio segnalato da Claude Fable 5 sulla PR #104: un motivo il cui
+    prefisso non e' esattamente una colonna verrebbe perso in silenzio. Non si
+    perde: `cause_di_riga` lo raccoglie, e il pannello lo mostra sotto la
+    tabella. Vale per QUALUNQUE motivo futuro, non solo per il gate #41."""
+    scarti = ['Price: fuori intervallo', 'qualcosa di nuovo che non nomina colonne',
+              'Prezzo: prefisso che NON e- una colonna del contratto']
+    assert main.cause_di_riga(scarti) == [
+        'qualcosa di nuovo che non nomina colonne',
+        'Prezzo: prefisso che NON e- una colonna del contratto']
+    # e nessuna delle 14 se lo prende
+    riga = [''] * len(main.HEADERS)
+    diagnosi = main._diagnosi_colonne(riga, True, [], scarti, [])
+    assert [v['colonna'] for v in diagnosi if v['stato'] == 'blocca'] == ['Price']
+
+
+def test_un_avviso_orfano_non_altera_nessuna_voce():
+    """Stessa regola dal lato `segnala`: un avviso il cui prefisso non e' una
+    colonna non deve marcare a caso una voce. Resta nella lista `avvisi`, che il
+    pannello mostra sempre nel suo banner."""
+    riga = ['x'] * len(main.HEADERS)
+    diagnosi = main._diagnosi_colonne(riga, True, [], [], ['non una colonna: nota'])
+    assert {v['stato'] for v in diagnosi} == {'ok'}

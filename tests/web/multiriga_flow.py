@@ -143,10 +143,28 @@ with sync_playwright() as pw:
     pg.wait_for_selector('#test-result')
     esito = pg.inner_text('#test-result')
     assert '2 di 3' in esito, f'la prova deve dire il k su N (2 di 3): {esito!r}'
-    pille = pg.query_selector_all('#test-righe .pill')
+    # `[data-esito-riga]`, non `.pill`: dal #25 ogni riga porta anche la sua
+    # tabella «Diagnosi per colonna», che di pill ne ha una per voce piu' quelle
+    # della legenda. Il selettore generico contava quelle, non gli esiti.
+    pille = pg.query_selector_all('#test-righe [data-esito-riga]')
     assert len(pille) == 3, 'una pill di esito per ciascuna riga generata'
     assert 'abc' in pg.inner_text('#test-righe'), \
         'la riga rotta deve mostrare il SUO motivo'
+    # #25: la diagnosi e' PER RIGA. La riga rotta e' la terza (indice 2) e la sua
+    # tabella deve accusare la colonna della RIGA, non quella della base — che
+    # nella prima versione della #25 era l'unica tabella esistente, e diceva
+    # «0 bloccano» mentre il CSV non usciva.
+    rotta = next(i for i in range(3)
+                 if 'scartata' in pg.inner_text(f'[data-esito-riga="{i}"]'))
+    bloccanti = pg.query_selector_all(
+        f'#tabella-diagnosi-{rotta} tr[data-stato="blocca"]')
+    assert [b.get_attribute('data-col') for b in bloccanti] == ['Price'], \
+        'la tabella della riga rotta deve accusare Price, la colonna della RIGA'
+    sane = pg.query_selector_all(
+        f'#tabella-diagnosi-{(rotta + 1) % 3} tr[data-stato="blocca"]')
+    assert sane == [], 'una riga piazzabile non ha colonne che bloccano'
+    assert len(pg.query_selector_all(f'#tabella-diagnosi-{rotta} tbody tr')) == 14, \
+        'quattordici voci anche nella tabella per riga'
     csv = pg.inner_text('#test-csv')
     assert csv.count('"Provider"') == 1, 'CSV composto: header UNA volta sola'
     assert csv.count('"OVER_UNDER_25"') == 1 and csv.count('"BANCA"') == 1, csv
