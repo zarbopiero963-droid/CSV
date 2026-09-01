@@ -4250,10 +4250,12 @@ CHIAVE_CANALE_BACKUP_ID = 'canale_backup_chat_id'
 CHIAVE_CANALE_BACKUP_TITOLO = 'canale_backup_titolo'
 CHIAVE_CANALE_CANDIDATO_ID = 'canale_backup_candidato_chat_id'
 CHIAVE_CANALE_CANDIDATO_TITOLO = 'canale_backup_candidato_titolo'
-# L'`update_id` piu' alto gia' processato per il ciclo di vita del canale di backup
-# (#56, pezzo idempotenza): gli `update_id` di Telegram crescono in modo monotono, quindi
-# un evento con id <= a questo e' una riconsegna o un fuori-ordine (una promozione tardiva
-# dopo una rimozione piu' nuova) e va ignorato, o farebbe risorgere un candidato invalido.
+# PREFISSO della chiave dell'`update_id` piu' alto gia' processato, tenuto PER CANALE come
+# `canale_backup_ultimo_update_id:<chat_id>` (#56, pezzo idempotenza). Gli `update_id` di
+# Telegram crescono in modo monotono, quindi un evento con id <= a quello del suo canale e'
+# una riconsegna o un fuori-ordine (una promozione tardiva dopo una rimozione piu' nuova dello
+# STESSO canale) e va ignorato. Per-canale e non globale: l'ordine di un canale non deve
+# sopprimere gli eventi di un altro (bloccante di Fable, gate finale #56).
 CHIAVE_CANALE_ULTIMO_UPDATE = 'canale_backup_ultimo_update_id'
 
 
@@ -7641,12 +7643,17 @@ def _cattura_canale_backup(payload):
             return {'ok': True, 'ignored': 'duplicate'}
         # Ordinamento (#56, pezzo idempotenza — Sol B1): gli `update_id` di Telegram crescono
         # monotoni, ma l'offload su thread puo' elaborarli fuori ordine. Un evento con id <= a
-        # quello piu' alto gia' processato per QUESTO canale e' una promozione tardiva dopo una
-        # rimozione piu' nuova: applicarla farebbe risorgere un candidato ormai invalido. Si
-        # ignora. Il registro dell'high-water-mark si aggiorna solo quando agiamo davvero sul
-        # nostro canale (in `_segna_update_visto`), quindi eventi di canali estranei non lo
-        # inquinano.
-        ultimo = leggi_impostazione(c, CHIAVE_CANALE_ULTIMO_UPDATE)
+        # quello piu' alto gia' processato PER QUESTO CANALE e' una promozione tardiva dopo una
+        # rimozione piu' nuova dello stesso canale: applicarla farebbe risorgere un candidato
+        # ormai invalido. Si ignora.
+        #
+        # L'high-water-mark e' PER `chat_id`, non globale: altrimenti la promozione di un ALTRO
+        # canale (un secondo candidato) alzerebbe il contatore e sopprimerebbe come `out_of_order`
+        # una rimozione LEGITTIMA — con id inferiore ma di un canale diverso — del canale
+        # configurato, lasciandolo puntato a un canale da cui il bot e' uscito. Bloccante di
+        # Claude Fable 5 al gate finale (#56). Si aggiorna solo quando agiamo sul canale (in
+        # `_segna_update_visto`), quindi eventi di canali estranei non lasciano traccia.
+        ultimo = leggi_impostazione(c, CHIAVE_CANALE_ULTIMO_UPDATE + ':' + chat_id)
         if update_id.isdigit() and (ultimo or '').isdigit() and int(update_id) <= int(ultimo):
             c.rollback()
             return {'ok': True, 'ignored': 'out_of_order'}
@@ -7664,38 +7671,40 @@ def _cattura_canale_backup(payload):
             if tocca_cand:
                 cancella_impostazione(c, CHIAVE_CANALE_CANDIDATO_ID)
                 cancella_impostazione(c, CHIAVE_CANALE_CANDIDATO_TITOLO)
-            _segna_update_visto(c, update_id)
+            _segna_update_visto(c, update_id, chat_id)
             c.commit()
             return {'ok': True, 'canale_backup_rimosso': True}
         # promozione: se il canale e' GIA' quello configurato, una riconsegna non ripropone
         # una proposta gia' consumata.
         if leggi_impostazione(c, CHIAVE_CANALE_BACKUP_ID) == chat_id:
-            _segna_update_visto(c, update_id)
+            _segna_update_visto(c, update_id, chat_id)
             c.commit()
             return {'ok': True, 'canale_backup_gia_configurato': True}
         scrivi_impostazione(c, CHIAVE_CANALE_CANDIDATO_ID, chat_id)
         scrivi_impostazione(c, CHIAVE_CANALE_CANDIDATO_TITOLO, titolo)
-        _segna_update_visto(c, update_id)
+        _segna_update_visto(c, update_id, chat_id)
         c.commit()
     finally:
         c.close()
     return {'ok': True, 'canale_backup_candidato': True}
 
 
-def _segna_update_visto(c, update_id):
-    """Marca un `update_id` come elaborato, nella transazione in corso. No-op se vuoto.
+def _segna_update_visto(c, update_id, chat_id):
+    """Marca un `update_id` come elaborato per `chat_id`, nella transazione in corso. No-op se
+    l'`update_id` e' vuoto.
 
     Due registri, entrambi nel commit dell'effetto:
     - `webhook_seen` (INSERT OR IGNORE) — il dedup della riconsegna esatta, come nel percorso
       segnali; un `update_id` e' unico per update in tutto Telegram, quindi un `my_chat_member`
       e un messaggio non collidono mai;
-    - l'high-water-mark `CHIAVE_CANALE_ULTIMO_UPDATE` — l'ordinamento (#56, Sol B1). Si scrive
-      SOLO qui, cioe' solo quando abbiamo agito sul nostro canale: eventi di canali estranei
-      non lo spostano. Chi arriva col controllo di ordine ha gia' `update_id > ultimo`, quindi
-      sovrascrivere col valore corrente lo tiene monotono."""
+    - l'high-water-mark `CHIAVE_CANALE_ULTIMO_UPDATE:<chat_id>` — l'ordinamento (#56, Sol B1),
+      tenuto PER CANALE cosi' l'ordine di un canale non sopprime gli eventi di un altro (Fable).
+      Si scrive SOLO qui, cioe' solo quando abbiamo agito su QUEL canale. Chi arriva col
+      controllo di ordine ha gia' `update_id > ultimo`, quindi sovrascrivere col valore corrente
+      lo tiene monotono."""
     if update_id:
         c.execute('INSERT OR IGNORE INTO webhook_seen(update_id) VALUES (?)', (update_id,))
-        scrivi_impostazione(c, CHIAVE_CANALE_ULTIMO_UPDATE, update_id)
+        scrivi_impostazione(c, CHIAVE_CANALE_ULTIMO_UPDATE + ':' + chat_id, update_id)
 
 
 @app.post('/telegram/webhook')

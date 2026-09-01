@@ -460,6 +460,28 @@ def test_una_promozione_tardiva_dopo_una_rimozione_piu_nuova_e_ignorata(tmp_path
         'una promozione tardiva (fuori ordine) ha fatto risorgere il candidato'
 
 
+def test_l_ordine_e_per_canale_non_globale(tmp_path, monkeypatch):
+    """L'high-water-mark dell'ordine è PER-CANALE, non globale (Fable, gate finale #56). Una
+    rimozione LEGITTIMA del canale CONFIGURATO non deve essere soppressa come `out_of_order` solo
+    perché un evento più nuovo di un ALTRO canale (la promozione di un altro candidato) ha alzato
+    un contatore globale.
+
+    Fail-first: con un HWM globale la rimozione di CANALE (update_id 203) viene scartata perché
+    un altro canale ha portato il contatore a 205, e la config resta puntata a un canale da cui il
+    bot è uscito."""
+    percorso, admin_s, _c, _u = _admin(tmp_path, monkeypatch, 'ordine_per_canale.db')
+    _abilita_webhook(monkeypatch)
+    _configura(admin_s, monkeypatch, CANALE, 'Backup')   # CANALE configurato (nessun HWM via webhook)
+
+    # un ALTRO canale viene proposto con update_id più alto: alzerebbe un contatore globale
+    _webhook(_promozione(ALTRO_CANALE, 'Altro', update_id=205))
+    # rimozione LEGITTIMA del canale configurato, update_id inferiore ma di un canale DIVERSO
+    esito = _webhook(_rimozione(CANALE, update_id=203))
+    assert esito.get('canale_backup_rimosso') is True, esito
+    assert _impostazione(percorso, main.CHIAVE_CANALE_BACKUP_ID) is None, \
+        'una rimozione legittima e- stata soppressa da un HWM globale alzato da un altro canale'
+
+
 # ---------------------------------------------------------------- le rotte
 
 def _metti_candidato(chat_id, titolo):

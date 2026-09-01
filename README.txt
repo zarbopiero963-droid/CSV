@@ -741,10 +741,12 @@ canale CONFIGURATO:
     stesso registro del percorso segnali (webhook_seen): lo stesso update elaborato due
     volte esce come duplicate e non riscrive niente (#56 pezzo 3b). E in piu' l'ORDINE
     (#56, Sol B1): gli update_id di Telegram crescono monotoni, ma l'offload su thread puo'
-    elaborarli fuori ordine; si tiene l'update_id piu' alto gia' processato per il canale
-    (canale_backup_ultimo_update_id) e un evento con id inferiore - una promozione tardiva
-    dopo una rimozione piu' nuova - esce come out_of_order, cosi' non risorge un candidato
-    ormai invalido.
+    elaborarli fuori ordine; si tiene l'update_id piu' alto gia' processato PER CANALE
+    (canale_backup_ultimo_update_id:<chat_id>) e un evento con id inferiore per lo STESSO
+    canale - una promozione tardiva dopo una rimozione piu' nuova - esce come out_of_order,
+    cosi' non risorge un candidato ormai invalido. Per-canale e non globale: l'ordine di un
+    canale non sopprime gli eventi di un altro (un altro candidato non blocca la pulizia del
+    configurato).
   - RIMOZIONE (#56 pezzo 3b): se il bot non puo' piu' pubblicare nel canale — uscito
     (left/kicked) o RETROCESSO da amministratore a member/restricted (in un canale solo gli
     admin postano) — la configurazione si azzera, che sia il configurato o il candidato.
