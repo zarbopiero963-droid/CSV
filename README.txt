@@ -202,10 +202,26 @@ PUT    /api/me/parsers/SLUG             aggiorna il proprio (lo slug non cambia 
                                         distingue le due righe. Senza "uid" la richiesta
                                         resta incondizionata, come senza "versione".
 DELETE /api/me/parsers/SLUG[?uid=UID]   elimina il proprio (uid = precondizione, #75)
-POST   /api/me/parsers/SLUG/test        body {"message":"..."} -> {matched,missing,scarti,complete,event?,csv?}
+POST   /api/me/parsers/SLUG/test        body {"message":"..."} -> {matched,missing,scarti,diagnosi,complete,event?,csv?}
 La config viene validata alla creazione (struttura + dry-run): una config storta da'
 422 col motivo. La prova (/test) e' a secco: non scrive nel feed di nessuno, e dice
 se la condizione ha combaciato e quali colonne obbligatorie mancano.
+DIAGNOSI PER COLONNA (#25). `diagnosi` porta UNA voce per ognuna delle 14 colonne -
+{colonna, stato, motivo, valore} - cosi' la domanda «perche' questo messaggio non ha
+prodotto un segnale» ha una risposta a quattordici righe, non a tre livelli globali.
+Gli stati sono quattro, su DUE livelli di gravita' deliberatamente distinti:
+  blocca  - senza questa colonna la riga NON esce (obbligatoria vuota, o valore
+            scartato dalle guardie #39/#41/#42). Sono le cause di complete=false;
+  segnala - c'e' qualcosa da sapere ma la riga ESCE lo stesso (gli avvisi, es. la
+            squadra senza alias nella sorgente);
+  ok      - valorizzata e senza problemi;
+  vuota   - vuota ma facoltativa: NON e' un errore (Price vuota e' il caso normale,
+            la quota la mette XTrader).
+I motivi sono gli STESSI che finiscono in scarti/avvisi (gia' azionabili: dicono cosa
+fare), piu' uno solo nuovo per l'obbligatoria vuota - cosi' non esiste un secondo
+catalogo da tenere allineato fra i due motori. La diagnosi nasce DENTRO il motore
+(non accanto), quindi la prova non puo' divergere dal webhook, e il test di parita'
+JS<->Python la confronta per intero.
 
 MERCATI BETFAIR DELL'UTENTE (#33, SESSIONE)
 La libreria sport -> mercato (MarketType + MarketName) -> selezioni (SelectionName),

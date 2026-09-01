@@ -408,7 +408,11 @@ export function runParser(message, config, aliasMap) {
   // BASE: i consumatori esistenti non cambiano.
   const righe = generaRighe(message, config, matched,
     { row: rowGiudicata, missing, scarti, complete });
-  return { matched, row: rowGiudicata, missing, scarti, avvisi, righe, complete };
+  // La diagnosi per colonna (#25) esce dalla stessa fonte del giudizio; gli
+  // `avvisi` si sovrappongono qui perche' nascono nel chiamante (la sorgente
+  // squadre), come livello `segnala`: la riga esce lo stesso.
+  const diagnosi = applicaAvvisi(giudizio.diagnosi, avvisi);
+  return { matched, row: rowGiudicata, missing, scarti, avvisi, diagnosi, righe, complete };
 }
 
 // Giudica UNA riga gia' estratta: appiattisce i numerici, calcola le
@@ -440,6 +444,9 @@ function giudicaRiga(rowGrezza, matched) {
   // una costante numerica invalida produrrebbe motivi per QUALUNQUE
   // messaggio. [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #47.
   const scarti = !matched ? [] : Object.values(numericReasons).filter(Boolean);
+  // Il motivo dell'emoji si tiene anche PER COLONNA (#25): la diagnosi per
+  // colonna deve poter dire quale valore ha il problema, non solo che esiste.
+  const motiviEmoji = {};
   if (matched) {
     // Niente emoji nei valori (#42): il feed uscirebbe formalmente valido e
     // XTrader lo scarterebbe in silenzio. Stesso blocco in `esegui_parser`.
@@ -449,9 +456,10 @@ function giudicaRiga(rowGrezza, matched) {
       if (EMOJI.test(testo)) {
         const piano = piatto(testo);
         const citato = [...piano].length <= 60 ? piano : cutByCodePoint(piano, 60) + '…';
-        scarti.push(`${c}: il valore contiene un'emoji («${citato}»). XTrader `
+        motiviEmoji[c] = `${c}: il valore contiene un'emoji («${citato}»). XTrader `
           + 'marcherebbe il segnale non valido, senza nessun errore di ritorno: '
-          + 'estrai il testo DOPO il marcatore, non la riga intera.');
+          + 'estrai il testo DOPO il marcatore, non la riga intera.';
+        scarti.push(motiviEmoji[c]);
       }
     }
   }
@@ -462,7 +470,67 @@ function giudicaRiga(rowGrezza, matched) {
     const i = COLUMNS.indexOf(c);
     if (reason === null && row[i]) row[i] = row[i].replace('.', DECIMAL_SEPARATOR);
   }
-  return { row, missing, scarti };
+  const diagnosi = diagnosiColonne(row, matched, missing, numericReasons, motiviEmoji);
+  return { row, missing, scarti, diagnosi };
+}
+
+// Il motivo dell'obbligatoria vuota: l'UNICA stringa nuova della diagnosi per
+// colonna (#25). Tutte le altre riusano i motivi che gia' finiscono in `scarti` e
+// `avvisi` — che sono gia' azionabili — cosi' non nasce un secondo catalogo da
+// tenere allineato fra i due motori. Identica a `_motivo_obbligatoria_vuota` in
+// main.py, e il caso di parita' la confronta.
+function motivoObbligatoriaVuota(colonna) {
+  return `${colonna}: e' obbligatoria ed e' vuota. Mappala su una sorgente che `
+    + "legge dal messaggio, o nessuna riga verra' scritta nel feed.";
+}
+
+// La diagnosi PER COLONNA: 14 voci `{colonna, stato, motivo, valore}` (#25).
+// Gemella di `_diagnosi_colonne` in main.py, confrontata dal caso di parita'.
+//
+// Due livelli di gravita' DELIBERATAMENTE distinti (vincolo del commento del
+// 14/08 sulla #25, nato da un difetto del Bridge: la' un rosso che blocca e un
+// rosso su campo facoltativo avevano lo stesso aspetto):
+//   `blocca`  - senza questa colonna la riga NON esce (obbligatoria vuota, o
+//               valore scartato dalla guardia numerica / emoji);
+//   `segnala` - c'e' qualcosa da sapere ma la riga ESCE lo stesso (gli avvisi);
+//   `ok`      - valorizzata e senza problemi;
+//   `vuota`   - vuota ma facoltativa: NON e' un errore (Price vuota e' normale).
+// Il `valore` e' quello FINALE, gia' localizzato.
+function diagnosiColonne(row, matched, missing, numericReasons, motiviEmoji) {
+  return COLUMNS.map(colonna => {
+    const valore = String(row[COLUMNS.indexOf(colonna)] ?? '');
+    let motivo = '';
+    if (matched) motivo = numericReasons[colonna] || motiviEmoji[colonna] || '';
+    let stato;
+    if (motivo) {
+      stato = 'blocca';
+    } else if (missing.includes(colonna)) {
+      stato = 'blocca';
+      motivo = motivoObbligatoriaVuota(colonna);
+    } else if (!piatto(valore)) {
+      stato = 'vuota';
+    } else {
+      stato = 'ok';
+    }
+    return { colonna, stato, motivo, valore };
+  });
+}
+
+// Sovrappone gli `avvisi` alla diagnosi come livello `segnala` (#25). Un avviso
+// nomina la propria colonna in testa (`EventName: ...`), quindi si aggancia per
+// prefisso: generico, e identico in Python. Non tocca una colonna che gia'
+// `blocca` — un problema che ferma la riga non va declassato a segnalazione — e
+// piu' avvisi sulla stessa colonna (le due meta' di EventName) si uniscono.
+function applicaAvvisi(diagnosi, avvisi) {
+  for (const voce of diagnosi) {
+    if (voce.stato !== 'ok' && voce.stato !== 'vuota') continue;
+    const suoi = avvisi.filter(a => a.split(':', 1)[0] === voce.colonna);
+    if (suoi.length) {
+      voce.stato = 'segnala';
+      voce.motivo = suoi.join(' ');
+    }
+  }
+  return diagnosi;
 }
 
 // Gli override del multi-riga (#35): campo della riga → colonna del CSV.

@@ -1206,7 +1206,7 @@ GET    /api/me/parsers                 i parser dell'utente della sessione
 POST   /api/me/parsers                 { titolo, config, active? } → parser creato
 PUT    /api/me/parsers/{slug}          { titolo, config, active? } aggiorna il proprio
 DELETE /api/me/parsers/{slug}          elimina il proprio
-POST   /api/me/parsers/{slug}/test     { message } → { matched, missing, complete, event?, csv? }
+POST   /api/me/parsers/{slug}/test     { message } → { matched, missing, complete, diagnosi[], event?, csv? }
 ```
 
 Dal #35 (pezzo 2) la risposta della prova porta anche `righe` — per ogni riga
@@ -2401,7 +2401,21 @@ La voce e la vista esistono solo con `admin` vero; il server risponde comunque
   /api/me/parsers/{slug}/test`, lo stesso `esegui_parser` del webhook, a secco): il
   CSV mostrato è quello del server byte per byte, e gli **`scarti`** — il perché un
   valore non ha raggiunto il feed (#39/#41/#42) — compaiono in un banner sotto
-  l'esito. «Salva configurazione» fa la PUT; la prova salva prima di provare, perché
+  l'esito.
+  - **Diagnosi per colonna** (#25): sotto l'esito, un pannello «Diagnosi per
+    colonna — N bloccano, M da sapere» con una tabella a **quattordici righe**,
+    una per ogni colonna del CSV: **Colonna · Stato · Motivo · Valore estratto**.
+    È aperto quando c'è qualcosa da correggere, chiuso quando è tutto a posto.
+    Gli stati hanno **due livelli visivamente distinti**, come richiesto dalla
+    #25 per non ripetere il difetto del Bridge (dove un rosso bloccante e un
+    rosso su campo facoltativo avevano lo stesso aspetto):
+    `blocca` (pillola rossa — senza questa colonna la riga non esce) ·
+    `segnala` (pillola ambra — la riga esce lo stesso) ·
+    `ok` (verde) · `vuota` (neutra — facoltativa, **non è un errore**).
+    Una legenda sopra la tabella dice esattamente questo. Il **valore estratto
+    non viene mai troncato**: la tabella scorre dentro il proprio contenitore
+    (`.tbl-scroll`), come ogni tabella larga di questa app.
+  «Salva configurazione» fa la PUT; la prova salva prima di provare, perché
   il server conosce solo ciò che è salvato. L'anteprima locale accanto al wizard
   resta, dichiarata indicativa: «fa fede la prova sul server».
 - **Feed CSV**: il token è **dell'utente**, non del parser — un solo URL da incollare

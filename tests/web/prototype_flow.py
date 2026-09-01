@@ -310,6 +310,40 @@ with sync_playwright() as pw:
     shot(pg, '10-prova-ok')
     print('CSV riconosciuto:', repr(csv_txt))
 
+    # Diagnosi PER COLONNA (#25): la risposta a QUATTORDICI righe, non a tre
+    # livelli globali. Il pannello e' chiuso quando non c'e' niente da correggere,
+    # quindi lo si apre — che verifica anche il summary.
+    pg.click('#test-diagnosi summary')
+    pg.wait_for_selector('#tabella-diagnosi tbody tr')
+    righe_diag = pg.locator('#tabella-diagnosi tbody tr')
+    assert righe_diag.count() == 14, \
+        f'attese 14 righe di diagnosi, trovate {righe_diag.count()}'
+    colonne_diag = pg.eval_on_selector_all(
+        '#tabella-diagnosi tbody tr', 'rr => rr.map(r => r.dataset.col)')
+    assert colonne_diag[2] == 'EventName', f'ordine inatteso: {colonne_diag!r}'
+    # Il valore estratto NON si tronca mai (vincolo del commento del 14/08 sulla
+    # #25, difetto A del Bridge): si legge per intero.
+    valore_evento = pg.inner_text(
+        '#tabella-diagnosi tr[data-col="EventName"] td:last-child')
+    assert valore_evento.strip() == 'Inter - Milan', \
+        f'valore estratto troncato o sbagliato: {valore_evento!r}'
+    # Due livelli DISTINTI a colpo d'occhio: qui il parser e' completo, quindi
+    # nessuna colonna blocca e la valorizzata porta la pillola «ok» (verde).
+    classi = pg.get_attribute('#tabella-diagnosi tr[data-col="EventName"] .pill', 'class')
+    assert 'on' in (classi or ''), f'stato ok senza la sua pillola: {classi!r}'
+    vuote = pg.locator('#tabella-diagnosi tr[data-stato="vuota"]')
+    assert vuote.count() > 0, 'nessuna colonna «vuota»: il livello non e- esercitato'
+    classi_vuota = pg.get_attribute(
+        '#tabella-diagnosi tr[data-stato="vuota"] .pill', 'class')
+    assert 'off' in (classi_vuota or ''), \
+        f'una facoltativa vuota non deve sembrare un errore: {classi_vuota!r}'
+    assert pg.locator('#tabella-diagnosi tr[data-stato="blocca"]').count() == 0, \
+        'nessuna colonna dovrebbe bloccare su un parser completo'
+    # La tabella scorre nel PROPRIO contenitore: la pagina non sfonda (regola 2).
+    assert pg.evaluate('document.documentElement.scrollWidth <= window.innerWidth + 1'), \
+        'la tabella della diagnosi fa sfondare la pagina in orizzontale'
+    shot(pg, '10b-diagnosi-per-colonna')
+
     # prova messaggio: caso da ignorare (la condizione non corrisponde)
     pg.fill('#test-msg', 'Buongiorno ragazzi, nessun segnale adesso')
     pg.click('[data-act="run-test"]')

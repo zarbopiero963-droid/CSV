@@ -3258,6 +3258,10 @@ def esegui_parser(message, config, mappa_alias=None):
     row = giudizio['row']
     mancanti = giudizio['missing']
     scarti = giudizio['scarti']
+    # La diagnosi per colonna (#25) esce dalla stessa fonte del giudizio; gli
+    # `avvisi` si sovrappongono qui perche' nascono nel chiamante (la sorgente
+    # squadre), come livello `segnala`: la riga esce lo stesso.
+    diagnosi = _applica_avvisi(giudizio['diagnosi'], avvisi)
     # Il gate di CONTENUTO (#41): almeno una colonna obbligatoria deve venire da
     # un'estrazione REALE che ha prodotto qualcosa. Un parser con tutte e quattro
     # le obbligatorie costanti produce una riga piazzabile per QUALSIASI messaggio
@@ -3278,7 +3282,8 @@ def esegui_parser(message, config, mappa_alias=None):
                           {'row': row, 'missing': mancanti, 'scarti': scarti,
                            'complete': completo})
     return {'matched': matched, 'row': row, 'missing': mancanti, 'scarti': scarti,
-            'avvisi': avvisi, 'righe': righe, 'complete': completo}
+            'avvisi': avvisi, 'diagnosi': diagnosi, 'righe': righe,
+            'complete': completo}
 
 
 def _giudica_riga(row_grezza, matched):
@@ -3305,6 +3310,9 @@ def _giudica_riga(row_grezza, matched):
     motivi_numerici = {c: motivo_valore_numerico(c, row[HEADERS.index(c)])
                        for c in INTERVALLI_NUMERICI}
     scarti = [m for m in motivi_numerici.values() if m] if matched else []
+    # Il motivo dell'emoji si tiene anche PER COLONNA (#25): la diagnosi per
+    # colonna deve poter dire quale valore ha il problema, non solo che esiste.
+    motivi_emoji = {}
     if matched:
         for colonna in HEADERS:
             if colonna in INTERVALLI_NUMERICI:
@@ -3315,16 +3323,90 @@ def _giudica_riga(row_grezza, matched):
                 piano = _piatto(testo)
                 citato = (piano if len(piano) <= 60
                           else _taglia_codepoint(piano, 60) + '…')
-                scarti.append(
+                motivi_emoji[colonna] = (
                     f'{colonna}: il valore contiene un\'emoji («{citato}»). '
                     'XTrader marcherebbe il segnale non valido, senza nessun '
                     'errore di ritorno: estrai il testo DOPO il marcatore, '
                     'non la riga intera.')
+                scarti.append(motivi_emoji[colonna])
     for colonna, motivo in motivi_numerici.items():
         indice = HEADERS.index(colonna)
         if motivo is None and row[indice]:
             row[indice] = row[indice].replace('.', SEPARATORE_DECIMALE, 1)
-    return {'row': row, 'missing': mancanti, 'scarti': scarti}
+    diagnosi = _diagnosi_colonne(row, matched, mancanti, motivi_numerici, motivi_emoji)
+    return {'row': row, 'missing': mancanti, 'scarti': scarti, 'diagnosi': diagnosi}
+
+
+# Il motivo dell'obbligatoria vuota: l'UNICA stringa nuova della diagnosi per
+# colonna (#25). Tutte le altre riusano i motivi che gia' finiscono in `scarti`
+# e `avvisi` — che sono gia' azionabili — cosi' non nasce un secondo catalogo da
+# tenere allineato fra i due motori. Identica a `MOTIVO_OBBLIGATORIA_VUOTA` in
+# engine.js, e il caso di parita' la confronta.
+def _motivo_obbligatoria_vuota(colonna):
+    return (f"{colonna}: e' obbligatoria ed e' vuota. Mappala su una sorgente che "
+            "legge dal messaggio, o nessuna riga verra' scritta nel feed.")
+
+
+def _diagnosi_colonne(row, matched, mancanti, motivi_numerici, motivi_emoji):
+    """La diagnosi PER COLONNA: 14 voci `{colonna, stato, motivo, valore}` (#25).
+
+    Risponde alla domanda «perche' questa colonna e' cosi'» per **ognuna** delle
+    14, non solo per quelle problematiche. Gemella di `diagnosiColonne` in
+    engine.js, confrontata dal caso di parita'.
+
+    **Due livelli di gravita', deliberatamente distinti** (vincolo del commento
+    del 14/08 sulla #25, che nasce da un difetto del Bridge: la' un rosso che
+    blocca e un rosso su campo facoltativo avevano lo stesso aspetto):
+
+    - `blocca` — senza questa colonna la riga NON esce: un'obbligatoria vuota,
+      oppure un valore scartato (guardia numerica o emoji). Sono esattamente le
+      cause che rendono `complete` falso;
+    - `segnala` — c'e' qualcosa da sapere ma la riga ESCE lo stesso (gli
+      `avvisi`, sovrapposti dal chiamante);
+    - `ok` — valorizzata e senza problemi;
+    - `vuota` — vuota ma facoltativa e senza problemi: **non e' un errore**
+      (`Price` vuota e' il caso normale, la quota la mette XTrader).
+
+    Il `valore` e' quello FINALE, gia' localizzato: la tabella mostra cio' che
+    verrebbe scritto, non una forma intermedia.
+    """
+    voci = []
+    for colonna in HEADERS:
+        valore = str('' if row[HEADERS.index(colonna)] is None
+                     else row[HEADERS.index(colonna)])
+        motivo = ''
+        if matched:
+            motivo = motivi_numerici.get(colonna) or motivi_emoji.get(colonna) or ''
+        if motivo:
+            stato = 'blocca'
+        elif colonna in mancanti:
+            stato = 'blocca'
+            motivo = _motivo_obbligatoria_vuota(colonna)
+        elif not _piatto(valore):
+            stato = 'vuota'
+        else:
+            stato = 'ok'
+        voci.append({'colonna': colonna, 'stato': stato,
+                     'motivo': motivo, 'valore': valore})
+    return voci
+
+
+def _applica_avvisi(diagnosi, avvisi):
+    """Sovrappone gli `avvisi` alla diagnosi come livello `segnala` (#25).
+
+    Un avviso nomina la propria colonna in testa (`EventName: ...`), quindi si
+    aggancia per prefisso: generico, e identico in JS. Non tocca una colonna che
+    gia' `blocca` — un problema che ferma la riga non va declassato a segnalazione
+    — e piu' avvisi sulla stessa colonna (le due meta' di `EventName`) si uniscono.
+    """
+    for voce in diagnosi:
+        if voce['stato'] not in ('ok', 'vuota'):
+            continue
+        suoi = [a for a in avvisi if a.split(':', 1)[0] == voce['colonna']]
+        if suoi:
+            voce['stato'] = 'segnala'
+            voce['motivo'] = ' '.join(suoi)
+    return diagnosi
 
 
 # Gli override del multi-riga (#35): campo della riga → colonna del CSV.
@@ -6399,7 +6481,8 @@ def elimina_parser_mio(slug: str, request: Request, uid: str | None = None):
 async def prova_parser_mio(slug: str, request: Request):
     """Prova un messaggio contro un proprio parser, A SECCO: niente scrittura nel feed.
 
-    Restituisce `matched`, `missing`, `complete` e — se completo — il `csv` e l'`event`.
+    Restituisce `matched`, `missing`, `complete`, la `diagnosi` PER COLONNA (#25:
+    stato/motivo/valore per ognuna delle 14) e — se completo — il `csv` e l'`event`.
     E' la base del motore diagnostico «perche' non ha fatto il parser»: il cliente vede
     se la condizione ha combaciato e quali colonne obbligatorie mancano, senza toccare
     il feed di nessuno. `esegui_parser` e' avvolto: una config che sollevasse da' un
@@ -6452,9 +6535,14 @@ async def prova_parser_mio(slug: str, request: Request):
     # (`componi_feed` di un documento e' il documento).
     righe = risultato.get('righe') or []
     complete = [r for r in righe if r['complete']]
+    # `diagnosi` (#25): la risposta PER COLONNA — stato, motivo e valore per
+    # ognuna delle 14 — che il pannello mostra come tabella. E' la differenza fra
+    # «non completo» e «SelectionName e' obbligatoria ed e' vuota: mappala su…»:
+    # il sintomo contro la causa, con due livelli distinti (blocca / segnala).
     corpo = {'matched': risultato['matched'], 'missing': risultato['missing'],
              'scarti': risultato.get('scarti') or [],
              'avvisi': risultato.get('avvisi') or [],
+             'diagnosi': risultato.get('diagnosi') or [],
              'complete': bool(complete),
              'righe': [{'row': [_testo_canonico(v) for v in r['row']],
                         'missing': r['missing'], 'scarti': r['scarti'],

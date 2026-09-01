@@ -1322,6 +1322,31 @@ function stepReview() {
           <span class="mono">${esc((t.missing || []).join(', '))}</span>
           la riga sarebbe formalmente valida e priva di senso per XTrader.
         </div>` : ''}
+        ${(t.diagnosi || []).length ? `<details id="test-diagnosi" class="stack"${
+          t.diagnosi.some(v => v.stato === 'blocca' || v.stato === 'segnala') ? ' open' : ''}>
+          <summary class="small">Diagnosi per colonna — ${
+            t.diagnosi.filter(v => v.stato === 'blocca').length} bloccano, ${
+            t.diagnosi.filter(v => v.stato === 'segnala').length} da sapere</summary>
+          <p class="dim small" style="margin:6px 0">
+            <span class="pill no">blocca</span> senza questa colonna la riga non esce ·
+            <span class="pill warn">segnala</span> la riga esce lo stesso ·
+            <span class="pill off">vuota</span> facoltativa, non è un errore
+          </p>
+          <div class="tbl-scroll"><table id="tabella-diagnosi">
+            <thead><tr><th>Colonna</th><th>Stato</th><th>Motivo</th>
+              <th>Valore estratto</th></tr></thead>
+            <tbody>${t.diagnosi.map(v => `<tr data-col="${esc(v.colonna)}"
+                data-stato="${esc(v.stato)}">
+              <td class="mono">${esc(v.colonna)}</td>
+              <td><span class="pill ${v.stato === 'blocca' ? 'no'
+                : v.stato === 'segnala' ? 'warn'
+                : v.stato === 'ok' ? 'on' : 'off'}">${esc(v.stato)}</span></td>
+              <td class="small">${esc(v.motivo) || '<span class="dim">—</span>'}</td>
+              <td class="mono small">${
+                v.valore ? esc(v.valore) : '<span class="dim">(vuoto)</span>'}</td>
+            </tr>`).join('')}</tbody>
+          </table></div>
+        </details>` : ''}
         <div><label>CSV inviato a XTrader</label>
           <pre class="csv-out" id="test-csv">${esc(t.csv || headerOnlyCsv())}</pre></div>
       </div>` : ''}
