@@ -95,26 +95,56 @@ function findLine(message, anchor) {
 }
 
 // Estrae il valore grezzo di una colonna dal messaggio, poi applica le trasformazioni.
-export function extractValue(message, rule) {
+// Un frammento della CONFIG citato dentro un motivo, in forma sicura (#25):
+// appiattito (niente a capo dentro una cella di tabella) e tagliato per
+// CODEPOINT, mai per unita' UTF-16 — un pattern che finisce con un emoji astrale
+// a cavallo del taglio lascerebbe un surrogato spaiato, e la stessa stringa
+// uscirebbe diversa nei due motori. Gemella di `_citato` in main.py.
+function citato(testo, tetto = 60) {
+  const piano = piatto(String(testo ?? ''));
+  return [...piano].length <= tetto ? piano : cutByCodePoint(piano, tetto) + '…';
+}
+
+// `diario` (#25) e' un oggetto facoltativo in cui il ramo che produce un valore
+// VUOTO scrive `motivo`: perche' quella regola non ha estratto niente. Nasce QUI e
+// non in una funzione che ri-ispeziona la regola dopo — un secondo posto che rifa'
+// le stesse verifiche diverge dal runtime al primo ramo che cambia, che e' il
+// difetto C del Bridge che la #25 dice di non ereditare. Chi non passa `diario`
+// non cambia comportamento. Gemello di `_estrai_valore` in main.py.
+export function extractValue(message, rule, diario) {
   let v = '';
+  const annota = motivo => { if (diario) diario.motivo = motivo; };
   if (!rule) return '';
   switch (rule.source) {
     case 'empty':
       return '';
     case 'constant':
       v = rule.value ?? '';
+      if (!piatto(String(v))) annota("la costante impostata nella regola e' vuota.");
       break;
     case 'message':
       v = message;
+      if (!piatto(String(v))) {
+        annota("la regola prende il messaggio intero, e il messaggio e' vuoto.");
+      }
       break;
     case 'line': {
       const line = findLine(message, rule.anchor);
-      if (line === undefined) return '';
+      if (line === undefined) {
+        annota('nel messaggio non c\'e\' nessuna riga che contiene «'
+          + citato(rule.anchor) + '»: controlla il testo da cercare, o se il '
+          + "messaggio di prova e' quello giusto.");
+        return '';
+      }
       if (rule.part === 'after' && rule.marker) {
         // findLine trova la riga ignorando il caso: se il taglio fosse
         // sensibile al caso, un marcatore che differisce solo per maiuscole
         // darebbe indexOf === -1 e la colonna resterebbe vuota senza errore.
         const i = line.toLowerCase().indexOf(rule.marker.toLowerCase());
+        if (i < 0) {
+          annota('la riga con «' + citato(rule.anchor) + '» c\'e\', ma non contiene «'
+            + citato(rule.marker) + '», il marcatore dopo cui la regola legge il valore.');
+        }
         v = i < 0 ? '' : line.slice(i + rule.marker.length);
       } else {
         v = line;
@@ -127,25 +157,52 @@ export function extractValue(message, rule) {
       // compila. Su una colonna obbligatoria il segnale non esce, senza fail-open
       // e senza dipendere dalla coercizione. Simmetrico a `_estrai_valore` in
       // main.py. Bloccante GPT-5.6 Sol, PR #85.
-      if (rule.flags != null && typeof rule.flags !== 'string') return '';
+      if (rule.flags != null && typeof rule.flags !== 'string') {
+        annota("la regola ha un campo «flags» che non e' testo: e' malformata e la "
+          + 'colonna resta vuota. Risalvala dal wizard.');
+        return '';
+      }
       let m = null;
       try {
         m = new RegExp(rule.pattern, flagRegex(rule.flags)).exec(message);
       } catch {
+        // Stesso motivo del «nessuna corrispondenza», deliberatamente: in Python
+        // i due casi sono indistinguibili per costruzione (`_cerca_regex_utente`
+        // da' None per entrambi, e per il timeout), e due motori che spiegano lo
+        // stesso vuoto in modo diverso sono una diagnosi diversa per lo stesso
+        // messaggio. In pratica non si perde nulla: una regex che non compila non
+        // e' salvabile, la validazione la rifiuta con 422 alla scrittura.
+        annota(motivoRegexSenzaMatch(rule.pattern));
         return '';
       }
-      if (!m) return '';
+      if (!m) {
+        annota(motivoRegexSenzaMatch(rule.pattern));
+        return '';
+      }
       v = m[rule.group ?? 1] ?? m[0];
       break;
     }
     default:
       return '';
   }
+  const primaDelleTrasformazioni = piatto(String(v));
   for (const t of rule.transforms || []) {
     const def = TRANSFORMS[t.op];
     if (def) v = def.fn(v, t);
   }
+  // Il caso insidioso: l'estrazione HA funzionato, sono le trasformazioni ad aver
+  // svuotato il campo. Senza questo motivo l'utente cerca il guasto nella
+  // sorgente, che invece e' corretta.
+  if (primaDelleTrasformazioni && !piatto(String(v))) {
+    annota('la sorgente ha estratto un valore, ma le trasformazioni della regola lo '
+      + 'hanno svuotato: controlla la catena di trasformazioni.');
+  }
   return v;
+}
+
+function motivoRegexSenzaMatch(pattern) {
+  return "l'espressione regolare «" + citato(pattern ?? '')
+    + '» non ha trovato corrispondenza in questo messaggio.';
 }
 
 // Il messaggio appartiene a questo parser?
@@ -365,7 +422,15 @@ function scartoEstrazione(columns, row) {
 // riconosciuto ma senza evento produrrebbe una riga quotata e priva di senso.
 export function runParser(message, config, aliasMap) {
   const matched = matches(message, config.match);
-  const row = COLUMNS.map(c => extractValue(message, (config.columns || {})[c]));
+  // Il `diario` per colonna (#25): il motivo per cui una regola non ha estratto
+  // niente, scritto dal ramo che il vuoto lo ha prodotto.
+  const motiviRegola = {};
+  const row = COLUMNS.map(c => {
+    const diario = {};
+    const v = extractValue(message, (config.columns || {})[c], diario);
+    if (diario.motivo) motiviRegola[c] = diario.motivo;
+    return v;
+  });
   // La sorgente squadre (#34 pezzo 3): con una mappa alias→Betfair l'evento
   // si traduce QUI, sul valore finale di EventName — spezzato sull'ULTIMO
   // ' - ' (il separatore che il transform del wizard produce), ogni meta'
@@ -405,7 +470,8 @@ export function runParser(message, config, aliasMap) {
   // La diagnosi per colonna (#25) si costruisce QUI, coi motivi definitivi della
   // riga base — gate #41 compreso — e con gli `avvisi`, che nascono nel chiamante
   // (la sorgente squadre) come livello `segnala`: la riga esce lo stesso.
-  const diagnosi = diagnosiColonne(rowGiudicata, matched, missing, scarti, avvisi);
+  const diagnosi = diagnosiColonne(rowGiudicata, matched, missing, scarti, avvisi,
+    motiviRegola);
   // Il multi-riga (#35 pezzo 2): `righe` e' l'elenco delle righe GENERATE —
   // senza `config.multi` e' la sola base (comportamento storico), con le righe
   // di override e' la loro somma. I campi storici continuano a descrivere la
@@ -476,9 +542,20 @@ function giudicaRiga(rowGrezza, matched) {
 // `avvisi` — che sono gia' azionabili — cosi' non nasce un secondo catalogo da
 // tenere allineato fra i due motori. Identica a `_motivo_obbligatoria_vuota` in
 // main.py, e il caso di parita' la confronta.
-function motivoObbligatoriaVuota(colonna) {
-  return `${colonna}: e' obbligatoria ed e' vuota. Mappala su una sorgente che `
-    + "legge dal messaggio, o nessuna riga verra' scritta nel feed.";
+// Perche' questa obbligatoria e' vuota — e sono DUE cose diverse (#25). Senza
+// `motivoRegola` la colonna non e' mappata, e il consiglio giusto e' mapparla. CON
+// `motivoRegola` la colonna E' mappata e la regola non ha estratto niente:
+// consigliare di mapparla sarebbe consigliare una cosa gia' fatta, e la causa vera
+// resterebbe taciuta. Era il difetto misurato sulla #25 dopo il merge della PR
+// #104, ed e' la forma della #328 del Bridge — causa formale al posto dell'azione.
+function motivoObbligatoriaVuota(colonna, motivoRegola) {
+  if (motivoRegola) {
+    return `${colonna}: e' obbligatoria ed e' rimasta vuota — ${motivoRegola} `
+      + "Finche' resta vuota, nessuna riga verra' scritta nel feed.";
+  }
+  return `${colonna}: e' obbligatoria e non e' mappata su nessuna sorgente. `
+    + "Scegli una regola che legga dal messaggio, o nessuna riga verra' scritta "
+    + 'nel feed.';
 }
 
 // I motivi che nominano `colonna` in testa (`EventName: ...`). UNICA regola
@@ -522,11 +599,15 @@ export function causeDiRiga(scarti) {
 // la condizione non ha combaciato, e attribuire quel rifiuto alle obbligatorie
 // vuote indicherebbe la causa sbagliata (Claude Fable 5, PR #104).
 // Il `valore` e' quello FINALE, gia' localizzato.
-function diagnosiColonne(row, matched, missing, scarti, avvisi) {
+function diagnosiColonne(row, matched, missing, scarti, avvisi, motiviRegola) {
   return COLUMNS.map(colonna => {
     const valore = String(row[COLUMNS.indexOf(colonna)] ?? '');
     const suoiScarti = motiviDi(scarti, colonna);
     const suoiAvvisi = motiviDi(avvisi, colonna);
+    // Il motivo della REGOLA che non ha estratto (#25): lo ha scritto il ramo di
+    // `extractValue` che ha prodotto il vuoto. Vale solo su una colonna VUOTA — su
+    // un valore scartato non c'e' nessun vuoto da spiegare.
+    const dellaRegola = (motiviRegola || {})[colonna] || '';
     let stato;
     let motivo = '';
     if (suoiScarti.length) {
@@ -534,13 +615,17 @@ function diagnosiColonne(row, matched, missing, scarti, avvisi) {
       motivo = suoiScarti.join(' ');
     } else if (matched && (missing || []).includes(colonna)) {
       stato = 'blocca';
-      motivo = motivoObbligatoriaVuota(colonna);
+      motivo = motivoObbligatoriaVuota(colonna, dellaRegola);
     } else if (suoiAvvisi.length) {
       // Non declassa mai un bloccante: i due rami sopra hanno gia' deciso.
       stato = 'segnala';
       motivo = suoiAvvisi.join(' ');
     } else if (!piatto(valore)) {
+      // `vuota` NON diventa un errore — una facoltativa vuota e' il caso normale
+      // (Price la mette XTrader) — ma se una regola c'era e non ha estratto, la
+      // cella «Motivo» lo dice invece di restare muta.
       stato = 'vuota';
+      motivo = dellaRegola ? `${colonna}: ${dellaRegola}` : '';
     } else {
       stato = 'ok';
     }

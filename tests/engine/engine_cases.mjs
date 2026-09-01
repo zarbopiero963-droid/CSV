@@ -935,6 +935,37 @@ function casiConfronto() {
     perDiagnosi(obbEstratte, { markets: [{ market_type: 'CORRECT_SCORE',
       price: '0.5', selection_name: '',
       start_after: 'P.Bet.', end_before: 'fine' }] }));
+  // Il motivo della REGOLA che non ha estratto (#25, residuo 3). I testi devono
+  // coincidere CARATTERE per carattere: due motori che spiegano lo stesso vuoto in
+  // modo diverso sono due diagnosi diverse per lo stesso messaggio, ed e' il
+  // difetto che questo confronto esiste per impedire.
+  aggiungi('motivi: regex che non trova nulla su una OBBLIGATORIA',
+    'P.Bet. Juventus - Milan', perDiagnosi({ ...obbFisse,
+      EventName: { source: 'regex', pattern: 'Squadre: (.+)', group: 1 } }));
+  aggiungi('motivi: riga con ancora inesistente',
+    'P.Bet. Juventus - Milan', perDiagnosi({ ...obbFisse,
+      EventName: { source: 'line', anchor: 'Squadre', part: 'after', marker: ':' } }));
+  aggiungi('motivi: la riga c\'e\' ma il marcatore no',
+    'P.Bet.\nPartita: Juventus - Milan', perDiagnosi({ ...obbFisse,
+      EventName: { source: 'line', anchor: 'Partita', part: 'after', marker: '=>' } }));
+  aggiungi('motivi: FACOLTATIVA mappata e vuota → motivo senza cambiare stato',
+    'P.Bet. Juventus - Milan', perDiagnosi({ ...obbEstratte,
+      Price: { source: 'line', anchor: 'Quota', part: 'after', marker: ':' } }));
+  aggiungi('motivi: le trasformazioni svuotano un valore estratto',
+    'P.Bet. Juventus - Milan', perDiagnosi({ ...obbFisse,
+      EventName: { source: 'message', transforms: [{ op: 'digits_only' }] } }));
+  aggiungi('motivi: costante vuota su una obbligatoria',
+    'P.Bet. Juventus - Milan', perDiagnosi({ ...obbFisse,
+      EventName: { source: 'constant', value: '' } }));
+  aggiungi('motivi: flags non-stringa → motivo di regola malformata',
+    'P.Bet. Juventus - Milan', perDiagnosi({ ...obbFisse,
+      EventName: { source: 'regex', pattern: '(x)', flags: 7, group: 1 } }));
+  // Il citato si taglia per CODEPOINT in entrambi: un pattern lungo che finisce
+  // con emoji astrali al confine dei 60 non deve lasciare un surrogato spaiato.
+  aggiungi('motivi: pattern lunghissimo con emoji al confine del taglio',
+    'P.Bet. Juventus - Milan', perDiagnosi({ ...obbFisse,
+      EventName: { source: 'regex', group: 1,
+        pattern: '(' + 'z'.repeat(55) + '\u{1F19A}\u{1F19A}\u{1F19A}\u{1F19A})' } }));
   // C) messaggio non riconosciuto: nessuna colonna blocca, in entrambi.
   aggiungi('diagnosi: messaggio ignorato → nessuna colonna blocca',
     'oggi si parla di altro', perDiagnosi(obbEstratte));

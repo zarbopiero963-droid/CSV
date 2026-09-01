@@ -239,6 +239,28 @@ sotto la tabella, e il conteggio del riepilogo lo include ("N sulla riga").
 MESSAGGIO NON RICONOSCIUTO. Nessuna colonna «blocca»: la riga non esce perche' la
 condizione non ha combaciato, e accusare le obbligatorie vuote manderebbe l'utente a
 mappare colonne mentre il difetto e' nella condizione.
+IL MOTIVO DELLA REGOLA CHE NON HA ESTRATTO. Una colonna vuota ha due cause diverse, e
+il consiglio da dare e' opposto: se non e' mappata va mappata; se E' mappata e la
+regola non ha trovato niente, dire «mappala» consiglia una cosa gia' fatta e tace la
+causa vera. Il motivo lo scrive il ramo di _estrai_valore / extractValue che il vuoto
+lo ha appena prodotto - non una funzione che ri-ispeziona la regola dopo, che
+divergerebbe dal runtime al primo ramo che cambia. Per sorgente:
+  non mappata / empty  -> «e' obbligatoria e non e' mappata su nessuna sorgente...»
+                          (sulle FACOLTATIVE non mappate nessun motivo: dieci righe
+                           di «non e' mappata» sarebbero rumore, non diagnosi)
+  constant vuota       -> «la costante impostata nella regola e' vuota.»
+  message              -> «la regola prende il messaggio intero, e il messaggio e' vuoto.»
+  line, riga assente   -> «nel messaggio non c'e' nessuna riga che contiene «ANCORA»...»
+  line, marcatore assente -> «la riga con «ANCORA» c'e', ma non contiene «MARCATORE»...»
+  regex senza match    -> «l'espressione regolare «PATTERN» non ha trovato
+                          corrispondenza in questo messaggio.» (stesso motivo anche per
+                          un pattern che non compila: in Python i due casi sono
+                          indistinguibili, e una regex non compilabile non e' salvabile)
+  regex flags non testo -> «la regola ha un campo «flags» che non e' testo...»
+  trasformazioni       -> «la sorgente ha estratto un valore, ma le trasformazioni
+                          della regola lo hanno svuotato...»
+Su una OBBLIGATORIA il motivo accompagna lo stato «blocca»; su una FACOLTATIVA riempie
+la colonna Motivo senza toccare lo stato - «vuota» NON diventa mai un errore.
 
 MERCATI BETFAIR DELL'UTENTE (#33, SESSIONE)
 La libreria sport -> mercato (MarketType + MarketName) -> selezioni (SelectionName),
