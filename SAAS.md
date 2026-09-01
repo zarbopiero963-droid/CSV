@@ -1206,13 +1206,20 @@ GET    /api/me/parsers                 i parser dell'utente della sessione
 POST   /api/me/parsers                 { titolo, config, active? } → parser creato
 PUT    /api/me/parsers/{slug}          { titolo, config, active? } aggiorna il proprio
 DELETE /api/me/parsers/{slug}          elimina il proprio
-POST   /api/me/parsers/{slug}/test     { message } → { matched, missing, complete, event?, csv? }
+POST   /api/me/parsers/{slug}/test     { message } → { matched, missing, complete, diagnosi[], event?, csv? }
 ```
 
 Dal #35 (pezzo 2) la risposta della prova porta anche `righe` — per ogni riga
-generata: `row`, `missing`, `scarti`, `complete` — con `complete` al livello
-alto vero se **almeno una** riga è piazzabile e `csv` composto delle sole
-complete (vedi «Il multi-riga» sopra).
+generata: `row`, `missing`, `scarti`, `complete` e, dal #25, la sua `diagnosi` —
+con `complete` al livello alto vero se **almeno una** riga è piazzabile e `csv`
+composto delle sole complete (vedi «Il multi-riga» sopra).
+
+La `diagnosi` per riga non è un di più: col multi-riga il verdetto è **di ogni
+riga**, e la `diagnosi` di primo livello descrive la **base**, che con
+`config.multi` non è una riga del feed. Mostrare solo quella spiegava una riga
+che non esiste — misurato sulla PR #104: base sana, unica riga generata scartata
+per `Price`, e la tabella diceva «0 bloccano» mentre il CSV non usciva. Fermato
+da Claude Fable 5 e GPT-5.5 prima del merge.
 
 **La precondizione della PUT (#51).** La vista del parser porta `versione`
 (parte da 1, avanza a **ogni** modifica), e la PUT accetta una `versione`
@@ -2401,7 +2408,37 @@ La voce e la vista esistono solo con `admin` vero; il server risponde comunque
   /api/me/parsers/{slug}/test`, lo stesso `esegui_parser` del webhook, a secco): il
   CSV mostrato è quello del server byte per byte, e gli **`scarti`** — il perché un
   valore non ha raggiunto il feed (#39/#41/#42) — compaiono in un banner sotto
-  l'esito. «Salva configurazione» fa la PUT; la prova salva prima di provare, perché
+  l'esito.
+  - **Diagnosi per colonna** (#25): sotto l'esito, un pannello «Diagnosi per
+    colonna — N bloccano, M da sapere» con una tabella a **quattordici righe**,
+    una per ogni colonna del CSV: **Colonna · Stato · Motivo · Valore estratto**.
+    È aperto quando c'è qualcosa da correggere, chiuso quando è tutto a posto.
+    Gli stati hanno **due livelli visivamente distinti**, come richiesto dalla
+    #25 per non ripetere il difetto del Bridge (dove un rosso bloccante e un
+    rosso su campo facoltativo avevano lo stesso aspetto):
+    `blocca` (pillola rossa — senza questa colonna la riga non esce) ·
+    `segnala` (pillola ambra — la riga esce lo stesso) ·
+    `ok` (verde) · `vuota` (neutra — facoltativa, **non è un errore**).
+    Una legenda sopra la tabella dice esattamente questo. Il **valore estratto
+    non viene mai troncato**: la tabella scorre dentro il proprio contenitore
+    (`.tbl-scroll`), come ogni tabella larga di questa app.
+  - **Una tabella per riga generata**, col multi-riga (#35). Quando ci sono righe
+    di override, l'elenco «k di N righe piazzabili» porta, sotto ogni riga, la
+    diagnosi **di quella riga**: la pillola di esito (`piazzabile` / `scartata`)
+    e poi il suo pannello. La tabella unica compare solo quando il multi non è
+    attivo. È il difetto che i reviewer hanno fermato sulla PR #104: con una sola
+    tabella — quella della base — il pannello spiegava una riga che non finisce
+    nel feed, e diceva «0 bloccano» mentre il CSV non usciva.
+  - **«Non è una singola colonna, è la riga»**: quando lo scarto non nomina una
+    colonna — oggi il gate di contenuto #41, che parla del parser nel suo insieme
+    — compare in un banner dentro il pannello, e il riepilogo lo conta a parte
+    («N bloccano, M da sapere, K sulla riga»). Attribuirlo a una colonna sarebbe
+    falso; ometterlo lascerebbe la tabella a dire che va tutto bene.
+  - Su un messaggio **non riconosciuto** nessuna colonna è rossa: la pillola dice
+    già «Ignorato: la condizione non corrisponde», e la tabella resta il referto
+    di ciò che si estrarrebbe. Marcare le obbligatorie vuote come `blocca`
+    manderebbe l'utente a mappare colonne mentre il difetto è nella condizione.
+  «Salva configurazione» fa la PUT; la prova salva prima di provare, perché
   il server conosce solo ciò che è salvato. L'anteprima locale accanto al wizard
   resta, dichiarata indicativa: «fa fede la prova sul server».
 - **Feed CSV**: il token è **dell'utente**, non del parser — un solo URL da incollare

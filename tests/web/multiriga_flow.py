@@ -143,10 +143,28 @@ with sync_playwright() as pw:
     pg.wait_for_selector('#test-result')
     esito = pg.inner_text('#test-result')
     assert '2 di 3' in esito, f'la prova deve dire il k su N (2 di 3): {esito!r}'
-    pille = pg.query_selector_all('#test-righe .pill')
+    # `[data-esito-riga]`, non `.pill`: dal #25 ogni riga porta anche la sua
+    # tabella «Diagnosi per colonna», che di pill ne ha una per voce piu' quelle
+    # della legenda. Il selettore generico contava quelle, non gli esiti.
+    pille = pg.query_selector_all('#test-righe [data-esito-riga]')
     assert len(pille) == 3, 'una pill di esito per ciascuna riga generata'
     assert 'abc' in pg.inner_text('#test-righe'), \
         'la riga rotta deve mostrare il SUO motivo'
+    # #25: la diagnosi e' PER RIGA. La riga rotta e' la terza (indice 2) e la sua
+    # tabella deve accusare la colonna della RIGA, non quella della base — che
+    # nella prima versione della #25 era l'unica tabella esistente, e diceva
+    # «0 bloccano» mentre il CSV non usciva.
+    rotta = next(i for i in range(3)
+                 if 'scartata' in pg.inner_text(f'[data-esito-riga="{i}"]'))
+    bloccanti = pg.query_selector_all(
+        f'#tabella-diagnosi-{rotta} tr[data-stato="blocca"]')
+    assert [b.get_attribute('data-col') for b in bloccanti] == ['Price'], \
+        'la tabella della riga rotta deve accusare Price, la colonna della RIGA'
+    sane = pg.query_selector_all(
+        f'#tabella-diagnosi-{(rotta + 1) % 3} tr[data-stato="blocca"]')
+    assert sane == [], 'una riga piazzabile non ha colonne che bloccano'
+    assert len(pg.query_selector_all(f'#tabella-diagnosi-{rotta} tbody tr')) == 14, \
+        'quattordici voci anche nella tabella per riga'
     csv = pg.inner_text('#test-csv')
     assert csv.count('"Provider"') == 1, 'CSV composto: header UNA volta sola'
     assert csv.count('"OVER_UNDER_25"') == 1 and csv.count('"BANCA"') == 1, csv
@@ -155,6 +173,35 @@ with sync_playwright() as pw:
     assert pg.inner_text('#live-csv') == csv, \
         'anteprima live e prova server devono coincidere'
     shot(pg, '04-prova-k-su-n')
+
+    # ------------------------------------------------ 390px CON le N tabelle
+    # Il rischio segnalato da GPT-5.5 sulla PR #104: col multi attivo la prova
+    # rende UNA tabella «Diagnosi per colonna» per riga generata, tutte aperte
+    # quando c'e' una riga rotta. Tre tabelle a quattro colonne su 390px sono
+    # esattamente la forma che la regola 2 di CLAUDE.md dice di misurare, non di
+    # guardare: la pagina non deve scorrere in orizzontale, e la larghezza deve
+    # restare DENTRO i `.tbl-scroll`. La misura sta qui e non in fondo al flow
+    # perche' dopo il reload la vista prova non c'e' piu'.
+    pg.set_viewport_size({'width': 390, 'height': 844})
+    # Attesa su CONDIZIONE, non a orologio: il resize non e' sincrono col
+    # relayout, e un timeout fisso e' la ricetta del flake in CI (rilievo non
+    # bloccante di Claude Fable 5 sulla PR #104). Qui si aspetta che il viewport
+    # sia davvero quello nuovo, poi si misura.
+    pg.wait_for_function('() => document.documentElement.clientWidth <= 390')
+    aperte = pg.query_selector_all('#test-righe details[open]')
+    assert len(aperte) >= 1, 'la diagnosi della riga rotta deve essere aperta'
+    stretto = pg.evaluate(
+        'document.documentElement.scrollWidth - document.documentElement.clientWidth')
+    assert stretto <= 0, \
+        f'scroll orizzontale a 390px con le tabelle della diagnosi: {stretto}px'
+    # e la larghezza e' assorbita dai contenitori, non dal corpo della pagina
+    dentro = pg.evaluate(
+        '''Array.from(document.querySelectorAll('#test-righe .tbl-scroll'))
+             .every(d => getComputedStyle(d).overflowX !== 'visible')''')
+    assert dentro, 'le tabelle della diagnosi devono scorrere dentro il proprio contenitore'
+    shot(pg, '04b-mobile-diagnosi-per-riga')
+    pg.set_viewport_size({'width': 1420, 'height': 1000})
+    pg.wait_for_function('() => document.documentElement.clientWidth > 390')
 
     # ------------------------------------------------ salvataggio e riapertura
     pg.click('[data-act="wiz-save"]')

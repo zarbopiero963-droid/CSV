@@ -4,8 +4,8 @@
 // accorgono. Nessun build step: moduli ES nativi.
 
 import * as api from './api.js';
-import { COLUMNS, TRANSFORMS, componiFeed, describeRule, runParser, extractValue,
-         toCsv, headerOnlyCsv, cutByCodePoint } from './engine.js';
+import { COLUMNS, TRANSFORMS, causeDiRiga, componiFeed, describeRule, runParser,
+         extractValue, toCsv, headerOnlyCsv, cutByCodePoint } from './engine.js';
 
 const app = document.getElementById('app');
 
@@ -1301,14 +1301,18 @@ function stepReview() {
           : `Riconosciuto ma incompleto: manca ${(t.missing || []).join(', ')}`
         }</span></div>
         ${mostraRighe ? `<div class="stack" id="test-righe" style="gap:6px">
-          ${righeTest.map((r, i) => `<div class="row wrap" style="gap:8px;align-items:baseline">
-            <span class="pill ${r.complete ? 'on' : 'no'}">${r.complete ? 'piazzabile' : 'scartata'}</span>
-            <span class="small mono">${esc(r.row[COLUMNS.indexOf('MarketType')] || '—')}
-              · ${esc(r.row[COLUMNS.indexOf('SelectionName')] || '—')}</span>
-            ${!r.complete ? `<span class="small dim">${
-              esc((r.scarti || []).join(' ')
-                  || ((r.missing || []).length ? `manca ${r.missing.join(', ')}` : ''))
-            }</span>` : ''}
+          ${righeTest.map((r, i) => `<div class="stack" style="gap:4px">
+            <div class="row wrap" style="gap:8px;align-items:baseline">
+              <span class="pill ${r.complete ? 'on' : 'no'}" data-esito-riga="${i}">${
+                r.complete ? 'piazzabile' : 'scartata'}</span>
+              <span class="small mono">${esc(r.row[COLUMNS.indexOf('MarketType')] || '—')}
+                · ${esc(r.row[COLUMNS.indexOf('SelectionName')] || '—')}</span>
+              ${!r.complete ? `<span class="small dim">${
+                esc((r.scarti || []).join(' ')
+                    || ((r.missing || []).length ? `manca ${r.missing.join(', ')}` : ''))
+              }</span>` : ''}
+            </div>
+            ${diagnosiDettaglio(r.diagnosi, r.scarti, '-' + i)}
           </div>`).join('')}
         </div>` : ''}
         ${(t.scarti || []).length ? `<div class="banner warn" id="test-scarti">
@@ -1322,6 +1326,7 @@ function stepReview() {
           <span class="mono">${esc((t.missing || []).join(', '))}</span>
           la riga sarebbe formalmente valida e priva di senso per XTrader.
         </div>` : ''}
+        ${!mostraRighe ? diagnosiDettaglio(t.diagnosi, t.scarti, '') : ''}
         <div><label>CSV inviato a XTrader</label>
           <pre class="csv-out" id="test-csv">${esc(t.csv || headerOnlyCsv())}</pre></div>
       </div>` : ''}
@@ -1411,6 +1416,53 @@ function rigaMultiCard(lista, i, riga) {
 // dalla base; ogni riga e' giudicata da sola e una rotta non ferma le altre.
 // I valori si LEGGONO dal DOM (leggiMulti) prima di ogni render che potrebbe
 // ridisegnare la card, come il messaggio di prova: niente handler di change.
+// La tabella «Diagnosi per colonna» (#25): 14 righe con stato, motivo e valore
+// estratto. UN solo renderer per la riga base e per ogni riga generata dal
+// multi-riga (#35): con due copie, la tabella delle righe e quella della base
+// sarebbero divergenti al primo ritocco.
+//
+// `suffisso` distingue gli id nel DOM: '' per la tabella unica (nessun multi
+// attivo), '-0', '-1', … per le righe generate.
+//
+// Le CAUSE DI RIGA (`causeDiRiga`) si mostrano sotto la tabella: sono gli scarti
+// che non nominano una colonna — oggi il gate di contenuto (#41) — e senza di
+// esse la tabella direbbe «0 bloccano» mentre la riga non esce. Il dettaglio si
+// apre da solo anche per loro.
+function diagnosiDettaglio(diagnosi, scarti, suffisso) {
+  const voci = diagnosi || [];
+  if (!voci.length) return '';
+  const cause = causeDiRiga(scarti);
+  const bloccano = voci.filter(v => v.stato === 'blocca').length;
+  const daSapere = voci.filter(v => v.stato === 'segnala').length;
+  const apri = bloccano || daSapere || cause.length;
+  return `<details id="test-diagnosi${suffisso}" class="stack"${apri ? ' open' : ''}>
+    <summary class="small">Diagnosi per colonna — ${bloccano} bloccano, ${
+      daSapere} da sapere${cause.length ? `, ${cause.length} sulla riga` : ''}</summary>
+    <p class="dim small" style="margin:6px 0">
+      <span class="pill no">blocca</span> senza questa colonna la riga non esce ·
+      <span class="pill warn">segnala</span> la riga esce lo stesso ·
+      <span class="pill off">vuota</span> facoltativa, non è un errore
+    </p>
+    <div class="tbl-scroll"><table id="tabella-diagnosi${suffisso}">
+      <thead><tr><th>Colonna</th><th>Stato</th><th>Motivo</th>
+        <th>Valore estratto</th></tr></thead>
+      <tbody>${voci.map(v => `<tr data-col="${esc(v.colonna)}"
+          data-stato="${esc(v.stato)}">
+        <td class="mono">${esc(v.colonna)}</td>
+        <td><span class="pill ${v.stato === 'blocca' ? 'no'
+          : v.stato === 'segnala' ? 'warn'
+          : v.stato === 'ok' ? 'on' : 'off'}">${esc(v.stato)}</span></td>
+        <td class="small">${esc(v.motivo) || '<span class="dim">—</span>'}</td>
+        <td class="mono small">${
+          v.valore ? esc(v.valore) : '<span class="dim">(vuoto)</span>'}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>
+    ${cause.length ? `<div class="banner warn" id="test-cause-riga${suffisso}">
+      Non è una singola colonna, è la riga: ${cause.map(esc).join('<br>')}
+    </div>` : ''}
+  </details>`;
+}
+
 function cardMulti() {
   const multi = wiz.draft.multi || {};
   const mercati = multi.markets || [];

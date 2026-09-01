@@ -203,10 +203,17 @@ def test_i_due_motori_producono_lo_STESSO_runParser(casi):
         # all'utente per la squadra senza alias, e due motori che avvisano
         # diversamente manderebbero il cliente su piste diverse.
         # `righe` (#35 pezzo 2) sta nel confronto INTERO: N righe generate,
-        # ciascuna con row/missing/scarti/complete — un solo campo diverso in
-        # una sola riga nomina caso e campo.
-        for campo in ('matched', 'row', 'missing', 'scarti', 'avvisi', 'righe',
-                      'complete'):
+        # ciascuna con row/missing/scarti/complete E la sua `diagnosi` (#25) —
+        # un solo campo diverso in una sola riga nomina caso e campo. La diagnosi
+        # per riga entra qui e non ha bisogno di un campo suo: e' dentro `righe`,
+        # quindi il confronto la copre per costruzione.
+        # `diagnosi` (#25) sta nel confronto INTERO: 14 voci con stato/motivo/
+        # valore per colonna. E' la tabella che l'utente legge per capire perche'
+        # un messaggio non ha prodotto un segnale — due motori che diagnosticano
+        # diversamente manderebbero il cliente su due piste diverse, che e'
+        # esattamente il difetto che il confronto esiste per impedire.
+        for campo in ('matched', 'row', 'missing', 'scarti', 'avvisi', 'diagnosi',
+                      'righe', 'complete'):
             if ottenuto[campo] != atteso[campo]:
                 divergenti.append(
                     f'{nome} · {campo}: JS={atteso[campo]!r} Python={ottenuto[campo]!r}')

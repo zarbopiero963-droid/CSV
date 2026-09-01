@@ -202,10 +202,43 @@ PUT    /api/me/parsers/SLUG             aggiorna il proprio (lo slug non cambia 
                                         distingue le due righe. Senza "uid" la richiesta
                                         resta incondizionata, come senza "versione".
 DELETE /api/me/parsers/SLUG[?uid=UID]   elimina il proprio (uid = precondizione, #75)
-POST   /api/me/parsers/SLUG/test        body {"message":"..."} -> {matched,missing,scarti,complete,event?,csv?}
+POST   /api/me/parsers/SLUG/test        body {"message":"..."} -> {matched,missing,scarti,diagnosi,complete,event?,csv?}
 La config viene validata alla creazione (struttura + dry-run): una config storta da'
 422 col motivo. La prova (/test) e' a secco: non scrive nel feed di nessuno, e dice
 se la condizione ha combaciato e quali colonne obbligatorie mancano.
+DIAGNOSI PER COLONNA (#25). `diagnosi` porta UNA voce per ognuna delle 14 colonne -
+{colonna, stato, motivo, valore} - cosi' la domanda «perche' questo messaggio non ha
+prodotto un segnale» ha una risposta a quattordici righe, non a tre livelli globali.
+Gli stati sono quattro, su DUE livelli di gravita' deliberatamente distinti:
+  blocca  - senza questa colonna la riga NON esce (obbligatoria vuota, o valore
+            scartato dalle guardie #39/#41/#42). Sono le cause di complete=false;
+  segnala - c'e' qualcosa da sapere ma la riga ESCE lo stesso (gli avvisi, es. la
+            squadra senza alias nella sorgente);
+  ok      - valorizzata e senza problemi;
+  vuota   - vuota ma facoltativa: NON e' un errore (Price vuota e' il caso normale,
+            la quota la mette XTrader).
+I motivi sono gli STESSI che finiscono in scarti/avvisi (gia' azionabili: dicono cosa
+fare), piu' uno solo nuovo per l'obbligatoria vuota - cosi' non esiste un secondo
+catalogo da tenere allineato fra i due motori. La diagnosi nasce DENTRO il motore
+(non accanto), quindi la prova non puo' divergere dal webhook, e il test di parita'
+JS<->Python la confronta per intero.
+COME SI COSTRUISCE, e perche' conta. La diagnosi si calcola sui motivi FINALI di UNA
+riga - i suoi missing, i suoi scarti, i suoi avvisi - agganciati alla colonna che
+nominano in testa ("Price: ..."). E' l'unica regola d'attribuzione, la stessa per
+scarti e avvisi, in Python come in JS. Calcolarla a meta' strada la faceva mentire:
+il gate #41 e le cause delle righe di override arrivano DOPO, e la tabella diceva
+«0 colonne bloccano» mentre il CSV non usciva.
+DIAGNOSI PER RIGA. Col multi-riga (#35) il verdetto e' di ogni riga, quindi ogni
+elemento di `righe` porta la SUA `diagnosi`: la tabella top-level descrive la BASE,
+che con config.multi non e' una riga del feed. Il pannello mostra una tabella per
+riga generata, e la tabella unica solo quando il multi non e' attivo.
+CAUSE DI RIGA. Uno scarto che non nomina nessuna colonna - oggi il gate di contenuto
+#41, che parla del parser nel suo insieme - non finisce in nessuna voce: attribuirlo
+a una colonna sarebbe falso. Non si perde: resta in `scarti`, il pannello lo mostra
+sotto la tabella, e il conteggio del riepilogo lo include ("N sulla riga").
+MESSAGGIO NON RICONOSCIUTO. Nessuna colonna «blocca»: la riga non esce perche' la
+condizione non ha combaciato, e accusare le obbligatorie vuote manderebbe l'utente a
+mappare colonne mentre il difetto e' nella condizione.
 
 MERCATI BETFAIR DELL'UTENTE (#33, SESSIONE)
 La libreria sport -> mercato (MarketType + MarketName) -> selezioni (SelectionName),

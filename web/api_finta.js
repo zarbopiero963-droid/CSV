@@ -231,8 +231,9 @@ export async function testParser(slug, message) {
     if (rif !== undefined && rif !== null) mappa = _mappaSorgenteDemo(rif);
     r = runParser(message, p.config, mappa);
   } catch {
-    return { matched: false, missing: [], scarti: [], complete: false,
-             errore: 'config non eseguibile' };
+    // `diagnosi` vuota, non assente: stessa forma della rotta vera.
+    return { matched: false, missing: [], scarti: [], diagnosi: [],
+             complete: false, errore: 'config non eseguibile' };
   }
   // Il multi-riga (#35 pezzo 2), come `prova_parser_mio` sul server: le
   // righe generate col LORO esito (k su N), `complete` se almeno una e'
@@ -243,13 +244,19 @@ export async function testParser(slug, message) {
   const complete = righe.filter(x => x.complete);
   const corpo = { matched: r.matched, missing: r.missing,
                   scarti: r.scarti || [], avvisi: r.avvisi || [],
+                  // La diagnosi per colonna (#25), come `prova_parser_mio`: quella
+                  // della BASE in testa, e quella di OGNI riga generata dentro
+                  // `righe`. Senza, il file unico demo mostrerebbe la prova senza
+                  // la tabella che il pannello vero ha.
+                  diagnosi: r.diagnosi || [],
                   complete: complete.length > 0,
                   // La forma CANONICA dei valori (`String`), come
                   // `_testo_canonico` nella rotta del server: gli stessi byte.
                   righe: righe.map(x => ({ row: x.row.map(v => String(v ?? '')),
                                            missing: x.missing,
                                            scarti: x.scarti,
-                                           complete: x.complete })) };
+                                           complete: x.complete,
+                                           diagnosi: x.diagnosi || [] })) };
   if (complete.length) {
     corpo.event = complete[0].row[COLUMNS.indexOf('EventName')];
     corpo.csv = componiFeed(complete.map(x => toCsv(x.row)));

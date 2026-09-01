@@ -3270,15 +3270,24 @@ def esegui_parser(message, config, mappa_alias=None):
         if gate:
             scarti.append(gate)
     completo = matched and not mancanti and not scarti
+    # La diagnosi per colonna (#25) si costruisce QUI, coi motivi definitivi
+    # della riga base — gate #41 compreso — e con gli `avvisi`, che nascono nel
+    # chiamante (la sorgente squadre) come livello `segnala`: la riga esce lo
+    # stesso. Costruirla prima del gate la faceva mentire (vedi `_diagnosi_colonne`).
+    diagnosi = _diagnosi_colonne(row, matched, mancanti, scarti, avvisi)
     # Il multi-riga (#35 pezzo 2): `righe` e' l'elenco delle righe GENERATE —
     # senza `config.multi` e' la sola base (comportamento storico), con le
     # righe di override e' la loro somma. I campi storici continuano a
     # descrivere la BASE: i consumatori esistenti non cambiano.
+    # Gli `avvisi` scendono nelle righe generate perche' le righe EREDITANO le
+    # colonne della base (EventName incluso, che e' l'unica sorgente di avvisi
+    # oggi): un avviso vero sulla base e' vero anche sulle sue derivate.
     righe = _genera_righe(message, config, matched,
                           {'row': row, 'missing': mancanti, 'scarti': scarti,
-                           'complete': completo})
+                           'complete': completo, 'diagnosi': diagnosi}, avvisi)
     return {'matched': matched, 'row': row, 'missing': mancanti, 'scarti': scarti,
-            'avvisi': avvisi, 'righe': righe, 'complete': completo}
+            'avvisi': avvisi, 'diagnosi': diagnosi, 'righe': righe,
+            'complete': completo}
 
 
 def _giudica_riga(row_grezza, matched):
@@ -3305,6 +3314,8 @@ def _giudica_riga(row_grezza, matched):
     motivi_numerici = {c: motivo_valore_numerico(c, row[HEADERS.index(c)])
                        for c in INTERVALLI_NUMERICI}
     scarti = [m for m in motivi_numerici.values() if m] if matched else []
+    # Il motivo dell'emoji si tiene anche PER COLONNA (#25): la diagnosi per
+    # colonna deve poter dire quale valore ha il problema, non solo che esiste.
     if matched:
         for colonna in HEADERS:
             if colonna in INTERVALLI_NUMERICI:
@@ -3325,6 +3336,100 @@ def _giudica_riga(row_grezza, matched):
         if motivo is None and row[indice]:
             row[indice] = row[indice].replace('.', SEPARATORE_DECIMALE, 1)
     return {'row': row, 'missing': mancanti, 'scarti': scarti}
+
+
+# Il motivo dell'obbligatoria vuota: l'UNICA stringa nuova della diagnosi per
+# colonna (#25). Tutte le altre riusano i motivi che gia' finiscono in `scarti`
+# e `avvisi` — che sono gia' azionabili — cosi' non nasce un secondo catalogo da
+# tenere allineato fra i due motori. Identica a `MOTIVO_OBBLIGATORIA_VUOTA` in
+# engine.js, e il caso di parita' la confronta.
+def _motivo_obbligatoria_vuota(colonna):
+    return (f"{colonna}: e' obbligatoria ed e' vuota. Mappala su una sorgente che "
+            "legge dal messaggio, o nessuna riga verra' scritta nel feed.")
+
+
+def _motivi_di(messaggi, colonna):
+    """I motivi che nominano `colonna` in testa (`EventName: ...`).
+
+    UNICA regola d'attribuzione della diagnosi (#25): la usano gli `scarti` e gli
+    `avvisi`, in Python come in JS (`motiviDi`). Scritta una volta perche' due
+    regole d'aggancio sarebbero due comportamenti alla prima divergenza.
+    """
+    return [m for m in (messaggi or []) if str(m).split(':', 1)[0] == colonna]
+
+
+def cause_di_riga(scarti):
+    """Gli scarti che NON nominano nessuna delle 14 colonne (#25).
+
+    Sono le cause di RIGA, non di colonna: oggi il gate di contenuto (#41), che
+    parla del parser nel suo insieme («nessuna colonna obbligatoria viene estratta
+    dal messaggio»). La diagnosi per colonna non puo' ospitarle senza mentire su
+    quale colonna sia il problema, e perderle sarebbe peggio: la tabella direbbe
+    «nessuna colonna blocca» mentre la riga non esce. Il pannello le mostra sotto
+    la tabella. Gemella di `causeDiRiga` in engine.js.
+    """
+    return [s for s in (scarti or [])
+            if not any(str(s).split(':', 1)[0] == c for c in HEADERS)]
+
+
+def _diagnosi_colonne(row, matched, mancanti, scarti, avvisi):
+    """La diagnosi PER COLONNA: 14 voci `{colonna, stato, motivo, valore}` (#25).
+
+    Risponde alla domanda «perche' questa colonna e' cosi'» per **ognuna** delle
+    14, non solo per quelle problematiche. Gemella di `diagnosiColonne` in
+    engine.js, confrontata dal caso di parita'.
+
+    **Si costruisce sui motivi FINALI di UNA riga** — i suoi `mancanti`, i suoi
+    `scarti`, i suoi `avvisi` — non su un sottoinsieme calcolato a meta' strada.
+    Era il difetto delle PR #104 prima di questa correzione, e i reviewer l'hanno
+    fermato: la diagnosi nasceva dentro `_giudica_riga`, quindi il gate #41
+    (aggiunto agli scarti DOPO) e le cause delle righe di override (#35) non
+    comparivano — misurato: `complete=False` con «0 colonne bloccano», cioe'
+    esattamente il contrario di cio' per cui la tabella esiste. Ogni chiamante che
+    possiede un verdetto di riga la costruisce, e ogni riga generata ha la sua.
+
+    **Due livelli di gravita', deliberatamente distinti** (vincolo del commento
+    del 14/08 sulla #25, che nasce da un difetto del Bridge: la' un rosso che
+    blocca e un rosso su campo facoltativo avevano lo stesso aspetto):
+
+    - `blocca` — senza questa colonna la riga NON esce: un'obbligatoria vuota,
+      oppure un valore scartato (guardia numerica, emoji, delimitatori del
+      multi-riga). Sono esattamente le cause che rendono `complete` falso;
+    - `segnala` — c'e' qualcosa da sapere ma la riga ESCE lo stesso (gli
+      `avvisi`);
+    - `ok` — valorizzata e senza problemi;
+    - `vuota` — vuota ma facoltativa e senza problemi: **non e' un errore**
+      (`Price` vuota e' il caso normale, la quota la mette XTrader).
+
+    A messaggio NON riconosciuto nessuna colonna `blocca`: la riga non esce
+    perche' la condizione non ha combaciato, e attribuire quel rifiuto alle
+    obbligatorie vuote indicherebbe all'utente la causa sbagliata (segnalato da
+    Claude Fable 5 sulla PR #104). Il pannello dice gia' «Ignorato: la condizione
+    non corrisponde», e la tabella resta il referto di cio' che si estrarrebbe.
+
+    Il `valore` e' quello FINALE, gia' localizzato: la tabella mostra cio' che
+    verrebbe scritto, non una forma intermedia.
+    """
+    voci = []
+    for colonna in HEADERS:
+        valore = str('' if row[HEADERS.index(colonna)] is None
+                     else row[HEADERS.index(colonna)])
+        suoi_scarti = _motivi_di(scarti, colonna)
+        suoi_avvisi = _motivi_di(avvisi, colonna)
+        if suoi_scarti:
+            stato, motivo = 'blocca', ' '.join(suoi_scarti)
+        elif matched and colonna in (mancanti or []):
+            stato, motivo = 'blocca', _motivo_obbligatoria_vuota(colonna)
+        elif suoi_avvisi:
+            # Non declassa mai un bloccante: i due rami sopra hanno gia' deciso.
+            stato, motivo = 'segnala', ' '.join(suoi_avvisi)
+        elif not _piatto(valore):
+            stato, motivo = 'vuota', ''
+        else:
+            stato, motivo = 'ok', ''
+        voci.append({'colonna': colonna, 'stato': stato,
+                     'motivo': motivo, 'valore': valore})
+    return voci
 
 
 # Gli override del multi-riga (#35): campo della riga → colonna del CSV.
@@ -3378,7 +3483,7 @@ def _riga_multi(voce):
     return isinstance(voce, dict) and bool(voce)
 
 
-def _genera_righe(message, config, matched, base):
+def _genera_righe(message, config, matched, base, avvisi=None):
     """Le righe GENERATE dal parser (#35 pezzo 2), come `generaRighe` in JS.
 
     La base e' il modello; ogni riga di `config.multi` dice solo cosa cambia e
@@ -3390,6 +3495,11 @@ def _genera_righe(message, config, matched, base):
     `market_type` viene ignorato. Selezione VUOTA + delimitatori = punteggi
     dinamici, SOLO su CORRECT_SCORE/HALF_TIME_SCORE (tranello 4): altrove e'
     un errore di config segnalato, non una riga.
+
+    Ogni riga porta la PROPRIA `diagnosi` per colonna (#25): con gli override il
+    verdetto e' per riga, quindi una diagnosi sola — quella della base — spiegava
+    la riga sbagliata. Anche le righe rifiutate prima del giudizio (delimitatori)
+    ne hanno una, o la loro tabella sarebbe l'unica vuota proprio dove serve.
     """
     if not matched:
         return []
@@ -3413,6 +3523,31 @@ def _genera_righe(message, config, matched, base):
     i_prezzo = HEADERS.index('Price')
     i_mercato = HEADERS.index('MarketType')
     righe = []
+
+    def _esito(row, mancanti, scarti):
+        """L'esito di UNA riga generata, diagnosi compresa: forma unica per tutti
+        i rami (giudicata, rifiutata dai delimitatori, punteggio)."""
+        return {'row': row, 'missing': mancanti, 'scarti': scarti,
+                'complete': not mancanti and not scarti,
+                'diagnosi': _diagnosi_colonne(row, True, mancanti, scarti, avvisi)}
+
+    def _rifiuto(row, motivo):
+        """Una riga rifiutata dai delimitatori: il motivo del ramo SOMMATO al
+        giudizio pieno della riga.
+
+        Non basta il motivo del ramo. [REAL_FINDING] di GPT-5.6 Sol al gate finale
+        della PR #104: con `missing=[]` e il solo scarto proprio, le altre cause
+        della stessa riga sparivano dalla diagnosi — e non solo sparivano, la
+        colonna veniva dichiarata SANA. Misurato: una riga rifiutata dai
+        delimitatori con quota `0.5` mostrava «Price: ok», cioe' un'affermazione
+        falsa nella tabella che l'utente legge per correggere. Il verdetto della
+        riga era gia' giusto: a mentire era la spiegazione, che e' esattamente
+        cio' per cui la #25 esiste.
+        """
+        giudizio = _giudica_riga(row, True)
+        return _esito(giudizio['row'], giudizio['missing'],
+                      [motivo] + giudizio['scarti'])
+
     for riga, mercato in attive:
         derivata = list(base['row'])
         # Le colonne SOVRASCRITTE dalla riga: per il gate #41 non contano come
@@ -3440,26 +3575,25 @@ def _genera_righe(message, config, matched, base):
             derivata[i_prezzo] = _segmento(message, dopo, prima)
         if con_delimitatori and not sel_esplicita:
             if derivata[i_mercato] not in MERCATI_PUNTEGGI:
-                righe.append({'row': derivata, 'missing': [], 'scarti': [
+                righe.append(_rifiuto(derivata,
                     'SelectionName: la selezione vuota con i delimitatori '
                     'estrae i punteggi ed e\' ammessa solo su CORRECT_SCORE e '
-                    'HALF_TIME_SCORE: questa riga non genera nulla.'],
-                    'complete': False})
+                    'HALF_TIME_SCORE: questa riga non genera nulla.'))
                 continue
             # `[0-9]`, non `\\d`: in JS `\\d` e' solo ASCII, in Python
             # prenderebbe anche le cifre unicode — i due motori divergerebbero.
             punteggi = re.findall(r'[0-9]+-[0-9]+',
                                   _segmento(message, dopo, prima))
             if not punteggi:
-                righe.append({'row': derivata, 'missing': [], 'scarti': [
+                righe.append(_rifiuto(derivata,
                     'SelectionName: nessun punteggio N-N fra i delimitatori '
-                    'della riga.'], 'complete': False})
+                    'della riga.'))
                 continue
             if len(punteggi) > MAX_PUNTEGGI_RIGA:
-                righe.append({'row': derivata, 'missing': [], 'scarti': [
+                righe.append(_rifiuto(derivata,
                     'SelectionName: troppi punteggi fra i delimitatori della '
                     f'riga ({len(punteggi)}, massimo {MAX_PUNTEGGI_RIGA}): '
-                    'controlla i delimitatori.'], 'complete': False})
+                    'controlla i delimitatori.'))
                 continue
             for punteggio in punteggi:
                 per_punteggio = list(derivata)
@@ -3467,11 +3601,8 @@ def _genera_righe(message, config, matched, base):
                 # Niente gate #41 qui: il punteggio VIENE dal messaggio per
                 # costruzione, quindi la riga varia col messaggio.
                 giudizio = _giudica_riga(per_punteggio, True)
-                righe.append({'row': giudizio['row'],
-                              'missing': giudizio['missing'],
-                              'scarti': giudizio['scarti'],
-                              'complete': (not giudizio['missing']
-                                           and not giudizio['scarti'])})
+                righe.append(_esito(giudizio['row'], giudizio['missing'],
+                                    giudizio['scarti']))
             continue
         giudizio = _giudica_riga(derivata, True)
         if not giudizio['missing']:
@@ -3483,10 +3614,8 @@ def _genera_righe(message, config, matched, base):
             gate = _scarto_estrazione(colonne, giudizio['row'])
             if gate:
                 giudizio['scarti'].append(gate)
-        righe.append({'row': giudizio['row'], 'missing': giudizio['missing'],
-                      'scarti': giudizio['scarti'],
-                      'complete': (not giudizio['missing']
-                                   and not giudizio['scarti'])})
+        righe.append(_esito(giudizio['row'], giudizio['missing'],
+                            giudizio['scarti']))
     return righe
 
 
@@ -6399,7 +6528,8 @@ def elimina_parser_mio(slug: str, request: Request, uid: str | None = None):
 async def prova_parser_mio(slug: str, request: Request):
     """Prova un messaggio contro un proprio parser, A SECCO: niente scrittura nel feed.
 
-    Restituisce `matched`, `missing`, `complete` e — se completo — il `csv` e l'`event`.
+    Restituisce `matched`, `missing`, `complete`, la `diagnosi` PER COLONNA (#25:
+    stato/motivo/valore per ognuna delle 14) e — se completo — il `csv` e l'`event`.
     E' la base del motore diagnostico «perche' non ha fatto il parser»: il cliente vede
     se la condizione ha combaciato e quali colonne obbligatorie mancano, senza toccare
     il feed di nessuno. `esegui_parser` e' avvolto: una config che sollevasse da' un
@@ -6440,6 +6570,10 @@ async def prova_parser_mio(slug: str, request: Request):
     except Exception:
         return _rispondi_con_sessione(utente['id'], utente['versione'],
                                       {'matched': False, 'missing': [], 'complete': False,
+                                       # `diagnosi` vuota, non assente: la forma
+                                       # della risposta e' una sola, e il pannello
+                                       # mostra `errore` invece della tabella.
+                                       'diagnosi': [],
                                        'errore': 'config non eseguibile'})
     # `scarti` nella risposta, non solo nel log: e' la diagnosi che dice all'utente
     # PERCHE' il messaggio non produce riga, e senza di essa la prova mostrerebbe
@@ -6452,13 +6586,25 @@ async def prova_parser_mio(slug: str, request: Request):
     # (`componi_feed` di un documento e' il documento).
     righe = risultato.get('righe') or []
     complete = [r for r in righe if r['complete']]
+    # `diagnosi` (#25): la risposta PER COLONNA — stato, motivo e valore per
+    # ognuna delle 14 — che il pannello mostra come tabella. E' la differenza fra
+    # «non completo» e «SelectionName e' obbligatoria ed e' vuota: mappala su…»:
+    # il sintomo contro la causa, con due livelli distinti (blocca / segnala).
     corpo = {'matched': risultato['matched'], 'missing': risultato['missing'],
              'scarti': risultato.get('scarti') or [],
              'avvisi': risultato.get('avvisi') or [],
+             'diagnosi': risultato.get('diagnosi') or [],
              'complete': bool(complete),
              'righe': [{'row': [_testo_canonico(v) for v in r['row']],
                         'missing': r['missing'], 'scarti': r['scarti'],
-                        'complete': r['complete']} for r in righe]}
+                        'complete': r['complete'],
+                        # La diagnosi PER RIGA (#25): col multi-riga il verdetto
+                        # e' di ogni riga, quindi la tabella del pannello e' di
+                        # ogni riga. Il `diagnosi` di primo livello resta quello
+                        # della BASE, e con `config.multi` la base non e' una
+                        # riga del feed: mostrarlo da solo spiegherebbe una riga
+                        # che non esiste (Fable 5 e GPT-5.5, PR #104).
+                        'diagnosi': r.get('diagnosi') or []} for r in righe]}
     if complete:
         # `_testo_canonico` come nel webhook (`esito_messaggio`): l'anteprima
         # della prova deve mostrare gli STESSI byte che uscirebbero nel feed.

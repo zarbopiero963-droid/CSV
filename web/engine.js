@@ -402,13 +402,19 @@ export function runParser(message, config, aliasMap) {
     if (gate) scarti.push(gate);
   }
   const complete = matched && missing.length === 0 && scarti.length === 0;
+  // La diagnosi per colonna (#25) si costruisce QUI, coi motivi definitivi della
+  // riga base — gate #41 compreso — e con gli `avvisi`, che nascono nel chiamante
+  // (la sorgente squadre) come livello `segnala`: la riga esce lo stesso.
+  const diagnosi = diagnosiColonne(rowGiudicata, matched, missing, scarti, avvisi);
   // Il multi-riga (#35 pezzo 2): `righe` e' l'elenco delle righe GENERATE —
   // senza `config.multi` e' la sola base (comportamento storico), con le righe
   // di override e' la loro somma. I campi storici continuano a descrivere la
-  // BASE: i consumatori esistenti non cambiano.
+  // BASE: i consumatori esistenti non cambiano. Gli `avvisi` scendono nelle righe
+  // generate perche' le righe EREDITANO le colonne della base (EventName incluso,
+  // l'unica sorgente di avvisi oggi).
   const righe = generaRighe(message, config, matched,
-    { row: rowGiudicata, missing, scarti, complete });
-  return { matched, row: rowGiudicata, missing, scarti, avvisi, righe, complete };
+    { row: rowGiudicata, missing, scarti, complete, diagnosi }, avvisi);
+  return { matched, row: rowGiudicata, missing, scarti, avvisi, diagnosi, righe, complete };
 }
 
 // Giudica UNA riga gia' estratta: appiattisce i numerici, calcola le
@@ -463,6 +469,83 @@ function giudicaRiga(rowGrezza, matched) {
     if (reason === null && row[i]) row[i] = row[i].replace('.', DECIMAL_SEPARATOR);
   }
   return { row, missing, scarti };
+}
+
+// Il motivo dell'obbligatoria vuota: l'UNICA stringa nuova della diagnosi per
+// colonna (#25). Tutte le altre riusano i motivi che gia' finiscono in `scarti` e
+// `avvisi` — che sono gia' azionabili — cosi' non nasce un secondo catalogo da
+// tenere allineato fra i due motori. Identica a `_motivo_obbligatoria_vuota` in
+// main.py, e il caso di parita' la confronta.
+function motivoObbligatoriaVuota(colonna) {
+  return `${colonna}: e' obbligatoria ed e' vuota. Mappala su una sorgente che `
+    + "legge dal messaggio, o nessuna riga verra' scritta nel feed.";
+}
+
+// I motivi che nominano `colonna` in testa (`EventName: ...`). UNICA regola
+// d'attribuzione della diagnosi (#25): la usano gli `scarti` e gli `avvisi`, in
+// JS come in Python (`_motivi_di`). Scritta una volta perche' due regole
+// d'aggancio sarebbero due comportamenti alla prima divergenza.
+function motiviDi(messaggi, colonna) {
+  return (messaggi || []).filter(m => String(m).split(':', 1)[0] === colonna);
+}
+
+// Gli scarti che NON nominano nessuna delle 14 colonne (#25): le cause di RIGA,
+// non di colonna — oggi il gate di contenuto (#41), che parla del parser nel suo
+// insieme. La diagnosi per colonna non puo' ospitarle senza mentire su quale
+// colonna sia il problema, e perderle sarebbe peggio: la tabella direbbe
+// «nessuna colonna blocca» mentre la riga non esce. Il pannello le mostra sotto
+// la tabella. Gemella di `cause_di_riga` in main.py.
+export function causeDiRiga(scarti) {
+  return (scarti || []).filter(
+    s => !COLUMNS.some(c => String(s).split(':', 1)[0] === c));
+}
+
+// La diagnosi PER COLONNA: 14 voci `{colonna, stato, motivo, valore}` (#25).
+// Gemella di `_diagnosi_colonne` in main.py, confrontata dal caso di parita'.
+//
+// Si costruisce sui motivi FINALI di UNA riga — i suoi `missing`, i suoi
+// `scarti`, i suoi `avvisi` — non su un sottoinsieme calcolato a meta' strada.
+// Era il difetto della PR #104 prima di questa correzione: la diagnosi nasceva
+// dentro `giudicaRiga`, quindi il gate #41 (aggiunto agli scarti DOPO) e le
+// cause delle righe di override (#35) non comparivano — misurato: `complete`
+// falso con «0 colonne bloccano», il contrario di cio' per cui la tabella esiste.
+//
+// Due livelli di gravita' DELIBERATAMENTE distinti (vincolo del commento del
+// 14/08 sulla #25, nato da un difetto del Bridge: la' un rosso che blocca e un
+// rosso su campo facoltativo avevano lo stesso aspetto):
+//   `blocca`  - senza questa colonna la riga NON esce (obbligatoria vuota, o
+//               valore scartato: guardia numerica, emoji, delimitatori);
+//   `segnala` - c'e' qualcosa da sapere ma la riga ESCE lo stesso (gli avvisi);
+//   `ok`      - valorizzata e senza problemi;
+//   `vuota`   - vuota ma facoltativa: NON e' un errore (Price vuota e' normale).
+// A messaggio NON riconosciuto nessuna colonna `blocca`: la riga non esce perche'
+// la condizione non ha combaciato, e attribuire quel rifiuto alle obbligatorie
+// vuote indicherebbe la causa sbagliata (Claude Fable 5, PR #104).
+// Il `valore` e' quello FINALE, gia' localizzato.
+function diagnosiColonne(row, matched, missing, scarti, avvisi) {
+  return COLUMNS.map(colonna => {
+    const valore = String(row[COLUMNS.indexOf(colonna)] ?? '');
+    const suoiScarti = motiviDi(scarti, colonna);
+    const suoiAvvisi = motiviDi(avvisi, colonna);
+    let stato;
+    let motivo = '';
+    if (suoiScarti.length) {
+      stato = 'blocca';
+      motivo = suoiScarti.join(' ');
+    } else if (matched && (missing || []).includes(colonna)) {
+      stato = 'blocca';
+      motivo = motivoObbligatoriaVuota(colonna);
+    } else if (suoiAvvisi.length) {
+      // Non declassa mai un bloccante: i due rami sopra hanno gia' deciso.
+      stato = 'segnala';
+      motivo = suoiAvvisi.join(' ');
+    } else if (!piatto(valore)) {
+      stato = 'vuota';
+    } else {
+      stato = 'ok';
+    }
+    return { colonna, stato, motivo, valore };
+  });
 }
 
 // Gli override del multi-riga (#35): campo della riga → colonna del CSV.
@@ -521,8 +604,27 @@ function segmento(message, dopo, prima) {
 // le altre (tranello 1). Le MultiSelection restano sul mercato base per
 // contratto: un loro `market_type` viene ignorato. Gemella di
 // `_genera_righe` in main.py, parita' vincolata sui casi.
-function generaRighe(message, config, matched, base) {
+function generaRighe(message, config, matched, base, avvisi) {
   if (!matched) return [];
+  // L'esito di UNA riga generata, diagnosi compresa (#25): forma unica per tutti
+  // i rami (giudicata, rifiutata dai delimitatori, punteggio). Con gli override
+  // il verdetto e' PER RIGA, quindi una diagnosi sola — quella della base —
+  // spiegava la riga sbagliata.
+  const esito = (row, missing, scarti) => ({
+    row, missing, scarti,
+    complete: missing.length === 0 && scarti.length === 0,
+    diagnosi: diagnosiColonne(row, true, missing, scarti, avvisi),
+  });
+  // Una riga rifiutata dai delimitatori: il motivo del ramo SOMMATO al giudizio
+  // pieno della riga. [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #104:
+  // con `missing=[]` e il solo scarto proprio, le altre cause della stessa riga
+  // sparivano dalla diagnosi — e la colonna veniva dichiarata SANA. Misurato: una
+  // riga rifiutata con quota `0.5` mostrava «Price: ok», un'affermazione falsa
+  // nella tabella che l'utente legge per correggere.
+  const rifiuto = (row, motivo) => {
+    const g = giudicaRiga(row, true);
+    return esito(g.row, g.missing, [motivo].concat(g.scarti));
+  };
   const multi = config.multi || {};
   const attive = [];
   // `Array.isArray`, non `|| []`: un `markets` non-lista faceva SOLLEVARE il
@@ -576,10 +678,10 @@ function generaRighe(message, config, matched, base) {
       // mercati dei risultati esatti (tranello 4): fuori da li' e' un errore
       // di config SEGNALATO, non una scorciatoia e non una riga.
       if (!MERCATI_PUNTEGGI.includes(derivata[iMercato])) {
-        righe.push({ row: derivata, missing: [], scarti: [
+        righe.push(rifiuto(derivata,
           'SelectionName: la selezione vuota con i delimitatori estrae i '
           + 'punteggi ed e\' ammessa solo su CORRECT_SCORE e HALF_TIME_SCORE: '
-          + 'questa riga non genera nulla.'], complete: false });
+          + 'questa riga non genera nulla.'));
         continue;
       }
       // `[0-9]`, come nel gemello Python: in JS `\d` E' gia' solo ASCII, ma
@@ -588,16 +690,15 @@ function generaRighe(message, config, matched, base) {
       const punteggi = segmento(message, dopo, prima)
         .match(/[0-9]+-[0-9]+/g) || [];
       if (!punteggi.length) {
-        righe.push({ row: derivata, missing: [], scarti: [
-          'SelectionName: nessun punteggio N-N fra i delimitatori della riga.'],
-          complete: false });
+        righe.push(rifiuto(derivata,
+          'SelectionName: nessun punteggio N-N fra i delimitatori della riga.'));
         continue;
       }
       if (punteggi.length > MAX_PUNTEGGI_RIGA) {
-        righe.push({ row: derivata, missing: [], scarti: [
+        righe.push(rifiuto(derivata,
           'SelectionName: troppi punteggi fra i delimitatori della riga ('
           + punteggi.length + ', massimo ' + MAX_PUNTEGGI_RIGA + '): '
-          + 'controlla i delimitatori.'], complete: false });
+          + 'controlla i delimitatori.'));
         continue;
       }
       for (const punteggio of punteggi) {
@@ -606,8 +707,7 @@ function generaRighe(message, config, matched, base) {
         // Niente gate #41 qui: il punteggio VIENE dal messaggio per
         // costruzione, quindi la riga varia col messaggio — non e' fissa.
         const g = giudicaRiga(perPunteggio, true);
-        righe.push({ row: g.row, missing: g.missing, scarti: g.scarti,
-          complete: g.missing.length === 0 && g.scarti.length === 0 });
+        righe.push(esito(g.row, g.missing, g.scarti));
       }
       continue;
     }
@@ -621,8 +721,7 @@ function generaRighe(message, config, matched, base) {
       const gate = scartoEstrazione(colonne, g.row);
       if (gate) g.scarti.push(gate);
     }
-    righe.push({ row: g.row, missing: g.missing, scarti: g.scarti,
-      complete: g.missing.length === 0 && g.scarti.length === 0 });
+    righe.push(esito(g.row, g.missing, g.scarti));
   }
   return righe;
 }

@@ -886,6 +886,63 @@ function casiConfronto() {
   aggiungi('E2: flag oggetto {i:1} (non-stringa) → colonna vuota, niente divergenza',
     ...conMercato({ source: 'regex', pattern: '(abc)', flags: { i: 1 }, group: 1 },
       'P.Bet. ABCabc'));
+
+  // --- Diagnosi per colonna (#25): la tabella deve essere IDENTICA nei due
+  // motori, e i reviewer della PR #104 hanno fermato la prima versione perche'
+  // nasceva da un verdetto parziale. Questi casi tengono i tre buchi misurati,
+  // e la diagnosi delle righe generate viaggia dentro `righe`, confrontato
+  // intero: una divergenza in una sola voce di una sola riga nomina il caso.
+  const perDiagnosi = (columns, multi) => ({
+    match: { type: 'contains', value: 'P.Bet.' }, columns, multi });
+  const obbFisse = {
+    EventName: { source: 'constant', value: 'Juventus - Milan' },
+    MarketType: { source: 'constant', value: 'OVER_UNDER_15' },
+    SelectionName: { source: 'constant', value: 'Over 1,5' },
+    BetType: { source: 'constant', value: 'PUNTA' },
+  };
+  const obbEstratte = { ...obbFisse,
+    EventName: { source: 'regex', pattern: '([A-Za-z]+ - [A-Za-z]+)', group: 1 } };
+  // A) gate #41: nessuna colonna blocca, e il motivo resta fra gli scarti come
+  // causa di RIGA. I due motori devono essere d'accordo anche su questo, o uno
+  // dei due mostrerebbe una colonna rossa che l'altro non mostra.
+  aggiungi('diagnosi: gate #41 → 0 colonne bloccano, causa di riga negli scarti',
+    'P.Bet. oggi', perDiagnosi(obbFisse));
+  // B) multi-riga: la base e' sana, la riga di override no. La diagnosi della
+  // riga deve accusare la colonna della RIGA in entrambi.
+  aggiungi('diagnosi: multi-riga, la riga di override rotta ha la SUA diagnosi',
+    'P.Bet. Juventus - Milan',
+    perDiagnosi(obbEstratte, { markets: [{ market_type: 'CORRECT_SCORE', price: '0.5' }] }));
+  aggiungi('diagnosi: riga rifiutata dai delimitatori → diagnosi su SelectionName',
+    'P.Bet. Juventus - Milan 1-0 fine',
+    perDiagnosi(obbEstratte, { markets: [{ market_type: 'MATCH_ODDS',
+      start_after: 'Milan', end_before: 'fine' }] }));
+  aggiungi('diagnosi: punteggi dinamici → una diagnosi per punteggio',
+    'P.Bet. Juventus - Milan Risultati: 1-0 2-1; fine',
+    perDiagnosi(obbEstratte, { markets: [{ market_type: 'CORRECT_SCORE',
+      selection_name: '', start_after: 'Risultati:', end_before: ';' }] }));
+  // Il ramo di rifiuto anticipato con ALTRE cause nella stessa riga
+  // ([REAL_FINDING] di Sol al gate finale): il motivo del ramo si somma al
+  // giudizio pieno, e i due motori devono sommare gli stessi motivi nello stesso
+  // ordine — un ordine diverso e' una diagnosi diversa per l'utente.
+  aggiungi('diagnosi: riga rifiutata CON quota invalida e obbligatoria vuota',
+    'P.Bet. 1-0 fine',
+    perDiagnosi({ ...obbEstratte,
+      EventName: { source: 'regex', pattern: '(NON C E)', group: 1 } },
+      { markets: [{ market_type: 'MATCH_ODDS', price: '0.5', selection_name: '',
+        start_after: 'P.Bet.', end_before: 'fine' }] }));
+  aggiungi('diagnosi: rifiuto per zero punteggi CON quota invalida',
+    'P.Bet. Juventus - Milan niente cifre fine',
+    perDiagnosi(obbEstratte, { markets: [{ market_type: 'CORRECT_SCORE',
+      price: '0.5', selection_name: '',
+      start_after: 'P.Bet.', end_before: 'fine' }] }));
+  // C) messaggio non riconosciuto: nessuna colonna blocca, in entrambi.
+  aggiungi('diagnosi: messaggio ignorato → nessuna colonna blocca',
+    'oggi si parla di altro', perDiagnosi(obbEstratte));
+  // Emoji: il motivo per colonna nasce ora dagli scarti, quindi il taglio del
+  // citato deve restare identico anche passando per l'attribuzione.
+  aggiungi('diagnosi: emoji in una colonna → stessa voce, stesso citato',
+    'P.Bet. Juventus - Milan', perDiagnosi({ ...obbEstratte,
+      MarketName: { source: 'constant', value: 'Mercato \u{1F19A} caldo' } }));
   return confronti;
 }
 
