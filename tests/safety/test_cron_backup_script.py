@@ -88,16 +88,19 @@ def test_header_col_valore_reale_e_due_punti(tmp_path):
         % (dump, dump), encoding='utf-8')
     (fake / 'curl').chmod(0o755)
 
-    token = 'TOKEN_DI_PROVA_9f8e7d'
+    # Valore fittizio (vive solo in questo test), ma i messaggi degli assert NON lo stampano
+    # comunque: un header con un segreto non deve mai finire nell'output CI, anche finto — il
+    # pattern non va copiato su un valore vero (nota di GPT-5.5, PR #102).
+    valore_finto = 'PROVA-9f8e7d'
     rc, out = _esegui({'BACKUP_BASE_URL': 'https://example.test/',
-                       'BACKUP_CRON_TOKEN': token}, fake_curl_dir=str(fake))
-    assert rc == 0, f'lo script e- fallito con le variabili giuste: {out!r}'
+                       'BACKUP_CRON_TOKEN': valore_finto}, fake_curl_dir=str(fake))
+    assert rc == 0, 'lo script e- fallito con le variabili giuste'
     args = dump.read_text(encoding='utf-8').splitlines()
 
     assert 'https://example.test/api/admin/backup/invia' in args, \
-        f'URL dell-endpoint assente o sbagliato: {args!r}'
-    header = f'X-Backup-Cron-Token: {token}'
-    assert header in args, f'header col valore reale e i due punti assente: {args!r}'
-    # Il token NON deve finire nell'URL (gli URL finiscono nei log).
+        'URL dell-endpoint assente o sbagliato fra gli argomenti di curl'
+    assert f'X-Backup-Cron-Token: {valore_finto}' in args, \
+        'header col valore reale e i due punti assente fra gli argomenti di curl'
+    # Il valore NON deve finire nell'URL (gli URL finiscono nei log).
     url = next(a for a in args if a.startswith('http'))
-    assert token not in url, 'il token e- finito nell-URL'
+    assert valore_finto not in url, 'il valore del token e- finito nell-URL'
