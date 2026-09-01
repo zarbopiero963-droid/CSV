@@ -14,6 +14,12 @@ privato configurato dal pannello admin.
    - `BACKUP_BASE_URL` = URL pubblico del relay, es. `https://betrelay.net`
    - `BACKUP_CRON_TOKEN` = lo STESSO valore impostato sul servizio principale.
 
+## Idempotenza
+
+Il servizio prenota un periodo (la data UTC del giro) prima di inviare: se il cron
+riprova o gira su più repliche nello stesso giorno, parte **un solo** backup. Un retry
+dopo un fallimento riparte normalmente. Quindi uno schedule con retry è sicuro.
+
 ## Prerequisiti sul servizio principale
 
 - `BACKUP_CRON_TOKEN` impostata (stesso valore). Se vuota, l'endpoint risponde

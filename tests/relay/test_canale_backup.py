@@ -435,6 +435,31 @@ def test_il_bot_rimosso_da_un_canale_ESTRANEO_non_tocca_la_config(tmp_path, monk
         'un left da un canale estraneo ha azzerato la config del canale nostro'
 
 
+def test_una_promozione_tardiva_dopo_una_rimozione_piu_nuova_e_ignorata(tmp_path, monkeypatch):
+    """Ordinamento degli eventi di membership (#56, Sol B1): se una rimozione con `update_id` più
+    NUOVO è già stata processata, una promozione con `update_id` più VECCHIO (consegnata in
+    ritardo dall'offload su thread) NON deve far risorgere il candidato di un canale ormai
+    abbandonato. Il dedup per riconsegna esatta non la copre (è un id mai visto); serve l'ordine.
+
+    Fail-first: senza il controllo di ordine la promozione tardiva riscrive il candidato."""
+    percorso, _admin_s, _c, _u = _admin(tmp_path, monkeypatch, 'ordine.db')
+    _abilita_webhook(monkeypatch)
+
+    _webhook(_promozione(CANALE, 'Backup', update_id=200))
+    assert _impostazione(percorso, main.CHIAVE_CANALE_CANDIDATO_ID) == str(CANALE)
+
+    # rimozione con update_id più nuovo: pulisce e porta l'high-water-mark a 205
+    esito_rim = _webhook(_rimozione(CANALE, update_id=205))
+    assert esito_rim.get('canale_backup_rimosso') is True, esito_rim
+    assert _impostazione(percorso, main.CHIAVE_CANALE_CANDIDATO_ID) is None
+
+    # promozione consegnata in ritardo, update_id 203 < 205 (id mai visto, non è un duplicato)
+    esito = _webhook(_promozione(CANALE, 'Backup', update_id=203))
+    assert esito.get('ignored') == 'out_of_order', esito
+    assert _impostazione(percorso, main.CHIAVE_CANALE_CANDIDATO_ID) is None, \
+        'una promozione tardiva (fuori ordine) ha fatto risorgere il candidato'
+
+
 # ---------------------------------------------------------------- le rotte
 
 def _metti_candidato(chat_id, titolo):
