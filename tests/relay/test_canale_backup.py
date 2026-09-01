@@ -391,6 +391,35 @@ def test_il_bot_RETROCESSO_ad_member_pulisce_la_config(tmp_path, monkeypatch):
         'il canale e- rimasto configurato dopo la retrocessione del bot a member'
 
 
+def test_il_bot_RESTRICTED_nel_canale_configurato_pulisce_la_config(tmp_path, monkeypatch):
+    """Anche lo stato `restricted` toglie al bot la possibilita' di pubblicare: la config del
+    canale configurato va azzerata come per `member`/`left`/`kicked` (copertura chiesta da
+    GPT-5.5 al gate finale #56)."""
+    percorso, admin_s, _c, _u = _admin(tmp_path, monkeypatch, 'restricted.db')
+    _abilita_webhook(monkeypatch)
+    _configura(admin_s, monkeypatch, CANALE, 'Backup')
+    assert _impostazione(percorso, main.CHIAVE_CANALE_BACKUP_ID) == str(CANALE)
+
+    esito = _webhook(_rimozione(CANALE, stato='restricted'))
+    assert esito.get('canale_backup_rimosso') is True, esito
+    assert _impostazione(percorso, main.CHIAVE_CANALE_BACKUP_ID) is None, \
+        'restricted non ha ripulito la config del canale configurato'
+
+
+def test_il_bot_retrocesso_a_member_nel_CANDIDATO_lo_toglie(tmp_path, monkeypatch):
+    """La retrocessione vale anche sul CANDIDATO non ancora confermato: se il bot perde i
+    privilegi mentre e' solo proposto, la proposta va tolta (copertura chiesta da GPT-5.5)."""
+    percorso, _admin_s, _c, _u = _admin(tmp_path, monkeypatch, 'cand_member.db')
+    _abilita_webhook(monkeypatch)
+    _webhook(_promozione(CANALE, 'Backup'))
+    assert _impostazione(percorso, main.CHIAVE_CANALE_CANDIDATO_ID) == str(CANALE)
+
+    esito = _webhook(_rimozione(CANALE, stato='member'))
+    assert esito.get('canale_backup_rimosso') is True, esito
+    assert _impostazione(percorso, main.CHIAVE_CANALE_CANDIDATO_ID) is None, \
+        'la retrocessione a member non ha tolto il candidato'
+
+
 def test_il_bot_rimosso_da_un_canale_ESTRANEO_non_tocca_la_config(tmp_path, monkeypatch):
     """La pulizia agisce SOLO sul canale nostro: un `left` da un canale diverso da quello
     configurato/candidato non deve azzerare niente, e prosegue nel percorso normale (`no_text`).
