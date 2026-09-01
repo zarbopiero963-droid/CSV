@@ -86,8 +86,12 @@ def test_una_OBBLIGATORIA_vuota_BLOCCA_e_il_motivo_dice_cosa_fare():
     voce = _voce(esito, 'SelectionName')
     assert voce['stato'] == 'blocca', voce
     assert 'SelectionName' in voce['motivo']
-    # azionabile: dice COSA FARE, non solo cosa manca
-    assert 'Mappala' in voce['motivo'], voce['motivo']
+    # azionabile: dice COSA FARE, non solo cosa manca. Il testo esatto cambia col
+    # tipo di guasto (#25, residuo 3): qui la costante impostata E' vuota, quindi
+    # il motivo nomina quello invece di consigliare di mappare una colonna che
+    # risulta gia' mappata.
+    assert 'costante' in voce['motivo'], voce['motivo']
+    assert 'Mappala' not in voce['motivo'], voce['motivo']
     assert 'SelectionName' in esito['missing']
     assert esito['complete'] is False
 
@@ -162,7 +166,10 @@ def test_un_problema_che_BLOCCA_non_viene_declassato_a_segnala():
     esito = main.esegui_parser('Juventus - Milan GOL', cfg, mappa_alias={})
     voce = _voce(esito, 'EventName')
     assert voce['stato'] == 'blocca', voce
-    assert 'Mappala' in voce['motivo'], voce['motivo']
+    # Il motivo resta azionabile e non viene declassato: il testo dice che la
+    # costante e' vuota (#25, residuo 3), non piu' «Mappala» — la colonna una
+    # regola ce l'ha.
+    assert 'obbligatoria' in voce['motivo'], voce['motivo']
 
 
 # ------------------------------------------------- il messaggio non riconosciuto
@@ -382,3 +389,115 @@ def test_il_rifiuto_per_zero_punteggi_porta_le_altre_cause_della_riga():
     assert 'nessun punteggio' in voci['SelectionName']['motivo']
     assert voci['Price']['stato'] == 'blocca', \
         f"Price 0.5 dichiarata sana nel ramo «zero punteggi»: {voci['Price']}"
+
+
+# ------------------- il motivo della REGOLA che non ha estratto (#25, residuo 3)
+#
+# I motivi guardavano il VALORE uscito dall'estrazione, mai la REGOLA che doveva
+# produrlo. Conseguenza misurata sulla #25 dopo il merge della PR #104: una
+# colonna obbligatoria mappata su una regex che non trova nulla riceveva
+#
+#     «EventName: e' obbligatoria ed e' vuota. Mappala su una sorgente che legge
+#      dal messaggio, o nessuna riga verra' scritta nel feed.»
+#
+# cioe' il consiglio di fare una cosa GIA' FATTA, mentre la causa vera taceva. E'
+# il difetto della #328 del Bridge — la causa formale al posto dell'azione — ed e'
+# esattamente cio' che il commento del 14/08 su questa Issue diceva di non
+# ereditare. I motivi devono distinguere «non l'hai mappata» da «l'hai mappata e
+# non ha trovato niente»: per l'utente sono due azioni opposte.
+
+
+def _voci(esito):
+    return {v['colonna']: v for v in esito['diagnosi']}
+
+
+def test_una_regex_che_non_trova_nulla_lo_DICE_invece_di_dire_mappala():
+    """Il caso misurato. La colonna E' mappata su una regex: il motivo non deve
+    consigliare di mapparla, deve dire che la regex non ha trovato nulla."""
+    cfg = _config(EventName={'source': 'regex', 'pattern': r'Squadre: (.+)',
+                             'group': 1})
+    voce = _voci(main.esegui_parser('GOL Inter - Milan', cfg))['EventName']
+    assert voce['stato'] == 'blocca'
+    assert 'Mappala' not in voce['motivo'], \
+        f'consiglia di mappare una colonna gia- mappata: {voce["motivo"]}'
+    assert 'Squadre: (.+)' in voce['motivo'], \
+        f'il motivo non cita la regola che ha fallito: {voce["motivo"]}'
+
+
+def test_una_colonna_NON_mappata_riceve_ancora_il_consiglio_di_mapparla():
+    """L'altra meta' della distinzione: quando la colonna davvero non e' mappata,
+    il motivo di prima e' quello GIUSTO e non va perso."""
+    cfg = _config(EventName={'source': 'empty'})
+    voce = _voci(main.esegui_parser('GOL Inter - Milan', cfg))['EventName']
+    assert voce['stato'] == 'blocca'
+    assert 'mappata' in voce['motivo'].lower(), voce['motivo']
+
+
+def test_la_riga_con_l_ancora_che_non_esiste_nomina_l_ancora():
+    """Sorgente `line`: nessuna riga contiene l'ancora. Il motivo deve nominarla,
+    o l'utente non sa quale delle sue regole guardare."""
+    cfg = _config(EventName={'source': 'line', 'anchor': 'Squadre',
+                             'part': 'after', 'marker': ':'})
+    voce = _voci(main.esegui_parser('GOL Inter - Milan', cfg))['EventName']
+    assert voce['stato'] == 'blocca'
+    assert 'Squadre' in voce['motivo'], voce['motivo']
+    assert 'Mappala' not in voce['motivo'], voce['motivo']
+
+
+def test_la_riga_c_e_ma_il_marcatore_no_e_un_motivo_DIVERSO():
+    """Due guasti diversi della stessa sorgente `line` non possono avere lo stesso
+    motivo: «la riga non c'e'» si corregge sull'ancora, «manca il marcatore» si
+    corregge sul marcatore."""
+    cfg = _config(EventName={'source': 'line', 'anchor': 'Partita',
+                             'part': 'after', 'marker': '=>'})
+    voce = _voci(main.esegui_parser('GOL\nPartita: Inter - Milan', cfg))['EventName']
+    assert voce['stato'] == 'blocca'
+    assert '=>' in voce['motivo'], voce['motivo']
+    # e non e' lo stesso motivo del caso «riga assente»
+    altra = _voci(main.esegui_parser('GOL Inter - Milan', _config(
+        EventName={'source': 'line', 'anchor': 'Partita', 'part': 'after',
+                   'marker': '=>'})))['EventName']
+    assert voce['motivo'] != altra['motivo'], \
+        'riga assente e marcatore assente hanno lo stesso motivo'
+
+
+def test_una_FACOLTATIVA_mappata_e_vuota_dice_perche_ma_resta_vuota():
+    """Invariante da non rompere: `vuota` NON e' un errore (Price vuota e' il caso
+    normale, la quota la mette XTrader). Il motivo si riempie, lo stato no."""
+    cfg = _config(Price={'source': 'line', 'anchor': 'Quota',
+                         'part': 'after', 'marker': ':'})
+    voce = _voci(main.esegui_parser('GOL Inter - Milan', cfg))['Price']
+    assert voce['stato'] == 'vuota', \
+        f'una facoltativa vuota non deve diventare un errore: {voce}'
+    assert voce['motivo'], 'la facoltativa mappata e vuota resta muta'
+    assert 'Quota' in voce['motivo'], voce['motivo']
+
+
+def test_una_facoltativa_NON_mappata_resta_muta():
+    """Il contrario: nessuna regola, nessun motivo. Riempire 10 righe di «non e-
+    mappata» renderebbe la tabella rumore invece che diagnosi."""
+    voce = _voci(main.esegui_parser('GOL Inter - Milan', _config()))['MinPrice']
+    assert voce['stato'] == 'vuota'
+    assert voce['motivo'] == '', voce['motivo']
+
+
+def test_le_trasformazioni_che_svuotano_un_valore_ESTRATTO_lo_dicono():
+    """Caso insidioso: l'estrazione ha funzionato, sono le trasformazioni ad aver
+    svuotato il campo. Senza questo motivo l'utente cerca il guasto nella sorgente,
+    che invece e- corretta."""
+    # `digits_only` su un testo senza cifre: l'estrazione riesce, la
+    # trasformazione svuota. E' una trasformazione VERA del motore, non inventata.
+    cfg = _config(EventName={'source': 'message',
+                             'transforms': [{'op': 'digits_only'}]})
+    voce = _voci(main.esegui_parser('GOL Inter - Milan', cfg))['EventName']
+    assert voce['stato'] == 'blocca'
+    assert 'trasformazioni' in voce['motivo'].lower(), voce['motivo']
+
+
+def test_il_motivo_della_regola_non_scavalca_uno_SCARTO():
+    """Precedenza: se la colonna ha un valore SCARTATO (guardia numerica), il
+    motivo e- quello dello scarto — non c'e- nessun vuoto da spiegare."""
+    cfg = _config(Price={'source': 'constant', 'value': '0.5'})
+    voce = _voci(main.esegui_parser('GOL Inter - Milan', cfg))['Price']
+    assert voce['stato'] == 'blocca'
+    assert "fuori dall'intervallo" in voce['motivo'], voce['motivo']

@@ -2434,6 +2434,16 @@ La voce e la vista esistono solo con `admin` vero; il server risponde comunque
     — compare in un banner dentro il pannello, e il riepilogo lo conta a parte
     («N bloccano, M da sapere, K sulla riga»). Attribuirlo a una colonna sarebbe
     falso; ometterlo lascerebbe la tabella a dire che va tutto bene.
+  - **La colonna «Motivo» parla anche quando la colonna è solo vuota**, se una
+    regola c'era e non ha estratto: «*nel messaggio non c'è nessuna riga che
+    contiene «Quota»…*», «*l'espressione regolare «…» non ha trovato
+    corrispondenza…*», «*le trasformazioni della regola lo hanno svuotato*». Lo
+    **stato** però non cambia: `vuota` resta neutra, non diventa un errore. E su
+    una colonna che non è mappata affatto il motivo resta vuoto — dieci righe di
+    «non è mappata» sarebbero rumore, non diagnosi.
+  - Sulle **obbligatorie** lo stesso motivo accompagna il rosso, al posto del
+    generico «mappala»: se la colonna è già mappata, consigliare di mapparla è
+    consigliare una cosa fatta. Era il difetto misurato dopo la PR #104.
   - Su un messaggio **non riconosciuto** nessuna colonna è rossa: la pillola dice
     già «Ignorato: la condizione non corrisponde», e la tabella resta il referto
     di ciò che si estrarrebbe. Marcare le obbligatorie vuote come `blocca`

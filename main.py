@@ -2841,6 +2841,18 @@ def _numero_stile_js(valore):
     return segno + corpo
 
 
+def _citato(testo, tetto=60):
+    """Un frammento della CONFIG citato dentro un motivo, in forma sicura (#25).
+
+    Appiattito con `_piatto` (niente a capo dentro una cella di tabella) e tagliato
+    per CODEPOINT, mai per unita' UTF-16: un pattern che finisce con un emoji
+    astrale a cavallo del taglio lascerebbe un surrogato spaiato, e la stessa
+    stringa uscirebbe diversa nei due motori. Gemella di `citato` in engine.js.
+    """
+    piano = _piatto(str('' if testo is None else testo))
+    return piano if len(piano) <= tetto else _taglia_codepoint(piano, tetto) + '…'
+
+
 def _taglia_codepoint(testo, n):
     """Primi `n` CODEPOINT, non le prime `n` unita' UTF-16 (`cutByCodePoint`).
 
@@ -3115,12 +3127,22 @@ def _flag_regex(flags):
     return risultato
 
 
-def _estrai_valore(message, regola, scadenza=None):
+def _estrai_valore(message, regola, scadenza=None, diario=None):
     """Il valore grezzo di una colonna dal messaggio, poi le trasformazioni
     (`extractValue`).
 
     `scadenza` è il budget di parser condiviso, passato solo al match regex (vedi
     `_cerca_regex_utente`); le altre sorgenti non eseguono regex dell'utente.
+
+    `diario` (#25) è un dict facoltativo in cui il ramo che produce un valore VUOTO
+    scrive `motivo`: perche' quella regola non ha estratto niente. Nasce QUI e non
+    in una funzione che ri-ispeziona la regola dopo, e la differenza non e'
+    stilistica — un secondo posto che rifa' le stesse verifiche diverge dal runtime
+    al primo ramo che cambia, che e' esattamente il difetto C del Bridge («la prova
+    piu' pessimista del runtime») che la #25 dice di non ereditare. Il motivo lo
+    scrive il ramo che il vuoto lo ha appena prodotto: non puo' sbagliarsi.
+
+    Chi non passa `diario` non paga niente e non cambia comportamento.
 
     I casi che restituiscono PRIMA delle trasformazioni sono deliberati e copiati
     da JS: riga non trovata e regex che non combacia (o non compila) danno `''`
@@ -3128,6 +3150,11 @@ def _estrai_valore(message, regola, scadenza=None):
     da' `''` e POI applica le trasformazioni, perche' in JS non c'e' un ritorno
     anticipato in quel ramo.
     """
+    def _annota(motivo):
+        # `is not None`: un dict vuoto e' un diario valido, non «nessun diario».
+        if diario is not None:
+            diario['motivo'] = motivo
+
     if not regola:
         return ''
     sorgente = regola.get('source')
@@ -3136,15 +3163,26 @@ def _estrai_valore(message, regola, scadenza=None):
     if sorgente == 'constant':
         v = regola.get('value')
         v = '' if v is None else v
+        if not _piatto(str(v)):
+            _annota('la costante impostata nella regola e\' vuota.')
     elif sorgente == 'message':
         v = message
+        if not _piatto(str(v)):
+            _annota('la regola prende il messaggio intero, e il messaggio e\' vuoto.')
     elif sorgente == 'line':
         riga = _riga_con_ancora(message, regola.get('anchor'))
         if riga is None:
+            _annota(f'nel messaggio non c\'e\' nessuna riga che contiene '
+                    f'«{_citato(regola.get("anchor"))}»: controlla il testo da cercare, '
+                    'o se il messaggio di prova e\' quello giusto.')
             return ''
         marcatore = regola.get('marker')
         if regola.get('part') == 'after' and marcatore:
             i = riga.lower().find(marcatore.lower())
+            if i < 0:
+                _annota(f'la riga con «{_citato(regola.get("anchor"))}» c\'e\', ma non '
+                        f'contiene «{_citato(marcatore)}», il marcatore dopo cui la '
+                        'regola legge il valore.')
             v = '' if i < 0 else riga[i + len(marcatore):]
         else:
             v = riga
@@ -3158,6 +3196,8 @@ def _estrai_valore(message, regola, scadenza=None):
         # PR #85.
         flags = regola.get('flags')
         if flags is not None and not isinstance(flags, str):
+            _annota('la regola ha un campo «flags» che non e\' testo: e\' malformata '
+                    'e la colonna resta vuota. Risalvala dal wizard.')
             return ''
         # Pattern dell'utente → timeout duro (worker condiviso), dentro il budget di
         # parser. Errore o scadenza danno None, cioe' colonna vuota, come prima
@@ -3165,6 +3205,15 @@ def _estrai_valore(message, regola, scadenza=None):
         m = _cerca_regex_utente(regola.get('pattern', ''), message,
                                 _flag_regex(flags), scadenza)
         if not m:
+            # Un solo motivo per «non compila» e «non combacia»: qui i due casi
+            # sono indistinguibili per costruzione — `_cerca_regex_utente`
+            # restituisce None per entrambi, e anche per il timeout. Distinguerli
+            # richiederebbe di ricompilare il pattern nella diagnosi, cioe' un
+            # secondo posto che puo' divergere. In pratica non si perde nulla: una
+            # regex che non compila non e' salvabile, `_valida_config_parser` la
+            # rifiuta con 422 alla scrittura.
+            _annota(f'l\'espressione regolare «{_citato(regola.get("pattern", ""))}» '
+                    'non ha trovato corrispondenza in questo messaggio.')
             return ''
         gruppo = regola.get('group', 1)
         try:
@@ -3176,10 +3225,17 @@ def _estrai_valore(message, regola, scadenza=None):
         v = catturato if catturato is not None else m.group(0)
     else:
         return ''
+    prima_delle_trasformazioni = _piatto(str(v))
     for t in regola.get('transforms') or []:
         fn = TRASFORMAZIONI_MOTORE.get(t.get('op'))
         if fn:
             v = fn(v, t)
+    # Il caso insidioso: l'estrazione HA funzionato, sono le trasformazioni ad aver
+    # svuotato il campo. Senza questo motivo l'utente cerca il guasto nella
+    # sorgente, che invece e' corretta.
+    if prima_delle_trasformazioni and not _piatto(str(v)):
+        _annota('la sorgente ha estratto un valore, ma le trasformazioni della '
+                'regola lo hanno svuotato: controlla la catena di trasformazioni.')
     return v
 
 
@@ -3219,7 +3275,16 @@ def esegui_parser(message, config, mappa_alias=None):
     scadenza = time.monotonic() + REGEX_BUDGET_PARSER_S
     colonne = config.get('columns') or {}
     matched = condizione_soddisfatta(message, config.get('match'), scadenza)
-    row = [_estrai_valore(message, colonne.get(c), scadenza) for c in HEADERS]
+    # Il `diario` per colonna (#25): il motivo per cui una regola non ha estratto
+    # niente, scritto dal ramo che il vuoto lo ha prodotto. Un dict per colonna,
+    # raccolto solo quando c'e' davvero un motivo.
+    row = []
+    motivi_regola = {}
+    for c in HEADERS:
+        diario = {}
+        row.append(_estrai_valore(message, colonne.get(c), scadenza, diario))
+        if diario.get('motivo'):
+            motivi_regola[c] = diario['motivo']
     # La sorgente squadre (#34 pezzo 3): con una mappa alias→Betfair l'evento
     # si traduce QUI, sul valore finale di EventName — spezzato sull'ULTIMO
     # ' - ' (il separatore che il transform del wizard produce), ogni meta'
@@ -3274,7 +3339,8 @@ def esegui_parser(message, config, mappa_alias=None):
     # della riga base — gate #41 compreso — e con gli `avvisi`, che nascono nel
     # chiamante (la sorgente squadre) come livello `segnala`: la riga esce lo
     # stesso. Costruirla prima del gate la faceva mentire (vedi `_diagnosi_colonne`).
-    diagnosi = _diagnosi_colonne(row, matched, mancanti, scarti, avvisi)
+    diagnosi = _diagnosi_colonne(row, matched, mancanti, scarti, avvisi,
+                                motivi_regola)
     # Il multi-riga (#35 pezzo 2): `righe` e' l'elenco delle righe GENERATE —
     # senza `config.multi` e' la sola base (comportamento storico), con le
     # righe di override e' la loro somma. I campi storici continuano a
@@ -3343,9 +3409,25 @@ def _giudica_riga(row_grezza, matched):
 # e `avvisi` — che sono gia' azionabili — cosi' non nasce un secondo catalogo da
 # tenere allineato fra i due motori. Identica a `MOTIVO_OBBLIGATORIA_VUOTA` in
 # engine.js, e il caso di parita' la confronta.
-def _motivo_obbligatoria_vuota(colonna):
-    return (f"{colonna}: e' obbligatoria ed e' vuota. Mappala su una sorgente che "
-            "legge dal messaggio, o nessuna riga verra' scritta nel feed.")
+def _motivo_obbligatoria_vuota(colonna, motivo_regola=''):
+    """Perche' questa obbligatoria e' vuota — e sono DUE cose diverse (#25).
+
+    Senza `motivo_regola` la colonna non e' mappata su nessuna sorgente, e il
+    consiglio giusto e' mapparla. CON `motivo_regola` la colonna e' mappata e la
+    regola non ha estratto niente: consigliare di mapparla sarebbe consigliare una
+    cosa gia' fatta, e la causa vera resterebbe taciuta. Era il difetto misurato
+    sulla #25 dopo il merge della PR #104, ed e' la forma della #328 del Bridge —
+    la causa formale al posto dell'azione.
+
+    Identica a `motivoObbligatoriaVuota` in engine.js; i casi di parita' le
+    confrontano per intero.
+    """
+    if motivo_regola:
+        return (f"{colonna}: e' obbligatoria ed e' rimasta vuota — {motivo_regola} "
+                "Finche' resta vuota, nessuna riga verra' scritta nel feed.")
+    return (f"{colonna}: e' obbligatoria e non e' mappata su nessuna sorgente. "
+            "Scegli una regola che legga dal messaggio, o nessuna riga verra' "
+            "scritta nel feed.")
 
 
 def _motivi_di(messaggi, colonna):
@@ -3372,7 +3454,7 @@ def cause_di_riga(scarti):
             if not any(str(s).split(':', 1)[0] == c for c in HEADERS)]
 
 
-def _diagnosi_colonne(row, matched, mancanti, scarti, avvisi):
+def _diagnosi_colonne(row, matched, mancanti, scarti, avvisi, motivi_regola=None):
     """La diagnosi PER COLONNA: 14 voci `{colonna, stato, motivo, valore}` (#25).
 
     Risponde alla domanda «perche' questa colonna e' cosi'» per **ognuna** delle
@@ -3416,15 +3498,25 @@ def _diagnosi_colonne(row, matched, mancanti, scarti, avvisi):
                      else row[HEADERS.index(colonna)])
         suoi_scarti = _motivi_di(scarti, colonna)
         suoi_avvisi = _motivi_di(avvisi, colonna)
+        # Il motivo della REGOLA che non ha estratto (#25): lo ha scritto il ramo
+        # di `_estrai_valore` che ha prodotto il vuoto. Vale solo su una colonna
+        # VUOTA — su un valore scartato non c'e' nessun vuoto da spiegare, e i due
+        # rami sotto hanno la precedenza.
+        della_regola = (motivi_regola or {}).get(colonna, '')
         if suoi_scarti:
             stato, motivo = 'blocca', ' '.join(suoi_scarti)
         elif matched and colonna in (mancanti or []):
-            stato, motivo = 'blocca', _motivo_obbligatoria_vuota(colonna)
+            stato = 'blocca'
+            motivo = _motivo_obbligatoria_vuota(colonna, della_regola)
         elif suoi_avvisi:
             # Non declassa mai un bloccante: i due rami sopra hanno gia' deciso.
             stato, motivo = 'segnala', ' '.join(suoi_avvisi)
         elif not _piatto(valore):
-            stato, motivo = 'vuota', ''
+            # `vuota` NON diventa un errore — una facoltativa vuota e' il caso
+            # normale (Price la mette XTrader) — ma se una regola c'era e non ha
+            # estratto, la cella «Motivo» lo dice invece di restare muta.
+            stato = 'vuota'
+            motivo = f'{colonna}: {della_regola}' if della_regola else ''
         else:
             stato, motivo = 'ok', ''
         voci.append({'colonna': colonna, 'stato': stato,
