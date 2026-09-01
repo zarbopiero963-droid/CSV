@@ -174,6 +174,31 @@ with sync_playwright() as pw:
         'anteprima live e prova server devono coincidere'
     shot(pg, '04-prova-k-su-n')
 
+    # ------------------------------------------------ 390px CON le N tabelle
+    # Il rischio segnalato da GPT-5.5 sulla PR #104: col multi attivo la prova
+    # rende UNA tabella «Diagnosi per colonna» per riga generata, tutte aperte
+    # quando c'e' una riga rotta. Tre tabelle a quattro colonne su 390px sono
+    # esattamente la forma che la regola 2 di CLAUDE.md dice di misurare, non di
+    # guardare: la pagina non deve scorrere in orizzontale, e la larghezza deve
+    # restare DENTRO i `.tbl-scroll`. La misura sta qui e non in fondo al flow
+    # perche' dopo il reload la vista prova non c'e' piu'.
+    pg.set_viewport_size({'width': 390, 'height': 844})
+    pg.wait_for_timeout(200)
+    aperte = pg.query_selector_all('#test-righe details[open]')
+    assert len(aperte) >= 1, 'la diagnosi della riga rotta deve essere aperta'
+    stretto = pg.evaluate(
+        'document.documentElement.scrollWidth - document.documentElement.clientWidth')
+    assert stretto <= 0, \
+        f'scroll orizzontale a 390px con le tabelle della diagnosi: {stretto}px'
+    # e la larghezza e' assorbita dai contenitori, non dal corpo della pagina
+    dentro = pg.evaluate(
+        '''Array.from(document.querySelectorAll('#test-righe .tbl-scroll'))
+             .every(d => getComputedStyle(d).overflowX !== 'visible')''')
+    assert dentro, 'le tabelle della diagnosi devono scorrere dentro il proprio contenitore'
+    shot(pg, '04b-mobile-diagnosi-per-riga')
+    pg.set_viewport_size({'width': 1420, 'height': 1000})
+    pg.wait_for_timeout(200)
+
     # ------------------------------------------------ salvataggio e riapertura
     pg.click('[data-act="wiz-save"]')
     pg.wait_for_selector('.toast')
