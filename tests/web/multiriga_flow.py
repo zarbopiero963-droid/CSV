@@ -183,7 +183,11 @@ with sync_playwright() as pw:
     # restare DENTRO i `.tbl-scroll`. La misura sta qui e non in fondo al flow
     # perche' dopo il reload la vista prova non c'e' piu'.
     pg.set_viewport_size({'width': 390, 'height': 844})
-    pg.wait_for_timeout(200)
+    # Attesa su CONDIZIONE, non a orologio: il resize non e' sincrono col
+    # relayout, e un timeout fisso e' la ricetta del flake in CI (rilievo non
+    # bloccante di Claude Fable 5 sulla PR #104). Qui si aspetta che il viewport
+    # sia davvero quello nuovo, poi si misura.
+    pg.wait_for_function('() => document.documentElement.clientWidth <= 390')
     aperte = pg.query_selector_all('#test-righe details[open]')
     assert len(aperte) >= 1, 'la diagnosi della riga rotta deve essere aperta'
     stretto = pg.evaluate(
@@ -197,7 +201,7 @@ with sync_playwright() as pw:
     assert dentro, 'le tabelle della diagnosi devono scorrere dentro il proprio contenitore'
     shot(pg, '04b-mobile-diagnosi-per-riga')
     pg.set_viewport_size({'width': 1420, 'height': 1000})
-    pg.wait_for_timeout(200)
+    pg.wait_for_function('() => document.documentElement.clientWidth > 390')
 
     # ------------------------------------------------ salvataggio e riapertura
     pg.click('[data-act="wiz-save"]')

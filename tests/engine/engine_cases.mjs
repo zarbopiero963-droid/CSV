@@ -920,6 +920,21 @@ function casiConfronto() {
     'P.Bet. Juventus - Milan Risultati: 1-0 2-1; fine',
     perDiagnosi(obbEstratte, { markets: [{ market_type: 'CORRECT_SCORE',
       selection_name: '', start_after: 'Risultati:', end_before: ';' }] }));
+  // Il ramo di rifiuto anticipato con ALTRE cause nella stessa riga
+  // ([REAL_FINDING] di Sol al gate finale): il motivo del ramo si somma al
+  // giudizio pieno, e i due motori devono sommare gli stessi motivi nello stesso
+  // ordine — un ordine diverso e' una diagnosi diversa per l'utente.
+  aggiungi('diagnosi: riga rifiutata CON quota invalida e obbligatoria vuota',
+    'P.Bet. 1-0 fine',
+    perDiagnosi({ ...obbEstratte,
+      EventName: { source: 'regex', pattern: '(NON C E)', group: 1 } },
+      { markets: [{ market_type: 'MATCH_ODDS', price: '0.5', selection_name: '',
+        start_after: 'P.Bet.', end_before: 'fine' }] }));
+  aggiungi('diagnosi: rifiuto per zero punteggi CON quota invalida',
+    'P.Bet. Juventus - Milan niente cifre fine',
+    perDiagnosi(obbEstratte, { markets: [{ market_type: 'CORRECT_SCORE',
+      price: '0.5', selection_name: '',
+      start_after: 'P.Bet.', end_before: 'fine' }] }));
   // C) messaggio non riconosciuto: nessuna colonna blocca, in entrambi.
   aggiungi('diagnosi: messaggio ignorato → nessuna colonna blocca',
     'oggi si parla di altro', perDiagnosi(obbEstratte));

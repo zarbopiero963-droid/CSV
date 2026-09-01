@@ -615,6 +615,16 @@ function generaRighe(message, config, matched, base, avvisi) {
     complete: missing.length === 0 && scarti.length === 0,
     diagnosi: diagnosiColonne(row, true, missing, scarti, avvisi),
   });
+  // Una riga rifiutata dai delimitatori: il motivo del ramo SOMMATO al giudizio
+  // pieno della riga. [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #104:
+  // con `missing=[]` e il solo scarto proprio, le altre cause della stessa riga
+  // sparivano dalla diagnosi — e la colonna veniva dichiarata SANA. Misurato: una
+  // riga rifiutata con quota `0.5` mostrava «Price: ok», un'affermazione falsa
+  // nella tabella che l'utente legge per correggere.
+  const rifiuto = (row, motivo) => {
+    const g = giudicaRiga(row, true);
+    return esito(g.row, g.missing, [motivo].concat(g.scarti));
+  };
   const multi = config.multi || {};
   const attive = [];
   // `Array.isArray`, non `|| []`: un `markets` non-lista faceva SOLLEVARE il
@@ -668,10 +678,10 @@ function generaRighe(message, config, matched, base, avvisi) {
       // mercati dei risultati esatti (tranello 4): fuori da li' e' un errore
       // di config SEGNALATO, non una scorciatoia e non una riga.
       if (!MERCATI_PUNTEGGI.includes(derivata[iMercato])) {
-        righe.push(esito(derivata, [], [
+        righe.push(rifiuto(derivata,
           'SelectionName: la selezione vuota con i delimitatori estrae i '
           + 'punteggi ed e\' ammessa solo su CORRECT_SCORE e HALF_TIME_SCORE: '
-          + 'questa riga non genera nulla.']));
+          + 'questa riga non genera nulla.'));
         continue;
       }
       // `[0-9]`, come nel gemello Python: in JS `\d` E' gia' solo ASCII, ma
@@ -680,15 +690,15 @@ function generaRighe(message, config, matched, base, avvisi) {
       const punteggi = segmento(message, dopo, prima)
         .match(/[0-9]+-[0-9]+/g) || [];
       if (!punteggi.length) {
-        righe.push(esito(derivata, [], [
-          'SelectionName: nessun punteggio N-N fra i delimitatori della riga.']));
+        righe.push(rifiuto(derivata,
+          'SelectionName: nessun punteggio N-N fra i delimitatori della riga.'));
         continue;
       }
       if (punteggi.length > MAX_PUNTEGGI_RIGA) {
-        righe.push(esito(derivata, [], [
+        righe.push(rifiuto(derivata,
           'SelectionName: troppi punteggi fra i delimitatori della riga ('
           + punteggi.length + ', massimo ' + MAX_PUNTEGGI_RIGA + '): '
-          + 'controlla i delimitatori.']));
+          + 'controlla i delimitatori.'));
         continue;
       }
       for (const punteggio of punteggi) {

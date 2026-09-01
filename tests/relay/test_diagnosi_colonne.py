@@ -317,3 +317,68 @@ def test_un_avviso_orfano_non_altera_nessuna_voce():
     riga = ['x'] * len(main.HEADERS)
     diagnosi = main._diagnosi_colonne(riga, True, [], [], ['non una colonna: nota'])
     assert {v['stato'] for v in diagnosi} == {'ok'}
+
+
+def test_i_rami_di_rifiuto_anticipato_giudicano_comunque_la_riga():
+    """[REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #104.
+
+    Le righe rifiutate PRIMA del giudizio (delimitatori: mercato incompatibile,
+    zero punteggi, troppi punteggi) costruivano il proprio esito con `missing=[]`
+    e il solo scarto della riga. Le altre cause della STESSA riga sparivano dalla
+    diagnosi — e non «sparivano» soltanto: la colonna veniva dichiarata sana.
+
+    Misurato prima della correzione, su una riga rifiutata dai delimitatori che
+    porta anche una obbligatoria vuota e una quota fuori intervallo:
+
+        missing = []
+        blocca  = ['SelectionName']
+        Price   = '0.5' → stato «ok»
+
+    `Price: ok` su un valore che XTrader non accetta e' peggio di un'omissione: e'
+    un'affermazione falsa nella tabella che l'utente legge per correggere. Il
+    verdetto della riga (`complete`) era gia' giusto — e' la SPIEGAZIONE a mentire,
+    cioe' proprio cio' per cui la #25 esiste."""
+    cfg = {'match': {'value': 'GOL'},
+           'columns': {
+               # regex che non trova nulla: EventName resta vuota nella riga
+               'EventName': {'source': 'regex', 'pattern': '(NON C E)', 'group': 1},
+               'MarketType': {'source': 'constant', 'value': 'MATCH_ODDS'},
+               'SelectionName': {'source': 'constant', 'value': 'Inter'},
+               'BetType': {'source': 'constant', 'value': 'PUNTA'}},
+           # selezione vuota + delimitatori su un mercato NON di punteggio:
+           # ramo di rifiuto anticipato. La riga porta anche una quota invalida.
+           'multi': {'markets': [{'market_type': 'MATCH_ODDS', 'price': '0.5',
+                                  'selection_name': '',
+                                  'start_after': 'GOL', 'end_before': 'fine'}]}}
+    riga = main.esegui_parser('GOL 1-0 fine', cfg)['righe'][0]
+    assert riga['complete'] is False
+    voci = {v['colonna']: v for v in riga['diagnosi']}
+    # lo scarto del ramo resta
+    assert voci['SelectionName']['stato'] == 'blocca', voci['SelectionName']
+    assert 'CORRECT_SCORE' in voci['SelectionName']['motivo']
+    # ...e le altre cause della stessa riga NON spariscono
+    assert voci['Price']['stato'] == 'blocca', \
+        f"Price 0.5 dichiarata sana: {voci['Price']}"
+    assert "fuori dall'intervallo" in voci['Price']['motivo'], voci['Price']
+    assert voci['EventName']['stato'] == 'blocca', voci['EventName']
+    assert 'EventName' in riga['missing'], riga['missing']
+
+
+def test_il_rifiuto_per_zero_punteggi_porta_le_altre_cause_della_riga():
+    """Stesso difetto, secondo ramo: nessun punteggio N-N fra i delimitatori. La
+    classe sono i tre rami di rifiuto anticipato, non il primo che si incontra."""
+    cfg = {'match': {'value': 'GOL'},
+           'columns': {
+               'EventName': {'source': 'regex', 'pattern': r'(Inter - Milan)', 'group': 1},
+               'MarketType': {'source': 'constant', 'value': 'CORRECT_SCORE'},
+               'SelectionName': {'source': 'constant', 'value': 'Inter'},
+               'BetType': {'source': 'constant', 'value': 'PUNTA'}},
+           'multi': {'markets': [{'market_type': 'CORRECT_SCORE', 'price': '0.5',
+                                  'selection_name': '',
+                                  'start_after': 'GOL', 'end_before': 'fine'}]}}
+    riga = main.esegui_parser('GOL Inter - Milan niente cifre fine', cfg)['righe'][0]
+    voci = {v['colonna']: v for v in riga['diagnosi']}
+    assert voci['SelectionName']['stato'] == 'blocca'
+    assert 'nessun punteggio' in voci['SelectionName']['motivo']
+    assert voci['Price']['stato'] == 'blocca', \
+        f"Price 0.5 dichiarata sana nel ramo «zero punteggi»: {voci['Price']}"

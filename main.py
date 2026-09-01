@@ -3531,6 +3531,23 @@ def _genera_righe(message, config, matched, base, avvisi=None):
                 'complete': not mancanti and not scarti,
                 'diagnosi': _diagnosi_colonne(row, True, mancanti, scarti, avvisi)}
 
+    def _rifiuto(row, motivo):
+        """Una riga rifiutata dai delimitatori: il motivo del ramo SOMMATO al
+        giudizio pieno della riga.
+
+        Non basta il motivo del ramo. [REAL_FINDING] di GPT-5.6 Sol al gate finale
+        della PR #104: con `missing=[]` e il solo scarto proprio, le altre cause
+        della stessa riga sparivano dalla diagnosi — e non solo sparivano, la
+        colonna veniva dichiarata SANA. Misurato: una riga rifiutata dai
+        delimitatori con quota `0.5` mostrava «Price: ok», cioe' un'affermazione
+        falsa nella tabella che l'utente legge per correggere. Il verdetto della
+        riga era gia' giusto: a mentire era la spiegazione, che e' esattamente
+        cio' per cui la #25 esiste.
+        """
+        giudizio = _giudica_riga(row, True)
+        return _esito(giudizio['row'], giudizio['missing'],
+                      [motivo] + giudizio['scarti'])
+
     for riga, mercato in attive:
         derivata = list(base['row'])
         # Le colonne SOVRASCRITTE dalla riga: per il gate #41 non contano come
@@ -3558,25 +3575,25 @@ def _genera_righe(message, config, matched, base, avvisi=None):
             derivata[i_prezzo] = _segmento(message, dopo, prima)
         if con_delimitatori and not sel_esplicita:
             if derivata[i_mercato] not in MERCATI_PUNTEGGI:
-                righe.append(_esito(derivata, [], [
+                righe.append(_rifiuto(derivata,
                     'SelectionName: la selezione vuota con i delimitatori '
                     'estrae i punteggi ed e\' ammessa solo su CORRECT_SCORE e '
-                    'HALF_TIME_SCORE: questa riga non genera nulla.']))
+                    'HALF_TIME_SCORE: questa riga non genera nulla.'))
                 continue
             # `[0-9]`, non `\\d`: in JS `\\d` e' solo ASCII, in Python
             # prenderebbe anche le cifre unicode — i due motori divergerebbero.
             punteggi = re.findall(r'[0-9]+-[0-9]+',
                                   _segmento(message, dopo, prima))
             if not punteggi:
-                righe.append(_esito(derivata, [], [
+                righe.append(_rifiuto(derivata,
                     'SelectionName: nessun punteggio N-N fra i delimitatori '
-                    'della riga.']))
+                    'della riga.'))
                 continue
             if len(punteggi) > MAX_PUNTEGGI_RIGA:
-                righe.append(_esito(derivata, [], [
+                righe.append(_rifiuto(derivata,
                     'SelectionName: troppi punteggi fra i delimitatori della '
                     f'riga ({len(punteggi)}, massimo {MAX_PUNTEGGI_RIGA}): '
-                    'controlla i delimitatori.']))
+                    'controlla i delimitatori.'))
                 continue
             for punteggio in punteggi:
                 per_punteggio = list(derivata)
