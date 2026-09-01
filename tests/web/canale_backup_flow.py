@@ -37,6 +37,7 @@ DATI = json.loads(pathlib.Path(sys.argv[3]).read_text(encoding='utf-8'))
 CANDIDATO = {'chat_id': '-1001222333444', 'titolo': 'Backup Piero'}
 errors = []
 corpi_conferma = []   # i corpi JSON ricevuti da POST .../conferma
+invii_backup = []     # i POST .../backup/invia ricevuti dal bottone «Invia backup ora»
 
 
 def _console(m):
@@ -79,10 +80,15 @@ with sync_playwright() as pw:
     def stub_prova(route):
         route.fulfill(json={'inviato': True})
 
+    def stub_invia(route):
+        invii_backup.append(route.request.method)
+        route.fulfill(json={'inviato': True})
+
     pg.route('**/api/admin/canale-backup', lambda r: (
         stub_rimuovi(r) if r.request.method == 'DELETE' else stub_stato(r)))
     pg.route('**/api/admin/canale-backup/conferma', stub_conferma)
     pg.route('**/api/admin/canale-backup/prova', stub_prova)
+    pg.route('**/api/admin/backup/invia', stub_invia)
 
     pg.goto(BASE)
     pg.wait_for_selector('nav a[href="#/richieste"]')
@@ -112,6 +118,15 @@ with sync_playwright() as pw:
     # 3) Prova sul configurato: un toast di conferma, console pulita.
     pg.locator('[data-act="prova-canale-backup"]').click()
     pg.wait_for_selector('.toast')
+
+    # 3-bis) «Invia backup ora» (#56 pezzo 3b): conferma nel modale → POST all'endpoint di
+    # invio (lo stesso del cron) → toast. È il bottone dell'invio manuale dalla sessione admin.
+    pg.locator('[data-act="invia-backup-ora"]').click()
+    pg.wait_for_selector('[data-act="invia-backup-ora-ok"]')
+    pg.click('[data-act="invia-backup-ora-ok"]')
+    pg.wait_for_selector('.toast:has-text("Backup inviato")')
+    assert invii_backup == ['POST'], f'l-invio manuale non ha fatto un solo POST: {invii_backup!r}'
+    pg.screenshot(path=str(OUT / '02b-inviato.png'), full_page=True)
 
     # 4) Rimozione, con conferma nel modale: si torna allo stato vuoto.
     pg.locator('[data-act="rimuovi-canale-backup"]').click()

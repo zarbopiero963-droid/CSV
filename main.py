@@ -7499,24 +7499,36 @@ def _valida_betfair(c, user_id, config):
 
 
 def _cattura_canale_backup(payload):
-    """Se il bot e' stato promosso amministratore di un canale, lo propone come CANDIDATO (#56 pezzo 2).
+    """Gestisce i `my_chat_member` che riguardano il canale di backup (#56 pezzi 2 e 3b).
 
-    Un `my_chat_member` con status administrator/creator, e **solo se e' l'amministratore
-    ad averlo promosso** (`from.id == TELEGRAM_ADMIN_ID`): un canale altrui non deve poter
-    comparire come proposta nel pannello del proprietario. E' esattamente l'atto richiesto
-    perche' il bot possa poi pubblicare i backup nel canale — il proprietario lo descrive
-    cosi': «il bot rileva il proprio ingresso nel canale e lo propone nel pannello per
-    conferma». (L'inoltro di un messaggio, l'altra opzione della #56, e' scartato: qualunque
-    post di canale inoltrato al bot avrebbe riconfigurato il candidato di soppiatto.)
+    Due eventi, un solo handler perche' arrivano sullo stesso tipo di update e vanno
+    serializzati fra loro e con la conferma:
 
-    Scrive **solo un candidato**: nessun backup parte da qui, e la conferma nel pannello
-    manda un messaggio di prova prima di salvarlo come canale configurato. Non tocca
-    `signals`, non cerca parser, non scrive in `chats`: il canale di backup e' una
-    DESTINAZIONE, non una sorgente di segnali, e finire in `chats` lo iscriverebbe
+    - **promozione** — il bot promosso amministratore/creatore di un canale PRIVATO, e
+      **solo se e' l'amministratore ad averlo promosso** (`from.id == TELEGRAM_ADMIN_ID`):
+      un canale altrui non deve poter comparire come proposta nel pannello del proprietario.
+      Scrive **solo un candidato** — nessun backup parte da qui, la conferma nel pannello
+      manda un messaggio di prova prima di salvarlo. SOLO canali PRIVATI: un canale pubblico
+      ha uno `username` (e' cosi' che lo si raggiunge) e il backup, che contiene i dati dei
+      clienti, non deve poter finire dove chiunque lo legge (Sol, #56);
+    - **rimozione** (#56 pezzo 3b, Fable) — il bot esce (`left`/`kicked`) dal canale
+      CONFIGURATO o dal CANDIDATO: la config va azzerata, o il pannello continuerebbe a
+      mostrare una destinazione dove il bot non puo' piu' postare e ogni backup fallirebbe
+      in silenzio. Un `my_chat_member` e' sempre sulla membership del bot, quindi lo stato
+      basta a saperlo; e agiamo SOLO se il canale e' il nostro (match su `chat_id`), cosi'
+      un estraneo che spinge il bot fuori da un suo canale non spegne il backup altrui.
+
+    In nessun caso tocca `signals`, cerca parser o scrive in `chats`: il canale di backup e'
+    una DESTINAZIONE, non una sorgente di segnali, e finire in `chats` lo iscriverebbe
     all'instradamento del webhook — la regola non negoziabile del filtro delle chat.
 
-    Restituisce un dict da consegnare a Telegram se ha catturato qualcosa, altrimenti
-    `None` e il webhook prosegue col suo percorso normale.
+    **Dedup per `update_id`** (Sol B1, #56 pezzo 3b): come il percorso dei segnali, l'update
+    gia' visto esce come `duplicate` e non riscrive niente. Chiude la riconsegna che
+    farebbe risorgere un candidato di un canale gia' abbandonato. Il marker viaggia nella
+    STESSA transazione dell'effetto (crash-safe), come in `_elabora_consegna`.
+
+    Restituisce un dict da consegnare a Telegram se ha gestito l'update, altrimenti `None`
+    e il webhook prosegue col suo percorso normale.
 
     SINCRONA e da chiamare FUORI dall'event loop (`asyncio.to_thread`): prende il lock di
     scrittura con `BEGIN IMMEDIATE`, e sull'event loop l'attesa del lock sotto contesa
@@ -7528,39 +7540,71 @@ def _cattura_canale_backup(payload):
     attore = str((aggiornamento.get('from') or {}).get('id') or '')
     stato = (aggiornamento.get('new_chat_member') or {}).get('status') or ''
     ch = aggiornamento.get('chat') or {}
-    # SOLO canali PRIVATI. Il backup contiene i dati dei clienti (token come hash); un
-    # canale pubblico li esporrebbe a chiunque. Un canale pubblico ha uno `username`
-    # (e' cosi' che lo si raggiunge), uno privato no: rifiutare quelli con username tiene
-    # la destinazione privata gia' alla cattura, prima ancora della conferma. Bloccante
-    # di GPT-5.6 Sol al gate finale (#56).
-    if not (attore == TELEGRAM_ADMIN_ID and (ch.get('type') or '') == 'channel'
-            and stato in ('administrator', 'creator') and not ch.get('username')):
-        return None
     chat_id = str(ch.get('id') or '')
     if not chat_id:
+        return None
+    update_id = str(payload.get('update_id') or '')
+    promozione = (attore == TELEGRAM_ADMIN_ID and (ch.get('type') or '') == 'channel'
+                  and stato in ('administrator', 'creator') and not ch.get('username'))
+    rimozione = stato in ('left', 'kicked')
+    if not (promozione or rimozione):
         return None
     titolo = (ch.get('title') or '').strip()
     c = db()
     try:
-        # Controllo e scrittura ATOMICI, sotto `BEGIN IMMEDIATE`. Senza, la coppia
-        # «leggi il configurato / scrivi il candidato» ha una finestra: questa cattura gira
-        # nel loop e PRIMA del dedup di `webhook_seen`, mentre la conferma gira in un thread
-        # del pool — e sqlite rilascia il GIL durante l'I/O. Una riconsegna poteva leggere
-        # «non configurato», la conferma configurare nel frattempo, e la riconsegna riscrivere
-        # il candidato gia' consumato. BEGIN IMMEDIATE prende il lock di scrittura e serializza
-        # con la conferma (anch'essa BEGIN IMMEDIATE): o l'una o l'altra, mai intrecciate.
-        # Se il canale e' GIA' quello configurato, una riconsegna non ripropone una proposta
-        # gia' consumata. Bloccante di GPT-5.6 Sol; la guardia sequenziale l'aveva vista Fable.
+        # Controllo, scrittura e marker del dedup ATOMICI, sotto `BEGIN IMMEDIATE`. Senza, la
+        # coppia «leggi il configurato / scrivi» ha una finestra: questo handler gira PRIMA del
+        # dedup del percorso segnali, mentre la conferma gira in un thread del pool — e sqlite
+        # rilascia il GIL durante l'I/O. Una riconsegna poteva leggere «non configurato», la
+        # conferma configurare nel frattempo, e la riconsegna riscrivere il candidato gia'
+        # consumato. BEGIN IMMEDIATE prende il lock di scrittura e serializza con la conferma
+        # (anch'essa BEGIN IMMEDIATE): o l'una o l'altra, mai intrecciate. Bloccante di GPT-5.6
+        # Sol; la guardia sequenziale l'aveva vista Fable.
         c.execute('BEGIN IMMEDIATE')
-        if leggi_impostazione(c, CHIAVE_CANALE_BACKUP_ID) == chat_id:
+        if update_id and c.execute('SELECT 1 FROM webhook_seen WHERE update_id=?',
+                                   (update_id,)).fetchone():
             c.rollback()
+            return {'ok': True, 'ignored': 'duplicate'}
+        if rimozione:
+            # Pulizia SOLO del canale nostro: se il `left`/`kicked` non riguarda ne' il
+            # configurato ne' il candidato, non e' affar nostro — rollback e passthrough.
+            tocca_conf = leggi_impostazione(c, CHIAVE_CANALE_BACKUP_ID) == chat_id
+            tocca_cand = leggi_impostazione(c, CHIAVE_CANALE_CANDIDATO_ID) == chat_id
+            if not (tocca_conf or tocca_cand):
+                c.rollback()
+                return None
+            if tocca_conf:
+                cancella_impostazione(c, CHIAVE_CANALE_BACKUP_ID)
+                cancella_impostazione(c, CHIAVE_CANALE_BACKUP_TITOLO)
+            if tocca_cand:
+                cancella_impostazione(c, CHIAVE_CANALE_CANDIDATO_ID)
+                cancella_impostazione(c, CHIAVE_CANALE_CANDIDATO_TITOLO)
+            _segna_update_visto(c, update_id)
+            c.commit()
+            return {'ok': True, 'canale_backup_rimosso': True}
+        # promozione: se il canale e' GIA' quello configurato, una riconsegna non ripropone
+        # una proposta gia' consumata.
+        if leggi_impostazione(c, CHIAVE_CANALE_BACKUP_ID) == chat_id:
+            _segna_update_visto(c, update_id)
+            c.commit()
             return {'ok': True, 'canale_backup_gia_configurato': True}
         scrivi_impostazione(c, CHIAVE_CANALE_CANDIDATO_ID, chat_id)
         scrivi_impostazione(c, CHIAVE_CANALE_CANDIDATO_TITOLO, titolo)
+        _segna_update_visto(c, update_id)
         c.commit()
     finally:
         c.close()
     return {'ok': True, 'canale_backup_candidato': True}
+
+
+def _segna_update_visto(c, update_id):
+    """Marca un `update_id` come gia' elaborato, nella transazione in corso. No-op se vuoto.
+
+    Stesso registro (`webhook_seen`) e stessa `INSERT OR IGNORE` del percorso segnali: un
+    `update_id` e' unico per update in tutto Telegram, quindi un `my_chat_member` e un
+    messaggio non collidono mai."""
+    if update_id:
+        c.execute('INSERT OR IGNORE INTO webhook_seen(update_id) VALUES (?)', (update_id,))
 
 
 @app.post('/telegram/webhook')

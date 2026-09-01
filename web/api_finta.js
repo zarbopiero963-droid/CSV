@@ -122,6 +122,7 @@ export async function statoCanaleBackup() { _non_admin(); }
 export async function confermaCanaleBackup() { _non_admin(); }
 export async function provaCanaleBackup() { _non_admin(); }
 export async function rimuoviCanaleBackup() { _non_admin(); }
+export async function inviaBackupOra() { _non_admin(); }
 
 /* ----------------------------------------------------------------- parser */
 

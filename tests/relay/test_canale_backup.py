@@ -75,17 +75,45 @@ def _corpo(risposta):
     return json.loads(bytes(risposta.body).decode())
 
 
-def _promozione(chat_id, titolo, attore=None, username=None):
+def _promozione(chat_id, titolo, attore=None, username=None, update_id=None):
     """Un update `my_chat_member`: il bot promosso amministratore di un canale.
 
-    `username` presente = canale PUBBLICO (i privati non ne hanno)."""
+    `username` presente = canale PUBBLICO (i privati non ne hanno). `update_id`, se dato,
+    e' la chiave con cui Telegram identifica l'update: due consegne con lo STESSO
+    `update_id` sono la stessa riconsegna, e il dedup deve trattarle come una sola."""
     chat = {'id': chat_id, 'type': 'channel', 'title': titolo}
     if username:
         chat['username'] = username
-    return {'my_chat_member': {
+    payload = {'my_chat_member': {
         'from': {'id': int(attore if attore is not None else ADMIN_FINTO)},
         'chat': chat,
         'new_chat_member': {'status': 'administrator'}}}
+    if update_id is not None:
+        payload['update_id'] = update_id
+    return payload
+
+
+def _rimozione(chat_id, titolo='X', stato='left', attore=None, update_id=None):
+    """Un update `my_chat_member` che RIMUOVE il bot da un canale (`left`/`kicked`).
+
+    `my_chat_member` e' sempre un aggiornamento sulla membership del bot stesso, quindi
+    non serve identificare l'utente: se lo stato nuovo e' `left`/`kicked`, il bot non e'
+    piu' nel canale e non ci puo' piu' pubblicare i backup."""
+    payload = {'my_chat_member': {
+        'from': {'id': int(attore if attore is not None else ADMIN_FINTO)},
+        'chat': {'id': chat_id, 'type': 'channel', 'title': titolo},
+        'new_chat_member': {'status': stato}}}
+    if update_id is not None:
+        payload['update_id'] = update_id
+    return payload
+
+
+def _configura(admin_s, monkeypatch, chat_id, titolo='Backup'):
+    """Configura un canale come quello di backup, per la via reale (candidato + conferma)."""
+    _metti_candidato(chat_id, titolo)
+    monkeypatch.setattr(main, 'invia_messaggio_telegram',
+                        lambda chat_id, testo, bot_token=None: (True, None))
+    _conferma(admin_s, chat_id)
 
 
 # ---------------------------------------------------------------- la cattura
@@ -282,6 +310,82 @@ def test_un_my_chat_member_ignorato_passa_senza_scrivere_nulla(tmp_path, monkeyp
     finally:
         c.close()
     assert n == 0, 'un my_chat_member ignorato ha lasciato una riga in webhook_seen con chat_id vuoto'
+
+
+# ------------------------------------------ dedup e pulizia del ciclo di vita (#56 pezzo 3b)
+
+def test_una_riconsegna_con_lo_stesso_update_id_non_riscrive_il_candidato(tmp_path, monkeypatch):
+    """Dedup della cattura per `update_id` (Sol B1, #56). Il bot viene promosso (candidato
+    scritto), poi il candidato viene tolto (qui: il bot rimosso dal canale). Se Telegram
+    RICONSEGNA la promozione ORIGINALE — stesso `update_id` — il candidato NON deve
+    risorgere: quell'update e' gia' stato elaborato.
+
+    Fail-first: senza il dedup su `webhook_seen` la riconsegna riscrive il candidato per un
+    canale da cui il bot e' gia' uscito."""
+    percorso, _admin_s, _c, _u = _admin(tmp_path, monkeypatch, 'dedup_cattura.db')
+    _abilita_webhook(monkeypatch)
+
+    esito = _webhook(_promozione(CANALE, 'Backup', update_id=4242))
+    assert esito.get('canale_backup_candidato') is True, esito
+    assert _impostazione(percorso, main.CHIAVE_CANALE_CANDIDATO_ID) == str(CANALE)
+
+    # il bot esce dal canale: il candidato viene ripulito (update_id diverso)
+    _webhook(_rimozione(CANALE, update_id=4243))
+    assert _impostazione(percorso, main.CHIAVE_CANALE_CANDIDATO_ID) is None
+
+    # Telegram riconsegna la promozione ORIGINALE (stesso update_id): deve essere un duplicato
+    esito2 = _webhook(_promozione(CANALE, 'Backup', update_id=4242))
+    assert esito2.get('ignored') == 'duplicate', esito2
+    assert _impostazione(percorso, main.CHIAVE_CANALE_CANDIDATO_ID) is None, \
+        'una riconsegna con lo stesso update_id ha fatto risorgere il candidato'
+
+
+def test_il_bot_rimosso_dal_canale_CONFIGURATO_pulisce_la_config(tmp_path, monkeypatch):
+    """Il bot rimosso (`left`/`kicked`) dal canale CONFIGURATO → la config si azzera (Fable, #56).
+
+    Se non si pulisce, il pannello continua a mostrare un canale dove il bot non puo' piu'
+    postare e ogni backup fallisce in silenzio finche' qualcuno non se ne accorge.
+
+    Fail-first: senza la pulizia il canale resta configurato dopo che il bot ne e' uscito."""
+    percorso, admin_s, _c, _u = _admin(tmp_path, monkeypatch, 'pulizia_conf.db')
+    _abilita_webhook(monkeypatch)
+    _configura(admin_s, monkeypatch, CANALE, 'Backup')
+    assert _impostazione(percorso, main.CHIAVE_CANALE_BACKUP_ID) == str(CANALE)
+
+    esito = _webhook(_rimozione(CANALE, stato='kicked'))
+    assert esito.get('canale_backup_rimosso') is True, esito
+    assert _impostazione(percorso, main.CHIAVE_CANALE_BACKUP_ID) is None, \
+        'il canale e- rimasto configurato dopo che il bot ne e- uscito'
+    assert _impostazione(percorso, main.CHIAVE_CANALE_BACKUP_TITOLO) is None
+
+
+def test_il_bot_rimosso_dal_canale_CANDIDATO_pulisce_il_candidato(tmp_path, monkeypatch):
+    """Speculare del precedente sul CANDIDATO non ancora confermato: se il bot esce, la
+    proposta va tolta, o il pannello inviterebbe a confermare un canale gia' abbandonato."""
+    percorso, _admin_s, _c, _u = _admin(tmp_path, monkeypatch, 'pulizia_cand.db')
+    _abilita_webhook(monkeypatch)
+    _webhook(_promozione(CANALE, 'Backup'))
+    assert _impostazione(percorso, main.CHIAVE_CANALE_CANDIDATO_ID) == str(CANALE)
+
+    esito = _webhook(_rimozione(CANALE, stato='left'))
+    assert esito.get('canale_backup_rimosso') is True, esito
+    assert _impostazione(percorso, main.CHIAVE_CANALE_CANDIDATO_ID) is None, \
+        'il candidato e- rimasto dopo che il bot e- uscito dal canale'
+
+
+def test_il_bot_rimosso_da_un_canale_ESTRANEO_non_tocca_la_config(tmp_path, monkeypatch):
+    """La pulizia agisce SOLO sul canale nostro: un `left` da un canale diverso da quello
+    configurato/candidato non deve azzerare niente, e prosegue nel percorso normale (`no_text`).
+    Guardia contro l'eccesso di pulizia — un estraneo che spinge il bot fuori da un suo canale
+    non deve poter spegnere il backup del proprietario."""
+    percorso, admin_s, _c, _u = _admin(tmp_path, monkeypatch, 'estraneo_left.db')
+    _abilita_webhook(monkeypatch)
+    _configura(admin_s, monkeypatch, CANALE, 'Backup')
+
+    esito = _webhook(_rimozione(ALTRO_CANALE, stato='left'))
+    assert esito == {'ok': True, 'ignored': 'no_text'}, esito
+    assert _impostazione(percorso, main.CHIAVE_CANALE_BACKUP_ID) == str(CANALE), \
+        'un left da un canale estraneo ha azzerato la config del canale nostro'
 
 
 # ---------------------------------------------------------------- le rotte
