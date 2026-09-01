@@ -117,6 +117,9 @@ ROTTE_CON_AUTENTICAZIONE_PROPRIA = {
     ('POST', '/api/admin/canale-backup/conferma'): 404,
     ('POST', '/api/admin/canale-backup/prova'): 404,
     ('DELETE', '/api/admin/canale-backup'): 404,
+    # Invio del backup al canale (#56 pezzo 3): sessione admin OPPURE token del cron. Senza
+    # nessuno dei due (e senza token configurato nell'ambiente di test) → **404**, come il resto.
+    ('POST', '/api/admin/backup/invia'): 404,
     # I parser dell'utente: autenticazione a SESSIONE, non col token del feed. Senza
     # cookie valido → 401 come `/api/me`. Le due rotte col corpo (POST, PUT) lo leggono
     # a mano DOPO il controllo della sessione, o FastAPI risponderebbe 422 al corpo
