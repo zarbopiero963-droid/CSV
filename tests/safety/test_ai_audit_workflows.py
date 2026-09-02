@@ -1595,6 +1595,30 @@ CODE_MULTIRIGA = [
      '+ const password = "aperta\n+ FRAMMENTO";\n+ dopo'),
     ('YAML annidato su due livelli',
      'config:\n  auth:\n    password: "aperta\n    FRAMMENTO"\n  altro: 1'),
+    # I tre [REAL_FINDING] del quinto giro del gate, tutti verificati sul codice
+    # prima di correggere. Vengono da Fable (il primo) e da Sol (gli altri due).
+    #
+    # 1. Il prefisso di dichiarazione era ammesso da `APRE_QUOTATO` ma NON dalla
+    #    regola ancorata della tabella: la passata redigeva le righe seguenti e la
+    #    coda della PRIMA riga usciva. Una protezione che sembra esserci e ha un
+    #    buco dove si guarda meno — la forma peggiore.
+    ('prefisso di dichiarazione, coda sulla PRIMA riga',
+     '+ export password="abc FRAMMENTO-1\n+ FRAMMENTO-2"\n+ fine'),
+    ('const, coda sulla PRIMA riga',
+     '+ const secret = "abc FRAMMENTO-1\n+ FRAMMENTO-2"\n+ fine'),
+    # 2. Le TRIPLE virgolette venivano lette come una stringa vuota — apre e chiude
+    #    sulle prime due — e il corpo restava. E' la forma in cui si scrivono le
+    #    chiavi private e i certificati.
+    ('triple virgolette',
+     'password = """FRAMMENTO-A\nFRAMMENTO-B\n"""\nfine'),
+    ('triple apici',
+     'api_key = ' + chr(39) * 3 + 'FRAMMENTO-C\nFRAMMENTO-D\n' + chr(39) * 3 + '\nfine'),
+    # 3. Oltre il tetto di righe la coda tornava in chiaro. Una catena di
+    #    certificati supera comodamente qualunque numero scelto a occhio: adesso il
+    #    limite e' il confine di diff, e il tetto resta solo come guardia anti-fuga.
+    ('valore lungo oltre le 40 righe di tetto',
+     '+ password: "inizio\n' + '\n'.join('+ riga%d' % i for i in range(45))
+     + '\n+ FRAMMENTO-LONTANO"\n+ fine'),
     ('JSON annidato',
      '{\n  "auth": {\n    "api_key": "aperta\n    FRAMMENTO"\n  }\n}'),
 ]

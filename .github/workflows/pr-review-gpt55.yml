@@ -256,6 +256,13 @@ jobs:
               # la classe di consumazione la esclude gia', quindi `<espressione>,coda`
               # usciva in chiaro anche prima.
               (re.compile(r"""\$\{\{[^{}]*\}\}(?=[^\s"'\)\]\}>,;])[^\s"',;]*"""), "[REDACTED_VALORE_INCOLLATO]"),
+              # Le TRIPLE virgolette per prime, e la ragione e- che senza questa
+              # riga la regola del valore chiuso qui sopra le vede come una stringa
+              # VUOTA — apre e chiude sulle prime due — e lascia il corpo nel
+              # payload. Riguarda soprattutto chiavi private e certificati, che si
+              # scrivono cosi-. [REAL_FINDING] di GPT-5.6 Sol sulla PR #107,
+              # misurato prima di correggere: il corpo usciva quasi intero.
+              (re.compile(r"(?im)^([+\- ]?\s*(?:export|set|setx|declare|local|readonly|const|let|var)?\s*[\"']?(?:api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)[\"']?)\s*[:=]\s*(?![\"']?\s*\$\{\{[^{}]*\}\}[\"']?[ \t]*(?:\r?\n|\Z))(?:\"\"\"|''')[^\r\n]*(?=\r?\n|\Z)"), r"\1=[REDACTED]"),
               # Esenta le espressioni di GitHub Actions, cioe' la forma
               # dollaro-graffa-graffa: un riferimento a un Secret e' un PUNTATORE al
               # segreto, non il segreto. Senza l'esenzione questa regola trasformava una
@@ -323,7 +330,14 @@ jobs:
               # riceveva codice troncato e ne deduceva difetti inesistenti — la
               # classe di difetto del 12/08/2026. MISURATO sul file vero; la prima
               # misura non l-aveva visto perche- quel file mancava dall-insieme.
-              (re.compile(r"(?im)^([+\- ]?\s*[\"']?(?:api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)[\"']?)\s*[:=]\s*(?![\"']?\s*\$\{\{[^{}]*\}\}[\"']?[ \t]*(?:\r?\n|\Z))[\"'][^\r\n]*(?=\r?\n|\Z)"), r"\1=[REDACTED]"),
+              # Il valore quotato che sulla riga non si chiude, fino a fine riga.
+              # I prefissi di dichiarazione ammessi DEVONO essere gli stessi di
+              # `APRE_QUOTATO`: se la passata multiriga riconosce `export` e questa
+              # regola no, la coda della PRIMA riga esce in chiaro mentre le
+              # successive vengono redatte — una protezione che sembra esserci e ha
+              # un buco esattamente dove si guarda meno. [REAL_FINDING] di Claude
+              # Fable 5 sulla PR #107, misurato: la coda della prima riga usciva.
+              (re.compile(r"(?im)^([+\- ]?\s*(?:export|set|setx|declare|local|readonly|const|let|var)?\s*[\"']?(?:api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)[\"']?)\s*[:=]\s*(?![\"']?\s*\$\{\{[^{}]*\}\}[\"']?[ \t]*(?:\r?\n|\Z))[\"'][^\r\n]*(?=\r?\n|\Z)"), r"\1=[REDACTED]"),
               (re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)\s*[:=]\s*(?![\"']?\s*\$\{\{[^{}]*\}\}[\"']?[ \t]*(?:\r?\n|\Z))[\"']?[^\"'\s,;]+"), r"\1=[REDACTED]"),
           ]
 
@@ -355,19 +369,33 @@ jobs:
               r"""(?i)^[+\- ]?\s*(?:export|set|setx|declare|local|readonly|const|let|var)?\s*["']?"""
               r"""(?:api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)"""
               r"""["']?\s*[:=]\s*"""
-              r"""(?!["']?\s*\$\{\{[^{}]*\}\}["']?[ \t]*$)(["'])"""
+              # Le TRIPLE per prime nell'alternativa, o l'apice singolo vincerebbe
+              # e il valore risulterebbe chiuso sulle prime due virgolette. E' lo
+              # stesso difetto della tabella, un livello piu' in la'.
+              r"""(?!["']?\s*\$\{\{[^{}]*\}\}["']?[ \t]*$)(\"\"\"|'''|["'])"""
           )
           CONFINE_DIFF = re.compile(r"^(?:diff --git |index |@@|\+\+\+ |--- |Binary files )")
-          TETTO_RIGHE_CODA = 40
+          # Il limite vero e' il CONFINE DI DIFF, non un numero scelto a occhio:
+          # una chiave privata o una catena di certificati supera comodamente
+          # qualunque tetto, e alla riga dopo la coda tornava in chiaro.
+          # [REAL_FINDING] di GPT-5.6 Sol sulla PR #107, misurato con 45 righe.
+          # Questo resta solo come guardia contro una fuga senza fine su un testo
+          # che non e' un diff e quindi non ha confini.
+          TETTO_RIGHE_CODA = 5000
 
-          def _chiude_sulla_riga(riga: str, apice: str, da: int) -> bool:
-              """La virgoletta di chiusura c'e' su questa riga? Gli escape non contano."""
+          def _chiude_sulla_riga(riga: str, delimitatore: str, da: int) -> bool:
+              """Il delimitatore di chiusura c'e' su questa riga? Gli escape non contano.
+
+              `delimitatore` puo' essere lungo tre caratteri: una chiave privata o
+              un certificato si scrivono fra triple virgolette, e cercare un solo
+              carattere li dichiarerebbe chiusi sulla seconda. [REAL_FINDING] di
+              GPT-5.6 Sol sulla PR #107."""
               i, n = da, len(riga)
               while i < n:
                   if riga[i] == "\\":
                       i += 2
                       continue
-                  if riga[i] == apice:
+                  if riga.startswith(delimitatore, i):
                       return True
                   i += 1
               return False
