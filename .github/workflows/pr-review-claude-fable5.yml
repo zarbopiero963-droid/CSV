@@ -171,7 +171,7 @@ jobs:
           MAX_PATCH_PER_FILE_CHARS = int(os.environ.get("MAX_PATCH_PER_FILE_CHARS", "5000"))
           MAX_TOTAL_PATCH_CHARS = int(os.environ.get("MAX_TOTAL_PATCH_CHARS", "16000"))
           # Tier-2: usati SOLO se il tetto basso ha troncato il diff (vedi build_patch_payload).
-          MAX_PATCH_PER_FILE_CHARS_ESCALATED = int(os.environ.get("MAX_PATCH_PER_FILE_CHARS_ESCALATED", "15000"))
+          MAX_PATCH_PER_FILE_CHARS_ESCALATED = int(os.environ.get("MAX_PATCH_PER_FILE_CHARS_ESCALATED", "30000"))
           MAX_TOTAL_PATCH_CHARS_ESCALATED = int(os.environ.get("MAX_TOTAL_PATCH_CHARS_ESCALATED", "60000"))
           MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "3000"))
 
@@ -271,6 +271,13 @@ jobs:
               # la classe di consumazione la esclude gia', quindi `<espressione>,coda`
               # usciva in chiaro anche prima.
               (re.compile(r"""\$\{\{[^{}]*\}\}(?=[^\s"'\)\]\}>,;])[^\s"',;]*"""), "[REDACTED_VALORE_INCOLLATO]"),
+              # Le TRIPLE virgolette per prime, e la ragione e- che senza questa
+              # riga la regola del valore chiuso qui sopra le vede come una stringa
+              # VUOTA — apre e chiude sulle prime due — e lascia il corpo nel
+              # payload. Riguarda soprattutto chiavi private e certificati, che si
+              # scrivono cosi-. [REAL_FINDING] di GPT-5.6 Sol sulla PR #107,
+              # misurato prima di correggere: il corpo usciva quasi intero.
+              (re.compile(r"(?im)^([+\- ]?\s*(?:export|set|setx|declare|local|readonly|const|let|var)?\s*[\"']?(?:[A-Za-z0-9_.-]*[_.-])?(?:api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)[\"']?)\s*[:=]\s*(?![\"']?\s*\$\{\{[^{}]*\}\}[\"']?[ \t]*(?:\r?\n|\Z))(?:\"\"\"|''')[^\r\n]*(?=\r?\n|\Z)"), r"\1=[REDACTED]"),
               # Esenta le espressioni di GitHub Actions, cioe' la forma
               # dollaro-graffa-graffa: un riferimento a un Secret e' un PUNTATORE al
               # segreto, non il segreto. Senza l'esenzione questa regola trasformava una
@@ -296,10 +303,157 @@ jobs:
               # puntatore, e' un segreto, e nessun altro pattern della tabella lo
               # riconosce. Segnalato da CodeRabbit.
               # Il VALORE vero resta redatto: lo verifica un test dedicato.
+              # Il valore QUOTATO viene redatto fino alla virgoletta di CHIUSURA, e
+              # questa regola deve stare PRIMA di quella qui sotto, che si ferma al
+              # primo spazio. [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR
+              # #107, misurato prima di correggere:
+              #   in   password: "abc def ghi-segreto"
+              #   out  password=[REDACTED] def ghi-segreto"
+              # cioe' la CODA del segreto usciva verso il fornitore esterno. Vale per
+              # qualunque valore con spazi dentro le virgolette: una passphrase, una
+              # connection string, un token con separatori.
+              #
+              # Perche' una regola in piu' invece di allargare quella sotto: il
+              # 12/08/2026 una regola troppo larga ha prodotto payload ROTTI — la
+              # matrice di pytest, scritta con un'espressione di Actions dentro le
+              # parentesi, usciva come `name: pytest ([REDACTED_VALORE_INCOLLATO]`
+              # con la parentesi spaiata, e i modelli concludevano che qualcuno
+              # avesse incollato un segreto. Qui il confine e' la virgoletta di
+              # chiusura, quindi il taglio e' esatto e il caso non quotato resta
+              # com'era. Il lookahead sui puntatori ai Secret e' lo stesso della
+              # regola sotto: un riferimento a un Secret non e' un segreto.
+              #
+              # NB: qui le espressioni di Actions si DESCRIVONO, non si scrivono.
+              # Actions le interpola anche dentro `run:` e dentro i commenti; questo
+              # commento le conteneva, e i cinque workflow avrebbero smesso di
+              # caricarsi. L'ha preso `test_lo_script_non_contiene_espressioni_di_
+              # actions_letterali`, che esiste esattamente per questo.
+              (re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)\s*[:=]\s*(?![\"']?\s*\$\{\{[^{}]*\}\}[\"']?[ \t]*(?:\r?\n|\Z))([\"'])(?:\\.|(?!\2).)*\2"), r"\1=[REDACTED]"),
+              # ...e il valore quotato che sulla riga non si chiude AFFATTO: si
+              # redige fino a fine riga. Senza questa, una chiave seguita da
+              # una virgoletta e da un valore con spazi cadeva sulla regola
+              # generica qui sotto, che si ferma al primo spazio e lasciava
+              # uscire tutto il resto del valore. (L'esempio non lo scrivo per
+              # esteso: questa stessa regola lo redigerebbe nel diff, e chi
+              # legge vedrebbe un buco al posto della spiegazione.)
+              # Il taglio resta dentro la
+              # riga: attraversare i ritorni a capo e' la forma che il 12/08/2026
+              # produsse payload rotti, e non si rifa'.
+              # La chiave deve APRIRE la riga. Senza questo vincolo la regola
+              # mordeva `web/api.js`, dove una concatenazione di URL apre una
+              # virgoletta a meta' riga che sulla riga non si chiude: il modello
+              # riceveva codice troncato e ne deduceva difetti inesistenti — la
+              # classe di difetto del 12/08/2026. MISURATO sul file vero; la prima
+              # misura non l-aveva visto perche- quel file mancava dall-insieme.
+              # Il valore quotato che sulla riga non si chiude, fino a fine riga.
+              # I prefissi di dichiarazione ammessi DEVONO essere gli stessi di
+              # `APRE_QUOTATO`: se la passata multiriga riconosce `export` e questa
+              # regola no, la coda della PRIMA riga esce in chiaro mentre le
+              # successive vengono redatte — una protezione che sembra esserci e ha
+              # un buco esattamente dove si guarda meno. [REAL_FINDING] di Claude
+              # Fable 5 sulla PR #107, misurato: la coda della prima riga usciva.
+              (re.compile(r"(?im)^([+\- ]?\s*(?:export|set|setx|declare|local|readonly|const|let|var)?\s*[\"']?(?:[A-Za-z0-9_.-]*[_.-])?(?:api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)[\"']?)\s*[:=]\s*(?![\"']?\s*\$\{\{[^{}]*\}\}[\"']?[ \t]*(?:\r?\n|\Z))[\"'][^\r\n]*(?=\r?\n|\Z)"), r"\1=[REDACTED]"),
               (re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)\s*[:=]\s*(?![\"']?\s*\$\{\{[^{}]*\}\}[\"']?[ \t]*(?:\r?\n|\Z))[\"']?[^\"'\s,;]+"), r"\1=[REDACTED]"),
           ]
 
+          # La CODA di un valore quotato che si apre su una riga e si chiude su
+          # un'altra. Le regole della tabella sono orientate alla riga — di
+          # proposito: una regex che attraversa i ritorni a capo e' la forma che il
+          # 12/08/2026 produsse payload rotti e bloccanti inventati. Questa passata
+          # chiude il caso multiriga SENZA quella forma, con tre vincoli:
+          #
+          #  1. la chiave deve APRIRE la riga (dopo il prefisso di diff e
+          #     l'indentazione): una vera assegnazione di configurazione, non un
+          #     frammento in mezzo al codice. Senza questo vincolo la prima versione
+          #     mangiava 5 righe di `web/api.js`, dove `'?token=' + encode(...)`
+          #     apre una virgoletta che sulla riga non si chiude — MISURATO;
+          #  2. non si attraversa mai un confine di diff;
+          #  3. c'e' un tetto di righe.
+          #
+          # [REAL_FINDING] di GPT-5.6 Sol al gate della PR #107, terzo giro sulla
+          # stessa area. Misurato dopo: su 1.545.388 caratteri di testo reale del
+          # repository tocca 4 righe, tutte payload finti del file di test, dove
+          # redigere e' il comportamento giusto.
+          APRE_QUOTATO = re.compile(
+              # Un piccolo insieme di parole di dichiarazione puo' precedere la
+              # chiave e non spezza l'ancoraggio a inizio riga: `export SECRET="..."`
+              # e' una forma comune negli script e nei file d'ambiente, e senza questo
+              # restava scoperta. Segnalato come residuo da GPT-5.5 sulla PR #107 e
+              # misurato: prima SCOPERTO, dopo coperto, e zero righe in piu' morse su
+              # tutti i file del repository.
+              r"""(?i)^[+\- ]?\s*(?:export|set|setx|declare|local|readonly|const|let|var)?\s*["']?"""
+              r"""(?:[A-Za-z0-9_.-]*[_.-])?(?:api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)"""
+              r"""["']?\s*[:=]\s*"""
+              # Le TRIPLE per prime nell'alternativa, o l'apice singolo vincerebbe
+              # e il valore risulterebbe chiuso sulle prime due virgolette. E' lo
+              # stesso difetto della tabella, un livello piu' in la'.
+              r"""(?!["']?\s*\$\{\{[^{}]*\}\}["']?[ \t]*$)(\"\"\"|'''|["'])"""
+          )
+          CONFINE_DIFF = re.compile(r"^(?:diff --git |index |@@|\+\+\+ |--- |Binary files )")
+          # Il limite vero e' il CONFINE DI DIFF, non un numero scelto a occhio:
+          # una chiave privata o una catena di certificati supera comodamente
+          # qualunque tetto, e alla riga dopo la coda tornava in chiaro.
+          # [REAL_FINDING] di GPT-5.6 Sol sulla PR #107, misurato con 45 righe.
+          # Questo resta solo come guardia contro una fuga senza fine su un testo
+          # che non e' un diff e quindi non ha confini.
+          TETTO_RIGHE_CODA = 5000
+
+          def _chiude_sulla_riga(riga: str, delimitatore: str, da: int) -> bool:
+              """Il delimitatore di chiusura c'e' su questa riga? Gli escape non contano.
+
+              `delimitatore` puo' essere lungo tre caratteri: una chiave privata o
+              un certificato si scrivono fra triple virgolette, e cercare un solo
+              carattere li dichiarerebbe chiusi sulla seconda. [REAL_FINDING] di
+              GPT-5.6 Sol sulla PR #107."""
+              i, n = da, len(riga)
+              while i < n:
+                  if riga[i] == "\\":
+                      i += 2
+                      continue
+                  if riga.startswith(delimitatore, i):
+                      return True
+                  i += 1
+              return False
+
+          def redigi_coda_multiriga(text: str) -> str:
+              righe = text.split("\n")
+              fuori, i = [], 0
+              while i < len(righe):
+                  riga = righe[i]
+                  fuori.append(riga)
+                  i += 1
+                  m = APRE_QUOTATO.match(riga)
+                  if not m or _chiude_sulla_riga(riga, m.group(1), m.end()):
+                      continue
+                  # FAIL-CLOSED sul tetto. Prima, raggiunto il limite, il ciclo
+                  # usciva e la passata tornava in modo normale: tutte le righe
+                  # successive del valore ancora aperto uscivano IN CHIARO.
+                  # [REAL_FINDING] di GPT-5.6 Sol sulla PR #107, misurato con 5100
+                  # righe: 100 righe di corpo in chiaro piu' la coda.
+                  #
+                  # Il tetto ora non fa rinunciare: superato, si continua a
+                  # redigere fino al CONFINE DI DIFF, che e' il solo limite
+                  # strutturale. Il numero serve a distinguere «valore lungo» da
+                  # «testo che non e' un diff», non a smettere di proteggere.
+                  consumate = 0
+                  while i < len(righe):
+                      seguito = righe[i]
+                      if CONFINE_DIFF.match(seguito):
+                          break
+                      prefisso = seguito[:1] if seguito[:1] in "+- " else ""
+                      chiude = (consumate < TETTO_RIGHE_CODA
+                                and _chiude_sulla_riga(seguito, m.group(1), len(prefisso)))
+                      fuori.append(prefisso + "[REDACTED_CODA_MULTIRIGA]")
+                      i += 1
+                      consumate += 1
+                      if chiude:
+                          break
+              return "\n".join(fuori)
+
           def redact(text: str) -> str:
+              # PRIMA la passata multiriga: la tabella riscrive la riga d'apertura e
+              # cancella la virgoletta da cui si capisce che il valore non e' chiuso.
+              text = redigi_coda_multiriga(text)
               for pattern, replacement in REDACTIONS:
                   text = pattern.sub(replacement, text)
               return text
@@ -972,6 +1126,26 @@ jobs:
                   + "\n".join(f"- `{name}`" for name in skipped_files[:40])
                   + ("\n- ... altri file omessi" if len(skipped_files) > 40 else "")
                   + "\n"
+              )
+          # Il tetto dell'API, dichiarato SEPARATAMENTE dai file saltati per budget:
+          # sono due cose diverse e confonderle nasconderebbe la peggiore. Un file
+          # «saltato» lo sappiamo per nome; questi non li conosciamo affatto — l'API
+          # non li ha mai mandati, e nessuno puo' elencarli. Chi legge il commento
+          # deve poter distinguere «non l'ho mandato al modello» da «non so nemmeno
+          # cosa manca».
+          # Si aggancia a `compare_truncated`, che esisteva gia' e porta anche la
+          # label `manual-review-required`: qui si aggiunge SOLO il dettaglio nel
+          # commento, non una seconda variabile che dice la stessa cosa.
+          if compare_truncated:
+              skipped_note += (
+                  "\n\n## ⚠️ Confronto TRONCATO da GitHub\n"
+                  "L'API Compare restituisce al massimo 300 file per "
+                  f"l'intera comparazione, e ne ha restituiti {len(files)}: molto "
+                  "probabilmente **la PR ne tocca di più, e quelli in eccesso non "
+                  "sono arrivati affatto** — non compaiono nemmeno nell'elenco qui "
+                  "sopra, perché il loro nome non lo conosce nessuno.\n\n"
+                  "**Questa review non copre l'intera PR.** Serve una lettura umana "
+                  "dei file oltre il tetto, o va spezzata la PR.\n"
               )
 
           if not diff_text.strip():

@@ -27,6 +27,19 @@ WORKFLOWS = Path(__file__).resolve().parents[2] / '.github' / 'workflows'
 GPT = WORKFLOWS / 'pr-review-gpt55.yml'
 FABLE = WORKFLOWS / 'pr-review-claude-fable5.yml'
 SOL = WORKFLOWS / 'pr-review-gpt56-sol.yml'
+# Il reviewer forte su OPENROUTER (02/09/2026): stesso modello di SOL, fornitore ed
+# endpoint diversi. Non sostituisce il file di SOL, che resta DORMIENTE — vedi
+# `test_i_workflow_dormienti_non_partono_da_soli`.
+OPENROUTER = WORKFLOWS / 'pr-review-openrouter-sol.yml'
+# Il reviewer di OGNI push su OpenRouter (02/09/2026): ricostituisce il ruolo che
+# GPT-5.5 aveva prima di diventare dormiente, e chiude il buco che
+# addormentandolo si era aperto (push su soli test/docs letti da nessuno).
+OPENROUTER_55 = WORKFLOWS / 'pr-review-openrouter-gpt55.yml'
+# Tutti i workflow di review: le guardie STRUTTURALI (redazione, priorita' del
+# payload, contesto dei file mancanti, etichette dei bloccanti) valgono per ognuno,
+# vivo o dormiente. Un dormiente che si riattiva deve trovarle gia' rispettate,
+# non scoprire il giorno stesso che ha smesso di esserlo.
+TUTTI = (GPT, FABLE, SOL, OPENROUTER, OPENROUTER_55)
 
 # I due workflow che parlano con l'endpoint OpenAI `v1/responses`, e che quindi
 # leggono la stessa forma di risposta: `status`/`incomplete_details`, non
@@ -34,6 +47,13 @@ SOL = WORKFLOWS / 'pr-review-gpt56-sol.yml'
 # per costruzione in DUE posti, e i test che la riguardano vanno su entrambi
 # (regola 2: la classe, non il sito).
 SU_V1_RESPONSES = (GPT, SOL)
+
+# E i due che parlano con `chat/completions` su OpenRouter, che invece leggono
+# `finish_reason`. Sta QUI, accanto al gemello, e non 2500 righe piu' sotto dove
+# era nato: due costanti che si definiscono a vicenda e vivono lontane sono due
+# costanti che divergono. Chi aggiunge un workflow deve vedere entrambe le liste
+# in un colpo d'occhio.
+SU_CHAT_COMPLETIONS = (OPENROUTER, OPENROUTER_55)
 
 # File il cui cambiamento DEVE far spendere il reviewer forte su un push.
 # main.py e' il relay; web/ e' la superficie multiutente e ospita il motore di
@@ -99,6 +119,16 @@ def _script(path: Path) -> str:
     return '\n'.join(s.get('run') or '' for s in steps)
 
 
+def _job(path: Path) -> dict:
+    """Il job `review`, per ispezionarne la condizione `if:`.
+
+    Serve dove il comportamento non sta nello script ma nel fatto che il job
+    parta o no: una `if:` che pretende `github.event.pull_request` rende il job
+    irraggiungibile da un avvio manuale, e nessun test sullo script lo direbbe.
+    """
+    return _carica(path)['jobs']['review']
+
+
 def _core_patterns() -> list[re.Pattern]:
     """I pattern CORE veri, estratti dal workflow di Fable."""
     blocco = re.search(
@@ -117,8 +147,8 @@ def _tocca_core(nomi: list[str]) -> bool:
 
 # --------------------------------------------------------------- esistenza
 
-def test_i_tre_workflow_esistono():
-    for path in (GPT, FABLE, SOL):
+def test_TUTTI_i_workflow_esistono():
+    for path in TUTTI:
         assert path.is_file(), f'workflow mancante: {path.name}'
 
 
@@ -168,11 +198,16 @@ def _funzione_redact(path: Path):
     sorgente = _script(path)
     tabella = re.search(r'^(\s*)REDACTIONS = \[.*?^\1\]', sorgente, re.S | re.M)
     assert tabella, f'{path.name}: tabella REDACTIONS non trovata'
-    funzione = re.search(r'^(\s*)def redact\(.*?(?=\n\1[A-Za-z_]|\Z)', sorgente, re.S | re.M)
-    assert funzione, f'{path.name}: funzione redact non trovata'
+    # Dalla prima costante della passata multiriga fino alla fine di `redact`:
+    # `redact` non e' piu' autosufficiente — chiama `redigi_coda_multiriga`, e
+    # estrarla da sola darebbe un NameError invece di misurare qualcosa.
+    blocco = re.search(
+        r'^(\s*)APRE_QUOTATO = re\.compile\(.*?^\1def redact\(.*?(?=\n\1[A-Za-z_]|\Z)',
+        sorgente, re.S | re.M)
+    assert blocco, f'{path.name}: blocco della redazione (APRE_QUOTATO…redact) non trovato'
     spazio: dict = {'re': re}
     exec(textwrap.dedent(tabella.group(0)), spazio)  # noqa: S102 - sorgente del repo
-    exec(textwrap.dedent(funzione.group(0)), spazio)  # noqa: S102 - sorgente del repo
+    exec(textwrap.dedent(blocco.group(0)), spazio)  # noqa: S102 - sorgente del repo
     return spazio['redact']
 
 
@@ -188,7 +223,7 @@ TOKEN_FEED = 'xt_' + '7f3a91' * 6
 TOKEN_FEED_CORTO = 'xt_' + 'a1b2c3d4e5f6'
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
 def test_il_token_di_feed_nudo_viene_redatto(path):
     """Un token di feed senza la keyword `token=` accanto non deve uscire.
 
@@ -211,7 +246,7 @@ def test_il_token_di_feed_nudo_viene_redatto(path):
     )
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
 def test_il_prefisso_di_9_caratteri_sopravvive_alla_redazione(path):
     """`token_prefix` e' fatto per essere mostrato: redigerlo renderebbe muta la UI.
 
@@ -327,14 +362,48 @@ def test_entrambi_i_gate_coprono_i_quattro_esiti():
 # ------------------------------------------------------------ gate label
 
 def test_fable_e_fugu_reagiscono_alla_label():
-    for path in (FABLE, SOL):
+    """Chi tiene un gate a label deve ricevere gli eventi `labeled`.
+
+    Il reviewer del gate `final-fugu-review` e' passato da SOL (dormiente dal
+    02/09/2026, credito OpenAI esaurito) a OPENROUTER. Il gate non puo' restare
+    scoperto: se il file vivo non ascolta `labeled`, armare la label non fa partire
+    niente e il gate risulta «passato» senza che nessuno abbia letto una riga — la
+    forma esatta del difetto che CLAUDE.md riassume in «un check verde non e' prova
+    di review». Per questo il test guarda i workflow VIVI, non un elenco fisso.
+    """
+    vivi = [p for p in (FABLE, SOL, OPENROUTER) if 'pull_request' in _trigger(p)]
+    for path in vivi:
         tipi = _trigger(path)['pull_request']['types']
         assert 'labeled' in tipi, f'{path.name} non reagisce agli eventi labeled'
+    etichette = ' '.join(_carica(p)['jobs']['review']['if'] for p in vivi)
+    for label in ('final-fable-review', 'final-fugu-review'):
+        assert label in etichette, (
+            f'nessun workflow VIVO si prende il gate «{label}»: armarlo non farebbe '
+            'partire niente, e il gate risulterebbe passato con zero righe lette'
+        )
 
 
 def test_gpt_non_reagisce_alla_label():
-    """GPT-5.5 gira su ogni push e non ha bisogno del gate a label."""
-    assert 'labeled' not in _trigger(GPT)['pull_request']['types']
+    """GPT-5.5 gira su ogni push e non ha bisogno del gate a label.
+
+    DORMIENTE dal 02/09/2026: il trigger `pull_request` e' commentato, quindi non
+    c'e' nessun elenco di `types` da controllare. Il test non sparisce — verifica
+    che il file, quando verra' riattivato, non si prenda la label finale: il
+    riferimento commentato e' l'unica forma in cui `labeled` puo' comparire, e se
+    qualcuno lo riattivasse copiandolo da SOL se ne accorgerebbe qui.
+    """
+    trigger = _trigger(GPT)
+    if 'pull_request' not in trigger:
+        testo = GPT.read_text(encoding='utf-8')
+        commentati = [r for r in testo.splitlines()
+                      if r.strip().startswith('#') and 'types:' in r]
+        assert commentati, 'GPT-5.5 dormiente senza il trigger da riattivare commentato'
+        assert not any('labeled' in r for r in commentati), (
+            'il trigger commentato di GPT-5.5 include `labeled`: riattivandolo si '
+            'prenderebbe il gate a label, che non e- il suo ruolo'
+        )
+        return
+    assert 'labeled' not in trigger['pull_request']['types']
 
 
 def test_il_gate_si_arma_solo_con_la_propria_label():
@@ -366,7 +435,7 @@ def test_nessuna_api_key_in_chiaro():
         re.compile(r'sk-or-v1-[A-Za-z0-9_\-]{20,}'),
         re.compile(r'\b\d{8,12}:[A-Za-z0-9_\-]{30,}\b'),  # bot token Telegram
     ]
-    for path in (GPT, FABLE, SOL):
+    for path in TUTTI:
         testo = path.read_text(encoding='utf-8')
         for pat in perdite:
             # Le stesse regex compaiono nella tabella REDACTIONS del workflow:
@@ -388,13 +457,30 @@ def test_le_chiavi_vengono_dai_secret():
 
     **DUE workflow leggono `BETRELAY_GPT`,** e non e' un errore: dal 12/08/2026
     `gpt-5.6-sol` ha sostituito `sakana/fugu-ultra` al gate finale, e sta sulla
-    stessa API di GPT-5.5. Una chiave in meno da gestire. `BETRELAY_FUGU` non e'
-    piu' letto da nessuno, e il test accanto lo vieta come residuo.
+    stessa API di GPT-5.5. Quei due sono pero' DORMIENTI dal 02/09/2026 (credito
+    OpenAI esaurito): il Secret resta configurato per il giorno in cui torna.
+
+    **E `BETRELAY_FUGU` e' di nuovo VIVO,** dal 02/09/2026: porta la chiave
+    OpenRouter ed e' l'unico Secret che leggono i due workflow su quel fornitore.
+    Qui c'era scritto il contrario — «non e' piu' letto da nessuno, e il test
+    accanto lo vieta come residuo» — che era vero fino all'01/09 e falso dal
+    giorno dopo, a due righe dalla mappa che lo richiede. Chi si fosse fidato di
+    questa frase avrebbe rimesso il nome nella lista dei vietati e spento
+    ENTRAMBI i reviewer vivi. Segnalato da CodeRabbit sulla PR #107.
+
+    Il divieto non e' sparito, si e' spostato: `test_nessun_riferimento_ai_secret_del_bridge`
+    continua a vietare `BETRELAY_FUGU` sugli altri tre, dove sarebbe una lettura
+    a vuoto.
     """
     coppie = {
         GPT: 'secrets.BETRELAY_GPT',
         FABLE: 'secrets.BETRELAY_FABLE',
         SOL: 'secrets.BETRELAY_GPT',
+        # Dal 02/09/2026: il reviewer forte VIVO sta su OpenRouter e legge il Secret
+        # che il proprietario aveva creato per l'ex `sakana/fugu-ultra`. Nessuna
+        # chiave nuova — decisione del proprietario.
+        OPENROUTER: 'secrets.BETRELAY_FUGU',
+        OPENROUTER_55: 'secrets.BETRELAY_FUGU',
     }
     for path, atteso in coppie.items():
         assert atteso in path.read_text(encoding='utf-8'), f'{path.name}: manca {atteso}'
@@ -407,11 +493,16 @@ def test_nessun_riferimento_ai_secret_del_bridge():
     la review in silenzio. E' la stessa classe di difetto del punto sopra, per
     questo va cercata su tutto il file e non solo sulla riga `env:`.
     """
-    # `BETRELAY_FUGU` e' nella lista dal 12/08/2026: dopo la sostituzione di Fugu con
-    # `gpt-5.6-sol` non lo legge piu' nessun workflow, quindi un riferimento
-    # dimenticato leggerebbe vuoto e salterebbe la review in silenzio — la stessa
-    # classe di difetto dei nomi del Bridge. Un ritorno deliberato a Fugu dovrebbe
-    # togliere questa voce, ed e' giusto che sia una scelta esplicita.
+    # `BETRELAY_FUGU` e' stato nella lista dal 12/08/2026 al 02/09/2026: in quel
+    # periodo non lo leggeva nessun workflow, quindi un riferimento dimenticato
+    # avrebbe letto vuoto e saltato la review in silenzio. Il commento di allora
+    # diceva «un ritorno deliberato a Fugu dovrebbe togliere questa voce, ed e' giusto
+    # che sia una scelta esplicita»: questa e' quella scelta. Il Secret ora porta la
+    # chiave di OpenRouter e lo legge `pr-review-openrouter-sol.yml`.
+    #
+    # Il divieto non sparisce, si SPOSTA: resta su tutti gli altri file, dove un
+    # riferimento a quel nome sarebbe di nuovo una lettura a vuoto. Toglierlo del
+    # tutto avrebbe riaperto la falla per tre workflow su quattro.
     vecchi = ('OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'OPENROUTER_API_KEY',
               'BETRELAY_FUGU')
     for path in (GPT, FABLE, SOL):
@@ -427,7 +518,7 @@ def test_nessun_riferimento_ai_secret_del_bridge():
 
 def test_permessi_minimi_sul_codice():
     """I workflow commentano le PR ma non devono poter scrivere il codice."""
-    for path in (GPT, FABLE, SOL):
+    for path in TUTTI:
         perm = _carica(path)['permissions']
         assert perm['contents'] == 'read', f'{path.name}: contents non e\' read'
         assert perm['pull-requests'] == 'write'
@@ -435,7 +526,7 @@ def test_permessi_minimi_sul_codice():
 
 def test_nessun_auto_merge():
     """Il merge resta manuale del proprietario: nessun workflow lo automatizza."""
-    for path in (GPT, FABLE, SOL):
+    for path in TUTTI:
         testo = path.read_text(encoding='utf-8').lower()
         for vietato in ('enable-pull-request-automerge', 'gh pr merge', 'automerge'):
             assert vietato not in testo, f'{path.name}: contiene {vietato}'
@@ -462,7 +553,16 @@ def _funzione_payload(path: Path):
         blocco = re.search(r'^(\s*)' + re.escape(f) + r'.*?^\1\]', sorgente, re.S | re.M)
         assert blocco, f'{path.name}: {f} non trovata'
         pezzi.append(blocco.group(0))
-    for f in ('def redact(', 'def safe_display(', 'def is_critical(',
+    # `redact` non e' autosufficiente: chiama `redigi_coda_multiriga` e le sue
+    # costanti. Si prende il blocco intero, dalla prima costante fino alla fine di
+    # `redact` — estrarre la sola `def redact(` darebbe un NameError a runtime,
+    # cioe' cinque test rossi che non parlano del comportamento che misurano.
+    blocco = re.search(
+        r'^(\s*)APRE_QUOTATO = re\.compile\(.*?^\1def redact\(.*?(?=\n\1[A-Za-z_@]|\Z)',
+        sorgente, re.S | re.M)
+    assert blocco, f'{path.name}: blocco della redazione (APRE_QUOTATO…redact) non trovato'
+    pezzi.append(blocco.group(0))
+    for f in ('def safe_display(', 'def is_critical(',
               'def priorita_payload(', f'def {nome}('):
         blocco = re.search(r'^(\s*)' + re.escape(f) + r'.*?(?=\n\1[A-Za-z_@]|\Z)', sorgente, re.S | re.M)
         assert blocco, f'{path.name}: {f} non trovata'
@@ -494,7 +594,7 @@ FILE_COME_LA_PR_8 = [
 ]
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
 def test_i_file_core_entrano_nel_payload_anche_col_budget_stretto(path):
     """Il motore non deve mai finire fra i file saltati per budget.
 
@@ -539,7 +639,7 @@ def test_i_file_core_entrano_nel_payload_anche_col_budget_stretto(path):
         )
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
 def test_i_file_core_precedono_i_documenti_nel_payload(path):
     """L'ordine, non solo la presenza: il core va letto prima.
 
@@ -642,7 +742,7 @@ YAML_CON_SEGRETO = (
 )
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
 def test_un_riferimento_a_secrets_non_viene_maciullato(path):
     """`${{ secrets.X }}` e- un PUNTATORE a un segreto, non un segreto.
 
@@ -673,7 +773,7 @@ def test_un_riferimento_a_secrets_non_viene_maciullato(path):
     )
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
 def test_l_esenzione_copre_solo_l_espressione_COMPLETA(path):
     """Segnalato da CodeRabbit, ed e- la direzione pericolosa dell'esenzione.
 
@@ -756,7 +856,7 @@ def test_l_esenzione_copre_solo_l_espressione_COMPLETA(path):
         )
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
 def test_un_valore_di_segreto_VERO_resta_redatto(path):
     """L'altra faccia: esentare `${{ … }}` non deve aprire un varco.
 
@@ -888,7 +988,7 @@ def _funzione_contesto(path: Path):
     return spazio['blocco_contesto_mancante']
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
 def test_il_prompt_DICE_al_modello_cosa_non_ha_visto(path):
     """Il modello deve sapere di avere un contesto incompleto, non dedurlo.
 
@@ -945,15 +1045,15 @@ def test_le_tre_copie_del_preambolo_dicono_LA_STESSA_COSA():
     """
     casi = ([], ['solo/saltato.py']), (['solo/tagliato.py'], []), (['a.py'], ['b.py'])
     for tagliati, saltati in casi:
-        uscite = {p.name: _funzione_contesto(p)(tagliati, saltati) for p in (GPT, FABLE, SOL)}
+        uscite = {p.name: _funzione_contesto(p)(tagliati, saltati) for p in TUTTI}
         distinte = set(uscite.values())
         assert len(distinte) == 1, (
-            f'le tre copie divergono su tagliati={tagliati} saltati={saltati}:\n'
+            f'le copie divergono su tagliati={tagliati} saltati={saltati}:\n'
             + '\n'.join(f'--- {n} ---\n{t}' for n, t in uscite.items())
         )
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
 def test_il_preambolo_del_contesto_e_davvero_nel_prompt(path):
     """Una funzione corretta e mai chiamata non serve a niente.
 
@@ -973,7 +1073,7 @@ def test_il_preambolo_del_contesto_e_davvero_nel_prompt(path):
     )
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
 def test_un_file_TAGLIATO_a_meta_non_si_confonde_con_uno_non_inviato(path):
     """Due stati diversi, e il peggiore dei due era invisibile.
 
@@ -1011,7 +1111,7 @@ def test_un_file_TAGLIATO_a_meta_non_si_confonde_con_uno_non_inviato(path):
     )
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
 def test_un_file_tagliato_e_POI_scartato_e_solo_NON_INVIATO(path):
     """I due stati sono esclusivi: «non inviato» vince su «inviato incompleto».
 
@@ -1035,7 +1135,7 @@ def test_un_file_tagliato_e_POI_scartato_e_solo_NON_INVIATO(path):
     )
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
 def test_ogni_workflow_ha_un_tier_di_escalation_del_budget(path):
     """Se il diff risulta troncato, il job deve poter ricostruire piu- largo.
 
@@ -1095,7 +1195,7 @@ def _script_python(path: Path) -> tuple[str, str]:
     return trovati[0]
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
 def test_lo_script_del_workflow_ha_sintassi_valida(path):
     """Il Python incorporato deve compilare, e va compilato qui perche' non lo fa nessuno."""
     import ast
@@ -1116,8 +1216,8 @@ def test_lo_script_del_workflow_ha_sintassi_valida(path):
         ) from e
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
-def test_la_lista_di_priorita_e_identica_nei_tre_workflow(path):
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
+def test_la_lista_di_priorita_e_identica_in_TUTTI_i_workflow(path):
     """Regola 3 dove una fonte unica non e' possibile.
 
     I workflow non fanno checkout, quindi non possono importare un modulo comune:
@@ -1136,7 +1236,7 @@ def test_la_lista_di_priorita_e_identica_nei_tre_workflow(path):
     )
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
 def test_lo_script_non_contiene_espressioni_di_actions_letterali(path):
     """Dentro lo script non si scrive la forma dollaro-graffa-graffa, nemmeno nei commenti.
 
@@ -1176,7 +1276,7 @@ INIZI_PLAUSIBILI = ('CODA-INCOLLATA', '.coda-segreta', '/coda', '+coda', '=coda'
                     ':coda', '_coda', '9coda')
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
 @pytest.mark.parametrize('chiusura', CHIUSURE)
 def test_una_chiusura_dopo_un_espressione_NON_viene_mangiata(path, chiusura):
     """Il difetto che ha prodotto tre bloccanti falsi su una PR sola.
@@ -1219,7 +1319,7 @@ def test_una_chiusura_dopo_un_espressione_NON_viene_mangiata(path, chiusura):
         f'{path.name}: la {chiusura!r} finale e- sparita: {fuori!r}'
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
 @pytest.mark.parametrize('coda', INIZI_PLAUSIBILI)
 def test_una_coda_che_POTREBBE_essere_un_segreto_resta_redatta(path, coda):
     """Il rovescio del test sopra, e senza di lui quello sarebbe un indebolimento.
@@ -1244,7 +1344,7 @@ def test_una_coda_che_POTREBBE_essere_un_segreto_resta_redatta(path, coda):
     )
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
 def test_la_prosa_attorno_a_un_espressione_resta_leggibile(path):
     """Quello che il reviewer deve poter leggere: la frase, non un buco.
 
@@ -1259,23 +1359,403 @@ def test_la_prosa_attorno_a_un_espressione_resta_leggibile(path):
         f'{path.name}: la prosa e- ancora alterata: {ripulito!r}'
 
 
-def test_la_tabella_di_redazione_e_identica_nei_tre_workflow():
+# ---------------------------------------------------------------------------
+#  La coda di un valore quotato (02/09/2026)
+#
+#  [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #107, in DUE giri.
+#
+#  Primo giro: un valore quotato con spazi veniva redatto solo fino al primo
+#  spazio, e la coda del segreto usciva verso il fornitore esterno. Chiuso con
+#  una regola che si ferma alla virgoletta di CHIUSURA.
+#
+#  Secondo giro, sulla correzione stessa: quella regola non conosceva ne' le
+#  virgolette ESCAPATE ne' il caso in cui la virgoletta non si chiude affatto
+#  sulla riga. Misurato prima di ricorreggere, eseguendo il redact() reale:
+#
+#      'password: "abc\\" def-CODA"'   -> 'password=[REDACTED] def-CODA"'
+#      "api_key: 'ab\\' cd-CODA'"      -> "api_key=[REDACTED] cd-CODA'"
+#      'password: "riga1 con spazi'    -> 'password=[REDACTED] con spazi'
+#
+#  Tre perdite su tre. La lezione, che vale oltre questo caso: una correzione di
+#  sicurezza va misurata sui casi limite del linguaggio che tratta, non solo sul
+#  caso che l'ha motivata — chiudere il buco «valore con spazi» senza pensare
+#  all'escape lascia in piedi lo stesso buco per chi scrive una virgoletta.
+#
+#  Cosa NON viene chiuso, e va detto invece che taciuto: un valore che si chiude
+#  su una RIGA SUCCESSIVA continua a perdere la coda. La redazione e' orientata
+#  alla riga di proposito — una regola che attraversa i ritorni a capo e' la
+#  forma esatta che il 12/08/2026 produsse payload rotti e bloccanti inventati.
+#  Misurato: una coda di forma nota (token del feed `xt_`) viene comunque presa
+#  dalla sua regola di forma; resta scoperta solo una coda generica su riga
+#  successiva. Il baratto e' dichiarato, non nascosto.
+# ---------------------------------------------------------------------------
+
+# (chiave, testo, frammento che NON deve sopravvivere)
+CODE_DI_VALORI_QUOTATI = [
+    ('doppio apice, valore con spazi',
+     'password: "abc def ghi-CODA"', 'CODA'),
+    ('doppio apice, virgoletta ESCAPATA dentro il valore',
+     'password: "abc \\" def-CODA"', 'CODA'),
+    ('apice singolo, apice ESCAPATO dentro il valore',
+     "api_key: 'ab \\' cd-CODA'", 'CODA'),
+    ('virgoletta APERTA e mai chiusa sulla riga',
+     'password: "riga con spazi-CODA', 'CODA'),
+    ('virgoletta mai chiusa, con del testo dopo',
+     'secret: "abc def-CODA  # nota', 'CODA'),
+]
+
+
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
+@pytest.mark.parametrize('caso', CODE_DI_VALORI_QUOTATI, ids=lambda c: c[0])
+def test_la_coda_di_un_valore_quotato_non_esce_mai(path, caso):
+    """Nessuna forma di valore quotato lascia uscire la propria coda.
+
+    Il test esegue il `redact()` reale del workflow, non ne ispeziona il sorgente:
+    una regex che «sembra giusta» e non lo e' passerebbe un test sul testo."""
+    _, riga, vietato = caso
+    redact = _funzione_redact(path)
+    fuori = redact(riga)
+    assert vietato not in fuori, (
+        f'{path.name}: la coda del valore quotato esce in chiaro verso il '
+        f'fornitore esterno.\n  in : {riga!r}\n  out: {fuori!r}'
+    )
+
+
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
+def test_chiudere_la_coda_non_ha_allargato_la_redazione(path):
+    """Il rovescio obbligatorio: la coppia, non il singolo test.
+
+    Chiudere una fuga allargando la regex e' esattamente cio' che il 12/08/2026
+    ruppe. Questi sono i casi che devono restare INTATTI, e senza di loro il test
+    sopra si soddisfa redigendo tutto."""
+    redact = _funzione_redact(path)
+    espr = _espressione()
+    intatti = [
+        f'api-key: {espr}',
+        f'OPENAI_API_KEY: "{espr}"',
+        f'name: pytest ({espr})',
+        'Il parser legge il token dal messaggio e non lo stampa.',
+        'Nei log dei messaggi non deve comparire alcun token.',
+    ]
+    for riga in intatti:
+        assert redact(riga) == riga, (
+            f'{path.name}: la redazione ha morso contenuto legittimo.\n'
+            f'  in : {riga!r}\n  out: {redact(riga)!r}'
+        )
+    # e il commento dopo un valore quotato e chiuso sopravvive al taglio
+    con_commento = redact('password: "abc"  # commento che deve restare')
+    assert 'commento che deve restare' in con_commento, (
+        f'{path.name}: il taglio non si ferma alla virgoletta di chiusura: '
+        f'{con_commento!r}'
+    )
+
+
+# ---------------------------------------------------------------------------
+#  I default di fallback devono dire quello che dice l'env (02/09/2026)
+#
+#  `[INSUFFICIENT_CONTEXT]` di Claude Fable 5 al gate della PR #107, verificato e
+#  reale: `MAX_PATCH_PER_FILE_CHARS_ESCALATED` valeva "30000" nell'env e "15000"
+#  come default Python. Innocuo finche' l'env resta definito — e' esattamente per
+#  questo che nessuno se ne accorge.
+#
+#  Ma 15000 non e' un numero qualunque: e' il tetto che il 12/08/2026 ha mandato al
+#  modello il 60% di `main.py` e prodotto QUATTRO bloccanti falsi su nove, tutti
+#  nella forma «non verificabile dal diff troncato». Alzarlo a 30000 e' stata una
+#  decisione misurata, scritta in CLAUDE.md. Il default lasciato indietro conserva
+#  la decisione VECCHIA, pronta a tornare in vigore il giorno che qualcuno tocca
+#  il blocco `env:` — senza errore, senza check rosso, e con la stessa firma di
+#  bloccanti inventati che quel giorno e' costata ~$1 a giro.
+#
+#  Fable ne aveva indicato UNO. La classe, cercata su tutti e cinque i file, aveva
+#  SETTE siti: il tetto per-file in tutti e cinque, e il tetto di output nei due
+#  del gate (env 10000, default 3000). Regola 2.
+# ---------------------------------------------------------------------------
+
+# I tetti dichiarati nel blocco `env:` e riletti da Python con un default.
+TETTI_CON_DEFAULT = (
+    'MAX_PATCH_PER_FILE_CHARS',
+    'MAX_TOTAL_PATCH_CHARS',
+    'MAX_PATCH_PER_FILE_CHARS_ESCALATED',
+    'MAX_TOTAL_PATCH_CHARS_ESCALATED',
+    'MAX_OUTPUT_TOKENS',
+)
+
+
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
+def test_ogni_default_di_fallback_coincide_con_il_suo_env(path):
+    """Due numeri per la stessa nozione devono essere lo stesso numero.
+
+    Il default Python non e' documentazione: e' il valore che governa davvero il
+    giorno in cui l'env sparisce. Se dice altro dall'env, il workflow ha due
+    politiche e quella che vince e' quella che nessuno ha riletto."""
+    testo = path.read_text(encoding='utf-8')
+    doc = _carica(path)
+    ambiente = doc['jobs']['review'].get('env') or {}
+    for nome in TETTI_CON_DEFAULT:
+        if nome not in ambiente:
+            continue
+        m = re.search(
+            rf'{nome}\s*=\s*int\(os\.environ\.get\(\s*"{nome}"\s*,\s*"(\d+)"',
+            testo)
+        assert m, f'{path.name}: {nome} e- nell-env ma Python non lo rilegge con un default'
+        assert m.group(1) == str(ambiente[nome]).strip(), (
+            f'{path.name}: {nome} vale {ambiente[nome]!r} nell-env e {m.group(1)!r} '
+            'come default Python. Il giorno che l-env sparisce vince il secondo, '
+            'e nessuno se ne accorge.'
+        )
+
+
+def _funzione_usage_note(path: Path):
+    """Estrae ed ESEGUE `usage_note` dal workflow reale.
+
+    Come per `redact`: il rendiconto dei token va misurato facendolo girare su
+    una risposta finta, non leggendo la regex dei nomi di campo. Un rendiconto
+    che legge il nome sbagliato non solleva niente — dice zero."""
+    sorgente = _script(path)
+    funzione = re.search(r'^(\s*)def usage_note\(.*?(?=\n\1[A-Za-z_]|\Z)',
+                         sorgente, re.S | re.M)
+    assert funzione, f'{path.name}: funzione usage_note non trovata'
+    prezzi = {}
+    for nome in ('PRICE_INPUT_PER_MILLION', 'PRICE_OUTPUT_PER_MILLION',
+                 'PRICE_CACHE_READ_PER_MILLION'):
+        m = re.search(rf'^\s*{nome}\s*=\s*float\(os\.environ.*$', sorgente, re.M)
+        assert m, f'{path.name}: {nome} non trovato'
+        prezzi[nome] = 5.0
+    spazio: dict = dict(prezzi)
+    exec(textwrap.dedent(funzione.group(0)), spazio)  # noqa: S102 - sorgente del repo
+    return spazio['usage_note']
+
+
+@pytest.mark.parametrize('path', SU_CHAT_COMPLETIONS, ids=lambda p: p.name)
+def test_i_token_da_cache_si_leggono_dal_campo_di_chat_completions(path):
+    """`chat/completions` mette i token da cache in `prompt_tokens_details`.
+
+    `v1/responses` li mette in `input_tokens_details`, ed e' il nome che questi
+    due workflow avevano ereditato dai loro gemelli. Leggere il campo dell'API
+    sbagliata NON solleva niente: dice `0`, i token serviti dalla cache vengono
+    prezzati a tariffa piena, e il costo dichiarato nel commento della PR e'
+    gonfiato senza che nulla lo segnali.
+
+    E' la stessa classe dei nomi `input`/`messages` e `status`/`finish_reason`
+    che questa PR e' nata per separare — e me n'ero accorto sui nomi di primo
+    livello (`prompt_tokens`/`input_tokens`) senza cercarla nel dizionario
+    annidato: regola 2, la classe e non il sito. Segnalato da CodeRabbit.
+
+    Il fallback su `input_tokens_details` resta: OpenRouter inoltra le forme dei
+    fornitori a monte, e una risposta che usi il nome vecchio non deve perdere
+    il conteggio."""
+    usage_note = _funzione_usage_note(path)
+
+    forma_openrouter = usage_note(
+        {'prompt_tokens': 1000, 'completion_tokens': 10,
+         'prompt_tokens_details': {'cached_tokens': 800}},
+        'sys', 'user', 'review')
+    assert '`800`' in forma_openrouter, (
+        f'{path.name}: i token da cache di `chat/completions` non vengono contati — '
+        f'prezzati a tariffa piena, il costo dichiarato e- gonfiato.\n{forma_openrouter}'
+    )
+
+    forma_vecchia = usage_note(
+        {'prompt_tokens': 1000, 'completion_tokens': 10,
+         'input_tokens_details': {'cached_tokens': 700}},
+        'sys', 'user', 'review')
+    assert '`700`' in forma_vecchia, (
+        f'{path.name}: il fallback sul nome di `v1/responses` e- stato perso.\n{forma_vecchia}'
+    )
+
+    senza = usage_note({'prompt_tokens': 1000, 'completion_tokens': 10},
+                       'sys', 'user', 'review')
+    assert 'dalla cache' not in senza, (
+        f'{path.name}: senza dettagli dichiara comunque dei token da cache.\n{senza}'
+    )
+
+
+# (nome, testo, frammento che NON deve sopravvivere)
+CODE_MULTIRIGA = [
+    ('coda sulla riga successiva',
+     '+ password: "prima\n+ FRAMMENTO-x"\n+ riga normale'),
+    ('coda su tre righe',
+     '+ api_key: "a\n+ b-FRAMMENTO\n+ c-FRAMMENTO"\n+ dopo'),
+    ('assegnazione YAML indentata',
+     '      password: "aperta\n      FRAMMENTO"\n      dopo'),
+    ('chiave quotata, forma JSON',
+     '  "api_key": "aperta\n  FRAMMENTO",\n  altro'),
+    ('variabile d-ambiente con =',
+     '+ SECRET="aperta\n+ FRAMMENTO"\n+ dopo'),
+    # Le forme che una parola di dichiarazione precede. Restavano scoperte perche'
+    # `export` spezzava l'ancoraggio a inizio riga — residuo segnalato da GPT-5.5
+    # sulla PR #107, misurato SCOPERTO, e chiuso allargando l'ancora a un piccolo
+    # insieme di parole. Misurato dopo: zero righe in piu' morse su 3.081.643
+    # caratteri, cioe' su ogni file di testo del repository.
+    ('export in uno script di shell',
+     '+ export SECRET="aperta\n+ FRAMMENTO"\n+ dopo'),
+    ('declare',
+     '+ declare TOKEN="aperta\n+ FRAMMENTO"\n+ dopo'),
+    ('const in JavaScript',
+     '+ const password = "aperta\n+ FRAMMENTO";\n+ dopo'),
+    ('YAML annidato su due livelli',
+     'config:\n  auth:\n    password: "aperta\n    FRAMMENTO"\n  altro: 1'),
+    # I tre [REAL_FINDING] del quinto giro del gate, tutti verificati sul codice
+    # prima di correggere. Vengono da Fable (il primo) e da Sol (gli altri due).
+    #
+    # 1. Il prefisso di dichiarazione era ammesso da `APRE_QUOTATO` ma NON dalla
+    #    regola ancorata della tabella: la passata redigeva le righe seguenti e la
+    #    coda della PRIMA riga usciva. Una protezione che sembra esserci e ha un
+    #    buco dove si guarda meno — la forma peggiore.
+    ('prefisso di dichiarazione, coda sulla PRIMA riga',
+     '+ export password="abc FRAMMENTO-1\n+ FRAMMENTO-2"\n+ fine'),
+    ('const, coda sulla PRIMA riga',
+     '+ const secret = "abc FRAMMENTO-1\n+ FRAMMENTO-2"\n+ fine'),
+    # 2. Le TRIPLE virgolette venivano lette come una stringa vuota — apre e chiude
+    #    sulle prime due — e il corpo restava. E' la forma in cui si scrivono le
+    #    chiavi private e i certificati.
+    ('triple virgolette',
+     'password = """FRAMMENTO-A\nFRAMMENTO-B\n"""\nfine'),
+    ('triple apici',
+     'api_key = ' + chr(39) * 3 + 'FRAMMENTO-C\nFRAMMENTO-D\n' + chr(39) * 3 + '\nfine'),
+    # 3. Oltre il tetto di righe la coda tornava in chiaro. Una catena di
+    #    certificati supera comodamente qualunque numero scelto a occhio: adesso il
+    #    limite e' il confine di diff, e il tetto resta solo come guardia anti-fuga.
+    # Chiesto da OpenRouter GPT-5.5 nei «test minimi» dopo la correzione: le
+    # chiavi `private_key` e `cert` sono quelle per cui il caso multiriga esiste
+    # davvero, ed erano le uniche del gruppo mai esercitate. La misura c-era, la
+    # guardia no — cioe- erano libere di rompersi senza dirlo.
+    ('private_key fra triple virgolette, corpo lungo',
+     '+ private_key = """inizio\n'
+     + '\n'.join('+ FRAMMENTO-%d' % i for i in range(50))
+     + '\n+ fine"""\n+ dopo il valore'),
+    # [REAL_FINDING] di GPT-5.6 Sol al sesto giro, e il piu- vicino a casa: le
+    # regole ANCORATE accettavano solo la parola nuda, quindi i nomi COMPOSTI —
+    # cioe- esattamente i nomi dei segreti di QUESTO repository — non attivavano
+    # ne- la passata multiriga ne- la regola ancorata. Misurato prima di
+    # correggere: TELEGRAM_BOT_TOKEN, CSV_ACCESS_TOKEN, DB_PASSWORD e
+    # BACKUP_CRON_TOKEN perdevano tutti il corpo multiriga.
+    #
+    # L'ancoraggio a inizio riga NON e- stato tolto: e- cambiato cosa puo- stare
+    # fra l'inizio della riga e la parola chiave, non il fatto che debba essere
+    # l'inizio della riga. La misura lo conferma: su 3.390.767 caratteri cambia un
+    # solo file, e cambia perche- ora redige due token finti in un file di test.
+    ('TELEGRAM_BOT_TOKEN fra triple virgolette',
+     '+ TELEGRAM_BOT_TOKEN = """FRAMMENTO-A\n+ FRAMMENTO-B\n+ """\n+ dopo'),
+    ('CSV_ACCESS_TOKEN con valore non chiuso',
+     '+ CSV_ACCESS_TOKEN = "FRAMMENTO-A\n+ FRAMMENTO-B"\n+ dopo'),
+    ('DB_PASSWORD fra triple virgolette',
+     '+ DB_PASSWORD = """FRAMMENTO-A\n+ FRAMMENTO-B\n+ """\n+ dopo'),
+    ('BACKUP_CRON_TOKEN in forma YAML',
+     '+ BACKUP_CRON_TOKEN: "FRAMMENTO-A\n+ FRAMMENTO-B"\n+ dopo'),
+    ('export di un nome composto',
+     '+ export MY_API_KEY="FRAMMENTO-A\n+ FRAMMENTO-B"\n+ dopo'),
+    # Il secondo [REAL_FINDING] dello stesso giro: il tetto di righe era
+    # FAIL-OPEN. Raggiunto il limite la passata tornava in modo normale e tutte le
+    # righe seguenti uscivano in chiaro. Misurato con 5100 righe: 100 righe di
+    # corpo piu- la coda. Ora il tetto non fa rinunciare, si continua fino al
+    # confine di diff.
+    ('valore piu- lungo del tetto di 5000 righe',
+     '+ password: "inizio\n' + '\n'.join('+ r%d' % i for i in range(5100))
+     + '\n+ FRAMMENTO-OLTRE-IL-TETTO"\n+ dopo'),
+    ('cert con valore non chiuso sulla riga',
+     '+ cert: "inizio\n+ FRAMMENTO-corpo\n+ fine"\n+ dopo il valore'),
+    ('valore lungo oltre le 40 righe di tetto',
+     '+ password: "inizio\n' + '\n'.join('+ riga%d' % i for i in range(45))
+     + '\n+ FRAMMENTO-LONTANO"\n+ fine'),
+    ('JSON annidato',
+     '{\n  "auth": {\n    "api_key": "aperta\n    FRAMMENTO"\n  }\n}'),
+]
+
+
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
+@pytest.mark.parametrize('caso', CODE_MULTIRIGA, ids=lambda c: c[0])
+def test_la_coda_di_un_valore_quotato_MULTIRIGA_non_esce(path, caso):
+    """Il terzo giro di GPT-5.6 Sol sulla stessa area, e il piu- difficile.
+
+    Le regole della tabella sono orientate alla riga di proposito: una regex che
+    attraversa i ritorni a capo e' la forma che il 12/08/2026 produsse payload
+    rotti e bloccanti inventati. Il valore che si apre su una riga e si chiude su
+    un'altra restava percio' scoperto, e nel commit precedente l'avevo DICHIARATO
+    come residuo — che e' meglio di tacerlo, ma non e' chiuderlo.
+
+    Chiuso con una passata orientata alla riga, non con una regex multilinea."""
+    _, testo = caso
+    redact = _funzione_redact(path)
+    fuori = redact(testo)
+    assert 'FRAMMENTO' not in fuori, (
+        f'{path.name}: la coda multiriga esce in chiaro verso il fornitore '
+        f'esterno.\n  in : {testo!r}\n  out: {fuori!r}'
+    )
+
+
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
+def test_la_passata_multiriga_non_mangia_il_codice(path):
+    """Il rovescio, e senza di lui il test sopra si soddisfa redigendo tutto.
+
+    Questi casi vengono dalla PRIMA versione della passata, che li sbagliava
+    tutti: senza il vincolo «la chiave apre la riga» mangiava cinque righe di
+    `web/api.js`, dove `'?token=' + encode(...)` apre una virgoletta che sulla
+    riga non si chiude. Misurato allora, e questo test lo tiene chiuso adesso."""
+    redact = _funzione_redact(path)
+    espr = _espressione()
+    intatti = [
+        # concatenazione di URL in JavaScript: la chiave e- in mezzo alla riga
+        "    url: location.origin + r.feed + '?token=' + enc(r.token),\n"
+        "    altro: 1,\n  };",
+        # puntatore a un Secret
+        f'+ api-key: {espr}\n+ riga normale',
+        # prosa
+        'Nei log dei messaggi non deve comparire alcun token.\nriga dopo',
+    ]
+    for testo in intatti:
+        assert redact(testo) == testo, (
+            f'{path.name}: la passata multiriga ha mangiato contenuto legittimo.\n'
+            f'  in : {testo!r}\n  out: {redact(testo)!r}'
+        )
+    # Un valore quotato che si CHIUDE sulla riga va redatto — e' il lavoro della
+    # tabella — ma la passata multiriga non deve proseguire oltre: la riga dopo
+    # resta intatta. (Qui la prima versione del test pretendeva che l-intera riga
+    # sopravvivesse, cioe- chiedeva alla redazione di non redigere un segreto.)
+    chiuso = redact('+ password: "abc def"\n+ riga normale')
+    assert 'abc def' not in chiuso, (
+        f'{path.name}: il valore quotato chiuso non viene redatto: {chiuso!r}'
+    )
+    assert chiuso.endswith('+ riga normale'), (
+        f'{path.name}: la passata e- proseguita oltre la riga del valore: {chiuso!r}'
+    )
+    # e non attraversa mai un confine di diff
+    oltre = redact('+ password: "aperta\n@@ -1,2 +1,2 @@\n+ riga di un altro hunk')
+    assert 'riga di un altro hunk' in oltre and '@@ -1,2 +1,2 @@' in oltre, (
+        f'{path.name}: la passata ha superato un confine di diff: {oltre!r}'
+    )
+    # E l'altro confine, quello fra due FILE. Chiesto da OpenRouter GPT-5.5: senza
+    # questo, una passata che scavalcasse l'intestazione di un file successivo
+    # renderebbe illeggibile un file che non c'entra nulla, e nessun test lo direbbe.
+    fra_file = redact('+ cert: "aperta\ndiff --git a/x b/x\n+ riga di un altro file')
+    assert 'riga di un altro file' in fra_file and 'diff --git a/x b/x' in fra_file, (
+        f'{path.name}: la passata ha superato il confine fra due file: {fra_file!r}'
+    )
+
+
+def test_la_tabella_di_redazione_e_identica_in_TUTTI_i_workflow():
     """Regola 3 sulla redazione, non solo sulle priorita'.
 
-    Chiesto da GPT-5.5, e il rischio e' concreto: tre reviewer con policy di
+    Chiesto da GPT-5.5, e il rischio e' concreto: reviewer con policy di
     sanitizzazione diverse significa che un segreto redatto verso uno esce verso un
-    altro, e nulla lo segnala. I workflow non fanno checkout, quindi le tre copie
-    sono inevitabili — questo test le tiene allineate.
-    """
+    altro, e nulla lo segnala. I workflow non fanno checkout, quindi le copie sono
+    inevitabili — questo test le tiene allineate.
+
+    Copre TUTTI i workflow. Fino al 02/09/2026 ne confrontava tre: quando ne sono
+    nati altri due, la guardia e' rimasta indietro e i due nuovi — quelli che
+    parlano con un fornitore in piu' — erano gli unici non vincolati. Una guardia
+    che non cresce con cio' che sorveglia e' una guardia che si spegne da sola."""
     def tabella(p: Path) -> str:
         m = re.search(r'^(\s*)REDACTIONS = \[.*?^\1\]', _script(p), re.S | re.M)
         assert m, f'{p.name}: tabella REDACTIONS non trovata'
         return textwrap.dedent(m.group(0))
 
     riferimento = tabella(FABLE)
-    for p in (GPT, SOL):
+    for p in TUTTI:
+        if p == FABLE:
+            continue
         assert tabella(p) == riferimento, (
-            f'{p.name}: la tabella di redazione differisce da {FABLE.name}. Tre policy '
+            f'{p.name}: la tabella di redazione differisce da {FABLE.name}. Policy '
             f'diverse sono un segreto redatto verso un modello e in chiaro verso un altro.'
         )
 
@@ -1312,10 +1792,16 @@ TETTO_MINIMO_OUTPUT = {
     # completion di cui 2588 di reasoning (35%) e una review vera, a $0.5065. Con 8000
     # ci sarebbe stato ancora spazio, con 3000 no: il margine utile e- sopra 8000, e
     # abbassare la soglia sotto il valore misurato non compra niente.
+    # Stesso modello di SOL, stesso ruolo al gate: stesso pavimento.
+    'pr-review-openrouter-sol.yml': 10000,
+    # Stesso ruolo del gemello dormiente `pr-review-gpt55.yml`, stesso pavimento: il
+    # tetto non e' il costo (si pagano i token generati), quindi abbassarlo non
+    # risparmia — fa pagare review incomplete e le fa ripagare al giro dopo.
+    'pr-review-openrouter-gpt55.yml': 3000,
 }
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
 def test_il_tetto_di_output_lascia_spazio_al_testo_dopo_il_reasoning(path):
     """I token di reasoning sono fatturati come output E contano nel tetto.
 
@@ -1403,7 +1889,7 @@ FILE_PR_MISTA = [
 ]
 
 
-@pytest.mark.parametrize('path', (GPT, FABLE, SOL), ids=lambda p: p.name)
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
 def test_su_una_PR_mista_il_relay_precede_i_workflow(path):
     """Il codice che serve i clienti prima dell'impianto che lo revisiona.
 
@@ -1678,11 +2164,25 @@ def _call_model_del_gate(monkeypatch, risposta=None, errore=None, path=SOL):
             raise errore
         return RispostaFinta(risposta)
 
+    # I valori vengono dall'ENV DEL WORKFLOW, non cablati qui: cablarli rende vera
+    # per coincidenza la verifica «il modello spedito e' quello dichiarato». Lo ha
+    # mostrato il workflow su OpenRouter, dove l'id porta il prefisso del produttore
+    # (`openai/gpt-5.6-sol`) e il valore cablato non coincideva piu'.
+    _env = {**(_carica(path).get('env') or {}),
+            **(_carica(path)['jobs']['review'].get('env') or {})}
     spazio: dict = {
-        'MODEL_ID': 'gpt-5.6-sol',
-        'OPENAI_MODEL': 'gpt-5.5',
+        'MODEL_ID': _env.get('MODEL_ID', 'gpt-5.6-sol'),
+        'OPENAI_MODEL': _env.get('OPENAI_MODEL', 'gpt-5.5'),
         'MAX_OUTPUT_TOKENS': 10_000,
         'BETRELAY_GPT': 'chiave-finta-non-un-segreto',
+        'BETRELAY_FUGU': 'chiave-finta-non-un-segreto',
+        'API_URL': _env.get('API_URL', 'https://openrouter.ai/api/v1/chat/completions'),
+        # La politica di privacy verso il fornitore viene dall'env del workflow,
+        # come i modelli e per lo stesso motivo: cablarla qui renderebbe vera per
+        # coincidenza la verifica «cio' che e' dichiarato arriva nel corpo».
+        'OPENROUTER_DATA_COLLECTION': (_env.get('OPENROUTER_DATA_COLLECTION') or '').strip(),
+        'OPENROUTER_ZDR': str(_env.get('OPENROUTER_ZDR') or '').strip().lower()
+                          in ('1', 'true', 'yes'),
         'REVIEW_ID': 'gpt56-sol',
         'redact': lambda t: t,
         'json': _json,
@@ -2301,4 +2801,339 @@ def test_un_400_del_fornitore_fa_FALLIRE_e_non_restituisce_una_review(monkeypatc
     assert len(chiamate) == 1, (
         f'un 400 e- stato ritentato {len(chiamate)} volte: la richiesta e- malformata, '
         'ritentarla da- tre volte lo stesso errore e tre volte il costo'
+    )
+
+
+# ---------------------------------------------------------------------------
+#  Il reviewer forte su OPENROUTER (02/09/2026)
+#
+#  Stesso modello del workflow dormiente, endpoint DIVERSO: `chat/completions` al
+#  posto di `v1/responses`. Sono due API che si somigliano abbastanza da far
+#  sbagliare: il prompt sta in `messages` e non in `input`, il tetto e' `max_tokens`
+#  e non `max_output_tokens`, e — la parte che conta — il troncamento si legge in
+#  `finish_reason` e non in `status`/`incomplete_details`.
+#
+#  Leggere il campo dell'API sbagliata non solleva niente: restituisce sempre
+#  «completa», e una review interrotta a meta' viene pubblicata col done_marker che
+#  impedisce di rifarla. Il gate finale direbbe «nessun bloccante» su mezza review.
+#  Questi test ESEGUONO `call_model` del workflow su risposte finte, perche' un
+#  assert sul sorgente non prova che quel dizionario finisca nel corpo del POST.
+# ---------------------------------------------------------------------------
+
+
+
+@pytest.mark.parametrize('path', SU_CHAT_COMPLETIONS, ids=lambda p: p.name)
+def test_openrouter_spedisce_la_forma_di_chat_completions(monkeypatch, path):
+    """La richiesta ISPEZIONATA, non il sorgente: `messages`, `max_tokens`, e l'URL
+    con `/api/v1` — senza quel segmento la POST finisce su un percorso che non
+    esiste, ed e' l'errore dello snippet da cui siamo partiti."""
+    call_model, chiamate = _call_model_del_gate(monkeypatch, path=path, risposta={
+        'choices': [{'message': {'content': 'nessun bloccante'},
+                     'finish_reason': 'stop'}],
+        'usage': {'prompt_tokens': 1_000, 'completion_tokens': 10},
+    })
+    testo, usage = call_model('sistema', 'utente')
+    assert testo == 'nessun bloccante', f'testo non estratto: {testo!r}'
+    assert usage == {'prompt_tokens': 1_000, 'completion_tokens': 10}
+
+    corpo = _corpo_spedito(chiamate)
+    assert 'messages' in corpo, f'la richiesta non ha `messages`: {sorted(corpo)}'
+    assert 'input' not in corpo, 'la richiesta ha ancora `input`, il campo di v1/responses'
+    assert corpo['max_tokens'] == 10_000, corpo.get('max_tokens')
+    assert 'max_output_tokens' not in corpo, 'tetto col nome di v1/responses'
+    assert 'temperature' not in corpo
+
+    env = {**(_carica(path).get('env') or {}),
+           **(_carica(path)['jobs']['review'].get('env') or {})}
+    dichiarato = env.get('MODEL_ID') or env.get('OPENAI_MODEL')
+    assert corpo['model'] == dichiarato, (
+        f'modello spedito {corpo["model"]!r} != dichiarato {dichiarato!r}')
+    assert dichiarato.startswith('openai/'), (
+        f'su OpenRouter gli id portano il prefisso del produttore: {dichiarato!r}')
+
+    url = chiamate[0].full_url
+    assert url == 'https://openrouter.ai/api/v1/chat/completions', url
+    assert '/api/v1/' in url, (
+        f'manca `/api/v1` nell-URL ({url}): la POST finirebbe su un percorso '
+        'inesistente, ed e- l-errore dello snippet iniziale'
+    )
+    assert 'api.openai.com' not in url, 'punta ancora al fornitore col credito esaurito'
+
+
+@pytest.mark.parametrize('path', SU_CHAT_COMPLETIONS, ids=lambda p: p.name)
+def test_la_politica_di_privacy_del_fornitore_e_NEL_CORPO(monkeypatch, path):
+    """Il diff della PR non deve finire da un fornitore che lo conserva.
+
+    OpenRouter e' un instradatore: per default puo' scegliere fornitori che
+    conservano i dati. `provider.data_collection` e `provider.zdr` lo governano —
+    nomi verificati sulla documentazione del fornitore, non dedotti. Segnalato da
+    CodeRabbit sulla PR #107 come Major, ed e' fondato: qui dentro passa il
+    sorgente del relay.
+
+    Il test ISPEZIONA IL CORPO DEL POST. Una politica dichiarata nel blocco `env:`
+    e mai messa nel payload sarebbe la forma peggiore fra quelle che questo
+    repository conosce: una protezione che si legge nel file e non esiste nella
+    richiesta."""
+    call_model, chiamate = _call_model_del_gate(monkeypatch, path=path, risposta={
+        'choices': [{'message': {'content': 'ok'}, 'finish_reason': 'stop'}],
+        'usage': {'prompt_tokens': 10, 'completion_tokens': 1},
+    })
+    call_model('sistema', 'utente')
+    corpo = _corpo_spedito(chiamate)
+
+    env = {**(_carica(path).get('env') or {}),
+           **(_carica(path)['jobs']['review'].get('env') or {})}
+    politica = str(env.get('OPENROUTER_DATA_COLLECTION') or '').strip()
+    assert politica == 'deny', (
+        f'{path.name}: la raccolta dati del fornitore non e- negata nel blocco env: '
+        f'{politica!r}'
+    )
+    provider = corpo.get('provider')
+    assert isinstance(provider, dict), (
+        f'{path.name}: la richiesta non porta nessuna politica di instradamento — '
+        f'il diff puo- finire da un fornitore che lo conserva. Corpo: {sorted(corpo)}'
+    )
+    assert provider.get('data_collection') == 'deny', (
+        f'{path.name}: `data_collection` non arriva al fornitore: {provider!r}'
+    )
+    # ZDR e' spento per default e non deve comparire finche- non lo si accende:
+    # e' il piu- restrittivo e puo- lasciare zero endpoint per questi modelli.
+    zdr_env = str(env.get('OPENROUTER_ZDR') or '').strip().lower()
+    if zdr_env in ('1', 'true', 'yes'):
+        assert provider.get('zdr') is True, (
+            f'{path.name}: ZDR e- acceso nell-env ma non arriva nel corpo: {provider!r}'
+        )
+    else:
+        assert 'zdr' not in provider, (
+            f'{path.name}: ZDR e- spento nell-env ma viene spedito lo stesso: {provider!r}'
+        )
+
+
+@pytest.mark.parametrize('path', SU_CHAT_COMPLETIONS, ids=lambda p: p.name)
+@pytest.mark.parametrize('motivo', ('length', 'content_filter', 'tool_calls',
+                                    'error', None, '__assente__'),
+                         ids=('length', 'content_filter', 'tool_calls', 'error',
+                              'null', 'assente'))
+def test_openrouter_marca_troncata_ogni_uscita_che_non_sia_stop(monkeypatch, motivo, path):
+    """WHITELIST, non blacklist: completo e' SOLO `finish_reason == "stop"`.
+
+    Il caso `null` e quello `assente` sono il motivo per cui non basta elencare i
+    valori noti: se il fornitore a monte interrompe, o la forma cambia, una
+    condizione scritta come «diverso da length» direbbe «completa». E' il difetto
+    che `gpt-5.6-sol` trovo' alla sua prima chiamata reale sui workflow OpenAI —
+    una risposta interrotta CON del testo veniva certificata completa e mai rifatta.
+
+    Il banner conta perche' il chiamante lo controlla con `startswith` per NON
+    pubblicare il done_marker: senza, la review parziale viene deduplicata come
+    completata."""
+    scelta = {'message': {'content': 'meta- review'}}
+    if motivo != '__assente__':
+        scelta['finish_reason'] = motivo
+    call_model, _ = _call_model_del_gate(monkeypatch, path=path, risposta={
+        'choices': [scelta], 'usage': {}})
+    testo, _ = call_model('sistema', 'utente')
+    assert testo.lstrip().startswith('Output troncato'), (
+        f'finish_reason={motivo!r} passa per review COMPLETA: {testo[:120]!r}')
+    assert 'meta- review' in testo, 'il testo parziale non deve sparire'
+
+
+@pytest.mark.parametrize('path', SU_CHAT_COMPLETIONS, ids=lambda p: p.name)
+def test_openrouter_la_sola_uscita_COMPLETA_non_porta_il_banner(monkeypatch, path):
+    """Il caso che rende vivo il test sopra: senza, un `truncated` sempre vero li
+    farebbe passare tutti e la review si ripagherebbe a ogni giro."""
+    call_model, _ = _call_model_del_gate(monkeypatch, path=path, risposta={
+        'choices': [{'message': {'content': 'review intera'},
+                     'finish_reason': 'stop'}], 'usage': {}})
+    testo, _ = call_model('sistema', 'utente')
+    assert testo == 'review intera', f'banner su un-uscita completa: {testo!r}'
+
+
+@pytest.mark.parametrize('path', SU_CHAT_COMPLETIONS, ids=lambda p: p.name)
+def test_openrouter_un_errore_dentro_un_200_non_diventa_un_IndexError(monkeypatch, path):
+    """OpenRouter puo' rispondere 200 con `error` e nessun `choices`. Senza il
+    controllo, il codice solleverebbe «list index out of range»: un messaggio che
+    manda a cercare il guasto nel posto sbagliato, invece del motivo vero."""
+    call_model, _ = _call_model_del_gate(monkeypatch, path=path, risposta={
+        'error': {'message': 'insufficient credits'}})
+    with pytest.raises(RuntimeError) as exc:
+        call_model('sistema', 'utente')
+    assert 'insufficient credits' in str(exc.value), str(exc.value)
+
+
+@pytest.mark.parametrize('path', SU_CHAT_COMPLETIONS, ids=lambda p: p.name)
+def test_openrouter_choices_vuoto_dice_cosa_e_successo(monkeypatch, path):
+    call_model, _ = _call_model_del_gate(monkeypatch, path=path, risposta={
+        'choices': [], 'usage': {}})
+    with pytest.raises(RuntimeError) as exc:
+        call_model('sistema', 'utente')
+    assert 'choices' in str(exc.value), str(exc.value)
+
+
+def test_i_workflow_dormienti_non_partono_da_soli():
+    """I due su `api.openai.com` sono DORMIENTI dal 02/09/2026: credito esaurito.
+
+    Un workflow dormiente non deve avere `pull_request`, o continuerebbe a spendere
+    minuti di Actions per pubblicare «review non completata» e, al gate, un rosso
+    che non e' un difetto del codice.
+
+    E deve restare RIATTIVABILE: il trigger vero commentato nel file e' cio' che
+    distingue «messo a dormire» da «rotto». Se qualcuno lo cancellasse, riattivarlo
+    vorrebbe dire riscriverlo a memoria.
+
+    **Su `workflow_dispatch` questo docstring diceva una cosa falsa**, ed e' il
+    motivo per cui l'ultima asserzione esiste. C'era scritto che il dormiente
+    «deve restare LANCIABILE a mano: serve a provare se la chiave e' tornata viva».
+    Non e' vero: la `if:` del job pretende `github.event.pull_request`, che su un
+    avvio manuale non esiste, quindi il job viene SALTATO. Premere «Run workflow»
+    darebbe un run verde con zero job — e chi lo leggesse concluderebbe che la
+    chiave e' morta. Segnalato da CodeRabbit sulla PR #107.
+
+    `workflow_dispatch` resta per tenere il file visibile e valido nella scheda
+    Actions; il commento nel workflow ora lo dice, e l'asserzione impedisce che
+    la promessa falsa ci torni senza che nessuno se ne accorga."""
+    for path in (GPT, SOL):
+        trigger = _trigger(path)
+        assert 'pull_request' not in trigger, (
+            f'{path.name}: dormiente ma parte ancora sulle PR — spenderebbe minuti '
+            'per dire che il credito e- esaurito'
+        )
+        assert 'workflow_dispatch' in trigger, (
+            f'{path.name}: dormiente e nemmeno presente nella scheda Actions'
+        )
+        testo = path.read_text(encoding='utf-8')
+        righe = testo.splitlines()
+        assert any(r.strip().startswith('#') and 'pull_request:' in r for r in righe), (
+            f'{path.name}: manca il trigger commentato da cui riattivarlo'
+        )
+        # La `if:` del job pretende il contesto della PR: e' questo che rende
+        # irraggiungibile l'avvio manuale, ed e' il fatto che il commento deve
+        # dichiarare invece di contraddire.
+        condizione = _job(path).get('if') or ''
+        assert 'github.event.pull_request' in condizione, (
+            f'{path.name}: la condizione del job non richiede piu- il contesto della '
+            'PR — se e- voluto, il commento sull-avvio manuale va riscritto, perche- '
+            'oggi dice che il job viene saltato'
+        )
+        assert 'il job viene SALTATO' in testo, (
+            f'{path.name}: il commento non avverte piu- che un avvio manuale NON '
+            'esegue la review. Un run verde con zero job verrebbe letto come '
+            '«la chiave e- morta».'
+        )
+
+
+def test_il_workflow_vivo_del_gate_NON_e_dormiente():
+    """La rete che tiene insieme le due meta': se qualcuno addormentasse anche
+    questo, il gate finale resterebbe senza nessuno e armare la label non farebbe
+    partire niente — con la PR che mostra le spunte di sempre."""
+    trigger = _trigger(OPENROUTER)
+    assert 'pull_request' in trigger, (
+        'il reviewer forte VIVO e- dormiente: il gate finale non ha nessuno che lo '
+        'esegua, e armare la label non farebbe partire niente'
+    )
+    assert 'labeled' in trigger['pull_request']['types']
+
+
+# ---------------------------------------------------------------------------
+#  Il tetto dell'API Compare (02/09/2026)
+#
+#  [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #107, verificato sulla
+#  documentazione GitHub: «up to 300 changed files for the entire comparison»,
+#  e la lista esce solo sulla prima pagina. Oltre quella soglia i file in eccesso
+#  non arrivano AFFATTO: non come `skipped`, non come troncati — non ci sono.
+#
+#  MA la meta' del finding era gia' chiusa, e questo pezzo e' scritto perche'
+#  l'errore non si ripeta. `compare_truncated = len(files) >= 300` ESISTEVA GIA'
+#  in tutti e cinque i workflow, con `try_add_label()` che aggiunge
+#  `manual-review-required` e il blocco «RICHIEDE CONTROLLO MANUALE» nel commento:
+#  il fail-closed c'era. Io ho aggiunto una SECONDA variabile che diceva la stessa
+#  cosa (`TETTO_FILE_COMPARE` / `files_troncati_da_github`) — violazione della
+#  regola 3, fonte unica: due copie corrette oggi sono due copie divergenti domani.
+#  Il doppione e' stato rimosso; quel che mancava davvero era il DETTAGLIO nel
+#  commento, agganciato alla variabile che gia' c'era.
+#
+#  I tre test qui sotto tengono i tre lati: che il flag esista con la soglia e il
+#  confronto giusti (e sia UNO), che porti la label (fail-closed), e che finisca
+#  nel commento distinto dai file saltati per budget.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
+def test_il_tetto_dei_300_file_di_github_e_dichiarato(path):
+    """La soglia c'e', e' quella dell'API, il confronto e' `>=` non `>`, ed e' UNA.
+
+    `>=` perche' a 300 esatti non si puo' distinguere «erano proprio 300» da
+    «erano di piu' e l'API ha tagliato»: fail-closed, meglio un dubbio dichiarato
+    che un'omissione taciuta.
+
+    «Ed e' UNA»: il test vieta anche la seconda variabile che avevo aggiunto io.
+    Un doppione non e' innocuo — e' la premessa della divergenza."""
+    testo = path.read_text(encoding='utf-8')
+    assert 'compare_truncated = len(files) >= 300' in testo, (
+        f'{path.name}: il confronto col tetto dell-API Compare manca o non e- `>=` '
+        '(a 300 esatti non si distingue «erano 300» da «l-API ha tagliato»)'
+    )
+    for doppione in ('TETTO_FILE_COMPARE', 'files_troncati_da_github'):
+        assert doppione not in testo, (
+            f'{path.name}: `{doppione}` e- un doppione di `compare_truncated` — '
+            'regola 3, fonte unica'
+        )
+
+
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
+def test_il_tetto_dei_300_file_e_FAIL_CLOSED(path):
+    """Il tetto non produce solo una nota: arma il controllo manuale.
+
+    Se la Compare API ha tagliato, il workflow non puo' garantire di aver visto i
+    file sensibili del range: la label `manual-review-required` e il blocco
+    «RICHIEDE CONTROLLO MANUALE» devono partire per `compare_truncated` esattamente
+    come partono per `critical_files`."""
+    testo = path.read_text(encoding='utf-8')
+    assert 'if critical_files or compare_truncated:\n              try_add_label()' in testo, (
+        f'{path.name}: un confronto troncato non arma piu- `try_add_label()` — '
+        'il tetto tornerebbe a essere una nota senza conseguenze'
+    )
+    assert 'RICHIEDE CONTROLLO MANUALE' in testo, (
+        f'{path.name}: manca il blocco di avviso del controllo manuale'
+    )
+    assert '>= 300 file' in testo, (
+        f'{path.name}: l-avviso manuale non dice che la causa e- il tetto dell-API'
+    )
+
+
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
+def test_il_troncamento_di_github_finisce_NEL_COMMENTO(path):
+    """Un flag che nessuno stampa e' un flag inutile.
+
+    La dichiarazione va nel commento della PR, ed e' SEPARATA dall'elenco dei file
+    saltati per budget: sono due cose diverse e confonderle nasconderebbe la
+    peggiore. Un file «saltato» lo sappiamo per nome; questi non li conosce
+    nessuno, perche' l'API non li ha mai mandati."""
+    testo = path.read_text(encoding='utf-8')
+    assert 'Confronto TRONCATO da GitHub' in testo, (
+        f'{path.name}: il troncamento non ha un titolo suo nel commento'
+    )
+    assert "non copre l'intera PR" in testo, (
+        f'{path.name}: il commento non dice la conseguenza — che la review e- parziale'
+    )
+    # separato dai file saltati: la sua sezione non deve stare DENTRO quel blocco
+    posizione_saltati = testo.index('## File non inviati al modello')
+    posizione_tetto = testo.index('Confronto TRONCATO da GitHub')
+    assert posizione_tetto > posizione_saltati, (
+        f'{path.name}: la nota del tetto precede quella dei file saltati: le due '
+        'cose si confonderebbero proprio dove la distinzione conta'
+    )
+    # E la nota deve pendere DA `compare_truncated`, non essere stampata sempre.
+    # Attenzione a come si scrive questa asserzione: cercare `if compare_truncated:`
+    # «da qualche parte prima del titolo» NON basta — ce n'e' un'altra occorrenza
+    # piu' su, dentro il blocco dell'avviso manuale, e la guardia resterebbe verde
+    # dopo aver sostituito questa con `if True:`. Misurato: la prima versione di
+    # questo test passava esattamente quella mutazione. Serve l'aggancio esatto.
+    aggancio = (
+        'if compare_truncated:\n'
+        '              skipped_note += (\n'
+        '                  "\\n\\n## ⚠️ Confronto TRONCATO da GitHub\\n"'
+    )
+    assert aggancio in testo, (
+        f'{path.name}: la nota del tetto non pende direttamente da '
+        '`compare_truncated` — verrebbe stampata anche su un confronto integro'
     )

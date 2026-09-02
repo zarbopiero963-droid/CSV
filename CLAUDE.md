@@ -33,7 +33,7 @@ Il merge resta sempre manuale del repository owner.
 | Documentazione operativa endpoint e variabili | `README.txt` |
 | Screenshot reali di XTrader + catalogo (materia prima per le guide e per il chatbot) | `docs/xtrader/screenshot/` |
 | Deploy | `Procfile`, `railway.json`, `requirements.txt` |
-| Workflow di review AI (GPT-5.5, Fable 5, GPT-5.6 Sol) | `.github/workflows/pr-review-*.yml` |
+| Workflow di review AI — **vivi**: Fable 5, OpenRouter GPT-5.5, OpenRouter Sol; **dormienti**: GPT-5.5, GPT-5.6 Sol (credito OpenAI esaurito) | `.github/workflows/pr-review-*.yml` |
 | Guardia sui workflow di review | `tests/safety/test_ai_audit_workflows.py` |
 | Workflow che esegue i test (ogni PR, e i push a `main`) | `.github/workflows/test.yml` |
 | Runtime esterni dei test (node, Chromium) e modalita' severa | `tests/runtime.py` |
@@ -300,9 +300,24 @@ review/inline/thread triage · final hard verify.
 >
 > Perché funzionino servono due cose, **azione del proprietario una volta sola**:
 >
-> 1. i Secret del repo — **`BETRELAY_GPT`** (letto da DUE workflow: GPT-5.5 e GPT-5.6 Sol, che
->    stanno sulla stessa API) e **`BETRELAY_FABLE`**. `BETRELAY_FUGU` non è più letto da nessuno dal
->    12/08/2026 e la guardia lo vieta come residuo: il proprietario può eliminarlo. Sono i nomi scelti dal
+> **AGGIORNAMENTO 02/09/2026 — il credito OpenAI si è esaurito, e due workflow sono dormienti.**
+> Misurato sulle PR #104, #105 e #106: `credit_balance_exhausted` (HTTP 429) su ogni chiamata di
+> GPT-5.5 e GPT-5.6 Sol, che leggono `BETRELAY_GPT`. Decisione del proprietario: quei due file
+> restano **dormienti** (solo `workflow_dispatch`, riattivabili togliendo un commento) e il ruolo
+> del reviewer forte passa a **`pr-review-openrouter-sol.yml`** — stesso modello `gpt-5.6-sol`,
+> fornitore **OpenRouter**, endpoint `chat/completions`, e il Secret **`BETRELAY_FUGU`** che già
+> esisteva per l'ex reviewer Fugu. Nessuna chiave nuova da creare.
+> **La copertura dei push è ricostituita**, e va detto perché non è scontato: addormentare GPT-5.5
+> aveva aperto un buco — Fable spende solo sui file core, il reviewer forte solo al gate, quindi un
+> push su **soli test o documentazione** non veniva letto da nessuno fino al merge, e in questo
+> repository i test sono metà del lavoro. Il proprietario ha scelto di chiuderlo con un **quarto
+> workflow**, `pr-review-openrouter-gpt55.yml`: stesso ruolo del GPT-5.5 dormiente, su OpenRouter,
+> stesso Secret `BETRELAY_FUGU`. È il più caro per giro perché è l'unico che spende su **ogni**
+> push senza gate a file core — scelta consapevole, non un effetto collaterale.
+>
+> 1. i Secret del repo — **`BETRELAY_FUGU`** (l'unico dei tre letto da un workflow vivo: porta la
+>    chiave OpenRouter) e **`BETRELAY_FABLE`**. **`BETRELAY_GPT`** resta configurato ma lo leggono
+>    solo i due dormienti: non va eliminato, serve il giorno in cui quel credito torna. Sono i nomi scelti dal
 >    proprietario per questo repository: **non** `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` /
 >    `OPENROUTER_API_KEY`, che sono i nomi del Bridge. Un workflow che leggesse i nomi del Bridge
 >    troverebbe una stringa vuota e uscirebbe **verde senza chiamare il modello** — nessun errore,
@@ -320,7 +335,7 @@ review/inline/thread triage · final hard verify.
 > | Label `final-fable-review`, `final-fugu-review` | **misurato**: `GET /labels/{name}` risponde 200, non più 404 |
 > | Secret `BETRELAY_GPT` | **misurato**: il job GPT-5.5 su `7e86517` ha chiamato il modello e riportato 4572 token di uso |
 > | Secret `BETRELAY_FABLE` | **misurato dal 12/08/2026**: sulle PR #16, #17, #18 e #19 il job Fable ha riportato `Fonte token: Anthropic usage` con i conteggi e il costo — una review vera, non un `::notice`. Era «riferito dal proprietario» fino a quel giorno |
-> | Secret dell'ex reviewer via OpenRouter | **non più letto da nessun workflow** dal 12/08/2026: `gpt-5.6-sol` usa `BETRELAY_GPT`. Il proprietario può eliminarlo; la guardia vieta il nome come residuo |
+> | Secret `BETRELAY_FUGU` | **riusato dal 02/09/2026**: porta la chiave OpenRouter e lo leggono i **due** workflow su quel fornitore (`pr-review-openrouter-gpt55.yml` e `pr-review-openrouter-sol.yml`). Dal 12/08 al 02/09 non lo leggeva nessuno e la guardia lo vietava come residuo; ora la guardia è girata — lo **richiede** su quei due e continua a **vietarlo** sugli altri tre, dove sarebbe di nuovo una lettura a vuoto. **MISURATO il 02/09/2026** sulla PR #107: il job `OpenRouter GPT-5.5` ha chiamato il modello e riportato 12.410 token (`openai/gpt-5.5`, ~$0,0767). Quindi la chiave ha credito e l'id del modello esiste: non è più «riferito dal proprietario», è nel log |
 >
 > Regola che ne segue, e vale per chiunque legga: **un check verde non è prova di review.** Va letto il
 > log e cercata la riga d'uso token. Se compare un `::notice` «non configurato», quel reviewer non ha
@@ -345,7 +360,7 @@ GPT-5.5. Partono:
   push-range. Solo Claude Fable 5: GPT-5.6 Sol su un push esce senza spendere;
 - oppure quando l'agente aggiunge la label finale (gate pre-merge sull'intera PR):
   - `final-fable-review` → PR Review Claude Fable 5
-  - `final-fugu-review` → PR Review GPT-5.6 Sol *(il nome della label non cambia col modello: è
+  - `final-fugu-review` → **PR Review OpenRouter Sol** (dal 02/09/2026; prima era `PR Review GPT-5.6 Sol`, ora dormiente) *(il nome della label non cambia col modello né col fornitore: è
     il nome del GATE, e rinominarla richiede che il proprietario crei quella nuova)*
 
 Su push che toccano solo workflow/CI, docs o test, i due job partono ma escono senza chiamare il
@@ -394,7 +409,7 @@ ciascuna, i job gatano su `github.event.label.name`, l'evento della label che no
 viene rifiutato dalla condizione e — col gruppo di concorrenza della PR — i job buoni finiscono
 `skipped`. Il sintomo è «ho messo le label e i reviewer non partono», e non è deducibile dai log.
 
-Poi aspetta i workflow *PR Review Claude Fable 5* e *PR Review GPT-5.6 Sol* (rientrano
+Poi aspetta i workflow *PR Review Claude Fable 5* e *PR Review OpenRouter Sol* (rientrano
 nel CHECK COMPLETION GATE). Se una delle due review segnala bloccanti, security issue, rischi
 contratto CSV, rischi di isolamento fra utenti, rischi workflow, rischi gestione segreti o
 `manual-review-required`, non dichiarare la PR pronta e non proporre merge automatico: lascia la
@@ -440,11 +455,23 @@ solo perché stai aspettando.
 
 **Attenzione a cosa manca e cosa no.** Codacy, DeepSource, CodeRabbit e Codex sono GitHub App
 installate sull'account e compaiono su ogni PR: i loro check e commenti vanno attesi e letti come
-su qualunque altra PR. I workflow di review a API key **esistono** in `.github/workflows/` e sono
-**tre**: GPT-5.5, Claude Fable 5, GPT-5.6 Sol. **GLM 5.2 non è importato.** Se mancano i
-Secret del repo o le due label finali, quei tre workflow **escono verdi senza chiamare il modello**
-(un `::notice` nei log, non un errore): in quel caso la PR ha tre spunte verdi e zero righe
-revisionate, e la condizione va dichiarata, non taciuta.
+su qualunque altra PR. I workflow di review a API key in `.github/workflows/` sono **cinque file,
+tre vivi**: OpenRouter GPT-5.5, Claude Fable 5, OpenRouter Sol. Gli altri due
+(`pr-review-gpt55.yml`, `pr-review-gpt56-sol.yml`) sono **dormienti dal 02/09/2026** e non
+producono più alcun check: non aspettarli. **GLM 5.2 non è importato.**
+
+**Quando un check verde non prova una review, e per quale dei tre.** Le due cose vanno tenute
+distinte, perché confonderle fa scartare una review vera:
+
+- **Secret mancante:** il workflow che legge quel Secret trova una stringa vuota ed esce verde
+  con un `::notice` nei log, non un errore. Vale per tutti e tre, ciascuno per il proprio Secret.
+- **Label finali:** riguardano **solo** i due workflow col gate finale (Fable e OpenRouter Sol).
+  **OpenRouter GPT-5.5 gira su ogni evento `pull_request` e non dipende da quelle label**: un suo
+  check verde, con la riga d'uso token nel log, è una review vera anche senza label.
+
+Segnalato da CodeRabbit sulla PR #107: la versione precedente di questa riga diceva che senza le
+label «i tre vivi escono verdi senza chiamare il modello», e un agente che la leggesse butterebbe
+via l'unica review che ha.
 
 **Zero check non è comunque un PASS.** Se una PR non mostra alcun check — app non ancora attive
 su questo repository, outage, PR draft — si scrive esplicitamente «nessun check è girato: la
@@ -468,15 +495,26 @@ pubblicano commenti o annotation solo a check completato.
 >   `.github/workflows/` non esista: **CodeRabbit · Codacy · DeepSource · Codex** (e Sourcery,
 >   quando non è rate-limited). Aprendo una PR compaiono. I loro check vanno attesi e i loro
 >   commenti letti, esattamente come nel Bridge.
-> - **Workflow a API key, importati dal Bridge e presenti in `.github/workflows/`:** GPT-5.5,
->   Claude Fable 5, GPT-5.6 Sol. Usano i Secret del repo, che il proprietario deve
->   aggiungere. **GLM 5.2 non è stato importato:** qui i reviewer a API key sono tre, e questa
->   differenza rispetto al Bridge va detta, non taciuta.
+> - **Workflow a API key, presenti in `.github/workflows/`:** sono **cinque file**, ma solo
+>   **tre vivi**. Vivi: **OpenRouter GPT-5.5** (`pr-review-openrouter-gpt55.yml`),
+>   **Claude Fable 5** (`pr-review-claude-fable5.yml`), **OpenRouter Sol**
+>   (`pr-review-openrouter-sol.yml`). **Dormienti dal 02/09/2026**, credito OpenAI esaurito:
+>   `pr-review-gpt55.yml` e `pr-review-gpt56-sol.yml` — hanno solo `workflow_dispatch`, quindi
+>   **non compaiono più come check sulle PR**. Non aspettarli e non contarli.
+>   **GLM 5.2 non è stato importato:** questa differenza rispetto al Bridge va detta, non taciuta.
 
-I reviewer che coprono davvero una PR sono quindi i tre workflow GitHub Actions con API key nei
-Secret del repo — GPT-5.5, Claude Fable 5, GPT-5.6 Sol — più CodeRabbit. GPT-5.5 gira a
-ogni push; Fable parte da solo sui push che toccano file core; Sol solo con la label finale;
-entrambi partono con le label finali; CodeRabbit rivede l'intera PR dal suo base.
+I reviewer che coprono davvero una PR sono quindi i tre workflow **vivi** — OpenRouter GPT-5.5,
+Claude Fable 5, OpenRouter Sol — più CodeRabbit. OpenRouter GPT-5.5 gira a ogni push, qualunque
+file; Fable parte da solo sui push che toccano file core; OpenRouter Sol solo con la label
+finale; entrambi partono con le label finali; CodeRabbit rivede l'intera PR dal suo base.
+
+**Attenzione a un'azione del proprietario che questa transizione rende necessaria:** se la
+branch protection di `main` richiede ancora i check `GPT-5.5 push-range review` o
+`GPT-5.6 Sol final review`, quei check **non verranno più creati** sulle PR — perché i due
+workflow non partono più su `pull_request` — e il merge resterebbe bloccato in attesa di
+qualcosa che non arriva. Vanno tolti dai required check in *Settings → Branches*. Segnalato da
+CodeRabbit sulla PR #107; **non verificabile dall'agente**, che non ha accesso all'API di branch
+protection in questo ambiente.
 
 **Codex NON è un gate** — non aspettarlo. È installato e comparirà sulle PR, ma l'abbonamento
 Codex del proprietario è scaduto: quando pubblica «You have reached your Codex usage limits» o
@@ -679,9 +717,10 @@ Motivo per cui non si merga appena rispondono i veloci: i reviewer sincroni risp
 minuto, ma CodeRabbit pubblica i finding dettagliati (anche Major) minuti dopo. Saltarlo significa
 perdere P1 reali pre-merge.
 
-In questo repository i reviewer sincroni sono **tre** — GPT-5.5, Claude Fable 5, GPT-5.6 Sol —
-perché GLM 5.2 non è importato. Nel Bridge sono quattro: se leggi «quattro reviewer sincroni» da
-qualche parte, quella frase viene da là.
+In questo repository i reviewer sincroni sono **tre** — OpenRouter GPT-5.5, Claude Fable 5,
+OpenRouter Sol — perché GLM 5.2 non è importato e perché i due su OpenAI diretta sono dormienti.
+Nel Bridge sono quattro: se leggi «quattro reviewer sincroni» da qualche parte, quella frase viene
+da là.
 
 Flusso pre-merge:
 
@@ -691,7 +730,12 @@ Flusso pre-merge:
 3. leggere gli esiti dei tre reviewer sincroni;
 4. aspettare che **CodeRabbit abbia completato**: o pubblica commenti inline azionabili, o il
    riepilogo «No actionable comments». L'attesa è legata all'evento, non a un orologio, e non
-   blocca il proprietario;
+   blocca il proprietario. **MISURATO il 02/09/2026 sulla PR #107: CodeRabbit NON revisiona
+   automaticamente questo repository** — pubblica «This repository does not receive automatic
+   reviews because it has fewer than 10 stars». Non è lentezza: non parte. Va **innescato a mano**
+   con un commento `@coderabbitai review` sul head stabile, e solo allora l'attesa qui sopra ha
+   senso. Prima di quel giorno l'agente lo aspettava e lo dichiarava assente per il cap dei 15
+   minuti — cioè aspettava una cosa che non sarebbe mai arrivata;
 5. solo con i tre reviewer + la review reale di CodeRabbit acquisiti → dire al proprietario
    merge sì/no.
 
@@ -1532,9 +1576,10 @@ installate in posti diversi. Aspetta i loro check, leggi i loro commenti, fai il
 
 | Manca | Conseguenza per l'agente |
 |---|---|
-| ~~Secret delle API key~~ | **Configurati il 2026-08-11** come `BETRELAY_GPT`, `BETRELAY_FABLE`, `BETRELAY_FUGU`. Non erano configurati fino a quel giorno, e i tre workflow uscivano **verdi senza revisionare** (`::notice` nei log della PR #1): un check verde non prova che un modello abbia letto il diff. Adesso girano davvero. Attenzione ai nomi: sono quelli di questo repository, non quelli del Bridge. |
+| ~~Secret delle API key~~ | **Configurati il 2026-08-11** come `BETRELAY_GPT`, `BETRELAY_FABLE`, `BETRELAY_FUGU`. Non erano configurati fino a quel giorno, e i workflow uscivano **verdi senza revisionare** (`::notice` nei log della PR #1): un check verde non prova che un modello abbia letto il diff. Attenzione ai nomi: sono quelli di questo repository, non quelli del Bridge. **Dal 02/09/2026** `BETRELAY_GPT` lo leggono solo i **due dormienti** (credito esaurito), e la chiave che alimenta due dei tre reviewer vivi è `BETRELAY_FUGU`, che ora porta la chiave **OpenRouter**. |
 | ~~Label `final-fable-review`, `final-fugu-review`~~ | **Create il 2026-08-11.** La creazione era azione del proprietario, una volta sola. **Applicarle** è invece ricorrente e spetta all'agente: rimuovere e riaggiungere a ogni head stabile. |
-| Workflow GLM 5.2 | non importato per scelta: i reviewer a API key qui sono tre. Non contarlo né aspettarlo. |
+| Workflow GLM 5.2 | non importato per scelta. Non contarlo né aspettarlo. |
+| ~~Reviewer a API key su OpenAI diretta~~ | **Dormienti dal 02/09/2026**: `pr-review-gpt55.yml` e `pr-review-gpt56-sol.yml` hanno solo `workflow_dispatch` e **non producono più check sulle PR**. Il loro `workflow_dispatch` NON esegue la review — la `if:` del job pretende `github.event.pull_request`, assente su un avvio manuale, quindi il job viene saltato: un run verde con zero job. Per riprovarli si toglie il commento al trigger `pull_request`. |
 | ~~Workflow di build/test propri del repo~~ | **Creato il 12/08/2026**: `.github/workflows/test.yml` esegue `pytest -q` su ogni PR e sui push a `main`, con `TEST_RUNTIME_OBBLIGATORIO=1` perche' uno skip per runtime mancante non possa lasciarlo verde. Prima non esisteva e i test giravano solo in locale. |
 | ~~Test del relay (`main.py`)~~ | **Creati l'11/08/2026** in `tests/relay/test_csv_contract.py` col passaggio a UTF-8 con BOM: byte della risposta HTTP, `verify_csv()`, fail-closed di `store_signal`, esito del verificatore su `/health`. `tests/` ha ora quattro cartelle. |
 | `docs/` | esiste dal 14/08/2026, ma contiene **solo** `docs/xtrader/screenshot/` — materia prima fornita dal proprietario, non una guida. I documenti del Bridge citati sopra continuano a non esistere qui e non vanno inventati. |
