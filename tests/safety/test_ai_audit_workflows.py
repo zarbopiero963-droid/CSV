@@ -2530,3 +2530,62 @@ def test_il_workflow_vivo_del_gate_NON_e_dormiente():
         'esegua, e armare la label non farebbe partire niente'
     )
     assert 'labeled' in trigger['pull_request']['types']
+
+
+# ---------------------------------------------------------------------------
+#  Il tetto dell'API Compare (02/09/2026)
+#
+#  [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #107, verificato sulla
+#  documentazione GitHub prima di correggere: «up to 300 changed files for the
+#  entire comparison», e la lista esce solo sulla prima pagina.
+#
+#  Oltre quella soglia i file in eccesso non arrivano AFFATTO: non come `skipped`,
+#  non come troncati — non ci sono. Senza dichiararlo, la review coprirebbe una PR
+#  grande solo in parte e non lo direbbe: non «non ho visto un file», ma «ho visto
+#  tutto» detto da chi non ha visto tutto. E' la forma peggiore fra quelle che
+#  questo repository conosce, ed era EREDITATA da tutti i workflow.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
+def test_il_tetto_dei_300_file_di_github_e_dichiarato(path):
+    """La soglia c'e', e' quella dell'API, e il confronto e' `>=` non `>`.
+
+    `>=` perche' a 300 esatti non si puo' distinguere «erano proprio 300» da
+    «erano di piu' e l'API ha tagliato»: fail-closed, meglio un dubbio dichiarato
+    che un'omissione taciuta."""
+    testo = path.read_text(encoding='utf-8')
+    assert 'TETTO_FILE_COMPARE = 300' in testo, (
+        f'{path.name}: non conosce il tetto dell-API Compare'
+    )
+    assert 'files_troncati_da_github = len(files) >= TETTO_FILE_COMPARE' in testo, (
+        f'{path.name}: il confronto col tetto manca o non e- `>=` (a 300 esatti '
+        'non si distingue «erano 300» da «l-API ha tagliato»)'
+    )
+
+
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
+def test_il_troncamento_di_github_finisce_NEL_COMMENTO(path):
+    """Un flag che nessuno stampa e' un flag inutile.
+
+    La dichiarazione va nel commento della PR, ed e' SEPARATA dall'elenco dei file
+    saltati per budget: sono due cose diverse e confonderle nasconderebbe la
+    peggiore. Un file «saltato» lo sappiamo per nome; questi non li conosce
+    nessuno, perche' l'API non li ha mai mandati."""
+    testo = path.read_text(encoding='utf-8')
+    assert 'if files_troncati_da_github:' in testo, (
+        f'{path.name}: il flag e- calcolato ma non viene mai usato'
+    )
+    assert 'Confronto TRONCATO da GitHub' in testo, (
+        f'{path.name}: il troncamento non ha un titolo suo nel commento'
+    )
+    assert "non copre l'intera PR" in testo, (
+        f'{path.name}: il commento non dice la conseguenza — che la review e- parziale'
+    )
+    # separato dai file saltati: la sua sezione non deve stare DENTRO quel blocco
+    posizione_saltati = testo.index('## File non inviati al modello')
+    posizione_tetto = testo.index('Confronto TRONCATO da GitHub')
+    assert posizione_tetto > posizione_saltati, (
+        f'{path.name}: la nota del tetto precede quella dei file saltati: le due '
+        'cose si confonderebbero proprio dove la distinzione conta'
+    )
