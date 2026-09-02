@@ -254,9 +254,9 @@ jobs:
           MAX_PATCH_PER_FILE_CHARS = int(os.environ.get("MAX_PATCH_PER_FILE_CHARS", "4000"))
           MAX_TOTAL_PATCH_CHARS = int(os.environ.get("MAX_TOTAL_PATCH_CHARS", "14000"))
           # Tier-2: usati SOLO se il tetto basso ha troncato il diff (vedi build_patch_payload).
-          MAX_PATCH_PER_FILE_CHARS_ESCALATED = int(os.environ.get("MAX_PATCH_PER_FILE_CHARS_ESCALATED", "15000"))
+          MAX_PATCH_PER_FILE_CHARS_ESCALATED = int(os.environ.get("MAX_PATCH_PER_FILE_CHARS_ESCALATED", "30000"))
           MAX_TOTAL_PATCH_CHARS_ESCALATED = int(os.environ.get("MAX_TOTAL_PATCH_CHARS_ESCALATED", "60000"))
-          MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "3000"))
+          MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "10000"))
 
           PRICE_INPUT_PER_MILLION = float(os.environ.get("PRICE_INPUT_PER_MILLION", "0"))
           PRICE_OUTPUT_PER_MILLION = float(os.environ.get("PRICE_OUTPUT_PER_MILLION", "0"))
@@ -414,11 +414,83 @@ jobs:
               # Il taglio resta dentro la
               # riga: attraversare i ritorni a capo e' la forma che il 12/08/2026
               # produsse payload rotti, e non si rifa'.
-              (re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)\s*[:=]\s*(?![\"']?\s*\$\{\{[^{}]*\}\}[\"']?[ \t]*(?:\r?\n|\Z))[\"'][^\r\n]*(?=\r?\n|\Z)"), r"\1=[REDACTED]"),
+              # La chiave deve APRIRE la riga. Senza questo vincolo la regola
+              # mordeva `web/api.js`, dove una concatenazione di URL apre una
+              # virgoletta a meta' riga che sulla riga non si chiude: il modello
+              # riceveva codice troncato e ne deduceva difetti inesistenti — la
+              # classe di difetto del 12/08/2026. MISURATO sul file vero; la prima
+              # misura non l-aveva visto perche- quel file mancava dall-insieme.
+              (re.compile(r"(?im)^([+\- ]?\s*[\"']?(?:api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)[\"']?)\s*[:=]\s*(?![\"']?\s*\$\{\{[^{}]*\}\}[\"']?[ \t]*(?:\r?\n|\Z))[\"'][^\r\n]*(?=\r?\n|\Z)"), r"\1=[REDACTED]"),
               (re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)\s*[:=]\s*(?![\"']?\s*\$\{\{[^{}]*\}\}[\"']?[ \t]*(?:\r?\n|\Z))[\"']?[^\"'\s,;]+"), r"\1=[REDACTED]"),
           ]
 
+          # La CODA di un valore quotato che si apre su una riga e si chiude su
+          # un'altra. Le regole della tabella sono orientate alla riga — di
+          # proposito: una regex che attraversa i ritorni a capo e' la forma che il
+          # 12/08/2026 produsse payload rotti e bloccanti inventati. Questa passata
+          # chiude il caso multiriga SENZA quella forma, con tre vincoli:
+          #
+          #  1. la chiave deve APRIRE la riga (dopo il prefisso di diff e
+          #     l'indentazione): una vera assegnazione di configurazione, non un
+          #     frammento in mezzo al codice. Senza questo vincolo la prima versione
+          #     mangiava 5 righe di `web/api.js`, dove `'?token=' + encode(...)`
+          #     apre una virgoletta che sulla riga non si chiude — MISURATO;
+          #  2. non si attraversa mai un confine di diff;
+          #  3. c'e' un tetto di righe.
+          #
+          # [REAL_FINDING] di GPT-5.6 Sol al gate della PR #107, terzo giro sulla
+          # stessa area. Misurato dopo: su 1.545.388 caratteri di testo reale del
+          # repository tocca 4 righe, tutte payload finti del file di test, dove
+          # redigere e' il comportamento giusto.
+          APRE_QUOTATO = re.compile(
+              r"""(?i)^[+\- ]?\s*["']?"""
+              r"""(?:api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)"""
+              r"""["']?\s*[:=]\s*"""
+              r"""(?!["']?\s*\$\{\{[^{}]*\}\}["']?[ \t]*$)(["'])"""
+          )
+          CONFINE_DIFF = re.compile(r"^(?:diff --git |index |@@|\+\+\+ |--- |Binary files )")
+          TETTO_RIGHE_CODA = 40
+
+          def _chiude_sulla_riga(riga: str, apice: str, da: int) -> bool:
+              """La virgoletta di chiusura c'e' su questa riga? Gli escape non contano."""
+              i, n = da, len(riga)
+              while i < n:
+                  if riga[i] == "\\":
+                      i += 2
+                      continue
+                  if riga[i] == apice:
+                      return True
+                  i += 1
+              return False
+
+          def redigi_coda_multiriga(text: str) -> str:
+              righe = text.split("\n")
+              fuori, i = [], 0
+              while i < len(righe):
+                  riga = righe[i]
+                  fuori.append(riga)
+                  i += 1
+                  m = APRE_QUOTATO.match(riga)
+                  if not m or _chiude_sulla_riga(riga, m.group(1), m.end()):
+                      continue
+                  consumate = 0
+                  while i < len(righe) and consumate < TETTO_RIGHE_CODA:
+                      seguito = righe[i]
+                      if CONFINE_DIFF.match(seguito):
+                          break
+                      prefisso = seguito[:1] if seguito[:1] in "+- " else ""
+                      chiude = _chiude_sulla_riga(seguito, m.group(1), len(prefisso))
+                      fuori.append(prefisso + "[REDACTED_CODA_MULTIRIGA]")
+                      i += 1
+                      consumate += 1
+                      if chiude:
+                          break
+              return "\n".join(fuori)
+
           def redact(text: str) -> str:
+              # PRIMA la passata multiriga: la tabella riscrive la riga d'apertura e
+              # cancella la virgoletta da cui si capisce che il valore non e' chiuso.
+              text = redigi_coda_multiriga(text)
               for pattern, replacement in REDACTIONS:
                   text = pattern.sub(replacement, text)
               return text

@@ -198,11 +198,16 @@ def _funzione_redact(path: Path):
     sorgente = _script(path)
     tabella = re.search(r'^(\s*)REDACTIONS = \[.*?^\1\]', sorgente, re.S | re.M)
     assert tabella, f'{path.name}: tabella REDACTIONS non trovata'
-    funzione = re.search(r'^(\s*)def redact\(.*?(?=\n\1[A-Za-z_]|\Z)', sorgente, re.S | re.M)
-    assert funzione, f'{path.name}: funzione redact non trovata'
+    # Dalla prima costante della passata multiriga fino alla fine di `redact`:
+    # `redact` non e' piu' autosufficiente — chiama `redigi_coda_multiriga`, e
+    # estrarla da sola darebbe un NameError invece di misurare qualcosa.
+    blocco = re.search(
+        r'^(\s*)APRE_QUOTATO = re\.compile\(.*?^\1def redact\(.*?(?=\n\1[A-Za-z_]|\Z)',
+        sorgente, re.S | re.M)
+    assert blocco, f'{path.name}: blocco della redazione (APRE_QUOTATO…redact) non trovato'
     spazio: dict = {'re': re}
     exec(textwrap.dedent(tabella.group(0)), spazio)  # noqa: S102 - sorgente del repo
-    exec(textwrap.dedent(funzione.group(0)), spazio)  # noqa: S102 - sorgente del repo
+    exec(textwrap.dedent(blocco.group(0)), spazio)  # noqa: S102 - sorgente del repo
     return spazio['redact']
 
 
@@ -548,7 +553,16 @@ def _funzione_payload(path: Path):
         blocco = re.search(r'^(\s*)' + re.escape(f) + r'.*?^\1\]', sorgente, re.S | re.M)
         assert blocco, f'{path.name}: {f} non trovata'
         pezzi.append(blocco.group(0))
-    for f in ('def redact(', 'def safe_display(', 'def is_critical(',
+    # `redact` non e' autosufficiente: chiama `redigi_coda_multiriga` e le sue
+    # costanti. Si prende il blocco intero, dalla prima costante fino alla fine di
+    # `redact` — estrarre la sola `def redact(` darebbe un NameError a runtime,
+    # cioe' cinque test rossi che non parlano del comportamento che misurano.
+    blocco = re.search(
+        r'^(\s*)APRE_QUOTATO = re\.compile\(.*?^\1def redact\(.*?(?=\n\1[A-Za-z_@]|\Z)',
+        sorgente, re.S | re.M)
+    assert blocco, f'{path.name}: blocco della redazione (APRE_QUOTATO…redact) non trovato'
+    pezzi.append(blocco.group(0))
+    for f in ('def safe_display(', 'def is_critical(',
               'def priorita_payload(', f'def {nome}('):
         blocco = re.search(r'^(\s*)' + re.escape(f) + r'.*?(?=\n\1[A-Za-z_@]|\Z)', sorgente, re.S | re.M)
         assert blocco, f'{path.name}: {f} non trovata'
@@ -1436,6 +1450,61 @@ def test_chiudere_la_coda_non_ha_allargato_la_redazione(path):
     )
 
 
+# ---------------------------------------------------------------------------
+#  I default di fallback devono dire quello che dice l'env (02/09/2026)
+#
+#  `[INSUFFICIENT_CONTEXT]` di Claude Fable 5 al gate della PR #107, verificato e
+#  reale: `MAX_PATCH_PER_FILE_CHARS_ESCALATED` valeva "30000" nell'env e "15000"
+#  come default Python. Innocuo finche' l'env resta definito — e' esattamente per
+#  questo che nessuno se ne accorge.
+#
+#  Ma 15000 non e' un numero qualunque: e' il tetto che il 12/08/2026 ha mandato al
+#  modello il 60% di `main.py` e prodotto QUATTRO bloccanti falsi su nove, tutti
+#  nella forma «non verificabile dal diff troncato». Alzarlo a 30000 e' stata una
+#  decisione misurata, scritta in CLAUDE.md. Il default lasciato indietro conserva
+#  la decisione VECCHIA, pronta a tornare in vigore il giorno che qualcuno tocca
+#  il blocco `env:` — senza errore, senza check rosso, e con la stessa firma di
+#  bloccanti inventati che quel giorno e' costata ~$1 a giro.
+#
+#  Fable ne aveva indicato UNO. La classe, cercata su tutti e cinque i file, aveva
+#  SETTE siti: il tetto per-file in tutti e cinque, e il tetto di output nei due
+#  del gate (env 10000, default 3000). Regola 2.
+# ---------------------------------------------------------------------------
+
+# I tetti dichiarati nel blocco `env:` e riletti da Python con un default.
+TETTI_CON_DEFAULT = (
+    'MAX_PATCH_PER_FILE_CHARS',
+    'MAX_TOTAL_PATCH_CHARS',
+    'MAX_PATCH_PER_FILE_CHARS_ESCALATED',
+    'MAX_TOTAL_PATCH_CHARS_ESCALATED',
+    'MAX_OUTPUT_TOKENS',
+)
+
+
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
+def test_ogni_default_di_fallback_coincide_con_il_suo_env(path):
+    """Due numeri per la stessa nozione devono essere lo stesso numero.
+
+    Il default Python non e' documentazione: e' il valore che governa davvero il
+    giorno in cui l'env sparisce. Se dice altro dall'env, il workflow ha due
+    politiche e quella che vince e' quella che nessuno ha riletto."""
+    testo = path.read_text(encoding='utf-8')
+    doc = _carica(path)
+    ambiente = doc['jobs']['review'].get('env') or {}
+    for nome in TETTI_CON_DEFAULT:
+        if nome not in ambiente:
+            continue
+        m = re.search(
+            rf'{nome}\s*=\s*int\(os\.environ\.get\(\s*"{nome}"\s*,\s*"(\d+)"',
+            testo)
+        assert m, f'{path.name}: {nome} e- nell-env ma Python non lo rilegge con un default'
+        assert m.group(1) == str(ambiente[nome]).strip(), (
+            f'{path.name}: {nome} vale {ambiente[nome]!r} nell-env e {m.group(1)!r} '
+            'come default Python. Il giorno che l-env sparisce vince il secondo, '
+            'e nessuno se ne accorge.'
+        )
+
+
 def _funzione_usage_note(path: Path):
     """Estrae ed ESEGUE `usage_note` dal workflow reale.
 
@@ -1498,6 +1567,84 @@ def test_i_token_da_cache_si_leggono_dal_campo_di_chat_completions(path):
                        'sys', 'user', 'review')
     assert 'dalla cache' not in senza, (
         f'{path.name}: senza dettagli dichiara comunque dei token da cache.\n{senza}'
+    )
+
+
+# (nome, testo, frammento che NON deve sopravvivere)
+CODE_MULTIRIGA = [
+    ('coda sulla riga successiva',
+     '+ password: "prima\n+ FRAMMENTO-x"\n+ riga normale'),
+    ('coda su tre righe',
+     '+ api_key: "a\n+ b-FRAMMENTO\n+ c-FRAMMENTO"\n+ dopo'),
+    ('assegnazione YAML indentata',
+     '      password: "aperta\n      FRAMMENTO"\n      dopo'),
+    ('chiave quotata, forma JSON',
+     '  "api_key": "aperta\n  FRAMMENTO",\n  altro'),
+    ('variabile d-ambiente con =',
+     '+ SECRET="aperta\n+ FRAMMENTO"\n+ dopo'),
+]
+
+
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
+@pytest.mark.parametrize('caso', CODE_MULTIRIGA, ids=lambda c: c[0])
+def test_la_coda_di_un_valore_quotato_MULTIRIGA_non_esce(path, caso):
+    """Il terzo giro di GPT-5.6 Sol sulla stessa area, e il piu- difficile.
+
+    Le regole della tabella sono orientate alla riga di proposito: una regex che
+    attraversa i ritorni a capo e' la forma che il 12/08/2026 produsse payload
+    rotti e bloccanti inventati. Il valore che si apre su una riga e si chiude su
+    un'altra restava percio' scoperto, e nel commit precedente l'avevo DICHIARATO
+    come residuo — che e' meglio di tacerlo, ma non e' chiuderlo.
+
+    Chiuso con una passata orientata alla riga, non con una regex multilinea."""
+    _, testo = caso
+    redact = _funzione_redact(path)
+    fuori = redact(testo)
+    assert 'FRAMMENTO' not in fuori, (
+        f'{path.name}: la coda multiriga esce in chiaro verso il fornitore '
+        f'esterno.\n  in : {testo!r}\n  out: {fuori!r}'
+    )
+
+
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
+def test_la_passata_multiriga_non_mangia_il_codice(path):
+    """Il rovescio, e senza di lui il test sopra si soddisfa redigendo tutto.
+
+    Questi casi vengono dalla PRIMA versione della passata, che li sbagliava
+    tutti: senza il vincolo «la chiave apre la riga» mangiava cinque righe di
+    `web/api.js`, dove `'?token=' + encode(...)` apre una virgoletta che sulla
+    riga non si chiude. Misurato allora, e questo test lo tiene chiuso adesso."""
+    redact = _funzione_redact(path)
+    espr = _espressione()
+    intatti = [
+        # concatenazione di URL in JavaScript: la chiave e- in mezzo alla riga
+        "    url: location.origin + r.feed + '?token=' + enc(r.token),\n"
+        "    altro: 1,\n  };",
+        # puntatore a un Secret
+        f'+ api-key: {espr}\n+ riga normale',
+        # prosa
+        'Nei log dei messaggi non deve comparire alcun token.\nriga dopo',
+    ]
+    for testo in intatti:
+        assert redact(testo) == testo, (
+            f'{path.name}: la passata multiriga ha mangiato contenuto legittimo.\n'
+            f'  in : {testo!r}\n  out: {redact(testo)!r}'
+        )
+    # Un valore quotato che si CHIUDE sulla riga va redatto — e' il lavoro della
+    # tabella — ma la passata multiriga non deve proseguire oltre: la riga dopo
+    # resta intatta. (Qui la prima versione del test pretendeva che l-intera riga
+    # sopravvivesse, cioe- chiedeva alla redazione di non redigere un segreto.)
+    chiuso = redact('+ password: "abc def"\n+ riga normale')
+    assert 'abc def' not in chiuso, (
+        f'{path.name}: il valore quotato chiuso non viene redatto: {chiuso!r}'
+    )
+    assert chiuso.endswith('+ riga normale'), (
+        f'{path.name}: la passata e- proseguita oltre la riga del valore: {chiuso!r}'
+    )
+    # e non attraversa mai un confine di diff
+    oltre = redact('+ password: "aperta\n@@ -1,2 +1,2 @@\n+ riga di un altro hunk')
+    assert 'riga di un altro hunk' in oltre and '@@ -1,2 +1,2 @@' in oltre, (
+        f'{path.name}: la passata ha superato un confine di diff: {oltre!r}'
     )
 
 
