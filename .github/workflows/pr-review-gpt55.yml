@@ -24,8 +24,16 @@ on:
   # butterebbe via la sola implementazione funzionante dell'endpoint `v1/responses`,
   # che serve di nuovo il giorno in cui quel credito torna.
   #
-  # `workflow_dispatch` lo lascia lanciabile a mano dalla scheda Actions: cosi' si
-  # puo' provare se la chiave e' tornata viva senza toccare il codice.
+  # `workflow_dispatch` tiene il file VISIBILE e valido nella scheda Actions. Non
+  # fa pero' girare la review: la `if:` del job pretende `github.event.pull_request`,
+  # che su un avvio manuale non esiste, quindi il job viene SALTATO. Qui c'era
+  # scritto il contrario — «cosi' si puo' provare se la chiave e' tornata viva
+  # senza toccare il codice» — ed era falso: chi avesse premuto «Run workflow»
+  # avrebbe visto un run verde con zero job e concluso che la chiave e' morta.
+  # Segnalato da CodeRabbit sulla PR #107.
+  #
+  # Per provare davvero se il credito e' tornato, si toglie il commento al
+  # trigger `pull_request` qui sotto su una PR di prova.
   workflow_dispatch:
   # Per RIATTIVARLO, togli il commento qui sotto (e rimetti dormiente quello su
   # OpenRouter, o le review si pagano due volte):

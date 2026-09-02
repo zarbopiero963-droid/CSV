@@ -692,7 +692,17 @@ jobs:
               # Token serviti dalla CACHE. Il caching di OpenAI e' automatico sopra i
               # ~1024 token e `input_tokens` LI INCLUDE: prezzarli a tariffa piena
               # gonfiava il costo dichiarato. Si sottraggono e si prezzano a parte.
-              dettagli_input = (usage or {}).get("input_tokens_details") or {}
+              # `chat/completions` li mette in `prompt_tokens_details`; `v1/responses`
+              # in `input_tokens_details`. Questi due workflow parlano il PRIMO, e
+              # avevano ereditato il nome del secondo dai loro gemelli: leggere il
+              # campo dell'API sbagliata non solleva niente, dice `0`, e i token
+              # serviti dalla cache finiscono prezzati a tariffa piena — costo
+              # dichiarato gonfiato, e nulla lo segnala. Segnalato da CodeRabbit
+              # sulla PR #107. Il fallback resta: OpenRouter inoltra le forme dei
+              # fornitori a monte, e una risposta col nome vecchio non deve perdere
+              # il conteggio.
+              dettagli_input = ((usage or {}).get("prompt_tokens_details")
+                                or (usage or {}).get("input_tokens_details") or {})
               cached_tokens = int(dettagli_input.get("cached_tokens") or 0)
 
               source = "OpenAI usage"

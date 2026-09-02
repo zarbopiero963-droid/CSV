@@ -79,7 +79,6 @@ jobs:
         github.event.label.name == 'final-fugu-review' )
 
     env:
-      # Lo STESSO Secret di GPT-5.5: `gpt-5.6-sol` sta sull'API OpenAI, quindi non
       # La chiave di OPENROUTER, nel Secret che il proprietario aveva gia' creato
       # per l'ex reviewer `sakana/fugu-ultra`. Riusarlo e' una decisione del
       # proprietario (02/09/2026): nessuna chiave nuova, e quel Secret tornava utile
@@ -845,7 +844,17 @@ jobs:
               # ~1024 token e `input_tokens` LI INCLUDE: prezzarli a tariffa piena
               # gonfierebbe il costo dichiarato, e su quei numeri il proprietario decide
               # quando armare il gate.
-              dettagli_input = (usage or {}).get("input_tokens_details") or {}
+              # `chat/completions` li mette in `prompt_tokens_details`; `v1/responses`
+              # in `input_tokens_details`. Questi due workflow parlano il PRIMO, e
+              # avevano ereditato il nome del secondo dai loro gemelli: leggere il
+              # campo dell'API sbagliata non solleva niente, dice `0`, e i token
+              # serviti dalla cache finiscono prezzati a tariffa piena — costo
+              # dichiarato gonfiato, e nulla lo segnala. Segnalato da CodeRabbit
+              # sulla PR #107. Il fallback resta: OpenRouter inoltra le forme dei
+              # fornitori a monte, e una risposta col nome vecchio non deve perdere
+              # il conteggio.
+              dettagli_input = ((usage or {}).get("prompt_tokens_details")
+                                or (usage or {}).get("input_tokens_details") or {})
               cached_tokens = int(dettagli_input.get("cached_tokens") or 0)
               source = "OpenAI usage"
 

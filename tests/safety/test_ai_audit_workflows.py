@@ -48,6 +48,13 @@ TUTTI = (GPT, FABLE, SOL, OPENROUTER, OPENROUTER_55)
 # (regola 2: la classe, non il sito).
 SU_V1_RESPONSES = (GPT, SOL)
 
+# E i due che parlano con `chat/completions` su OpenRouter, che invece leggono
+# `finish_reason`. Sta QUI, accanto al gemello, e non 2500 righe piu' sotto dove
+# era nato: due costanti che si definiscono a vicenda e vivono lontane sono due
+# costanti che divergono. Chi aggiunge un workflow deve vedere entrambe le liste
+# in un colpo d'occhio.
+SU_CHAT_COMPLETIONS = (OPENROUTER, OPENROUTER_55)
+
 # File il cui cambiamento DEVE far spendere il reviewer forte su un push.
 # main.py e' il relay; web/ e' la superficie multiutente e ospita il motore di
 # parsing; Procfile e railway.json espongono il servizio su Internet; le
@@ -112,6 +119,16 @@ def _script(path: Path) -> str:
     return '\n'.join(s.get('run') or '' for s in steps)
 
 
+def _job(path: Path) -> dict:
+    """Il job `review`, per ispezionarne la condizione `if:`.
+
+    Serve dove il comportamento non sta nello script ma nel fatto che il job
+    parta o no: una `if:` che pretende `github.event.pull_request` rende il job
+    irraggiungibile da un avvio manuale, e nessun test sullo script lo direbbe.
+    """
+    return _carica(path)['jobs']['review']
+
+
 def _core_patterns() -> list[re.Pattern]:
     """I pattern CORE veri, estratti dal workflow di Fable."""
     blocco = re.search(
@@ -130,7 +147,7 @@ def _tocca_core(nomi: list[str]) -> bool:
 
 # --------------------------------------------------------------- esistenza
 
-def test_i_tre_workflow_esistono():
+def test_TUTTI_i_workflow_esistono():
     for path in TUTTI:
         assert path.is_file(), f'workflow mancante: {path.name}'
 
@@ -435,8 +452,20 @@ def test_le_chiavi_vengono_dai_secret():
 
     **DUE workflow leggono `BETRELAY_GPT`,** e non e' un errore: dal 12/08/2026
     `gpt-5.6-sol` ha sostituito `sakana/fugu-ultra` al gate finale, e sta sulla
-    stessa API di GPT-5.5. Una chiave in meno da gestire. `BETRELAY_FUGU` non e'
-    piu' letto da nessuno, e il test accanto lo vieta come residuo.
+    stessa API di GPT-5.5. Quei due sono pero' DORMIENTI dal 02/09/2026 (credito
+    OpenAI esaurito): il Secret resta configurato per il giorno in cui torna.
+
+    **E `BETRELAY_FUGU` e' di nuovo VIVO,** dal 02/09/2026: porta la chiave
+    OpenRouter ed e' l'unico Secret che leggono i due workflow su quel fornitore.
+    Qui c'era scritto il contrario — «non e' piu' letto da nessuno, e il test
+    accanto lo vieta come residuo» — che era vero fino all'01/09 e falso dal
+    giorno dopo, a due righe dalla mappa che lo richiede. Chi si fosse fidato di
+    questa frase avrebbe rimesso il nome nella lista dei vietati e spento
+    ENTRAMBI i reviewer vivi. Segnalato da CodeRabbit sulla PR #107.
+
+    Il divieto non e' sparito, si e' spostato: `test_nessun_riferimento_ai_secret_del_bridge`
+    continua a vietare `BETRELAY_FUGU` sugli altri tre, dove sarebbe una lettura
+    a vuoto.
     """
     coppie = {
         GPT: 'secrets.BETRELAY_GPT',
@@ -1005,7 +1034,7 @@ def test_le_tre_copie_del_preambolo_dicono_LA_STESSA_COSA():
         uscite = {p.name: _funzione_contesto(p)(tagliati, saltati) for p in TUTTI}
         distinte = set(uscite.values())
         assert len(distinte) == 1, (
-            f'le tre copie divergono su tagliati={tagliati} saltati={saltati}:\n'
+            f'le copie divergono su tagliati={tagliati} saltati={saltati}:\n'
             + '\n'.join(f'--- {n} ---\n{t}' for n, t in uscite.items())
         )
 
@@ -1174,7 +1203,7 @@ def test_lo_script_del_workflow_ha_sintassi_valida(path):
 
 
 @pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
-def test_la_lista_di_priorita_e_identica_nei_tre_workflow(path):
+def test_la_lista_di_priorita_e_identica_in_TUTTI_i_workflow(path):
     """Regola 3 dove una fonte unica non e' possibile.
 
     I workflow non fanno checkout, quindi non possono importare un modulo comune:
@@ -1404,6 +1433,71 @@ def test_chiudere_la_coda_non_ha_allargato_la_redazione(path):
     assert 'commento che deve restare' in con_commento, (
         f'{path.name}: il taglio non si ferma alla virgoletta di chiusura: '
         f'{con_commento!r}'
+    )
+
+
+def _funzione_usage_note(path: Path):
+    """Estrae ed ESEGUE `usage_note` dal workflow reale.
+
+    Come per `redact`: il rendiconto dei token va misurato facendolo girare su
+    una risposta finta, non leggendo la regex dei nomi di campo. Un rendiconto
+    che legge il nome sbagliato non solleva niente — dice zero."""
+    sorgente = _script(path)
+    funzione = re.search(r'^(\s*)def usage_note\(.*?(?=\n\1[A-Za-z_]|\Z)',
+                         sorgente, re.S | re.M)
+    assert funzione, f'{path.name}: funzione usage_note non trovata'
+    prezzi = {}
+    for nome in ('PRICE_INPUT_PER_MILLION', 'PRICE_OUTPUT_PER_MILLION',
+                 'PRICE_CACHE_READ_PER_MILLION'):
+        m = re.search(rf'^\s*{nome}\s*=\s*float\(os\.environ.*$', sorgente, re.M)
+        assert m, f'{path.name}: {nome} non trovato'
+        prezzi[nome] = 5.0
+    spazio: dict = dict(prezzi)
+    exec(textwrap.dedent(funzione.group(0)), spazio)  # noqa: S102 - sorgente del repo
+    return spazio['usage_note']
+
+
+@pytest.mark.parametrize('path', SU_CHAT_COMPLETIONS, ids=lambda p: p.name)
+def test_i_token_da_cache_si_leggono_dal_campo_di_chat_completions(path):
+    """`chat/completions` mette i token da cache in `prompt_tokens_details`.
+
+    `v1/responses` li mette in `input_tokens_details`, ed e' il nome che questi
+    due workflow avevano ereditato dai loro gemelli. Leggere il campo dell'API
+    sbagliata NON solleva niente: dice `0`, i token serviti dalla cache vengono
+    prezzati a tariffa piena, e il costo dichiarato nel commento della PR e'
+    gonfiato senza che nulla lo segnali.
+
+    E' la stessa classe dei nomi `input`/`messages` e `status`/`finish_reason`
+    che questa PR e' nata per separare — e me n'ero accorto sui nomi di primo
+    livello (`prompt_tokens`/`input_tokens`) senza cercarla nel dizionario
+    annidato: regola 2, la classe e non il sito. Segnalato da CodeRabbit.
+
+    Il fallback su `input_tokens_details` resta: OpenRouter inoltra le forme dei
+    fornitori a monte, e una risposta che usi il nome vecchio non deve perdere
+    il conteggio."""
+    usage_note = _funzione_usage_note(path)
+
+    forma_openrouter = usage_note(
+        {'prompt_tokens': 1000, 'completion_tokens': 10,
+         'prompt_tokens_details': {'cached_tokens': 800}},
+        'sys', 'user', 'review')
+    assert '`800`' in forma_openrouter, (
+        f'{path.name}: i token da cache di `chat/completions` non vengono contati — '
+        f'prezzati a tariffa piena, il costo dichiarato e- gonfiato.\n{forma_openrouter}'
+    )
+
+    forma_vecchia = usage_note(
+        {'prompt_tokens': 1000, 'completion_tokens': 10,
+         'input_tokens_details': {'cached_tokens': 700}},
+        'sys', 'user', 'review')
+    assert '`700`' in forma_vecchia, (
+        f'{path.name}: il fallback sul nome di `v1/responses` e- stato perso.\n{forma_vecchia}'
+    )
+
+    senza = usage_note({'prompt_tokens': 1000, 'completion_tokens': 10},
+                       'sys', 'user', 'review')
+    assert 'dalla cache' not in senza, (
+        f'{path.name}: senza dettagli dichiara comunque dei token da cache.\n{senza}'
     )
 
 
@@ -2489,8 +2583,6 @@ def test_un_400_del_fornitore_fa_FALLIRE_e_non_restituisce_una_review(monkeypatc
 # ---------------------------------------------------------------------------
 
 
-SU_CHAT_COMPLETIONS = (OPENROUTER, OPENROUTER_55)
-
 
 @pytest.mark.parametrize('path', SU_CHAT_COMPLETIONS, ids=lambda p: p.name)
 def test_openrouter_spedisce_la_forma_di_chat_completions(monkeypatch, path):
@@ -2595,13 +2687,23 @@ def test_i_workflow_dormienti_non_partono_da_soli():
 
     Un workflow dormiente non deve avere `pull_request`, o continuerebbe a spendere
     minuti di Actions per pubblicare «review non completata» e, al gate, un rosso
-    che non e' un difetto del codice. Deve pero' restare LANCIABILE a mano
-    (`workflow_dispatch`): serve a provare se la chiave e' tornata viva senza
-    toccare il codice.
+    che non e' un difetto del codice.
 
     E deve restare RIATTIVABILE: il trigger vero commentato nel file e' cio' che
     distingue «messo a dormire» da «rotto». Se qualcuno lo cancellasse, riattivarlo
-    vorrebbe dire riscriverlo a memoria."""
+    vorrebbe dire riscriverlo a memoria.
+
+    **Su `workflow_dispatch` questo docstring diceva una cosa falsa**, ed e' il
+    motivo per cui l'ultima asserzione esiste. C'era scritto che il dormiente
+    «deve restare LANCIABILE a mano: serve a provare se la chiave e' tornata viva».
+    Non e' vero: la `if:` del job pretende `github.event.pull_request`, che su un
+    avvio manuale non esiste, quindi il job viene SALTATO. Premere «Run workflow»
+    darebbe un run verde con zero job — e chi lo leggesse concluderebbe che la
+    chiave e' morta. Segnalato da CodeRabbit sulla PR #107.
+
+    `workflow_dispatch` resta per tenere il file visibile e valido nella scheda
+    Actions; il commento nel workflow ora lo dice, e l'asserzione impedisce che
+    la promessa falsa ci torni senza che nessuno se ne accorga."""
     for path in (GPT, SOL):
         trigger = _trigger(path)
         assert 'pull_request' not in trigger, (
@@ -2609,11 +2711,26 @@ def test_i_workflow_dormienti_non_partono_da_soli():
             'per dire che il credito e- esaurito'
         )
         assert 'workflow_dispatch' in trigger, (
-            f'{path.name}: dormiente e nemmeno lanciabile a mano'
+            f'{path.name}: dormiente e nemmeno presente nella scheda Actions'
         )
-        righe = path.read_text(encoding='utf-8').splitlines()
+        testo = path.read_text(encoding='utf-8')
+        righe = testo.splitlines()
         assert any(r.strip().startswith('#') and 'pull_request:' in r for r in righe), (
             f'{path.name}: manca il trigger commentato da cui riattivarlo'
+        )
+        # La `if:` del job pretende il contesto della PR: e' questo che rende
+        # irraggiungibile l'avvio manuale, ed e' il fatto che il commento deve
+        # dichiarare invece di contraddire.
+        condizione = _job(path).get('if') or ''
+        assert 'github.event.pull_request' in condizione, (
+            f'{path.name}: la condizione del job non richiede piu- il contesto della '
+            'PR — se e- voluto, il commento sull-avvio manuale va riscritto, perche- '
+            'oggi dice che il job viene saltato'
+        )
+        assert 'il job viene SALTATO' in testo, (
+            f'{path.name}: il commento non avverte piu- che un avvio manuale NON '
+            'esegue la review. Un run verde con zero job verrebbe letto come '
+            '«la chiave e- morta».'
         )
 
 
