@@ -306,7 +306,18 @@ jobs:
               # commento le conteneva, e i cinque workflow avrebbero smesso di
               # caricarsi. L'ha preso `test_lo_script_non_contiene_espressioni_di_
               # actions_letterali`, che esiste esattamente per questo.
-              (re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)\s*[:=]\s*(?![\"']?\s*\$\{\{[^{}]*\}\}[\"']?[ \t]*(?:\r?\n|\Z))([\"'])(?:(?!\2).)*\2"), r"\1=[REDACTED]"),
+              (re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)\s*[:=]\s*(?![\"']?\s*\$\{\{[^{}]*\}\}[\"']?[ \t]*(?:\r?\n|\Z))([\"'])(?:\\.|(?!\2).)*\2"), r"\1=[REDACTED]"),
+              # ...e il valore quotato che sulla riga non si chiude AFFATTO: si
+              # redige fino a fine riga. Senza questa, una chiave seguita da
+              # una virgoletta e da un valore con spazi cadeva sulla regola
+              # generica qui sotto, che si ferma al primo spazio e lasciava
+              # uscire tutto il resto del valore. (L'esempio non lo scrivo per
+              # esteso: questa stessa regola lo redigerebbe nel diff, e chi
+              # legge vedrebbe un buco al posto della spiegazione.)
+              # Il taglio resta dentro la
+              # riga: attraversare i ritorni a capo e' la forma che il 12/08/2026
+              # produsse payload rotti, e non si rifa'.
+              (re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)\s*[:=]\s*(?![\"']?\s*\$\{\{[^{}]*\}\}[\"']?[ \t]*(?:\r?\n|\Z))[\"'][^\r\n]*(?=\r?\n|\Z)"), r"\1=[REDACTED]"),
               (re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)\s*[:=]\s*(?![\"']?\s*\$\{\{[^{}]*\}\}[\"']?[ \t]*(?:\r?\n|\Z))[\"']?[^\"'\s,;]+"), r"\1=[REDACTED]"),
           ]
 

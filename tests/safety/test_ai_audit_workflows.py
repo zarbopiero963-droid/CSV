@@ -1316,23 +1316,120 @@ def test_la_prosa_attorno_a_un_espressione_resta_leggibile(path):
         f'{path.name}: la prosa e- ancora alterata: {ripulito!r}'
 
 
-def test_la_tabella_di_redazione_e_identica_nei_tre_workflow():
+# ---------------------------------------------------------------------------
+#  La coda di un valore quotato (02/09/2026)
+#
+#  [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #107, in DUE giri.
+#
+#  Primo giro: un valore quotato con spazi veniva redatto solo fino al primo
+#  spazio, e la coda del segreto usciva verso il fornitore esterno. Chiuso con
+#  una regola che si ferma alla virgoletta di CHIUSURA.
+#
+#  Secondo giro, sulla correzione stessa: quella regola non conosceva ne' le
+#  virgolette ESCAPATE ne' il caso in cui la virgoletta non si chiude affatto
+#  sulla riga. Misurato prima di ricorreggere, eseguendo il redact() reale:
+#
+#      'password: "abc\\" def-CODA"'   -> 'password=[REDACTED] def-CODA"'
+#      "api_key: 'ab\\' cd-CODA'"      -> "api_key=[REDACTED] cd-CODA'"
+#      'password: "riga1 con spazi'    -> 'password=[REDACTED] con spazi'
+#
+#  Tre perdite su tre. La lezione, che vale oltre questo caso: una correzione di
+#  sicurezza va misurata sui casi limite del linguaggio che tratta, non solo sul
+#  caso che l'ha motivata — chiudere il buco «valore con spazi» senza pensare
+#  all'escape lascia in piedi lo stesso buco per chi scrive una virgoletta.
+#
+#  Cosa NON viene chiuso, e va detto invece che taciuto: un valore che si chiude
+#  su una RIGA SUCCESSIVA continua a perdere la coda. La redazione e' orientata
+#  alla riga di proposito — una regola che attraversa i ritorni a capo e' la
+#  forma esatta che il 12/08/2026 produsse payload rotti e bloccanti inventati.
+#  Misurato: una coda di forma nota (token del feed `xt_`) viene comunque presa
+#  dalla sua regola di forma; resta scoperta solo una coda generica su riga
+#  successiva. Il baratto e' dichiarato, non nascosto.
+# ---------------------------------------------------------------------------
+
+# (chiave, testo, frammento che NON deve sopravvivere)
+CODE_DI_VALORI_QUOTATI = [
+    ('doppio apice, valore con spazi',
+     'password: "abc def ghi-CODA"', 'CODA'),
+    ('doppio apice, virgoletta ESCAPATA dentro il valore',
+     'password: "abc \\" def-CODA"', 'CODA'),
+    ('apice singolo, apice ESCAPATO dentro il valore',
+     "api_key: 'ab \\' cd-CODA'", 'CODA'),
+    ('virgoletta APERTA e mai chiusa sulla riga',
+     'password: "riga con spazi-CODA', 'CODA'),
+    ('virgoletta mai chiusa, con del testo dopo',
+     'secret: "abc def-CODA  # nota', 'CODA'),
+]
+
+
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
+@pytest.mark.parametrize('caso', CODE_DI_VALORI_QUOTATI, ids=lambda c: c[0])
+def test_la_coda_di_un_valore_quotato_non_esce_mai(path, caso):
+    """Nessuna forma di valore quotato lascia uscire la propria coda.
+
+    Il test esegue il `redact()` reale del workflow, non ne ispeziona il sorgente:
+    una regex che «sembra giusta» e non lo e' passerebbe un test sul testo."""
+    _, riga, vietato = caso
+    redact = _funzione_redact(path)
+    fuori = redact(riga)
+    assert vietato not in fuori, (
+        f'{path.name}: la coda del valore quotato esce in chiaro verso il '
+        f'fornitore esterno.\n  in : {riga!r}\n  out: {fuori!r}'
+    )
+
+
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
+def test_chiudere_la_coda_non_ha_allargato_la_redazione(path):
+    """Il rovescio obbligatorio: la coppia, non il singolo test.
+
+    Chiudere una fuga allargando la regex e' esattamente cio' che il 12/08/2026
+    ruppe. Questi sono i casi che devono restare INTATTI, e senza di loro il test
+    sopra si soddisfa redigendo tutto."""
+    redact = _funzione_redact(path)
+    espr = _espressione()
+    intatti = [
+        f'api-key: {espr}',
+        f'OPENAI_API_KEY: "{espr}"',
+        f'name: pytest ({espr})',
+        'Il parser legge il token dal messaggio e non lo stampa.',
+        'Nei log dei messaggi non deve comparire alcun token.',
+    ]
+    for riga in intatti:
+        assert redact(riga) == riga, (
+            f'{path.name}: la redazione ha morso contenuto legittimo.\n'
+            f'  in : {riga!r}\n  out: {redact(riga)!r}'
+        )
+    # e il commento dopo un valore quotato e chiuso sopravvive al taglio
+    con_commento = redact('password: "abc"  # commento che deve restare')
+    assert 'commento che deve restare' in con_commento, (
+        f'{path.name}: il taglio non si ferma alla virgoletta di chiusura: '
+        f'{con_commento!r}'
+    )
+
+
+def test_la_tabella_di_redazione_e_identica_in_TUTTI_i_workflow():
     """Regola 3 sulla redazione, non solo sulle priorita'.
 
-    Chiesto da GPT-5.5, e il rischio e' concreto: tre reviewer con policy di
+    Chiesto da GPT-5.5, e il rischio e' concreto: reviewer con policy di
     sanitizzazione diverse significa che un segreto redatto verso uno esce verso un
-    altro, e nulla lo segnala. I workflow non fanno checkout, quindi le tre copie
-    sono inevitabili — questo test le tiene allineate.
-    """
+    altro, e nulla lo segnala. I workflow non fanno checkout, quindi le copie sono
+    inevitabili — questo test le tiene allineate.
+
+    Copre TUTTI i workflow. Fino al 02/09/2026 ne confrontava tre: quando ne sono
+    nati altri due, la guardia e' rimasta indietro e i due nuovi — quelli che
+    parlano con un fornitore in piu' — erano gli unici non vincolati. Una guardia
+    che non cresce con cio' che sorveglia e' una guardia che si spegne da sola."""
     def tabella(p: Path) -> str:
         m = re.search(r'^(\s*)REDACTIONS = \[.*?^\1\]', _script(p), re.S | re.M)
         assert m, f'{p.name}: tabella REDACTIONS non trovata'
         return textwrap.dedent(m.group(0))
 
     riferimento = tabella(FABLE)
-    for p in (GPT, SOL):
+    for p in TUTTI:
+        if p == FABLE:
+            continue
         assert tabella(p) == riferimento, (
-            f'{p.name}: la tabella di redazione differisce da {FABLE.name}. Tre policy '
+            f'{p.name}: la tabella di redazione differisce da {FABLE.name}. Policy '
             f'diverse sono un segreto redatto verso un modello e in chiaro verso un altro.'
         )
 
