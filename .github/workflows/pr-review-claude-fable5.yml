@@ -277,7 +277,7 @@ jobs:
               # payload. Riguarda soprattutto chiavi private e certificati, che si
               # scrivono cosi-. [REAL_FINDING] di GPT-5.6 Sol sulla PR #107,
               # misurato prima di correggere: il corpo usciva quasi intero.
-              (re.compile(r"(?im)^([+\- ]?\s*(?:export|set|setx|declare|local|readonly|const|let|var)?\s*[\"']?(?:api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)[\"']?)\s*[:=]\s*(?![\"']?\s*\$\{\{[^{}]*\}\}[\"']?[ \t]*(?:\r?\n|\Z))(?:\"\"\"|''')[^\r\n]*(?=\r?\n|\Z)"), r"\1=[REDACTED]"),
+              (re.compile(r"(?im)^([+\- ]?\s*(?:export|set|setx|declare|local|readonly|const|let|var)?\s*[\"']?(?:[A-Za-z0-9_.-]*[_.-])?(?:api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)[\"']?)\s*[:=]\s*(?![\"']?\s*\$\{\{[^{}]*\}\}[\"']?[ \t]*(?:\r?\n|\Z))(?:\"\"\"|''')[^\r\n]*(?=\r?\n|\Z)"), r"\1=[REDACTED]"),
               # Esenta le espressioni di GitHub Actions, cioe' la forma
               # dollaro-graffa-graffa: un riferimento a un Secret e' un PUNTATORE al
               # segreto, non il segreto. Senza l'esenzione questa regola trasformava una
@@ -352,7 +352,7 @@ jobs:
               # successive vengono redatte — una protezione che sembra esserci e ha
               # un buco esattamente dove si guarda meno. [REAL_FINDING] di Claude
               # Fable 5 sulla PR #107, misurato: la coda della prima riga usciva.
-              (re.compile(r"(?im)^([+\- ]?\s*(?:export|set|setx|declare|local|readonly|const|let|var)?\s*[\"']?(?:api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)[\"']?)\s*[:=]\s*(?![\"']?\s*\$\{\{[^{}]*\}\}[\"']?[ \t]*(?:\r?\n|\Z))[\"'][^\r\n]*(?=\r?\n|\Z)"), r"\1=[REDACTED]"),
+              (re.compile(r"(?im)^([+\- ]?\s*(?:export|set|setx|declare|local|readonly|const|let|var)?\s*[\"']?(?:[A-Za-z0-9_.-]*[_.-])?(?:api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)[\"']?)\s*[:=]\s*(?![\"']?\s*\$\{\{[^{}]*\}\}[\"']?[ \t]*(?:\r?\n|\Z))[\"'][^\r\n]*(?=\r?\n|\Z)"), r"\1=[REDACTED]"),
               (re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)\s*[:=]\s*(?![\"']?\s*\$\{\{[^{}]*\}\}[\"']?[ \t]*(?:\r?\n|\Z))[\"']?[^\"'\s,;]+"), r"\1=[REDACTED]"),
           ]
 
@@ -382,7 +382,7 @@ jobs:
               # misurato: prima SCOPERTO, dopo coperto, e zero righe in piu' morse su
               # tutti i file del repository.
               r"""(?i)^[+\- ]?\s*(?:export|set|setx|declare|local|readonly|const|let|var)?\s*["']?"""
-              r"""(?:api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)"""
+              r"""(?:[A-Za-z0-9_.-]*[_.-])?(?:api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)"""
               r"""["']?\s*[:=]\s*"""
               # Le TRIPLE per prime nell'alternativa, o l'apice singolo vincerebbe
               # e il valore risulterebbe chiuso sulle prime due virgolette. E' lo
@@ -425,13 +425,24 @@ jobs:
                   m = APRE_QUOTATO.match(riga)
                   if not m or _chiude_sulla_riga(riga, m.group(1), m.end()):
                       continue
+                  # FAIL-CLOSED sul tetto. Prima, raggiunto il limite, il ciclo
+                  # usciva e la passata tornava in modo normale: tutte le righe
+                  # successive del valore ancora aperto uscivano IN CHIARO.
+                  # [REAL_FINDING] di GPT-5.6 Sol sulla PR #107, misurato con 5100
+                  # righe: 100 righe di corpo in chiaro piu' la coda.
+                  #
+                  # Il tetto ora non fa rinunciare: superato, si continua a
+                  # redigere fino al CONFINE DI DIFF, che e' il solo limite
+                  # strutturale. Il numero serve a distinguere «valore lungo» da
+                  # «testo che non e' un diff», non a smettere di proteggere.
                   consumate = 0
-                  while i < len(righe) and consumate < TETTO_RIGHE_CODA:
+                  while i < len(righe):
                       seguito = righe[i]
                       if CONFINE_DIFF.match(seguito):
                           break
                       prefisso = seguito[:1] if seguito[:1] in "+- " else ""
-                      chiude = _chiude_sulla_riga(seguito, m.group(1), len(prefisso))
+                      chiude = (consumate < TETTO_RIGHE_CODA
+                                and _chiude_sulla_riga(seguito, m.group(1), len(prefisso)))
                       fuori.append(prefisso + "[REDACTED_CODA_MULTIRIGA]")
                       i += 1
                       consumate += 1

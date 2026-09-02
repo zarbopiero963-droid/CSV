@@ -1624,6 +1624,35 @@ CODE_MULTIRIGA = [
      '+ private_key = """inizio\n'
      + '\n'.join('+ FRAMMENTO-%d' % i for i in range(50))
      + '\n+ fine"""\n+ dopo il valore'),
+    # [REAL_FINDING] di GPT-5.6 Sol al sesto giro, e il piu- vicino a casa: le
+    # regole ANCORATE accettavano solo la parola nuda, quindi i nomi COMPOSTI —
+    # cioe- esattamente i nomi dei segreti di QUESTO repository — non attivavano
+    # ne- la passata multiriga ne- la regola ancorata. Misurato prima di
+    # correggere: TELEGRAM_BOT_TOKEN, CSV_ACCESS_TOKEN, DB_PASSWORD e
+    # BACKUP_CRON_TOKEN perdevano tutti il corpo multiriga.
+    #
+    # L'ancoraggio a inizio riga NON e- stato tolto: e- cambiato cosa puo- stare
+    # fra l'inizio della riga e la parola chiave, non il fatto che debba essere
+    # l'inizio della riga. La misura lo conferma: su 3.390.767 caratteri cambia un
+    # solo file, e cambia perche- ora redige due token finti in un file di test.
+    ('TELEGRAM_BOT_TOKEN fra triple virgolette',
+     '+ TELEGRAM_BOT_TOKEN = """FRAMMENTO-A\n+ FRAMMENTO-B\n+ """\n+ dopo'),
+    ('CSV_ACCESS_TOKEN con valore non chiuso',
+     '+ CSV_ACCESS_TOKEN = "FRAMMENTO-A\n+ FRAMMENTO-B"\n+ dopo'),
+    ('DB_PASSWORD fra triple virgolette',
+     '+ DB_PASSWORD = """FRAMMENTO-A\n+ FRAMMENTO-B\n+ """\n+ dopo'),
+    ('BACKUP_CRON_TOKEN in forma YAML',
+     '+ BACKUP_CRON_TOKEN: "FRAMMENTO-A\n+ FRAMMENTO-B"\n+ dopo'),
+    ('export di un nome composto',
+     '+ export MY_API_KEY="FRAMMENTO-A\n+ FRAMMENTO-B"\n+ dopo'),
+    # Il secondo [REAL_FINDING] dello stesso giro: il tetto di righe era
+    # FAIL-OPEN. Raggiunto il limite la passata tornava in modo normale e tutte le
+    # righe seguenti uscivano in chiaro. Misurato con 5100 righe: 100 righe di
+    # corpo piu- la coda. Ora il tetto non fa rinunciare, si continua fino al
+    # confine di diff.
+    ('valore piu- lungo del tetto di 5000 righe',
+     '+ password: "inizio\n' + '\n'.join('+ r%d' % i for i in range(5100))
+     + '\n+ FRAMMENTO-OLTRE-IL-TETTO"\n+ dopo'),
     ('cert con valore non chiuso sulla riga',
      '+ cert: "inizio\n+ FRAMMENTO-corpo\n+ fine"\n+ dopo il valore'),
     ('valore lungo oltre le 40 righe di tetto',
