@@ -281,6 +281,32 @@ jobs:
               # puntatore, e' un segreto, e nessun altro pattern della tabella lo
               # riconosce. Segnalato da CodeRabbit.
               # Il VALORE vero resta redatto: lo verifica un test dedicato.
+              # Il valore QUOTATO viene redatto fino alla virgoletta di CHIUSURA, e
+              # questa regola deve stare PRIMA di quella qui sotto, che si ferma al
+              # primo spazio. [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR
+              # #107, misurato prima di correggere:
+              #   in   password: "abc def ghi-segreto"
+              #   out  password=[REDACTED] def ghi-segreto"
+              # cioe' la CODA del segreto usciva verso il fornitore esterno. Vale per
+              # qualunque valore con spazi dentro le virgolette: una passphrase, una
+              # connection string, un token con separatori.
+              #
+              # Perche' una regola in piu' invece di allargare quella sotto: il
+              # 12/08/2026 una regola troppo larga ha prodotto payload ROTTI — la
+              # matrice di pytest, scritta con un'espressione di Actions dentro le
+              # parentesi, usciva come `name: pytest ([REDACTED_VALORE_INCOLLATO]`
+              # con la parentesi spaiata, e i modelli concludevano che qualcuno
+              # avesse incollato un segreto. Qui il confine e' la virgoletta di
+              # chiusura, quindi il taglio e' esatto e il caso non quotato resta
+              # com'era. Il lookahead sui puntatori ai Secret e' lo stesso della
+              # regola sotto: un riferimento a un Secret non e' un segreto.
+              #
+              # NB: qui le espressioni di Actions si DESCRIVONO, non si scrivono.
+              # Actions le interpola anche dentro `run:` e dentro i commenti; questo
+              # commento le conteneva, e i cinque workflow avrebbero smesso di
+              # caricarsi. L'ha preso `test_lo_script_non_contiene_espressioni_di_
+              # actions_letterali`, che esiste esattamente per questo.
+              (re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)\s*[:=]\s*(?![\"']?\s*\$\{\{[^{}]*\}\}[\"']?[ \t]*(?:\r?\n|\Z))([\"'])(?:(?!\2).)*\2"), r"\1=[REDACTED]"),
               (re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)\s*[:=]\s*(?![\"']?\s*\$\{\{[^{}]*\}\}[\"']?[ \t]*(?:\r?\n|\Z))[\"']?[^\"'\s,;]+"), r"\1=[REDACTED]"),
           ]
 
@@ -700,25 +726,6 @@ jobs:
               sys.exit(0)
           files = compared.get("files") or []
           commit_count = len(compared.get("commits") or [])
-          # Il TETTO DELL'API COMPARE, e non e' nostro: GitHub documenta «up to 300
-          # changed files for the entire comparison», e la lista dei file esce solo
-          # sulla prima pagina. Oltre quella soglia i file in piu' non arrivano
-          # affatto — non come `skipped`, non come troncati: semplicemente non ci
-          # sono. Senza questa riga la review coprirebbe una PR grande solo in parte
-          # e non lo direbbe a nessuno, che e' la forma peggiore fra quelle che
-          # questo repository conosce: non «non ho visto un file», ma «ho visto
-          # tutto» detto da chi non ha visto tutto.
-          #
-          # [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #107, verificato
-          # sulla documentazione dell'API prima di correggere. Il difetto era
-          # EREDITATO da tutti i workflow, non introdotto la': per questo la
-          # correzione sta in tutti e cinque e non solo in quello segnalato.
-          #
-          # `>= 300` e non `> 300`: a 300 esatti non si puo' distinguere «erano
-          # proprio 300» da «erano di piu' e l'API ha tagliato». Fail-closed —
-          # meglio dichiarare un dubbio che tacere un'omissione.
-          TETTO_FILE_COMPARE = 300
-          files_troncati_da_github = len(files) >= TETTO_FILE_COMPARE
           diff_text, skipped_files, critical_files, budget_truncated, file_tagliati = build_patch_payload(
               files, MAX_PATCH_PER_FILE_CHARS, MAX_TOTAL_PATCH_CHARS)
           patch_budget_used = MAX_TOTAL_PATCH_CHARS
@@ -834,10 +841,13 @@ jobs:
           # non li ha mai mandati, e nessuno puo' elencarli. Chi legge il commento
           # deve poter distinguere «non l'ho mandato al modello» da «non so nemmeno
           # cosa manca».
-          if files_troncati_da_github:
+          # Si aggancia a `compare_truncated`, che esisteva gia' e porta anche la
+          # label `manual-review-required`: qui si aggiunge SOLO il dettaglio nel
+          # commento, non una seconda variabile che dice la stessa cosa.
+          if compare_truncated:
               skipped_note += (
                   "\n\n## ⚠️ Confronto TRONCATO da GitHub\n"
-                  f"L'API Compare restituisce al massimo {TETTO_FILE_COMPARE} file per "
+                  "L'API Compare restituisce al massimo 300 file per "
                   f"l'intera comparazione, e ne ha restituiti {len(files)}: molto "
                   "probabilmente **la PR ne tocca di più, e quelli in eccesso non "
                   "sono arrivati affatto** — non compaiono nemmeno nell'elenco qui "

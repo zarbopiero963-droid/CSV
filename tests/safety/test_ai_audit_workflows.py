@@ -2536,31 +2536,66 @@ def test_il_workflow_vivo_del_gate_NON_e_dormiente():
 #  Il tetto dell'API Compare (02/09/2026)
 #
 #  [REAL_FINDING] di GPT-5.6 Sol al gate finale della PR #107, verificato sulla
-#  documentazione GitHub prima di correggere: «up to 300 changed files for the
-#  entire comparison», e la lista esce solo sulla prima pagina.
+#  documentazione GitHub: «up to 300 changed files for the entire comparison»,
+#  e la lista esce solo sulla prima pagina. Oltre quella soglia i file in eccesso
+#  non arrivano AFFATTO: non come `skipped`, non come troncati — non ci sono.
 #
-#  Oltre quella soglia i file in eccesso non arrivano AFFATTO: non come `skipped`,
-#  non come troncati — non ci sono. Senza dichiararlo, la review coprirebbe una PR
-#  grande solo in parte e non lo direbbe: non «non ho visto un file», ma «ho visto
-#  tutto» detto da chi non ha visto tutto. E' la forma peggiore fra quelle che
-#  questo repository conosce, ed era EREDITATA da tutti i workflow.
+#  MA la meta' del finding era gia' chiusa, e questo pezzo e' scritto perche'
+#  l'errore non si ripeta. `compare_truncated = len(files) >= 300` ESISTEVA GIA'
+#  in tutti e cinque i workflow, con `try_add_label()` che aggiunge
+#  `manual-review-required` e il blocco «RICHIEDE CONTROLLO MANUALE» nel commento:
+#  il fail-closed c'era. Io ho aggiunto una SECONDA variabile che diceva la stessa
+#  cosa (`TETTO_FILE_COMPARE` / `files_troncati_da_github`) — violazione della
+#  regola 3, fonte unica: due copie corrette oggi sono due copie divergenti domani.
+#  Il doppione e' stato rimosso; quel che mancava davvero era il DETTAGLIO nel
+#  commento, agganciato alla variabile che gia' c'era.
+#
+#  I tre test qui sotto tengono i tre lati: che il flag esista con la soglia e il
+#  confronto giusti (e sia UNO), che porti la label (fail-closed), e che finisca
+#  nel commento distinto dai file saltati per budget.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
 def test_il_tetto_dei_300_file_di_github_e_dichiarato(path):
-    """La soglia c'e', e' quella dell'API, e il confronto e' `>=` non `>`.
+    """La soglia c'e', e' quella dell'API, il confronto e' `>=` non `>`, ed e' UNA.
 
     `>=` perche' a 300 esatti non si puo' distinguere «erano proprio 300» da
     «erano di piu' e l'API ha tagliato»: fail-closed, meglio un dubbio dichiarato
-    che un'omissione taciuta."""
+    che un'omissione taciuta.
+
+    «Ed e' UNA»: il test vieta anche la seconda variabile che avevo aggiunto io.
+    Un doppione non e' innocuo — e' la premessa della divergenza."""
     testo = path.read_text(encoding='utf-8')
-    assert 'TETTO_FILE_COMPARE = 300' in testo, (
-        f'{path.name}: non conosce il tetto dell-API Compare'
+    assert 'compare_truncated = len(files) >= 300' in testo, (
+        f'{path.name}: il confronto col tetto dell-API Compare manca o non e- `>=` '
+        '(a 300 esatti non si distingue «erano 300» da «l-API ha tagliato»)'
     )
-    assert 'files_troncati_da_github = len(files) >= TETTO_FILE_COMPARE' in testo, (
-        f'{path.name}: il confronto col tetto manca o non e- `>=` (a 300 esatti '
-        'non si distingue «erano 300» da «l-API ha tagliato»)'
+    for doppione in ('TETTO_FILE_COMPARE', 'files_troncati_da_github'):
+        assert doppione not in testo, (
+            f'{path.name}: `{doppione}` e- un doppione di `compare_truncated` — '
+            'regola 3, fonte unica'
+        )
+
+
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
+def test_il_tetto_dei_300_file_e_FAIL_CLOSED(path):
+    """Il tetto non produce solo una nota: arma il controllo manuale.
+
+    Se la Compare API ha tagliato, il workflow non puo' garantire di aver visto i
+    file sensibili del range: la label `manual-review-required` e il blocco
+    «RICHIEDE CONTROLLO MANUALE» devono partire per `compare_truncated` esattamente
+    come partono per `critical_files`."""
+    testo = path.read_text(encoding='utf-8')
+    assert 'if critical_files or compare_truncated:\n              try_add_label()' in testo, (
+        f'{path.name}: un confronto troncato non arma piu- `try_add_label()` — '
+        'il tetto tornerebbe a essere una nota senza conseguenze'
+    )
+    assert 'RICHIEDE CONTROLLO MANUALE' in testo, (
+        f'{path.name}: manca il blocco di avviso del controllo manuale'
+    )
+    assert '>= 300 file' in testo, (
+        f'{path.name}: l-avviso manuale non dice che la causa e- il tetto dell-API'
     )
 
 
@@ -2573,9 +2608,6 @@ def test_il_troncamento_di_github_finisce_NEL_COMMENTO(path):
     peggiore. Un file «saltato» lo sappiamo per nome; questi non li conosce
     nessuno, perche' l'API non li ha mai mandati."""
     testo = path.read_text(encoding='utf-8')
-    assert 'if files_troncati_da_github:' in testo, (
-        f'{path.name}: il flag e- calcolato ma non viene mai usato'
-    )
     assert 'Confronto TRONCATO da GitHub' in testo, (
         f'{path.name}: il troncamento non ha un titolo suo nel commento'
     )
@@ -2588,4 +2620,19 @@ def test_il_troncamento_di_github_finisce_NEL_COMMENTO(path):
     assert posizione_tetto > posizione_saltati, (
         f'{path.name}: la nota del tetto precede quella dei file saltati: le due '
         'cose si confonderebbero proprio dove la distinzione conta'
+    )
+    # E la nota deve pendere DA `compare_truncated`, non essere stampata sempre.
+    # Attenzione a come si scrive questa asserzione: cercare `if compare_truncated:`
+    # «da qualche parte prima del titolo» NON basta — ce n'e' un'altra occorrenza
+    # piu' su, dentro il blocco dell'avviso manuale, e la guardia resterebbe verde
+    # dopo aver sostituito questa con `if True:`. Misurato: la prima versione di
+    # questo test passava esattamente quella mutazione. Serve l'aggancio esatto.
+    aggancio = (
+        'if compare_truncated:\n'
+        '              skipped_note += (\n'
+        '                  "\\n\\n## ⚠️ Confronto TRONCATO da GitHub\\n"'
+    )
+    assert aggancio in testo, (
+        f'{path.name}: la nota del tetto non pende direttamente da '
+        '`compare_truncated` — verrebbe stampata anche su un confronto integro'
     )
