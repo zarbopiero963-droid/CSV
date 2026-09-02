@@ -508,13 +508,15 @@ Claude Fable 5, OpenRouter Sol — più CodeRabbit. OpenRouter GPT-5.5 gira a og
 file; Fable parte da solo sui push che toccano file core; OpenRouter Sol solo con la label
 finale; entrambi partono con le label finali; CodeRabbit rivede l'intera PR dal suo base.
 
-**Attenzione a un'azione del proprietario che questa transizione rende necessaria:** se la
-branch protection di `main` richiede ancora i check `GPT-5.5 push-range review` o
-`GPT-5.6 Sol final review`, quei check **non verranno più creati** sulle PR — perché i due
-workflow non partono più su `pull_request` — e il merge resterebbe bloccato in attesa di
-qualcosa che non arriva. Vanno tolti dai required check in *Settings → Branches*. Segnalato da
-CodeRabbit sulla PR #107; **non verificabile dall'agente**, che non ha accesso all'API di branch
-protection in questo ambiente.
+**La branch protection: nulla da fare, verificato dal proprietario.** CodeRabbit e GPT-5.5
+avevano avvisato, sulla PR #107, che se `main` avesse richiesto ancora i check
+`GPT-5.5 push-range review` o `GPT-5.6 Sol final review` — nomi di workflow ora dormienti, che
+non producono più quei check — il merge sarebbe rimasto appeso in attesa di qualcosa che non
+arriva. **Il proprietario ha controllato *Settings → Branches* dopo il merge della #107: quei due
+check non figurano fra i required.** L'avviso era quindi teorico e qui non si applica: non c'è
+niente da togliere. Lasciato scritto proprio perché non riemerga come falso todo — se un domani
+si configureranno dei required check, chi li imposta sa già di non riferirsi ai due workflow
+dormienti (`GPT-5.5 push-range review`, `GPT-5.6 Sol final review`), che non producono più nulla.
 
 **Codex NON è un gate** — non aspettarlo. È installato e comparirà sulle PR, ma l'abbonamento
 Codex del proprietario è scaduto: quando pubblica «You have reached your Codex usage limits» o
