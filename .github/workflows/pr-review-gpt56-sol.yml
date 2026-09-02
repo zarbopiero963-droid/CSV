@@ -36,9 +36,27 @@ name: PR Review GPT-5.6 Sol
 # CLAUDE.md, sezione «FINAL AI REVIEW BEFORE MERGE — CANCELLO LABEL».
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, labeled]
-
+  # DORMIENTE dal 02/09/2026, per decisione del proprietario.
+  #
+  # Perche': il credito dell'API OpenAI diretta si e' esaurito
+  # (`credit_balance_exhausted`, HTTP 429), e questo workflow legge il Secret di
+  # quella chiave. Finche' resta cosi', ogni sua corsa spende minuti di Actions per
+  # pubblicare un commento «review non completata» — e al gate finale un rosso che
+  # NON e' un difetto del codice, cioe' rumore che rende il gate meno leggibile.
+  # Il ruolo passa al workflow su OpenRouter (`pr-review-openrouter-sol.yml`).
+  #
+  # DORMIENTE, non cancellato, e la differenza e' voluta: il file resta valido e
+  # riattivarlo e' rimettere il blocco `pull_request` qui sotto. Cancellarlo
+  # butterebbe via la sola implementazione funzionante dell'endpoint `v1/responses`,
+  # che serve di nuovo il giorno in cui quel credito torna.
+  #
+  # `workflow_dispatch` lo lascia lanciabile a mano dalla scheda Actions: cosi' si
+  # puo' provare se la chiave e' tornata viva senza toccare il codice.
+  workflow_dispatch:
+  # Per RIATTIVARLO, togli il commento qui sotto (e rimetti dormiente quello su
+  # OpenRouter, o le review si pagano due volte):
+  # pull_request:
+  #   types: [opened, synchronize, reopened, ready_for_review, labeled]
 permissions:
   contents: read
   pull-requests: write
