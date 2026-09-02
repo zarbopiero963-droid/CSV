@@ -32,8 +32,16 @@ name: PR Review OpenRouter Sol
 #   `labeled` per una PR aperta con le label addosso (gate finale pre-merge)
 #   → analizza l'intera PR (base...head).
 # Su QUALSIASI push il job parte (pubblica lo stato del check) ma NON spende:
-# non esiste più il gate a file core, che invece Fable 5 mantiene. La copertura
-# dei push intermedi resta a GPT-5.5 (automatico) e a Fable.
+# non esiste più il gate a file core, che invece Fable 5 mantiene.
+#
+# CONSEGUENZA DA CONOSCERE, dal 02/09/2026: la copertura dei push intermedi resta
+# a FABLE 5 SOLTANTO, perché GPT-5.5 è dormiente. E Fable spende solo se il push
+# tocca file core (`main.py`, `web/**`, `requirements.txt`, `Procfile`,
+# `railway.json`): un push che tocca SOLO test, documentazione o workflow non
+# viene letto da nessun modello fino al gate finale. Prima quel caso lo copriva
+# GPT-5.5, che girava su ogni push qualunque file toccasse.
+# Non è un difetto nascosto: è il buco che la scelta lascia, e sta scritto qui
+# perché chi legge un push senza review sappia che è previsto e non un guasto.
 # Eccezione fail-closed: un push su una PR dove la label finale è GIÀ presente
 # rende il gate STANTIO (la review si riferisce a un altro commit) → job ROSSO,
 # si risolve rimuovendo e riaggiungendo la label. Diff-only: niente checkout, niente esecuzione del codice
@@ -857,8 +865,10 @@ jobs:
           # ed è per contratto il GATE FINALE pre-merge, che ha senso a head stabile e non
           # su ogni push intermedio. Quindi qui il modello si chiama SOLO sul trigger a
           # label. Il job parte comunque sui push (pubblica lo stato del check) ma esce
-          # subito senza spendere. La copertura dei push resta a GPT-5.5 (automatico,
-          # ~2 centesimi) e a Fable, che mantiene il suo gate core+label.
+          # subito senza spendere. Dal 02/09/2026 la copertura dei push resta a FABLE
+          # soltanto (col suo gate core+label): GPT-5.5 è dormiente, credito esaurito.
+          # Un push che tocca solo test o docs non viene quindi letto da nessuno fino
+          # al gate finale — dichiarato in testa al file, non lasciato da scoprire.
           # DECISIONE DEL GATE, isolata in una funzione PURA di proposito: così i test
           # possono estrarla ed ESEGUIRLA sui vari eventi (stessa tecnica usata altrove per
           # le funzioni pure estratte dagli heredoc),

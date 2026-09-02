@@ -307,7 +307,12 @@ review/inline/thread triage · final hard verify.
 > del reviewer forte passa a **`pr-review-openrouter-sol.yml`** — stesso modello `gpt-5.6-sol`,
 > fornitore **OpenRouter**, endpoint `chat/completions`, e il Secret **`BETRELAY_FUGU`** che già
 > esisteva per l'ex reviewer Fugu. Nessuna chiave nuova da creare.
-> Conseguenza da conoscere: **le review a ogni push le fa solo Fable 5**, perché GPT-5.5 dorme.
+> **Conseguenza da conoscere, ed è un buco reale:** le review sui push le fa **solo Fable 5**,
+> che spende **soltanto se il push tocca file core** (`main.py`, `web/**`, `requirements.txt`,
+> `Procfile`, `railway.json`). Un push che tocca **solo test, documentazione o workflow non viene
+> letto da nessun modello** fino al gate finale a label. Prima quel caso lo copriva GPT-5.5, che
+> girava su ogni push qualunque file toccasse. Chi vede un push senza review sappia che è previsto,
+> non un guasto — e chi tocca solo i test sappia che il primo lettore sarà il gate.
 >
 > 1. i Secret del repo — **`BETRELAY_FUGU`** (l'unico dei tre letto da un workflow vivo: porta la
 >    chiave OpenRouter) e **`BETRELAY_FABLE`**. **`BETRELAY_GPT`** resta configurato ma lo leggono
