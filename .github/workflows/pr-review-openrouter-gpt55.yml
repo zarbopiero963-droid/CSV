@@ -112,6 +112,14 @@ jobs:
       # nascosti dentro un totale.
       PRICE_CACHE_READ_PER_MILLION: "0.50"
 
+      # Privacy verso il fornitore. `deny` esclude i fornitori che conservano i
+      # dati; ZDR restringe agli endpoint a ritenzione zero ed e' spento finche'
+      # non si e' visto che per questi modelli un endpoint conforme esiste.
+      # Restringere troppo lascia zero endpoint e la chiamata fallisce: fail-closed,
+      # cioe' nessuna review invece di una review che perde i dati.
+      OPENROUTER_DATA_COLLECTION: "deny"
+      OPENROUTER_ZDR: "false"
+
       MANUAL_REVIEW_LABEL: manual-review-required
 
     steps:
@@ -159,6 +167,9 @@ jobs:
           MAX_TOTAL_PATCH_CHARS = int(os.environ.get("MAX_TOTAL_PATCH_CHARS", "24000"))
           MAX_PATCH_PER_FILE_CHARS_ESCALATED = int(os.environ.get("MAX_PATCH_PER_FILE_CHARS_ESCALATED", "30000"))
           MAX_TOTAL_PATCH_CHARS_ESCALATED = int(os.environ.get("MAX_TOTAL_PATCH_CHARS_ESCALATED", "60000"))
+          # Politica di privacy verso il fornitore: vedi il commento sul payload.
+          OPENROUTER_DATA_COLLECTION = (os.environ.get("OPENROUTER_DATA_COLLECTION") or "").strip()
+          OPENROUTER_ZDR = (os.environ.get("OPENROUTER_ZDR") or "").strip().lower() in ("1", "true", "yes")
           MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "3000"))
 
           PRICE_INPUT_PER_MILLION = float(os.environ.get("PRICE_INPUT_PER_MILLION", "0"))
@@ -664,6 +675,32 @@ jobs:
                   # banner di troncamento citano a chi legge.
                   "max_tokens": MAX_OUTPUT_TOKENS,
               }
+
+              # PRIVACY DEL FORNITORE. Qui dentro passa il diff della PR: il sorgente
+              # del relay, i test, la documentazione. OpenRouter e' un instradatore, e
+              # per default puo' scegliere fornitori che conservano i dati.
+              # `data_collection: "deny"` li esclude; `zdr: true` restringe agli
+              # endpoint a ritenzione zero. Segnalato da CodeRabbit sulla PR #107, e i
+              # due nomi sono VERIFICATI sulla documentazione del fornitore
+              # (openrouter.ai/docs/features/provider-routing), non dedotti.
+              #
+              # Sono variabili d'ambiente, non costanti nel codice, per la stessa
+              # ragione degli id dei modelli: restringere l'instradamento puo' lasciare
+              # ZERO endpoint per un modello, e allora la chiamata fallisce. Cambiare
+              # politica dev'essere una riga di YAML, non una patch a Python.
+              #
+              # Il default e' `deny` sulla raccolta e `zdr` SPENTO: il primo e' il
+              # guadagno grosso a rischio basso, il secondo e' il piu' restrittivo e
+              # va acceso dopo aver visto che un endpoint conforme esiste davvero. Un
+              # fallimento d'instradamento e' fail-closed — nessuna review, non una
+              # review che perde i dati.
+              instradamento = {}
+              if OPENROUTER_DATA_COLLECTION:
+                  instradamento["data_collection"] = OPENROUTER_DATA_COLLECTION
+              if OPENROUTER_ZDR:
+                  instradamento["zdr"] = True
+              if instradamento:
+                  payload["provider"] = instradamento
 
               data = json.dumps(payload).encode("utf-8")
               last_error = None

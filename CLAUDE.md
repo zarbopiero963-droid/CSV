@@ -458,10 +458,20 @@ installate sull'account e compaiono su ogni PR: i loro check e commenti vanno at
 su qualunque altra PR. I workflow di review a API key in `.github/workflows/` sono **cinque file,
 tre vivi**: OpenRouter GPT-5.5, Claude Fable 5, OpenRouter Sol. Gli altri due
 (`pr-review-gpt55.yml`, `pr-review-gpt56-sol.yml`) sono **dormienti dal 02/09/2026** e non
-producono più alcun check: non aspettarli. **GLM 5.2 non è importato.** Se mancano i Secret del
-repo o le due label finali, i tre vivi **escono verdi senza chiamare il modello** (un `::notice`
-nei log, non un errore): in quel caso la PR ha tre spunte verdi e zero righe revisionate, e la
-condizione va dichiarata, non taciuta.
+producono più alcun check: non aspettarli. **GLM 5.2 non è importato.**
+
+**Quando un check verde non prova una review, e per quale dei tre.** Le due cose vanno tenute
+distinte, perché confonderle fa scartare una review vera:
+
+- **Secret mancante:** il workflow che legge quel Secret trova una stringa vuota ed esce verde
+  con un `::notice` nei log, non un errore. Vale per tutti e tre, ciascuno per il proprio Secret.
+- **Label finali:** riguardano **solo** i due workflow col gate finale (Fable e OpenRouter Sol).
+  **OpenRouter GPT-5.5 gira su ogni evento `pull_request` e non dipende da quelle label**: un suo
+  check verde, con la riga d'uso token nel log, è una review vera anche senza label.
+
+Segnalato da CodeRabbit sulla PR #107: la versione precedente di questa riga diceva che senza le
+label «i tre vivi escono verdi senza chiamare il modello», e un agente che la leggesse butterebbe
+via l'unica review che ha.
 
 **Zero check non è comunque un PASS.** Se una PR non mostra alcun check — app non ancora attive
 su questo repository, outage, PR draft — si scrive esplicitamente «nessun check è girato: la

@@ -2092,6 +2092,12 @@ def _call_model_del_gate(monkeypatch, risposta=None, errore=None, path=SOL):
         'BETRELAY_GPT': 'chiave-finta-non-un-segreto',
         'BETRELAY_FUGU': 'chiave-finta-non-un-segreto',
         'API_URL': _env.get('API_URL', 'https://openrouter.ai/api/v1/chat/completions'),
+        # La politica di privacy verso il fornitore viene dall'env del workflow,
+        # come i modelli e per lo stesso motivo: cablarla qui renderebbe vera per
+        # coincidenza la verifica «cio' che e' dichiarato arriva nel corpo».
+        'OPENROUTER_DATA_COLLECTION': (_env.get('OPENROUTER_DATA_COLLECTION') or '').strip(),
+        'OPENROUTER_ZDR': str(_env.get('OPENROUTER_ZDR') or '').strip().lower()
+                          in ('1', 'true', 'yes'),
         'REVIEW_ID': 'gpt56-sol',
         'redact': lambda t: t,
         'json': _json,
@@ -2767,6 +2773,55 @@ def test_openrouter_spedisce_la_forma_di_chat_completions(monkeypatch, path):
         'inesistente, ed e- l-errore dello snippet iniziale'
     )
     assert 'api.openai.com' not in url, 'punta ancora al fornitore col credito esaurito'
+
+
+@pytest.mark.parametrize('path', SU_CHAT_COMPLETIONS, ids=lambda p: p.name)
+def test_la_politica_di_privacy_del_fornitore_e_NEL_CORPO(monkeypatch, path):
+    """Il diff della PR non deve finire da un fornitore che lo conserva.
+
+    OpenRouter e' un instradatore: per default puo' scegliere fornitori che
+    conservano i dati. `provider.data_collection` e `provider.zdr` lo governano —
+    nomi verificati sulla documentazione del fornitore, non dedotti. Segnalato da
+    CodeRabbit sulla PR #107 come Major, ed e' fondato: qui dentro passa il
+    sorgente del relay.
+
+    Il test ISPEZIONA IL CORPO DEL POST. Una politica dichiarata nel blocco `env:`
+    e mai messa nel payload sarebbe la forma peggiore fra quelle che questo
+    repository conosce: una protezione che si legge nel file e non esiste nella
+    richiesta."""
+    call_model, chiamate = _call_model_del_gate(monkeypatch, path=path, risposta={
+        'choices': [{'message': {'content': 'ok'}, 'finish_reason': 'stop'}],
+        'usage': {'prompt_tokens': 10, 'completion_tokens': 1},
+    })
+    call_model('sistema', 'utente')
+    corpo = _corpo_spedito(chiamate)
+
+    env = {**(_carica(path).get('env') or {}),
+           **(_carica(path)['jobs']['review'].get('env') or {})}
+    politica = str(env.get('OPENROUTER_DATA_COLLECTION') or '').strip()
+    assert politica == 'deny', (
+        f'{path.name}: la raccolta dati del fornitore non e- negata nel blocco env: '
+        f'{politica!r}'
+    )
+    provider = corpo.get('provider')
+    assert isinstance(provider, dict), (
+        f'{path.name}: la richiesta non porta nessuna politica di instradamento — '
+        f'il diff puo- finire da un fornitore che lo conserva. Corpo: {sorted(corpo)}'
+    )
+    assert provider.get('data_collection') == 'deny', (
+        f'{path.name}: `data_collection` non arriva al fornitore: {provider!r}'
+    )
+    # ZDR e' spento per default e non deve comparire finche- non lo si accende:
+    # e' il piu- restrittivo e puo- lasciare zero endpoint per questi modelli.
+    zdr_env = str(env.get('OPENROUTER_ZDR') or '').strip().lower()
+    if zdr_env in ('1', 'true', 'yes'):
+        assert provider.get('zdr') is True, (
+            f'{path.name}: ZDR e- acceso nell-env ma non arriva nel corpo: {provider!r}'
+        )
+    else:
+        assert 'zdr' not in provider, (
+            f'{path.name}: ZDR e- spento nell-env ma viene spedito lo stesso: {provider!r}'
+        )
 
 
 @pytest.mark.parametrize('path', SU_CHAT_COMPLETIONS, ids=lambda p: p.name)
