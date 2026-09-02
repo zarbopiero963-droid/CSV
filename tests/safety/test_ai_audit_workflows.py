@@ -31,11 +31,15 @@ SOL = WORKFLOWS / 'pr-review-gpt56-sol.yml'
 # endpoint diversi. Non sostituisce il file di SOL, che resta DORMIENTE — vedi
 # `test_i_workflow_dormienti_non_partono_da_soli`.
 OPENROUTER = WORKFLOWS / 'pr-review-openrouter-sol.yml'
+# Il reviewer di OGNI push su OpenRouter (02/09/2026): ricostituisce il ruolo che
+# GPT-5.5 aveva prima di diventare dormiente, e chiude il buco che
+# addormentandolo si era aperto (push su soli test/docs letti da nessuno).
+OPENROUTER_55 = WORKFLOWS / 'pr-review-openrouter-gpt55.yml'
 # Tutti i workflow di review: le guardie STRUTTURALI (redazione, priorita' del
 # payload, contesto dei file mancanti, etichette dei bloccanti) valgono per ognuno,
 # vivo o dormiente. Un dormiente che si riattiva deve trovarle gia' rispettate,
 # non scoprire il giorno stesso che ha smesso di esserlo.
-TUTTI = (GPT, FABLE, SOL, OPENROUTER)
+TUTTI = (GPT, FABLE, SOL, OPENROUTER, OPENROUTER_55)
 
 # I due workflow che parlano con l'endpoint OpenAI `v1/responses`, e che quindi
 # leggono la stessa forma di risposta: `status`/`incomplete_details`, non
@@ -442,6 +446,7 @@ def test_le_chiavi_vengono_dai_secret():
         # che il proprietario aveva creato per l'ex `sakana/fugu-ultra`. Nessuna
         # chiave nuova — decisione del proprietario.
         OPENROUTER: 'secrets.BETRELAY_FUGU',
+        OPENROUTER_55: 'secrets.BETRELAY_FUGU',
     }
     for path, atteso in coppie.items():
         assert atteso in path.read_text(encoding='utf-8'), f'{path.name}: manca {atteso}'
@@ -1366,6 +1371,10 @@ TETTO_MINIMO_OUTPUT = {
     # abbassare la soglia sotto il valore misurato non compra niente.
     # Stesso modello di SOL, stesso ruolo al gate: stesso pavimento.
     'pr-review-openrouter-sol.yml': 10000,
+    # Stesso ruolo del gemello dormiente `pr-review-gpt55.yml`, stesso pavimento: il
+    # tetto non e' il costo (si pagano i token generati), quindi abbassarlo non
+    # risparmia — fa pagare review incomplete e le fa ripagare al giro dopo.
+    'pr-review-openrouter-gpt55.yml': 3000,
 }
 
 
@@ -2383,11 +2392,15 @@ def test_un_400_del_fornitore_fa_FALLIRE_e_non_restituisce_una_review(monkeypatc
 # ---------------------------------------------------------------------------
 
 
-def test_openrouter_spedisce_la_forma_di_chat_completions(monkeypatch):
+SU_CHAT_COMPLETIONS = (OPENROUTER, OPENROUTER_55)
+
+
+@pytest.mark.parametrize('path', SU_CHAT_COMPLETIONS, ids=lambda p: p.name)
+def test_openrouter_spedisce_la_forma_di_chat_completions(monkeypatch, path):
     """La richiesta ISPEZIONATA, non il sorgente: `messages`, `max_tokens`, e l'URL
     con `/api/v1` — senza quel segmento la POST finisce su un percorso che non
     esiste, ed e' l'errore dello snippet da cui siamo partiti."""
-    call_model, chiamate = _call_model_del_gate(monkeypatch, path=OPENROUTER, risposta={
+    call_model, chiamate = _call_model_del_gate(monkeypatch, path=path, risposta={
         'choices': [{'message': {'content': 'nessun bloccante'},
                      'finish_reason': 'stop'}],
         'usage': {'prompt_tokens': 1_000, 'completion_tokens': 10},
@@ -2403,12 +2416,13 @@ def test_openrouter_spedisce_la_forma_di_chat_completions(monkeypatch):
     assert 'max_output_tokens' not in corpo, 'tetto col nome di v1/responses'
     assert 'temperature' not in corpo
 
-    env = {**(_carica(OPENROUTER).get('env') or {}),
-           **(_carica(OPENROUTER)['jobs']['review'].get('env') or {})}
-    assert corpo['model'] == env['MODEL_ID'], (
-        f'modello spedito {corpo["model"]!r} != dichiarato {env["MODEL_ID"]!r}')
-    assert env['MODEL_ID'].startswith('openai/'), (
-        f'su OpenRouter gli id portano il prefisso del produttore: {env["MODEL_ID"]!r}')
+    env = {**(_carica(path).get('env') or {}),
+           **(_carica(path)['jobs']['review'].get('env') or {})}
+    dichiarato = env.get('MODEL_ID') or env.get('OPENAI_MODEL')
+    assert corpo['model'] == dichiarato, (
+        f'modello spedito {corpo["model"]!r} != dichiarato {dichiarato!r}')
+    assert dichiarato.startswith('openai/'), (
+        f'su OpenRouter gli id portano il prefisso del produttore: {dichiarato!r}')
 
     url = chiamate[0].full_url
     assert url == 'https://openrouter.ai/api/v1/chat/completions', url
@@ -2419,11 +2433,12 @@ def test_openrouter_spedisce_la_forma_di_chat_completions(monkeypatch):
     assert 'api.openai.com' not in url, 'punta ancora al fornitore col credito esaurito'
 
 
+@pytest.mark.parametrize('path', SU_CHAT_COMPLETIONS, ids=lambda p: p.name)
 @pytest.mark.parametrize('motivo', ('length', 'content_filter', 'tool_calls',
                                     'error', None, '__assente__'),
                          ids=('length', 'content_filter', 'tool_calls', 'error',
                               'null', 'assente'))
-def test_openrouter_marca_troncata_ogni_uscita_che_non_sia_stop(monkeypatch, motivo):
+def test_openrouter_marca_troncata_ogni_uscita_che_non_sia_stop(monkeypatch, motivo, path):
     """WHITELIST, non blacklist: completo e' SOLO `finish_reason == "stop"`.
 
     Il caso `null` e quello `assente` sono il motivo per cui non basta elencare i
@@ -2438,7 +2453,7 @@ def test_openrouter_marca_troncata_ogni_uscita_che_non_sia_stop(monkeypatch, mot
     scelta = {'message': {'content': 'meta- review'}}
     if motivo != '__assente__':
         scelta['finish_reason'] = motivo
-    call_model, _ = _call_model_del_gate(monkeypatch, path=OPENROUTER, risposta={
+    call_model, _ = _call_model_del_gate(monkeypatch, path=path, risposta={
         'choices': [scelta], 'usage': {}})
     testo, _ = call_model('sistema', 'utente')
     assert testo.lstrip().startswith('Output troncato'), (
@@ -2446,29 +2461,32 @@ def test_openrouter_marca_troncata_ogni_uscita_che_non_sia_stop(monkeypatch, mot
     assert 'meta- review' in testo, 'il testo parziale non deve sparire'
 
 
-def test_openrouter_la_sola_uscita_COMPLETA_non_porta_il_banner(monkeypatch):
+@pytest.mark.parametrize('path', SU_CHAT_COMPLETIONS, ids=lambda p: p.name)
+def test_openrouter_la_sola_uscita_COMPLETA_non_porta_il_banner(monkeypatch, path):
     """Il caso che rende vivo il test sopra: senza, un `truncated` sempre vero li
     farebbe passare tutti e la review si ripagherebbe a ogni giro."""
-    call_model, _ = _call_model_del_gate(monkeypatch, path=OPENROUTER, risposta={
+    call_model, _ = _call_model_del_gate(monkeypatch, path=path, risposta={
         'choices': [{'message': {'content': 'review intera'},
                      'finish_reason': 'stop'}], 'usage': {}})
     testo, _ = call_model('sistema', 'utente')
     assert testo == 'review intera', f'banner su un-uscita completa: {testo!r}'
 
 
-def test_openrouter_un_errore_dentro_un_200_non_diventa_un_IndexError(monkeypatch):
+@pytest.mark.parametrize('path', SU_CHAT_COMPLETIONS, ids=lambda p: p.name)
+def test_openrouter_un_errore_dentro_un_200_non_diventa_un_IndexError(monkeypatch, path):
     """OpenRouter puo' rispondere 200 con `error` e nessun `choices`. Senza il
     controllo, il codice solleverebbe «list index out of range»: un messaggio che
     manda a cercare il guasto nel posto sbagliato, invece del motivo vero."""
-    call_model, _ = _call_model_del_gate(monkeypatch, path=OPENROUTER, risposta={
+    call_model, _ = _call_model_del_gate(monkeypatch, path=path, risposta={
         'error': {'message': 'insufficient credits'}})
     with pytest.raises(RuntimeError) as exc:
         call_model('sistema', 'utente')
     assert 'insufficient credits' in str(exc.value), str(exc.value)
 
 
-def test_openrouter_choices_vuoto_dice_cosa_e_successo(monkeypatch):
-    call_model, _ = _call_model_del_gate(monkeypatch, path=OPENROUTER, risposta={
+@pytest.mark.parametrize('path', SU_CHAT_COMPLETIONS, ids=lambda p: p.name)
+def test_openrouter_choices_vuoto_dice_cosa_e_successo(monkeypatch, path):
+    call_model, _ = _call_model_del_gate(monkeypatch, path=path, risposta={
         'choices': [], 'usage': {}})
     with pytest.raises(RuntimeError) as exc:
         call_model('sistema', 'utente')

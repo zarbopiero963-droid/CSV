@@ -33,7 +33,7 @@ Il merge resta sempre manuale del repository owner.
 | Documentazione operativa endpoint e variabili | `README.txt` |
 | Screenshot reali di XTrader + catalogo (materia prima per le guide e per il chatbot) | `docs/xtrader/screenshot/` |
 | Deploy | `Procfile`, `railway.json`, `requirements.txt` |
-| Workflow di review AI — **vivi**: Fable 5, OpenRouter Sol; **dormienti**: GPT-5.5, GPT-5.6 Sol | `.github/workflows/pr-review-*.yml` |
+| Workflow di review AI — **vivi**: Fable 5, OpenRouter GPT-5.5, OpenRouter Sol; **dormienti**: GPT-5.5, GPT-5.6 Sol (credito OpenAI esaurito) | `.github/workflows/pr-review-*.yml` |
 | Guardia sui workflow di review | `tests/safety/test_ai_audit_workflows.py` |
 | Workflow che esegue i test (ogni PR, e i push a `main`) | `.github/workflows/test.yml` |
 | Runtime esterni dei test (node, Chromium) e modalita' severa | `tests/runtime.py` |
@@ -307,12 +307,13 @@ review/inline/thread triage · final hard verify.
 > del reviewer forte passa a **`pr-review-openrouter-sol.yml`** — stesso modello `gpt-5.6-sol`,
 > fornitore **OpenRouter**, endpoint `chat/completions`, e il Secret **`BETRELAY_FUGU`** che già
 > esisteva per l'ex reviewer Fugu. Nessuna chiave nuova da creare.
-> **Conseguenza da conoscere, ed è un buco reale:** le review sui push le fa **solo Fable 5**,
-> che spende **soltanto se il push tocca file core** (`main.py`, `web/**`, `requirements.txt`,
-> `Procfile`, `railway.json`). Un push che tocca **solo test, documentazione o workflow non viene
-> letto da nessun modello** fino al gate finale a label. Prima quel caso lo copriva GPT-5.5, che
-> girava su ogni push qualunque file toccasse. Chi vede un push senza review sappia che è previsto,
-> non un guasto — e chi tocca solo i test sappia che il primo lettore sarà il gate.
+> **La copertura dei push è ricostituita**, e va detto perché non è scontato: addormentare GPT-5.5
+> aveva aperto un buco — Fable spende solo sui file core, il reviewer forte solo al gate, quindi un
+> push su **soli test o documentazione** non veniva letto da nessuno fino al merge, e in questo
+> repository i test sono metà del lavoro. Il proprietario ha scelto di chiuderlo con un **quarto
+> workflow**, `pr-review-openrouter-gpt55.yml`: stesso ruolo del GPT-5.5 dormiente, su OpenRouter,
+> stesso Secret `BETRELAY_FUGU`. È il più caro per giro perché è l'unico che spende su **ogni**
+> push senza gate a file core — scelta consapevole, non un effetto collaterale.
 >
 > 1. i Secret del repo — **`BETRELAY_FUGU`** (l'unico dei tre letto da un workflow vivo: porta la
 >    chiave OpenRouter) e **`BETRELAY_FABLE`**. **`BETRELAY_GPT`** resta configurato ma lo leggono
