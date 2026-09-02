@@ -271,9 +271,9 @@ jobs:
           OPENROUTER_ZDR = (os.environ.get("OPENROUTER_ZDR") or "").strip().lower() in ("1", "true", "yes")
           MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "10000"))
 
-          PRICE_INPUT_PER_MILLION = float(os.environ.get("PRICE_INPUT_PER_MILLION", "0"))
-          PRICE_OUTPUT_PER_MILLION = float(os.environ.get("PRICE_OUTPUT_PER_MILLION", "0"))
-          PRICE_CACHE_READ_PER_MILLION = float(os.environ.get("PRICE_CACHE_READ_PER_MILLION", "0"))
+          PRICE_INPUT_PER_MILLION = float(os.environ.get("PRICE_INPUT_PER_MILLION", "5.00"))
+          PRICE_OUTPUT_PER_MILLION = float(os.environ.get("PRICE_OUTPUT_PER_MILLION", "30.00"))
+          PRICE_CACHE_READ_PER_MILLION = float(os.environ.get("PRICE_CACHE_READ_PER_MILLION", "0.50"))
 
           MANUAL_REVIEW_LABEL = os.environ.get("MANUAL_REVIEW_LABEL", "manual-review-required")
 
@@ -1391,6 +1391,20 @@ jobs:
             ognuno max 2 righe. Se non ce ne sono, scrivi esattamente "Nessun bloccante evidente".
           - Niente ripetizione del diff, niente teoria/tutorial/blocchi di codice,
             niente rischi minori, niente miglioramenti opzionali, niente sezioni extra.
+
+          INPUT REDATTO — leggi prima di segnalare un errore di sintassi:
+          - Il diff che ricevi e' gia' passato da una redazione automatica dei
+            segreti, applicata da questo workflow prima di spedirtelo.
+          - I marcatori [REDACTED...] e le stringhe, parentesi o graffe che per
+            causa loro risultano non chiuse sono artefatti di quella redazione,
+            non codice del repository.
+          - Non segnalare MAI come bloccante un SyntaxError, una stringa non
+            terminata o «la CI non parte» dedotti dal solo diff redatto: sarebbe
+            una conclusione sul tuo input, non sul codice.
+          - Vale in particolare per tests/safety/test_ai_audit_workflows.py, che
+            per mestiere contiene payload finti di segreto e viene quindi redatto
+            sempre: le sue stringhe aperte e mai chiuse sono il risultato atteso
+            della redazione, non un file rotto.
           """
 
           user_prompt = f"""
