@@ -512,11 +512,11 @@ finale; entrambi partono con le label finali; CodeRabbit rivede l'intera PR dal 
 avevano avvisato, sulla PR #107, che se `main` avesse richiesto ancora i check
 `GPT-5.5 push-range review` o `GPT-5.6 Sol final review` — nomi di workflow ora dormienti, che
 non producono più quei check — il merge sarebbe rimasto appeso in attesa di qualcosa che non
-arriva. **Il proprietario ha controllato dopo il merge della #107: quei required check non
-esistono, e su `main` non c'è alcuna regola di branch protection.** L'avviso era quindi teorico e
-qui non si applica: non c'è niente da togliere in *Settings → Branches*. Lasciato scritto proprio
-perché non riemerga come falso todo — se un domani una regola verrà aggiunta, chi la scrive sa
-già di non riferirsi ai due check dormienti.
+arriva. **Il proprietario ha controllato *Settings → Branches* dopo il merge della #107: quei due
+check non figurano fra i required.** L'avviso era quindi teorico e qui non si applica: non c'è
+niente da togliere. Lasciato scritto proprio perché non riemerga come falso todo — se un domani
+si configureranno dei required check, chi li imposta sa già di non riferirsi ai due workflow
+dormienti (`GPT-5.5 push-range review`, `GPT-5.6 Sol final review`), che non producono più nulla.
 
 **Codex NON è un gate** — non aspettarlo. È installato e comparirà sulle PR, ma l'abbonamento
 Codex del proprietario è scaduto: quando pubblica «You have reached your Codex usage limits» o
