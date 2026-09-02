@@ -456,7 +456,13 @@ jobs:
           # repository tocca 4 righe, tutte payload finti del file di test, dove
           # redigere e' il comportamento giusto.
           APRE_QUOTATO = re.compile(
-              r"""(?i)^[+\- ]?\s*["']?"""
+              # Un piccolo insieme di parole di dichiarazione puo' precedere la
+              # chiave e non spezza l'ancoraggio a inizio riga: `export SECRET="..."`
+              # e' una forma comune negli script e nei file d'ambiente, e senza questo
+              # restava scoperta. Segnalato come residuo da GPT-5.5 sulla PR #107 e
+              # misurato: prima SCOPERTO, dopo coperto, e zero righe in piu' morse su
+              # tutti i file del repository.
+              r"""(?i)^[+\- ]?\s*(?:export|set|setx|declare|local|readonly|const|let|var)?\s*["']?"""
               r"""(?:api[_-]?key|token|secret|password|passwd|pwd|private[_-]?key|cert)"""
               r"""["']?\s*[:=]\s*"""
               r"""(?!["']?\s*\$\{\{[^{}]*\}\}["']?[ \t]*$)(["'])"""

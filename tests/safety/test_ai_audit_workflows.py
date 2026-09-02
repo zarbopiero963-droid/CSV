@@ -1582,6 +1582,21 @@ CODE_MULTIRIGA = [
      '  "api_key": "aperta\n  FRAMMENTO",\n  altro'),
     ('variabile d-ambiente con =',
      '+ SECRET="aperta\n+ FRAMMENTO"\n+ dopo'),
+    # Le forme che una parola di dichiarazione precede. Restavano scoperte perche'
+    # `export` spezzava l'ancoraggio a inizio riga — residuo segnalato da GPT-5.5
+    # sulla PR #107, misurato SCOPERTO, e chiuso allargando l'ancora a un piccolo
+    # insieme di parole. Misurato dopo: zero righe in piu' morse su 3.081.643
+    # caratteri, cioe' su ogni file di testo del repository.
+    ('export in uno script di shell',
+     '+ export SECRET="aperta\n+ FRAMMENTO"\n+ dopo'),
+    ('declare',
+     '+ declare TOKEN="aperta\n+ FRAMMENTO"\n+ dopo'),
+    ('const in JavaScript',
+     '+ const password = "aperta\n+ FRAMMENTO";\n+ dopo'),
+    ('YAML annidato su due livelli',
+     'config:\n  auth:\n    password: "aperta\n    FRAMMENTO"\n  altro: 1'),
+    ('JSON annidato',
+     '{\n  "auth": {\n    "api_key": "aperta\n    FRAMMENTO"\n  }\n}'),
 ]
 
 
