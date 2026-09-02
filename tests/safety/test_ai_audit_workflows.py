@@ -1616,6 +1616,16 @@ CODE_MULTIRIGA = [
     # 3. Oltre il tetto di righe la coda tornava in chiaro. Una catena di
     #    certificati supera comodamente qualunque numero scelto a occhio: adesso il
     #    limite e' il confine di diff, e il tetto resta solo come guardia anti-fuga.
+    # Chiesto da OpenRouter GPT-5.5 nei «test minimi» dopo la correzione: le
+    # chiavi `private_key` e `cert` sono quelle per cui il caso multiriga esiste
+    # davvero, ed erano le uniche del gruppo mai esercitate. La misura c-era, la
+    # guardia no — cioe- erano libere di rompersi senza dirlo.
+    ('private_key fra triple virgolette, corpo lungo',
+     '+ private_key = """inizio\n'
+     + '\n'.join('+ FRAMMENTO-%d' % i for i in range(50))
+     + '\n+ fine"""\n+ dopo il valore'),
+    ('cert con valore non chiuso sulla riga',
+     '+ cert: "inizio\n+ FRAMMENTO-corpo\n+ fine"\n+ dopo il valore'),
     ('valore lungo oltre le 40 righe di tetto',
      '+ password: "inizio\n' + '\n'.join('+ riga%d' % i for i in range(45))
      + '\n+ FRAMMENTO-LONTANO"\n+ fine'),
@@ -1684,6 +1694,13 @@ def test_la_passata_multiriga_non_mangia_il_codice(path):
     oltre = redact('+ password: "aperta\n@@ -1,2 +1,2 @@\n+ riga di un altro hunk')
     assert 'riga di un altro hunk' in oltre and '@@ -1,2 +1,2 @@' in oltre, (
         f'{path.name}: la passata ha superato un confine di diff: {oltre!r}'
+    )
+    # E l'altro confine, quello fra due FILE. Chiesto da OpenRouter GPT-5.5: senza
+    # questo, una passata che scavalcasse l'intestazione di un file successivo
+    # renderebbe illeggibile un file che non c'entra nulla, e nessun test lo direbbe.
+    fra_file = redact('+ cert: "aperta\ndiff --git a/x b/x\n+ riga di un altro file')
+    assert 'riga di un altro file' in fra_file and 'diff --git a/x b/x' in fra_file, (
+        f'{path.name}: la passata ha superato il confine fra due file: {fra_file!r}'
     )
 
 
