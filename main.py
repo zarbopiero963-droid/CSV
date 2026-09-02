@@ -2032,9 +2032,15 @@ def _travasa_nel_multiutente(c):
     # chat. Le associazioni che puntavano alle altre vengono RIPUNTATE prima della
     # cancellazione: senza, resterebbe una riga di `parser_chats` che riferisce un
     # `id` inesistente e il parser smetterebbe di ricevere da quella chat in silenzio.
-    # Oggi nessun codice scrive in `parser_chats`, quindi il ripuntamento non ha
-    # ancora niente da salvare; il PR sul dispatch lo trovera' fatto invece di
-    # scoprirlo su dati di un cliente.
+    # Il ripuntamento ha qualcosa da salvare: `_attacca_link_del_profilo` scrive in
+    # `parser_chats` (la conversione dei profili legacy), e il webhook ci legge il
+    # dispatch per-utente. Fino al 01/09/2026 qui c'era scritto «oggi nessun codice
+    # scrive in `parser_chats`»: era vero quando il commento fu scritto, e falso da
+    # quando il dispatch e' nato — a una funzione di distanza nello stesso file. Un
+    # commento che afferma il falso non e' innocuo: e' la forma con cui in questo
+    # repository sono sopravvissuti il BOM mancante e il «verificato byte per byte»
+    # che nessuno aveva verificato. Se un domani la scrittura sparisse davvero, e'
+    # questa riga a dover cambiare per prima.
     for chat, topic in c.execute(f'SELECT {CHIAVE_CHAT} FROM chats'
                                  f' GROUP BY {CHIAVE_CHAT} HAVING COUNT(*) > 1').fetchall():
         identificativi = [r[0] for r in c.execute(
