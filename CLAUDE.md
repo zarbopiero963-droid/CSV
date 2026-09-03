@@ -336,11 +336,16 @@ review/inline/thread triage · final hard verify.
 >   `Claude Fable 5.1 final review`. È sicuro perché il proprietario ha verificato che non ci sono
 >   required check (vedi «La branch protection»), e da adesso il nome del **job** di tutti e cinque
 >   i workflow è pinnato da un test: prima si poteva cambiare senza che diventasse rosso niente.
-> - **Trappola nel collaudo, misurata sul codice:** i marcatori di dedup contengono `REVIEW_ID` e
->   gli SHA del range, **non il modello**. Su una PR il cui range corrente porta già un
->   `done_marker` prodotto da Fable 5, il solo riarmo della label esce **verde senza chiamare
->   5.1**, e il commento continua a dire `Model: claude-fable-5`. La prima verifica della
->   migrazione va fatta su un **head nuovo**, non riarmando la label su uno vecchio.
+> - **Il marcatore di dedup ora contiene il modello — e prima no.** Conteneva `REVIEW_ID` e gli SHA
+>   del range: su una PR il cui range portava già un `done_marker` di Fable 5, il riarmo della label
+>   usciva **verde senza chiamare 5.1**, col commento che continuava a dire `Model: claude-fable-5`.
+>   La contromisura scritta qui era «collauda su un head nuovo», e OpenRouter Sol l'ha bloccata al
+>   gate della PR #110 con la ragione giusta: **una cautela scritta non è un vincolo**, ed era un
+>   check verde che non prova una review dentro il meccanismo che quella regola deve imporre.
+>   Corretto in tutti e cinque i workflow, con una guardia **comportamentale** — costruisce il
+>   marcatore due volte cambiando solo il modello e pretende che cambi. Cambiare modello ora
+>   invalida la dedup da sé, e il collaudo su head nuovo resta una buona abitudine, non l'unica
+>   difesa.
 > - **Priority Tier: nessuna azione.** Claude Fable 5.1 ne è escluso, ma il workflow non manda
 >   `service_tier`, quindi vale il default `auto`, che ripiega sulla capacità standard. Scritto qui
 >   perché non riemerga come falso todo.
@@ -632,6 +637,14 @@ stesso baratto «una protezione che sembra esserci» che questo file censura alt
 soppressione vale **solo dove c'è evidenza di alterazione** (un marcatore nella riga o vicino), e
 una clausola esplicita dice che senza marcatori l'errore è reale e va segnalato. Quella clausola è
 fra le frasi che la guardia pretende: toglierla fa diventare rosso il test, non solo il buon senso.
+
+**E resta un caso che nemmeno quella clausola risolve**, segnalato da Sol al giro successivo: un
+`[REDACTED...]` **già presente nel sorgente** — e questo repository ne ha, nel file di test della
+redazione — è indistinguibile da uno inserito dal redattore. Su una riga così, «c'è un marcatore,
+quindi non è un difetto» può occultare un errore vero. Il rimedio non è togliere l'avviso ma
+vietare l'uscita silenziosa: l'avviso chiede di etichettare il dubbio come `[INSUFFICIENT_CONTEXT]`
+— non un bloccante, una richiesta di verifica umana, lo stesso trattamento già previsto per i file
+troncati. **Il silenzio è l'unica uscita che non lascia traccia**, ed è quella che l'avviso vieta.
 
 Se un reviewer segnala comunque un errore di sintassi su quel file, la refutazione resta la stessa
 e resta misurata: `python -m py_compile tests/safety/test_ai_audit_workflows.py`, esito nel thread,

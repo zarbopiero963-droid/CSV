@@ -1136,6 +1136,13 @@ FRASI_AVVISO_REDAZIONE = (
     # spiega. Un avviso nato per togliere rumore diventava un punto cieco in tutti
     # e cinque i gate. La soppressione vale solo dove c'e' evidenza di alterazione.
     "l'errore e' reale e va segnalato",
+    # La PROVENIENZA del marcatore. Secondo [REAL_FINDING] di OpenRouter Sol sulla
+    # PR #110: un `[REDACTED...]` gia' presente nel sorgente e' indistinguibile da
+    # uno inserito dalla redazione, quindi «riga con marcatore -> non e' un difetto»
+    # puo' occultare un errore vero. Questo file di test ne contiene per mestiere.
+    # Il dubbio non si sopprime in silenzio: si etichetta [INSUFFICIENT_CONTEXT],
+    # lo stesso trattamento gia' previsto per i file troncati.
+    'INSUFFICIENT_CONTEXT',
 )
 
 
@@ -1187,6 +1194,50 @@ def test_il_prompt_avverte_che_l_input_e_gia_stato_redatto(path):
             f'{path.name}: l-avviso sull-input redatto non nomina {frase!r}. '
             f'Avviso trovato:\n{avviso}'
         )
+
+
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
+def test_il_marcatore_di_dedup_cambia_col_modello(path):
+    """Cambiare modello deve invalidare la dedup, o il gate mente sul suo esito.
+
+    Il `done_marker` conteneva `REVIEW_ID` e gli SHA del range, e NIENTE del
+    modello. Conseguenza misurata sul codice durante la migrazione a Fable 5.1: su
+    una PR il cui range portava gia' un `done_marker` prodotto dal modello vecchio,
+    il riarmo della label usciva **verde senza chiamare quello nuovo**, e il
+    commento continuava a dichiarare il modello vecchio. Un gate finale che si
+    dichiara superato da una review fatta da un altro modello e' la classe «un
+    check verde non e' prova di review», arrivata dentro il meccanismo che quella
+    regola doveva imporre.
+
+    Fino al 03/09/2026 la contromisura era una riga di documentazione — «collauda
+    su un head nuovo». [REAL_FINDING] di OpenRouter Sol al gate della PR #110: una
+    cautela scritta non e' un vincolo. Ora il modello e' dentro la chiave.
+
+    L'asserzione e' COMPORTAMENTALE: si costruisce il marcatore due volte
+    cambiando solo il modello e si guarda se il risultato cambia. Cercare il nome
+    della variabile nel testo sarebbe verde anche con un'interpolazione che non
+    finisce nella stringa.
+    """
+    sorgente = _script(path)
+    modello = re.search(r'"model":\s*([A-Z_]+)', sorgente)
+    assert modello, f'{path.name}: variabile del modello non trovata nel payload'
+    riga = re.search(r'^\s*done_marker = (f".*")$', sorgente, re.M)
+    assert riga, f'{path.name}: costruzione di done_marker non trovata'
+
+    def costruisci(valore_modello: str) -> str:
+        spazio = {
+            'REVIEW_ID': 'id-finto',
+            'range_base': 'a' * 40,
+            'range_head': 'b' * 40,
+            modello.group(1): valore_modello,
+        }
+        return eval(riga.group(1), spazio)  # noqa: S307 - sorgente del repo
+
+    assert costruisci('modello-vecchio') != costruisci('modello-nuovo'), (
+        f'{path.name}: il done_marker non cambia col modello. Un range gia- '
+        'marcato «fatto» dal modello precedente fa uscire il gate VERDE senza '
+        'chiamare quello nuovo, e il commento continua a dichiarare il vecchio.'
+    )
 
 
 def test_l_avviso_sull_input_redatto_e_identico_nelle_cinque_copie():

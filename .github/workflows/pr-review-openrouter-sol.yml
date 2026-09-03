@@ -1201,7 +1201,14 @@ jobs:
           # o d'errore (che porta `marker` ma NON `done_marker`) non blocca il retry —
           # fondamentale sul gate a LABEL, dove saltare una review fallita lascerebbe
           # il check verde senza la review forte richiesta (P1 CodeRabbit/Codex).
-          done_marker = f"<!-- {REVIEW_ID}-pr-review-done:xtrader-relay:{range_base[:12]}...{range_head[:12]} -->"
+          # Il MODELLO fa parte della chiave. Senza, un range gia- marcato «fatto»
+          # dal modello precedente faceva uscire il gate VERDE senza chiamare quello
+          # nuovo, e il commento continuava a dichiarare il vecchio: un check verde
+          # che non e- prova di review, dentro il meccanismo che quella regola deve
+          # imporre. Fino al 03/09/2026 la contromisura era una riga di
+          # documentazione — «collauda su un head nuovo». [REAL_FINDING] di
+          # OpenRouter Sol sulla PR #110: una cautela scritta non e- un vincolo.
+          done_marker = f"<!-- {REVIEW_ID}-pr-review-done:xtrader-relay:{MODEL_ID}:{range_base[:12]}...{range_head[:12]} -->"
 
           # Anti-doppia-review a pagamento: se esiste GIÀ una review COMPLETATA per
           # QUESTO range (done_marker), non richiamare il modello — un re-run del
@@ -1410,6 +1417,12 @@ jobs:
             reale e va segnalato normalmente. Questo avviso non ti chiede di
             ignorare gli errori di sintassi: ti chiede di distinguere quelli del
             repository da quelli che abbiamo introdotto noi nel tuo input.
+          - Un marcatore gia' presente nel sorgente e uno inserito dalla redazione
+            si assomigliano, e questo workflow non sa dirti quale dei due stai
+            guardando. Quando il dubbio resta, NON archiviare in silenzio:
+            segnalalo come [INSUFFICIENT_CONTEXT], che non e' un bloccante ma una
+            richiesta di verifica umana. Il silenzio e' l'unica uscita che non
+            lascia traccia.
           """
 
           user_prompt = f"""
