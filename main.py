@@ -5603,7 +5603,15 @@ async def conferma_canale_backup(request: Request):
             f'SELECT id, owner_user_id FROM chats WHERE telegram_chat_id=? AND {TOPIC_CHAT}=?',
             (candidato['chat_id'], '')).fetchone()
         if riga_chat:
-            if riga_chat[1] != amministratore['id']:
+            # `is not None` e non `!=` secco: `owner_user_id` NULL non e' «di un altro
+            # utente», e' di NESSUNO — ed e' un caso reale, non ipotetico, perche'
+            # `elimina_chat_mia` lo mette a NULL quando un utente toglie una chat su cui
+            # restano link di altri. Col confronto secco quella riga dava un messaggio
+            # falso e, peggio, bloccava la configurazione di un canale che non alimenta
+            # niente. Rilievo di Claude Fable 5.1 sulla PR #117. Il caso «senza
+            # proprietario ma con link altrui» resta coperto dal controllo qui sotto,
+            # che e' proprio la ragione per cui quella riga sopravvive alla rimozione.
+            if riga_chat[1] is not None and riga_chat[1] != amministratore['id']:
                 raise HTTPException(
                     409, 'questo canale e- collegato da un altro utente come sorgente di'
                          ' segnali: non puo- diventare la destinazione dei backup')

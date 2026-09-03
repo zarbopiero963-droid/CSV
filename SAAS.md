@@ -1383,6 +1383,15 @@ sui due versi:
   parser — cioè il contrario di quello che il commento accanto dichiarava. `[REAL_FINDING]`
   convergente di GPT-5.5 e Claude Fable 5.1 sulla PR #117.
 
+  «Di un altro utente» significa `owner_user_id` **non nullo e diverso**: una riga **senza
+  proprietario** non è di un altro, è di **nessuno** — ed è un caso reale, perché
+  `elimina_chat_mia` mette `owner_user_id` a `NULL` quando un utente toglie una chat su cui
+  restano link di altri. Col confronto secco quella riga dava un messaggio falso e, peggio,
+  bloccava la configurazione di un canale che non alimenta niente. Il caso «senza
+  proprietario **ma con link altrui**» resta coperto dal controllo sui link — che è proprio
+  la ragione per cui quella riga sopravvive alla rimozione. Rilievo di Claude Fable 5.1
+  sulla PR #117.
+
 Il controllo «è già il canale di backup?» sta **dentro** la transazione della scrittura, e
 non su una connessione a parte: fra la lettura e l'`INSERT` la conferma nel pannello poteva
 configurare quel canale, e lo stesso canale finiva destinazione **e** sorgente. Stessa forma

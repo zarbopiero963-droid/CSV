@@ -802,3 +802,37 @@ def test_confermare_il_backup_non_cancella_la_chat_di_un_ALTRO_utente(tmp_path, 
     c.close()
     assert riga and riga[0] == cliente, (
         f'la chat del cliente e- stata cancellata dalla conferma dell-admin: {riga}')
+
+
+def test_una_chat_SENZA_proprietario_e_senza_link_non_blocca_la_conferma(tmp_path, monkeypatch):
+    """`owner_user_id` NULL non e' «di un altro utente». Rilievo di Claude Fable 5.1
+    sulla PR #117.
+
+    E non e' un caso ipotetico: `elimina_chat_mia` mette `owner_user_id` a NULL quando
+    un utente toglie una chat su cui restano link di ALTRI — e' il modo in cui una riga
+    resta senza proprietario. Trattarla come «di un altro» darebbe un messaggio falso
+    (nessuno la possiede) e, peggio, rifiuterebbe di configurare un canale di backup per
+    una riga che non e' di nessuno e non alimenta niente.
+
+    Senza proprietario e senza link, quella riga e' inerte: la conferma la toglie, come
+    fa con la propria.
+    """
+    percorso, admin_s, _cliente_s, _cliente = _admin(tmp_path, monkeypatch, 'senza-padrone.db')
+    _abilita_webhook(monkeypatch)
+    c = sqlite3.connect(percorso)
+    c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id) VALUES (?, NULL)',
+              (str(CANALE),))
+    c.commit()
+    c.close()
+    _metti_candidato(CANALE, 'Backup BetRelay')
+    monkeypatch.setattr(main, 'invia_messaggio_telegram',
+                        lambda chat_id, testo, bot_token=None: (True, None))
+
+    _conferma(admin_s, CANALE)
+
+    assert _impostazione(percorso, main.CHIAVE_CANALE_BACKUP_ID) == str(CANALE)
+    c = sqlite3.connect(percorso)
+    resta = c.execute('SELECT COUNT(*) FROM chats WHERE telegram_chat_id=?',
+                      (str(CANALE),)).fetchone()[0]
+    c.close()
+    assert resta == 0, 'la riga senza proprietario e- rimasta e il canale ha due ruoli'
