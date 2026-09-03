@@ -124,6 +124,102 @@ export async function provaCanaleBackup() { _non_admin(); }
 export async function rimuoviCanaleBackup() { _non_admin(); }
 export async function inviaBackupOra() { _non_admin(); }
 
+/* --------------------------------------------- chat Telegram (#32, 3.2) */
+
+// Qui la demo SIMULA, e va detto invece di lasciarlo intuire: non c'e' nessun
+// Telegram e nessun webhook, quindi il codice non puo' essere incollato da
+// nessuna parte. Dopo `RITARDO_VERIFICA_MS` dalla richiesta, il sondaggio si
+// comporta come se qualcuno l'avesse incollato in un canale: e' il solo modo di
+// far vedere il percorso in una vetrina che gira da `file://`.
+//
+// Tutto il resto e' fedele al server: il codice esiste in chiaro una volta sola
+// (`statoVerificaChat` non lo ripete), il TTL scorre, e la PUT delle chat di un
+// parser SOSTITUISCE l'insieme invece di aggiungerci dentro.
+const RITARDO_VERIFICA_MS = 4000;
+const TTL_VERIFICA_MS = 600000;
+const ALFABETO_DEMO = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+
+function _statoChat() {
+  if (!stato.dati.chats) stato.dati.chats = [];
+  if (!stato.dati.parserChats) stato.dati.parserChats = {};
+  return stato.dati;
+}
+
+function _codiceDemo() {
+  let coda = '';
+  for (let i = 0; i < 8; i += 1) {
+    coda += ALFABETO_DEMO[Math.floor(Math.random() * ALFABETO_DEMO.length)];
+  }
+  return 'BETRELAY-' + coda;
+}
+
+export async function listaChat() {
+  return _statoChat().chats.slice();
+}
+
+export async function avviaVerificaChat() {
+  const d = _statoChat();
+  const codice = _codiceDemo();
+  d.verifica = { chiestaIl: Date.now(), scade: Date.now() + TTL_VERIFICA_MS,
+                 consumata: false, chatId: null };
+  salva();
+  // Il codice NON si salva: come sul server, esiste in chiaro solo qui.
+  return { codice, scade_fra_s: Math.round(TTL_VERIFICA_MS / 1000) };
+}
+
+export async function statoVerificaChat() {
+  const d = _statoChat();
+  const v = d.verifica;
+  if (!v) return { in_attesa: false, scaduto: false, scade_fra_s: 0, chat: null };
+  if (v.consumata) {
+    return { in_attesa: false, scaduto: false, scade_fra_s: 0,
+             chat: d.chats.find(c => c.id === v.chatId) || null };
+  }
+  if (Date.now() > v.scade) {
+    return { in_attesa: false, scaduto: true, scade_fra_s: 0, chat: null };
+  }
+  if (Date.now() - v.chiestaIl >= RITARDO_VERIFICA_MS) {
+    const id = (d.chats.reduce((m, c) => Math.max(m, c.id), 0) || 0) + 1;
+    const chat = { id, telegram_chat_id: String(-1002000000000 - id),
+                   titolo: 'Canale di prova ' + id, tipo: 'channel',
+                   verified_at: Math.floor(Date.now() / 1000) };
+    d.chats.push(chat);
+    v.consumata = true;
+    v.chatId = id;
+    salva();
+    return { in_attesa: false, scaduto: false, scade_fra_s: 0, chat };
+  }
+  return { in_attesa: true, scaduto: false,
+           scade_fra_s: Math.max(0, Math.round((v.scade - Date.now()) / 1000)),
+           chat: null };
+}
+
+export async function eliminaChat(id) {
+  const d = _statoChat();
+  const numerico = Number(id);
+  d.chats = d.chats.filter(c => c.id !== numerico);
+  // Come il server, che toglie i link nella STESSA transazione: un link a una
+  // chat sparita non sarebbe visibile da nessuna vista e resterebbe li'.
+  for (const slug of Object.keys(d.parserChats)) {
+    d.parserChats[slug] = d.parserChats[slug].filter(x => x !== numerico);
+  }
+  if (d.verifica && d.verifica.chatId === numerico) d.verifica = null;
+  salva();
+}
+
+export async function chatDelParser(slug) {
+  return (_statoChat().parserChats[slug] || []).slice();
+}
+
+export async function salvaChatDelParser(slug, chatIds) {
+  const d = _statoChat();
+  const esistenti = new Set(d.chats.map(c => c.id));
+  const voluti = chatIds.map(Number).filter(x => esistenti.has(x));
+  d.parserChats[slug] = voluti;
+  salva();
+  return voluti.slice();
+}
+
 /* ----------------------------------------------------------------- parser */
 
 export async function listParsers() {

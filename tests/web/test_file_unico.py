@@ -94,5 +94,19 @@ def test_il_file_unico_esegue_il_flusso_demo_da_file(tmp_path):
         pg.wait_for_selector('.modal .secret')
         assert pg.locator('.modal .secret').first.inner_text().startswith('xt_')
 
+        # La vista «Chat Telegram» (#32, 3.2): sei funzioni nuove nel layer, ed e'
+        # esattamente il punto in cui il gemello finto si rompe in silenzio — una
+        # che manca e' un TypeError alla prima azione, raccolto qui in console.
+        # La demo SIMULA l'incollata nel canale dopo qualche secondo: da `file://`
+        # non c'e' nessun Telegram, e senza la simulazione il percorso non si
+        # potrebbe mostrare affatto.
+        pg.click('[data-act="after-token"]')
+        pg.click('nav a[href="#/chats"]')
+        pg.wait_for_selector('[data-act="chat-verifica-start"]')
+        pg.click('[data-act="chat-verifica-start"]')
+        pg.wait_for_selector('#codice-verifica')
+        assert pg.inner_text('#codice-verifica').strip().startswith('BETRELAY-')
+        pg.wait_for_selector('.list-item:has-text("Canale di prova")', timeout=20000)
+
         b.close()
     assert not errori, errori

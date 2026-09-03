@@ -138,7 +138,15 @@ FORME_DI_SEGRETO = (
 # chat_id NUOVO sotto il mount fa fallire il test finche' qualcuno non lo aggiunge
 # qui: e' l'unico modo di distinguere un valore finto da uno vero, perche' dalla
 # forma sono identici.
-CHAT_ID_FINTI_DICHIARATI = {'-1001987654321'}
+CHAT_ID_FINTI_DICHIARATI = {
+    '-1001987654321',
+    # La base da cui `api_finta.js` conia i canali della verifica simulata (#32,
+    # 3.2): la demo non ha Telegram, quindi fabbrica `base - n` a ogni chat che
+    # finge di aver verificato. Dichiarato qui e non aggirato calcolandolo: il
+    # valore E' nel file servito, ed e' esattamente cio' che questa guardia
+    # esiste per farsi mostrare.
+    '-1002000000000',
+}
 FORMA_CHAT_ID = re.compile(r'-100\d{7,}')
 
 

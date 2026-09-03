@@ -181,9 +181,20 @@ def _login_b(base, percorso_db):
     return esito
 
 
-def _consegna(base, chat, testo):
-    """Una consegna di Telegram autentica: col segreto derivato dal bot."""
-    payload = {'message': {'chat': {'id': int(chat)}, 'text': testo}}
+def _consegna(base, chat, testo, titolo=None, tipo=None):
+    """Una consegna di Telegram autentica: col segreto derivato dal bot.
+
+    `titolo`/`tipo` sono i campi che Telegram mette in `message.chat` per gruppi e
+    canali. Restano opzionali perche' la gran parte dei casi qui non li riguarda,
+    ma il percorso della verifica li usa: sono l'unico modo che la web app ha di
+    dire QUALE canale ha appena registrato.
+    """
+    dati_chat = {'id': int(chat)}
+    if titolo is not None:
+        dati_chat['title'] = titolo
+    if tipo is not None:
+        dati_chat['type'] = tipo
+    payload = {'message': {'chat': dati_chat, 'text': testo}}
     req = urllib.request.Request(
         f'{base}/telegram/webhook', data=json.dumps(payload).encode('utf-8'),
         headers={'Content-Type': 'application/json',
@@ -825,3 +836,65 @@ def test_il_codice_non_compare_nei_log_dei_messaggi(servizio):
     assert not any(codice in t for t in testi), (
         'il codice di verifica e- finito in message_logs'
     )
+
+
+# --------------------------------------------- il nome del canale, per la web app
+
+def test_la_chat_verificata_porta_titolo_e_tipo_della_consegna(servizio):
+    """Senza il nome, la web app puo' mostrare solo `-1002000000101`.
+
+    Le colonne `title` e `type` esistono in `chats` dalla prima migrazione e
+    **nessun percorso le scriveva**: `grep 'INSERT INTO chats'` dava tre siti, tutti
+    senza quei campi. Finche' le chat le collegava l'amministratore la cosa non si
+    vedeva — era lui a sapere quale canale fosse quale. Da quando le collega il
+    cliente, una lista di interi negativi non e' una schermata: due canali si
+    distinguono solo dal numero, e nessuno riconosce i propri canali dal numero.
+
+    Il titolo arriva dalla stessa consegna che porta il codice: e' il modo in cui
+    Telegram dice come si chiama la chat, e non costa nessuna chiamata in piu'.
+    """
+    base, percorso_db = servizio
+    cookie, _ = _login_a(base, percorso_db)
+    codice = _codice(base, cookie)
+    stato, corpo = _consegna(base, CANALE_A, codice,
+                             titolo='Canale segnali', tipo='channel')
+    assert stato == 200, corpo
+
+    chat = _chats(base, cookie)[0]
+    assert chat['titolo'] == 'Canale segnali', f'titolo non registrato: {chat}'
+    assert chat['tipo'] == 'channel', f'tipo non registrato: {chat}'
+
+
+def test_il_titolo_del_canale_e_capato_e_ripulito(servizio):
+    """Il titolo e' testo di un ESTRANEO: arriva da Telegram, non dal servizio.
+
+    Chi controlla un canale ne sceglie il nome, quindi quel valore va trattato come
+    ogni altro input esterno: capato in lunghezza — o una riga di `chats` diventa
+    grande a piacere di chi la scrive — e senza caratteri di controllo, che nella
+    lista della web app produrrebbero righe spezzate.
+    """
+    base, percorso_db = servizio
+    cookie, _ = _login_a(base, percorso_db)
+    codice = _codice(base, cookie)
+    stato, corpo = _consegna(base, CANALE_A, codice,
+                             titolo='  A\nB' + 'x' * 500, tipo='channel')
+    assert stato == 200, corpo
+
+    chat = _chats(base, cookie)[0]
+    assert len(chat['titolo']) <= main.MAX_TITOLO_CHAT, (
+        f'titolo non capato: {len(chat["titolo"])} caratteri')
+    assert '\n' not in chat['titolo'], f'ritorno a capo nel titolo: {chat["titolo"]!r}'
+    assert chat['titolo'].startswith('A B'), f'titolo non ripulito: {chat["titolo"]!r}'
+
+
+def test_riverificare_la_stessa_chat_ne_aggiorna_il_nome(servizio):
+    """Un canale rinominato non deve restare col nome vecchio nella lista."""
+    base, percorso_db = servizio
+    cookie, _ = _login_a(base, percorso_db)
+    _consegna(base, CANALE_A, _codice(base, cookie),
+              titolo='Nome vecchio', tipo='channel')
+    _consegna(base, CANALE_A, _codice(base, cookie),
+              titolo='Nome nuovo', tipo='channel')
+
+    chat = _chats(base, cookie)[0]
+    assert chat['titolo'] == 'Nome nuovo', f'il nome non si aggiorna: {chat}'
