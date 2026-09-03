@@ -342,10 +342,16 @@ review/inline/thread triage · final hard verify.
 >   La contromisura scritta qui era «collauda su un head nuovo», e OpenRouter Sol l'ha bloccata al
 >   gate della PR #110 con la ragione giusta: **una cautela scritta non è un vincolo**, ed era un
 >   check verde che non prova una review dentro il meccanismo che quella regola deve imporre.
->   Corretto in tutti e cinque i workflow, con una guardia **comportamentale** — costruisce il
->   marcatore due volte cambiando solo il modello e pretende che cambi. Cambiare modello ora
->   invalida la dedup da sé, e il collaudo su head nuovo resta una buona abitudine, non l'unica
->   difesa.
+>   Corretto in tutti e cinque i workflow, con una guardia che legge i **segnaposto** della
+>   f-string via `string.Formatter().parse()` e pretende che il modello sia fra loro. Cambiare
+>   modello ora invalida la dedup da sé, e il collaudo su head nuovo resta una buona abitudine,
+>   non l'unica difesa.
+>   *La prima versione di quella guardia costruiva il marcatore due volte con `eval` — cioè
+>   eseguiva una f-string presa da un file che qualunque PR può modificare, con i builtin
+>   disponibili, dentro il runner della CI: esecuzione arbitraria offerta a chi apre una PR.
+>   `[REAL_FINDING]` di OpenRouter Sol allo stesso gate, accolto. **Una guardia non deve creare il
+>   buco che nessun'altra parte del repository ha**, e «è solo un test» non è un'attenuante: i test
+>   girano in CI con i permessi del job.*
 > - **Priority Tier: nessuna azione.** Claude Fable 5.1 ne è escluso, ma il workflow non manda
 >   `service_tier`, quindi vale il default `auto`, che ripiega sulla capacità standard. Scritto qui
 >   perché non riemerga come falso todo.
