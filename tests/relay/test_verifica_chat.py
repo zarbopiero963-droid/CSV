@@ -465,9 +465,17 @@ def test_eliminare_una_propria_chat_non_taglia_i_link_di_un_altro(servizio):
     _verifica(base, cookie_a, chat=CANALE_A)
     id_chat = _chats(base, cookie_a)[0]['id']
 
+    # A collega ANCHE un proprio parser: il caso misto e' quello che conta, perche'
+    # separa «cancella tutto» da «cancella i miei». Chiesto da GPT-5.5 sulla PR #112.
+    slug_a = _crea_parser(base, cookie_a, 'Parser di A')
+    stato, corpo, _ = _chiama(base, 'PUT', f'/api/me/parsers/{slug_a}/chats',
+                              cookie=cookie_a, corpo={'chat_ids': [id_chat]})
+    assert stato == 200, corpo
+
     cookie_b, _ = _login_b(base, percorso_db)
     slug_b = _crea_parser(base, cookie_b, 'Parser di B')
     c = sqlite3.connect(percorso_db)
+    parser_a = c.execute('SELECT id FROM parsers WHERE slug=?', (slug_a,)).fetchone()[0]
     parser_b = c.execute('SELECT id FROM parsers WHERE slug=?', (slug_b,)).fetchone()[0]
     c.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (?,?)',
               (parser_b, id_chat))
@@ -481,9 +489,18 @@ def test_eliminare_una_propria_chat_non_taglia_i_link_di_un_altro(servizio):
     c = sqlite3.connect(percorso_db)
     rimasti = c.execute('SELECT parser_id FROM parser_chats WHERE chat_id=?',
                         (id_chat,)).fetchall()
+    proprietario = c.execute('SELECT owner_user_id FROM chats WHERE id=?',
+                             (id_chat,)).fetchone()
     c.close()
     assert rimasti == [(parser_b,)], (
-        f'il link del parser di un altro utente e- stato tagliato: {rimasti}'
+        f'attesi solo i link di B, trovati {rimasti} (parser di A: {parser_a})'
+    )
+    assert proprietario is not None, (
+        'la riga di `chats` e- stata cancellata con i link di B ancora vivi: '
+        'il dispatch li leggerebbe come orfani'
+    )
+    assert proprietario[0] is None, (
+        f'la chat non e- stata disconosciuta: proprietario {proprietario[0]}'
     )
 
 

@@ -6918,9 +6918,17 @@ def stato_verifica_chat(request: Request):
             # La chat verificata DA QUESTO codice, correlata sul momento del
             # consumo: `_consuma_codice_di_verifica` scrive `verified_at` e
             # `consumed_at` con lo stesso valore, nella stessa transazione.
+            #
+            # `ORDER BY id DESC LIMIT 1`: `verified_at` ha la risoluzione del
+            # secondo, quindi due chat verificate dallo stesso utente nello stesso
+            # secondo combaciano entrambe e `fetchone()` ne prenderebbe una a caso
+            # — una risposta che cambia senza che cambi niente. Rischio alzato da
+            # GPT-5.5 sulla PR #112. Fra due candidate la piu' recente e' la
+            # risposta giusta, e in ogni caso e' deterministica.
             chat = c.execute(
                 f'SELECT {", ".join(CAMPI_CHAT)} FROM chats'
-                ' WHERE owner_user_id=? AND verified_at=?',
+                ' WHERE owner_user_id=? AND verified_at=?'
+                ' ORDER BY id DESC LIMIT 1',
                 (utente['id'], riga[1])).fetchone()
     finally:
         c.close()
