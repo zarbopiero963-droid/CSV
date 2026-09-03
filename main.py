@@ -1031,6 +1031,12 @@ COLONNE_MULTIUTENTE = (
     # `users` esiste gia' nei database creati dalla PR #22: le colonne che nascono dopo vanno
     # aggiunte con ALTER, o il servizio le cerca e non le trova.
     ('users', 'promemoria_per', 'INTEGER'),
+    # Il LEGAME fra un codice e la chat che ha verificato. Senza, `verify/status`
+    # doveva correlare su `verified_at == consumed_at`, che ha la risoluzione del
+    # secondo: due verifiche ravvicinate erano indistinguibili e la scelta fra loro
+    # un'euristica. Rilievo ripetuto di OpenRouter Sol e GPT-5.5 sulla PR #112 —
+    # finche' la correlazione e' un indizio, la risposta e' una scommessa.
+    ('chat_verifications', 'chat_id', 'INTEGER'),
     ('parsers', 'user_id', 'INTEGER'),
     ('parsers', 'slug', 'TEXT'),
     ('parsers', 'config_json', 'TEXT'),
@@ -6715,6 +6721,425 @@ async def prova_parser_mio(slug: str, request: Request):
 
 
 # ------------------------------------------------------------------------------
+#  Verifica delle chat col codice usa-e-getta (#32, pezzo 3.2).
+#
+#  Cosa risolve: fino a qui l'unico modo di autorizzare un canale era
+#  `/api/profiles` con l'admin token, cioe' il proprietario a mano — e la web app
+#  lo dichiarava all'utente («arriva con uno dei prossimi aggiornamenti»). Un
+#  cliente non poteva collegare da solo il canale da cui arrivano i suoi segnali.
+#
+#  Il meccanismo: l'utente chiede un codice, lo incolla NEL CANALE, il webhook lo
+#  riconosce e registra la chat come sua. **Incollarlo nel canale e' la prova**:
+#  chi non puo' scrivere li' dentro non puo' autorizzarlo, e non esiste altro
+#  modo di dimostrare quel controllo senza far passare il proprietario.
+#
+#  Perche' NON indebolisce il filtro delle chat, che `CLAUDE.md` elenca fra le
+#  aree da non toccare: il ramo del codice nel webhook e' l'eccezione che quello
+#  stesso file gia' prevede, ed e' *tutta* l'eccezione. Registra una riga in
+#  `chats` e consuma il codice; non tocca `signals`, non cerca parser, non
+#  scrive nel feed. Vincolato da `test_il_codice_non_apre_il_feed`.
+#
+#  Il modello dati esisteva gia' — `chat_verifications(code, user_id,
+#  expires_at, consumed_at)` e `chats.owner_user_id/verified_at` — creato da chi
+#  progetto' lo schema e mai usato da nessuno: `grep` prima di questo PR dava
+#  zero letture e zero scritture. Mancava il comportamento, non le tabelle.
+# ------------------------------------------------------------------------------
+
+# Dieci minuti: il tempo di passare dalla web app a Telegram e incollare. Piu'
+# lungo allargherebbe la finestra in cui un codice letto da un estraneo nel
+# canale resta spendibile; piu' corto farebbe scadere chi si distrae.
+TTL_CODICE_VERIFICA_S = 600
+
+# Alfabeto senza i caratteri che si confondono a leggerli (0/O, 1/I/l): il codice
+# si trascrive a mano da uno schermo a una chat, e una «O» letta «0» produce un
+# fallimento che l'utente non sa spiegarsi.
+ALFABETO_CODICE = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
+PREFISSO_CODICE = 'BETRELAY-'
+LUNGHEZZA_CODICE = 8
+
+
+def _nuovo_codice_verifica() -> str:
+    """Un codice con un prefisso RICONOSCIBILE, e il prefisso non e' estetica.
+
+    Il webhook deve decidere, su ogni messaggio da una chat sconosciuta, se e' un
+    tentativo di verifica o traffico da ignorare. Col prefisso quella decisione e'
+    una forma, non una ricerca a database su ogni consegna: senza, ogni messaggio
+    di ogni canale sconosciuto costerebbe una query su `chat_verifications`.
+
+    `secrets.choice` e non `random`: e' un valore che autorizza qualcosa.
+    """
+    coda = ''.join(secrets.choice(ALFABETO_CODICE) for _ in range(LUNGHEZZA_CODICE))
+    return PREFISSO_CODICE + coda
+
+
+def _e_codice_di_verifica(testo: str) -> str | None:
+    """Il codice se il testo ne e' uno, altrimenti `None`. Non tocca il database."""
+    candidato = (testo or '').strip().upper()
+    if not candidato.startswith(PREFISSO_CODICE):
+        return None
+    coda = candidato[len(PREFISSO_CODICE):]
+    if len(coda) != LUNGHEZZA_CODICE or not all(ch in ALFABETO_CODICE for ch in coda):
+        return None
+    return candidato
+
+
+def _vista_chat(riga):
+    """La forma che la web app legge. Nessun campo che non le serva."""
+    return {'id': riga[0], 'telegram_chat_id': riga[1], 'titolo': riga[2],
+            'tipo': riga[3], 'verified_at': riga[4]}
+
+
+CAMPI_CHAT = ('id', 'telegram_chat_id', 'title', 'type', 'verified_at')
+
+
+def _accesso_attivo_o_403(utente):
+    """Solo un accesso **attivo** (o l'amministratore) puo' collegare una chat.
+
+    Il cancello non e' `ACCESSI_BLOCCATI`, ed e' la ragione per cui questa funzione
+    esiste invece di riusare `_blocco_della_riga`: quella lista contiene solo
+    `scaduto` e `sospeso`, quindi un utente **`registrato`** — appena entrato col
+    Login Widget, mai approvato da nessuno — non e' bloccato da nessuna parte.
+
+    Prima di questo PR quello stato non aveva conseguenze: un tale utente poteva
+    creare parser, ma i parser senza chat non producono niente, e collegare una
+    chat lo faceva **solo l'amministratore**. La verifica col codice apre quel
+    passaggio a chiunque abbia una sessione — cioe' rende raggiungibile, con
+    questa modifica, la catena «mi registro → creo un parser → verifico un canale
+    → ricevo segnali» senza che nessuno mi abbia attivato.
+
+    Misurato: senza questo cancello, un utente `registrato` scrive nel feed —
+    `assert 1 == 0` in `test_un_utente_REGISTRATO_non_produce_segnali...`.
+    Segnalato da CodeRabbit sulla PR #112, e l'avevo creduto gia' coperto: il
+    primo end-to-end dava zero segnali per un utente `registrato`, ma il motivo
+    era un altro (una config di prova tutta costante, scartata dal motore) e
+    avevo attribuito la misura alla causa sbagliata.
+
+    Il cancello sta **qui e non in `ACCESSI_BLOCCATI`**: aggiungere `registrato`
+    a quella lista cambierebbe `/api/me`, il feed e il dispatch in un colpo solo,
+    e toglierebbe il feed agli utenti legacy migrati con quello stato. La falla
+    e' di questa capacita' nuova, e si chiude dove e' stata aperta.
+
+    **403 e non 404**: la rotta esiste e l'utente e' autenticato, quindi non c'e'
+    niente da nascondere; c'e' invece qualcosa da dirgli, perche' senza il motivo
+    non saprebbe che deve chiedere l'attivazione.
+    """
+    if utente['is_admin']:
+        return
+    stato = stato_effettivo(utente['status'], utente['access_expires_at'])
+    if stato != 'attivo':
+        raise HTTPException(403, 'accesso non attivo: chiedi l\'attivazione'
+                                 ' prima di collegare una chat')
+
+
+def _chat_posseduta(c, user_id, chat_id):
+    """La riga della chat se e' di quell'utente, altrimenti **404**.
+
+    404 e non 403: un 403 confermerebbe che quella chat esiste, cioe' direbbe a un
+    estraneo che il canale e' registrato sul servizio. Stessa regola dei parser.
+    """
+    riga = c.execute(
+        f'SELECT {", ".join(CAMPI_CHAT)} FROM chats WHERE id=? AND owner_user_id=?',
+        (chat_id, user_id)).fetchone()
+    if not riga:
+        raise HTTPException(404, 'chat non trovata')
+    return riga
+
+
+@app.get('/api/chats')
+def lista_chat_mie(request: Request):
+    """Le chat verificate dall'utente della sessione — MAI quelle di un altro."""
+    utente = _sessione_valida(request)
+    c = db()
+    try:
+        righe = c.execute(
+            f'SELECT {", ".join(CAMPI_CHAT)} FROM chats WHERE owner_user_id=?'
+            ' ORDER BY id', (utente['id'],)).fetchall()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'],
+                                  [_vista_chat(r) for r in righe])
+
+
+@app.post('/api/chats/verify/start')
+def avvia_verifica_chat(request: Request):
+    """Emette un codice usa-e-getta. **In chiaro una volta sola**, come il token del feed.
+
+    Ogni chiamata **cancella ogni riga precedente** dello stesso utente, consumata
+    o no. Due effetti, entrambi voluti: un codice dimenticato in una chat smette
+    di valere appena se ne chiede un altro, e resta **una sola riga per utente** —
+    che e' cio' che rende non ambigua la domanda «com'e' andata l'ultima verifica»
+    in `verify/status`.
+
+    La riga unica non e' un dettaglio implementativo: `chat_verifications` non ha
+    un `created_at`, quindi senza di essa «l'ultimo codice» andrebbe dedotto
+    dall'ordinamento su `expires_at` — che e' monotono con la creazione **solo**
+    finche' nessuno lo riscrive, cioe' una premessa che nessun test puo' tenere.
+    Meglio non avere la domanda che rispondere con un'euristica.
+    """
+    utente = _sessione_valida(request)
+    _accesso_attivo_o_403(utente)
+    codice = _nuovo_codice_verifica()
+    adesso = int(time.time())
+    c = db()
+    try:
+        c.execute('BEGIN IMMEDIATE')
+        c.execute('DELETE FROM chat_verifications WHERE user_id=?', (utente['id'],))
+        c.execute('INSERT INTO chat_verifications(code, user_id, expires_at)'
+                  ' VALUES (?,?,?)', (codice, utente['id'], adesso + TTL_CODICE_VERIFICA_S))
+        c.commit()
+    finally:
+        c.close()
+    # `no-store`: questo corpo porta un valore che autorizza qualcosa, e non deve
+    # restare in nessuna cache intermedia. Precedente in questo file: il download
+    # del backup (#56). La POST non e' cacheabile per difetto, quindi e' cintura
+    # oltre alle bretelle — ma su una risposta che porta un segreto la cintura si
+    # mette. Nota: `/api/me/token` ha la stessa forma e NON lo imposta; e' una
+    # rotta fuori da questo PR, e va guardata a parte.
+    return _rispondi_con_sessione(
+        utente['id'], utente['versione'],
+        risposta=JSONResponse({'codice': codice,
+                               'scade_fra_s': TTL_CODICE_VERIFICA_S},
+                              headers={'Cache-Control': 'no-store'}))
+
+
+@app.get('/api/chats/verify/status')
+def stato_verifica_chat(request: Request):
+    """«E' arrivato?» — per il sondaggio della web app mentre l'utente incolla.
+
+    **Non ripete il codice.** Chi l'ha chiesto ce l'ha gia', e rimandarlo a ogni
+    sondaggio lo moltiplicherebbe nei log del server e nella cronologia del
+    browser: un valore che autorizza qualcosa esiste in chiaro una volta sola.
+    """
+    utente = _sessione_valida(request)
+    adesso = int(time.time())
+    c = db()
+    try:
+        # L'unica riga dell'utente: `verify/start` cancella le precedenti, quindi
+        # questa E' l'ultima verifica — senza dedurlo da un ordinamento.
+        riga = c.execute(
+            'SELECT expires_at, consumed_at, chat_id FROM chat_verifications'
+            ' WHERE user_id=?', (utente['id'],)).fetchone()
+        chat = None
+        if riga and riga[1] and riga[2]:
+            # La chat verificata DA QUESTO codice, correlata sul momento del
+            # consumo: `_consuma_codice_di_verifica` scrive `verified_at` e
+            # `consumed_at` con lo stesso valore, nella stessa transazione.
+            # Il legame ESPLICITO, scritto al consumo nella stessa transazione.
+            # La prima versione correlava su `verified_at == consumed_at`, che ha
+            # la risoluzione del secondo: due verifiche ravvicinate combaciavano
+            # entrambe e la scelta fra loro era un'euristica (`ORDER BY id DESC`),
+            # che sbaglia appena la chat giusta e' una riga vecchia riverificata.
+            # `owner_user_id` resta nella clausola: il legame non deve poter
+            # mostrare la chat di un altro nemmeno se il dato fosse incoerente.
+            chat = c.execute(
+                f'SELECT {", ".join(CAMPI_CHAT)} FROM chats'
+                ' WHERE id=? AND owner_user_id=?',
+                (riga[2], utente['id'])).fetchone()
+    finally:
+        c.close()
+    in_attesa = bool(riga) and not riga[1] and riga[0] > adesso
+    scaduto = bool(riga) and not riga[1] and riga[0] <= adesso
+    return _rispondi_con_sessione(
+        utente['id'], utente['versione'],
+        {'in_attesa': in_attesa,
+         'scaduto': scaduto,
+         'scade_fra_s': max(0, riga[0] - adesso) if in_attesa else 0,
+         'chat': _vista_chat(chat) if chat else None})
+
+
+@app.delete('/api/chats/{chat_id}')
+def elimina_chat_mia(chat_id: str, request: Request):
+    """Toglie una propria chat e **i propri** link. 404 se non e' dell'utente.
+
+    I link vanno via nella stessa transazione: una riga di `parser_chats` che
+    riferisce una chat cancellata non sarebbe visibile da nessuna UI e il
+    dispatch la leggerebbe ancora — la stessa classe del link orfano che la
+    PR #4 chiuse sull'altro lato.
+
+    **Ma solo i propri link, e questa e' la parte che si sbaglia facilmente.**
+    Una chat posseduta da A puo' portare link a parser di B: il percorso legacy
+    dei profili scrive `chats` e `parser_chats` separatamente, e nulla impone che
+    il proprietario della chat sia il proprietario dei parser collegati. Un
+    `DELETE FROM parser_chats WHERE chat_id=?` nudo fermerebbe i segnali di B, in
+    silenzio e per mano di A. `[REAL_FINDING]` di OpenRouter Sol sulla PR #112.
+
+    Quando restano link altrui la riga di `chats` **non** si cancella, o quei
+    link diventerebbero orfani: il chiamante la **disconosce** — sparisce dalla
+    sua lista e torna allo stato legacy, senza proprietario. Da li' non e'
+    riadottabile con un codice, per la stessa ragione.
+    """
+    utente = _sessione_valida(request)
+    numerico = _intero_o_404(chat_id, 'chat')
+    c = db()
+    try:
+        c.execute('BEGIN IMMEDIATE')
+        _chat_posseduta(c, utente['id'], numerico)
+        c.execute('DELETE FROM parser_chats WHERE chat_id=? AND parser_id IN'
+                  ' (SELECT id FROM parsers WHERE user_id=?)',
+                  (numerico, utente['id']))
+        altrui = c.execute('SELECT 1 FROM parser_chats WHERE chat_id=? LIMIT 1',
+                           (numerico,)).fetchone()
+        if altrui:
+            c.execute('UPDATE chats SET owner_user_id=NULL, verified_at=NULL'
+                      ' WHERE id=? AND owner_user_id=?', (numerico, utente['id']))
+        else:
+            c.execute('DELETE FROM chats WHERE id=? AND owner_user_id=?',
+                      (numerico, utente['id']))
+        c.commit()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'], {'ok': True})
+
+
+def _parser_posseduto_id(c, user_id, slug):
+    """L'id del parser se e' dell'utente, altrimenti **404**."""
+    riga = c.execute('SELECT id FROM parsers WHERE user_id=? AND slug=?',
+                     (user_id, slug)).fetchone()
+    if not riga:
+        raise HTTPException(404, 'parser non trovato')
+    return riga[0]
+
+
+@app.get('/api/me/parsers/{slug}/chats')
+def chat_del_parser_mio(slug: str, request: Request):
+    """Le chat collegate a un proprio parser."""
+    utente = _sessione_valida(request)
+    c = db()
+    try:
+        parser_id = _parser_posseduto_id(c, utente['id'], slug)
+        righe = c.execute(
+            'SELECT pc.chat_id FROM parser_chats pc'
+            ' JOIN chats ch ON ch.id = pc.chat_id'
+            ' WHERE pc.parser_id=? AND ch.owner_user_id=? ORDER BY pc.chat_id',
+            (parser_id, utente['id'])).fetchall()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'],
+                                  {'chat_ids': [r[0] for r in righe]})
+
+
+@app.put('/api/me/parsers/{slug}/chats')
+async def collega_chat_al_parser_mio(slug: str, request: Request):
+    """Sostituisce l'insieme delle chat di un proprio parser.
+
+    **I `chat_id` arrivano dal CORPO**, ed e' l'unico posto in cui un utente puo'
+    nominare una risorsa che non e' sua: la proprieta' di OGNI id si verifica qui,
+    dentro la stessa transazione della scrittura. Verificarla prima sarebbe un
+    TOCTOU — una DELETE concorrente fra il controllo e l'INSERT lascerebbe un link
+    a una chat sparita (stessa forma del difetto chiuso sulla PR #46).
+
+    Il corpo si legge DOPO il controllo di sessione: con un modello Pydantic
+    FastAPI validerebbe prima, e un estraneo con corpo malformato riceverebbe 422
+    invece di 401 — cioe' saprebbe che la rotta esiste.
+    """
+    utente = _sessione_valida(request)
+    try:
+        dati = await _json_dal_corpo(request)
+    except ValueError:
+        raise HTTPException(422, 'corpo non valido') from None
+    if not isinstance(dati, dict):
+        # Un JSON valido che non e' un oggetto — una lista, una stringa, un numero,
+        # `null` — arriva fin qui e fa esplodere `.get()` con `AttributeError`,
+        # cioe' **500** a un utente autenticato per un corpo malformato. Segnalato
+        # da CodeRabbit sulla PR #112.
+        raise HTTPException(422, 'corpo non valido')
+    _accesso_attivo_o_403(utente)
+    grezzi = dati.get('chat_ids')
+    if not isinstance(grezzi, list):
+        raise HTTPException(422, 'chat_ids deve essere una lista')
+    voluti = sorted({_intero_o_404(v, 'chat') for v in grezzi})
+    c = db()
+    try:
+        c.execute('BEGIN IMMEDIATE')
+        parser_id = _parser_posseduto_id(c, utente['id'], slug)
+        for chat_id in voluti:
+            _chat_posseduta(c, utente['id'], chat_id)
+        c.execute('DELETE FROM parser_chats WHERE parser_id=?', (parser_id,))
+        for chat_id in voluti:
+            c.execute('INSERT OR IGNORE INTO parser_chats(parser_id, chat_id)'
+                      ' VALUES (?,?)', (parser_id, chat_id))
+        c.commit()
+    finally:
+        c.close()
+    return _rispondi_con_sessione(utente['id'], utente['versione'],
+                                  {'chat_ids': voluti})
+
+
+def _consuma_codice_di_verifica(chat_id, codice):
+    """Il ramo del webhook: registra la chat se il codice e' buono. **Niente altro.**
+
+    Restituisce l'esito per il chiamante, e non solleva: una consegna di Telegram
+    non deve fallire perche' un codice era scaduto.
+
+    Tutto in **una** transazione, e il codice si consuma nello stesso commit in
+    cui la chat viene scritta: o entrambi, o nessuno. Un consumo committato prima
+    della scrittura brucerebbe il codice senza registrare niente, e l'utente si
+    ritroverebbe a ricominciare senza sapere perche' — la stessa lezione del
+    marker di `webhook_seen` sulla PR #44.
+
+    **Una chat gia' di un altro utente non e' rubabile.** Chi puo' scrivere in un
+    canale altrui potrebbe altrimenti portarselo via, e con esso i segnali che ci
+    passano. Una chat SENZA proprietario (quelle create dal percorso legacy dei
+    profili) viene invece adottata: l'utente ha dimostrato di controllare quel
+    canale, e i link esistenti non si toccano.
+    """
+    adesso = int(time.time())
+    c = db()
+    try:
+        c.execute('BEGIN IMMEDIATE')
+        # Lo stato dell'utente si rilegge QUI, non solo all'emissione: fra il
+        # `verify/start` e l'incollata passano fino a 600 secondi, e in mezzo il
+        # proprietario puo' sospendere o far scadere l'accesso. Un codice gia' in
+        # mano resterebbe altrimenti spendibile per dieci minuti, cioe'
+        # aggirerebbe la sospensione. `[REAL_FINDING]` di OpenRouter Sol, PR #112.
+        riga = c.execute(
+            'SELECT v.user_id, u.status, u.access_expires_at, u.is_admin'
+            ' FROM chat_verifications v JOIN users u ON u.id = v.user_id'
+            ' WHERE v.code=? AND v.consumed_at IS NULL AND v.expires_at > ?',
+            (codice, adesso)).fetchone()
+        if not riga:
+            return {'ok': True, 'ignored': 'codice_non_valido'}
+        utente_id = riga[0]
+        if not riga[3] and stato_effettivo(riga[1], riga[2]) != 'attivo':
+            # Il codice NON si consuma: l'accesso puo' tornare, e bruciarlo
+            # costringerebbe a ricominciare chi nel frattempo e' stato riattivato.
+            return {'ok': True, 'ignored': 'accesso_non_attivo'}
+        esistente = c.execute(
+            f'SELECT id, owner_user_id FROM chats WHERE telegram_chat_id=?'
+            f' AND {TOPIC_CHAT}=?', (chat_id, '')).fetchone()
+        if esistente and esistente[1] != utente_id:
+            # Non e' di chi presenta il codice: non si tocca. Vale anche per la
+            # chat SENZA proprietario, e quel caso e' il piu' insidioso dei due —
+            # una riga legacy puo' portare link ai parser di ALTRI utenti, perche'
+            # `_attacca_link_del_profilo` scrive `chats` e `parser_chats` in modo
+            # indipendente e nulla impone che i due proprietari coincidano.
+            # Adottarla darebbe al nuovo proprietario una chat che alimenta i
+            # parser di qualcun altro. `[REAL_FINDING]` di OpenRouter Sol e
+            # rilievo convergente di Claude Fable 5.1 sulla PR #112.
+            #
+            # Il codice NON si consuma: non e' colpa di chi l'ha chiesto se il
+            # canale e' di un altro, e bruciarglielo lo costringerebbe a
+            # ricominciare senza capire.
+            return {'ok': True, 'ignored': 'chat_non_disponibile'}
+        if esistente:
+            c.execute('UPDATE chats SET owner_user_id=?, verified_at=? WHERE id=?',
+                      (utente_id, adesso, esistente[0]))
+        else:
+            c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id, verified_at)'
+                      ' VALUES (?,?,?)', (chat_id, utente_id, adesso))
+        registrata = c.execute(
+            f'SELECT id FROM chats WHERE telegram_chat_id=? AND {TOPIC_CHAT}=?',
+            (chat_id, '')).fetchone()
+        c.execute('UPDATE chat_verifications SET consumed_at=?, chat_id=?'
+                  ' WHERE code=?',
+                  (adesso, registrata[0] if registrata else None, codice))
+        c.commit()
+    finally:
+        c.close()
+    return {'ok': True, 'verified': True}
+
+
+# ------------------------------------------------------------------------------
 #  Mercati Betfair per-utente (#33). Sport → mercato (MarketType + MarketName) →
 #  selezioni (SelectionName), tutto creato dall'utente: NESSUN catalogo
 #  incorporato. Il wizard del parser consuma questi dati come regole costanti
@@ -8055,6 +8480,25 @@ async def telegram_webhook(request: Request):
         finally:
             c.close()
         return {'ok': True, 'start': True}
+    # Il CODICE DI VERIFICA: l'unica eccezione al filtro delle chat, e tutta
+    # l'eccezione (#32, pezzo 3.2).
+    #
+    # **Perche' non indebolisce il filtro**, che e' una regola non negoziabile di
+    # `CLAUDE.md`: questo ramo non e' un percorso di scrittura verso i segnali.
+    # Non tocca `signals`, non cerca parser, non guarda `profiles`, non scrive in
+    # `message_logs`. Registra una riga in `chats` e consuma un codice che il
+    # servizio stesso ha emesso pochi minuti prima a una sessione autenticata.
+    # Chi forgiasse questa consegna (e non puo': serve il segreto del webhook)
+    # dovrebbe comunque indovinare un codice vivo.
+    #
+    # Il riconoscimento e' sulla FORMA, prima del database: senza il prefisso,
+    # ogni messaggio di ogni canale sconosciuto costerebbe una query.
+    #
+    # Il testo NON finisce in `message_logs`: quel log e' dei segnali, e un
+    # codice conservato li' sarebbe rileggibile da chi apre la vista dei log.
+    codice = _e_codice_di_verifica(text)
+    if codice:
+        return await asyncio.to_thread(_consuma_codice_di_verifica, chat_id, codice)
     # L'elaborazione sta FUORI dall'event loop (asyncio.to_thread): SQLite e il
     # motore di parsing sono sincroni, e sul percorso che riceve OGNI messaggio di
     # OGNI canale un parser lento non deve fermare le altre richieste del servizio

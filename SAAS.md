@@ -1209,6 +1209,104 @@ DELETE /api/me/parsers/{slug}          elimina il proprio
 POST   /api/me/parsers/{slug}/test     { message } → { matched, missing, complete, diagnosi[], event?, csv? }
 ```
 
+### Le chat verificate dall'utente (#32, pezzo 3.2)
+
+Il pezzo che mancava davvero a un cliente: fino al 03/09/2026 l'unico modo di
+autorizzare un canale era `POST /api/profiles` con l'admin token — il
+proprietario a mano — e la web app lo dichiarava («arriva con uno dei prossimi
+aggiornamenti»).
+
+```text
+POST   /api/chats/verify/start        → { codice, scade_fra_s }
+GET    /api/chats/verify/status       → { in_attesa, scade_fra_s, chat|null }
+GET    /api/chats                       le chat verificate dall'utente
+DELETE /api/chats/{id}                  toglie la chat E i suoi link
+GET    /api/me/parsers/{slug}/chats   → { chat_ids }
+PUT    /api/me/parsers/{slug}/chats     { chat_ids } sostituisce l'insieme
+```
+
+**Il meccanismo, e perché è fatto così.** L'utente chiede un codice; lo **incolla
+nel canale** che vuole autorizzare; il webhook lo riconosce e registra la chat
+come sua. Incollarlo nel canale *è* la prova: chi non può scrivere lì dentro non
+può autorizzarlo, e non esiste altro modo di dimostrare quel controllo senza far
+passare il proprietario.
+
+Il codice ha la forma `BETRELAY-` + 8 caratteri di un alfabeto senza `0/O` e
+`1/I/l` — si trascrive a mano da uno schermo a una chat, e una «O» letta «0»
+produrrebbe un fallimento inspiegabile. Il prefisso non è estetica: permette al
+webhook di decidere sulla **forma**, prima del database, senza che ogni messaggio
+di ogni canale sconosciuto costi una query.
+
+**Le invarianti, tutte vincolate da test:**
+
+- il codice esiste **in chiaro una volta sola**, come il token del feed;
+  `verify/status` non lo ripete a ogni sondaggio;
+- vive 600 secondi ed è **usa-e-getta**: scaduto, consumato o inventato non
+  registra niente;
+- una chat **già di un altro utente non è rubabile** — e in quel caso il codice
+  non viene nemmeno consumato, perché non è colpa di chi l'ha chiesto;
+- **nemmeno una chat senza proprietario si adotta.** È il caso più insidioso dei
+  due: una riga legacy può portare link ai parser di *altri* utenti, perché
+  `_attacca_link_del_profilo` scrive `chats` e `parser_chats` in modo
+  indipendente e nulla impone che i due proprietari coincidano. Adottarla darebbe
+  al nuovo proprietario una chat che alimenta i parser di qualcun altro;
+- `DELETE /api/chats/{id}` toglie **solo i link dei parser di chi chiama**. Una
+  chat posseduta da A può portare link a parser di B, e un `DELETE FROM
+  parser_chats WHERE chat_id=?` nudo fermerebbe i segnali di B in silenzio. Se
+  restano link altrui la riga di `chats` non si cancella — lascerebbe orfani che
+  il dispatch legge ancora — ma viene **disconosciuta**: sparisce dalla lista di
+  chi l'ha tolta e torna allo stato legacy;
+- `verify/status` restituisce la chat verificata **da quel codice**, e il legame è
+  **esplicito**: `chat_verifications.chat_id`, scritto al consumo nella stessa
+  transazione. La prima versione restituiva «l'ultima chat dell'utente» — cioè
+  diceva «fatto» dopo un codice scaduto, mostrando un canale che con quella
+  verifica non c'entrava; la seconda correlava su `verified_at == consumed_at`,
+  che ha la risoluzione del **secondo** e quindi non distingue due verifiche
+  ravvicinate. Finché la correlazione è un indizio, la risposta è una scommessa;
+- **lo stato dell'utente si ricontrolla al consumo**, non solo all'emissione: fra
+  `verify/start` e l'incollata passano fino a 600 secondi, e in mezzo il
+  proprietario può sospendere l'accesso. Senza, un codice già in mano aggirerebbe
+  la sospensione per dieci minuti;
+- **chiedere un codice e collegare una chat richiedono un accesso `attivo`** (o
+  l'amministratore): un utente `registrato` riceve **403**. `ACCESSI_BLOCCATI`
+  contiene solo `scaduto` e `sospeso`, quindi prima di questo cancello la catena
+  «mi registro → creo un parser → verifico un canale → ricevo segnali» era
+  percorribile senza che nessuno mi avesse attivato. Il cancello sta sulla
+  capacità nuova e non in `ACCESSI_BLOCCATI`: allargare quella lista cambierebbe
+  `/api/me`, il feed e il dispatch insieme, e toglierebbe il feed agli utenti
+  legacy migrati come `registrato`;
+- `verify/start` cancella **ogni** riga precedente dell'utente, consumata o no:
+  resta una riga sola, ed è ciò che rende non ambigua la domanda «com'è andata
+  l'ultima verifica». `chat_verifications` non ha un `created_at`, quindi senza
+  quella regola «l'ultimo codice» andrebbe dedotto ordinando per `expires_at` —
+  monotono con la creazione solo finché nessuno lo riscrive, cioè una premessa
+  che nessun test può tenere;
+- `user_id` sempre dalla sessione; su chat o parser di un altro **404**, non 403;
+- eliminare una chat toglie i suoi link nella stessa transazione: una riga di
+  `parser_chats` che riferisce una chat morta non sarebbe visibile da nessuna UI
+  e il dispatch la leggerebbe ancora;
+- verificare una chat **non aggira l'attivazione**: i parser di un utente
+  `registrato` restano fermi con `access_registrato`, come prima.
+
+**Perché non indebolisce il filtro delle chat**, che è una regola non negoziabile:
+il ramo del codice nel webhook è l'eccezione che quella regola già prevede, ed è
+*tutta* l'eccezione. Registra una riga in `chats` e consuma il codice; non tocca
+`signals`, non cerca parser, non guarda `profiles`, non scrive in `message_logs`
+— un codice conservato lì sarebbe rileggibile da chi apre la vista dei log.
+
+**Il modello dati esisteva già e non lo usava nessuno.** `chat_verifications(code,
+user_id, expires_at, consumed_at)` e `chats.owner_user_id / verified_at` erano
+nello schema dalla prima migrazione, con zero letture e zero scritture: mancava
+il comportamento, non le tabelle.
+
+**Limite noto, e non introdotto qui: i topic dei forum Telegram.** Nessun percorso
+del servizio scrive `message_thread_id`, e ogni ricerca usa `IFNULL(message_thread_id,
+'') = ''`, cioè la chat radice — vale per il dispatch, per il percorso legacy e per
+la verifica. Conseguenza: verificare in un topic autorizza il **gruppo intero**.
+Segnalato da OpenRouter Sol sulla PR #112 e confermato misurando i cinque siti;
+supportare i topic sarebbe una funzione nuova su tutto il modello, non una
+correzione di questo pezzo.
+
 Dal #35 (pezzo 2) la risposta della prova porta anche `righe` — per ogni riga
 generata: `row`, `missing`, `scarti`, `complete` e, dal #25, la sua `diagnosi` —
 con `complete` al livello alto vero se **almeno una** riga è piazzabile e `csv`
