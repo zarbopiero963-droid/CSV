@@ -1260,6 +1260,14 @@ di ogni canale sconosciuto costi una query.
   momento del consumo (`verified_at == consumed_at`, scritti nella stessa
   transazione). Restituire «l'ultima chat dell'utente» direbbe «fatto» dopo un
   codice scaduto, mostrando un canale che con quella verifica non c'entra;
+- **chiedere un codice e collegare una chat richiedono un accesso `attivo`** (o
+  l'amministratore): un utente `registrato` riceve **403**. `ACCESSI_BLOCCATI`
+  contiene solo `scaduto` e `sospeso`, quindi prima di questo cancello la catena
+  «mi registro → creo un parser → verifico un canale → ricevo segnali» era
+  percorribile senza che nessuno mi avesse attivato. Il cancello sta sulla
+  capacità nuova e non in `ACCESSI_BLOCCATI`: allargare quella lista cambierebbe
+  `/api/me`, il feed e il dispatch insieme, e toglierebbe il feed agli utenti
+  legacy migrati come `registrato`;
 - `verify/start` cancella **ogni** riga precedente dell'utente, consumata o no:
   resta una riga sola, ed è ciò che rende non ambigua la domanda «com'è andata
   l'ultima verifica». `chat_verifications` non ha un `created_at`, quindi senza

@@ -149,12 +149,36 @@ def _login(base, **extra):
     return _cookie_dalla_risposta(intestazioni), json.loads(corpo)['utente']
 
 
-def _login_a(base):
-    return _login(base, id=CLIENTE_A, first_name='ClienteA', username='clientea')
+def _attiva(percorso_db, telegram_id):
+    """Attiva un utente a database, come farebbe il proprietario dal pannello.
+
+    Serve perche' collegare una chat richiede un accesso ATTIVO: `registrato` non
+    basta piu' (vedi `test_un_utente_REGISTRATO_non_produce_segnali...`). I test
+    che esercitano il giro completo devono quindi partire da un utente attivato,
+    che e' anche lo scenario reale — un cliente collega il canale dopo essere
+    stato approvato, non prima.
+
+    `access_expires_at` a NULL significa «senza scadenza»: e' l'unico valore che
+    `stato_effettivo` tratta cosi', e va bene per un test.
+    """
+    c = sqlite3.connect(percorso_db)
+    c.execute("UPDATE users SET status='attivo', access_expires_at=NULL"
+              ' WHERE telegram_id=?', (telegram_id,))
+    c.commit()
+    c.close()
 
 
-def _login_b(base):
-    return _login(base, id=CLIENTE_B, first_name='ClienteB', username='clienteb')
+def _login_a(base, percorso_db):
+    """Cliente A, gia' ATTIVATO: collegare una chat lo richiede."""
+    esito = _login(base, id=CLIENTE_A, first_name='ClienteA', username='clientea')
+    _attiva(percorso_db, CLIENTE_A)
+    return esito
+
+
+def _login_b(base, percorso_db):
+    esito = _login(base, id=CLIENTE_B, first_name='ClienteB', username='clienteb')
+    _attiva(percorso_db, CLIENTE_B)
+    return esito
 
 
 def _consegna(base, chat, testo):
@@ -202,8 +226,8 @@ def test_il_codice_incollato_nel_canale_registra_la_chat(servizio):
     incolla nel canale, e la chat compare fra le sue. E' la funzione che oggi
     manca, e per cui la UI dice «arriva con uno dei prossimi aggiornamenti».
     """
-    base, _ = servizio
-    cookie, _ = _login_a(base)
+    base, percorso_db = servizio
+    cookie, _ = _login_a(base, percorso_db)
     assert _chats(base, cookie) == [], 'un utente nuovo non ha chat'
 
     _verifica(base, cookie)
@@ -259,8 +283,8 @@ def test_lo_stato_della_verifica_dice_quando_e_arrivata(servizio):
     cronologia del browser. Il codice esiste in chiaro una volta sola, come il
     token del feed.
     """
-    base, _ = servizio
-    cookie, _ = _login_a(base)
+    base, percorso_db = servizio
+    cookie, _ = _login_a(base, percorso_db)
     codice = _codice(base, cookie)
 
     stato, corpo, _ = _chiama(base, 'GET', '/api/chats/verify/status', cookie=cookie)
@@ -289,8 +313,8 @@ def test_un_messaggio_qualsiasi_da_una_chat_sconosciuta_resta_ignorato(servizio)
     Se registrare la chat bastasse a un messaggio qualunque, il codice sarebbe
     decorazione e il filtro delle chat sarebbe caduto.
     """
-    base, _ = servizio
-    cookie, _ = _login_a(base)
+    base, percorso_db = servizio
+    cookie, _ = _login_a(base, percorso_db)
 
     stato, corpo = _consegna(base, CANALE_A, 'SEGNALE qualunque, senza codice')
     assert stato == 200, corpo
@@ -302,8 +326,8 @@ def test_un_messaggio_qualsiasi_da_una_chat_sconosciuta_resta_ignorato(servizio)
 
 
 def test_un_codice_inventato_non_registra_niente(servizio):
-    base, _ = servizio
-    cookie, _ = _login_a(base)
+    base, percorso_db = servizio
+    cookie, _ = _login_a(base, percorso_db)
     _codice(base, cookie)   # ne esiste uno valido, ma non e' questo
 
     _consegna(base, CANALE_A, 'BETRELAY-ZZZZZZZZ')
@@ -317,8 +341,8 @@ def test_un_codice_gia_consumato_non_vale_una_seconda_volta(servizio):
     E' lo scenario del codice ricopiato — una persona che lo incolla in due
     canali, o un estraneo che lo legge nel primo canale e lo rilancia nel suo.
     """
-    base, _ = servizio
-    cookie, _ = _login_a(base)
+    base, percorso_db = servizio
+    cookie, _ = _login_a(base, percorso_db)
     codice, _ = _verifica(base, cookie, chat=CANALE_A)
 
     _consegna(base, CANALE_B, codice)
@@ -332,7 +356,7 @@ def test_un_codice_gia_consumato_non_vale_una_seconda_volta(servizio):
 def test_un_codice_scaduto_non_registra_niente(servizio):
     """La scadenza si misura invecchiando la riga, non aspettando davvero."""
     base, percorso_db = servizio
-    cookie, _ = _login_a(base)
+    cookie, _ = _login_a(base, percorso_db)
     codice = _codice(base, cookie)
 
     c = sqlite3.connect(percorso_db)
@@ -353,7 +377,7 @@ def test_il_codice_non_apre_il_feed(servizio):
     un percorso di scrittura verso i segnali che XTrader legge.
     """
     base, percorso_db = servizio
-    cookie, _ = _login_a(base)
+    cookie, _ = _login_a(base, percorso_db)
     _verifica(base, cookie)
 
     c = sqlite3.connect(percorso_db)
@@ -370,11 +394,11 @@ def test_una_chat_di_un_altro_utente_non_e_rubabile(servizio):
     Il canale resta di A. Senza questo, chiunque riesca a scrivere in un canale
     altrui potrebbe portarselo via — e con esso i segnali che ci passano.
     """
-    base, _ = servizio
-    cookie_a, _ = _login_a(base)
+    base, percorso_db = servizio
+    cookie_a, _ = _login_a(base, percorso_db)
     _verifica(base, cookie_a, chat=CANALE_A)
 
-    cookie_b, _ = _login_b(base)
+    cookie_b, _ = _login_b(base, percorso_db)
     codice_b = _codice(base, cookie_b)
     _consegna(base, CANALE_A, codice_b)
 
@@ -401,7 +425,7 @@ def test_una_chat_SENZA_proprietario_non_si_adotta(servizio):
     oggi.
     """
     base, percorso_db = servizio
-    cookie, _ = _login_a(base)
+    cookie, _ = _login_a(base, percorso_db)
 
     c = sqlite3.connect(percorso_db)
     c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id) VALUES (?, NULL)',
@@ -437,11 +461,11 @@ def test_eliminare_una_propria_chat_non_taglia_i_link_di_un_altro(servizio):
     sparisce dalla sua lista.
     """
     base, percorso_db = servizio
-    cookie_a, _ = _login_a(base)
+    cookie_a, _ = _login_a(base, percorso_db)
     _verifica(base, cookie_a, chat=CANALE_A)
     id_chat = _chats(base, cookie_a)[0]['id']
 
-    cookie_b, _ = _login_b(base)
+    cookie_b, _ = _login_b(base, percorso_db)
     slug_b = _crea_parser(base, cookie_b, 'Parser di B')
     c = sqlite3.connect(percorso_db)
     parser_b = c.execute('SELECT id FROM parsers WHERE slug=?', (slug_b,)).fetchone()[0]
@@ -473,7 +497,7 @@ def test_lo_stato_non_spaccia_una_vecchia_chat_per_l_esito_di_un_codice_nuovo(se
     `[REAL_FINDING]` di OpenRouter Sol al gate della PR #112.
     """
     base, percorso_db = servizio
-    cookie, _ = _login_a(base)
+    cookie, _ = _login_a(base, percorso_db)
     _verifica(base, cookie, chat=CANALE_A)
 
     codice_nuovo = _codice(base, cookie)
@@ -494,10 +518,10 @@ def test_lo_stato_non_spaccia_una_vecchia_chat_per_l_esito_di_un_codice_nuovo(se
 
 
 def test_le_chat_elencate_sono_solo_le_proprie(servizio):
-    base, _ = servizio
-    cookie_a, _ = _login_a(base)
+    base, percorso_db = servizio
+    cookie_a, _ = _login_a(base, percorso_db)
     _verifica(base, cookie_a, chat=CANALE_A)
-    cookie_b, _ = _login_b(base)
+    cookie_b, _ = _login_b(base, percorso_db)
     _verifica(base, cookie_b, chat=CANALE_B)
 
     assert [c['telegram_chat_id'] for c in _chats(base, cookie_a)] == [CANALE_A]
@@ -506,12 +530,12 @@ def test_le_chat_elencate_sono_solo_le_proprie(servizio):
 
 def test_eliminare_la_chat_di_un_altro_da_404_e_non_403(servizio):
     """404 e non 403: un 403 confermerebbe che quella chat esiste."""
-    base, _ = servizio
-    cookie_a, _ = _login_a(base)
+    base, percorso_db = servizio
+    cookie_a, _ = _login_a(base, percorso_db)
     _verifica(base, cookie_a, chat=CANALE_A)
     id_di_a = _chats(base, cookie_a)[0]['id']
 
-    cookie_b, _ = _login_b(base)
+    cookie_b, _ = _login_b(base, percorso_db)
     stato, corpo, _ = _chiama(base, 'DELETE', f'/api/chats/{id_di_a}', cookie=cookie_b)
     assert stato == 404, (stato, corpo)
 
@@ -520,7 +544,7 @@ def test_eliminare_la_chat_di_un_altro_da_404_e_non_403(servizio):
 
 def test_senza_sessione_nessuna_rotta_delle_chat_risponde(servizio):
     """`user_id` viene dalla sessione: senza sessione non c'e' niente da servire."""
-    base, _ = servizio
+    base, percorso_db = servizio
     for metodo, path in (('GET', '/api/chats'),
                          ('POST', '/api/chats/verify/start'),
                          ('GET', '/api/chats/verify/status'),
@@ -540,8 +564,8 @@ def _crea_parser(base, cookie, titolo='Parser'):
 
 
 def test_collegare_le_proprie_chat_a_un_proprio_parser(servizio):
-    base, _ = servizio
-    cookie, _ = _login_a(base)
+    base, percorso_db = servizio
+    cookie, _ = _login_a(base, percorso_db)
     _verifica(base, cookie, chat=CANALE_A)
     id_chat = _chats(base, cookie)[0]['id']
     slug = _crea_parser(base, cookie)
@@ -560,12 +584,12 @@ def test_collegare_le_proprie_chat_a_un_proprio_parser(servizio):
 def test_non_si_collega_la_chat_di_un_altro_utente(servizio):
     """Il `chat_id` arriva dal corpo: e' l'unico posto dove un utente puo' NOMINARE
     una risorsa altrui, quindi e' li' che la proprieta' va verificata."""
-    base, _ = servizio
-    cookie_a, _ = _login_a(base)
+    base, percorso_db = servizio
+    cookie_a, _ = _login_a(base, percorso_db)
     _verifica(base, cookie_a, chat=CANALE_A)
     id_di_a = _chats(base, cookie_a)[0]['id']
 
-    cookie_b, _ = _login_b(base)
+    cookie_b, _ = _login_b(base, percorso_db)
     slug_b = _crea_parser(base, cookie_b, 'Parser di B')
     stato, corpo, _ = _chiama(base, 'PUT', f'/api/me/parsers/{slug_b}/chats',
                               cookie=cookie_b, corpo={'chat_ids': [id_di_a]})
@@ -573,11 +597,11 @@ def test_non_si_collega_la_chat_di_un_altro_utente(servizio):
 
 
 def test_non_si_collegano_chat_al_parser_di_un_altro(servizio):
-    base, _ = servizio
-    cookie_a, _ = _login_a(base)
+    base, percorso_db = servizio
+    cookie_a, _ = _login_a(base, percorso_db)
     slug_a = _crea_parser(base, cookie_a, 'Parser di A')
 
-    cookie_b, _ = _login_b(base)
+    cookie_b, _ = _login_b(base, percorso_db)
     _verifica(base, cookie_b, chat=CANALE_B)
     id_di_b = _chats(base, cookie_b)[0]['id']
     stato, corpo, _ = _chiama(base, 'PUT', f'/api/me/parsers/{slug_a}/chats',
@@ -589,7 +613,7 @@ def test_eliminare_la_chat_toglie_anche_i_suoi_link(servizio):
     """Senza, resterebbe una riga di `parser_chats` che riferisce una chat morta —
     e il dispatch la leggerebbe ancora."""
     base, percorso_db = servizio
-    cookie, _ = _login_a(base)
+    cookie, _ = _login_a(base, percorso_db)
     _verifica(base, cookie, chat=CANALE_A)
     id_chat = _chats(base, cookie)[0]['id']
     slug = _crea_parser(base, cookie)
@@ -640,10 +664,72 @@ def test_dopo_la_verifica_il_canale_alimenta_davvero_il_feed(servizio):
     assert quanti >= 1, 'il canale verificato e collegato non ha prodotto nessun segnale'
 
 
+def test_un_utente_REGISTRATO_non_produce_segnali_nemmeno_dopo_la_verifica(servizio):
+    """La verifica della chat **non** aggira l'attivazione.
+
+    Lo scenario che CodeRabbit ha segnalato come bypass di autorizzazione sulla
+    PR #112: un utente appena entrato crea un parser, verifica una chat e ci manda
+    un messaggio riconosciuto. Se il segnale uscisse, la verifica sarebbe una
+    porta di servizio verso le funzioni operative senza passare dall'attivazione.
+
+    Non esce, e la ragione precede questo PR: `_blocco_della_riga` ferma i parser
+    di chi non e' `attivo` con `access_registrato`. Questo test la inchioda sul
+    percorso NUOVO — l'invariante c'era, la prova che regga anche di qui no.
+    """
+    base, percorso_db = servizio
+    # Login SENZA attivazione: e' il punto del test, quindi non passa da `_login_a`.
+    cookie, _ = _login(base, id=CLIENTE_A, first_name='ClienteA', username='clientea')
+
+    stato, corpo, _ = _chiama(base, 'POST', '/api/chats/verify/start', cookie=cookie)
+    assert stato == 403, (
+        f'un utente `registrato` ha ottenuto un codice di verifica: {stato} {corpo}'
+    )
+
+    # E anche se la chat gli arrivasse per un'altra via, collegarla e- chiuso.
+    _attiva(percorso_db, CLIENTE_A)
+    _verifica(base, cookie, chat=CANALE_A)
+    id_chat = _chats(base, cookie)[0]['id']
+    slug = _crea_parser(base, cookie)
+    c = sqlite3.connect(percorso_db)
+    c.execute("UPDATE users SET status='registrato' WHERE telegram_id=?", (CLIENTE_A,))
+    c.commit()
+    c.close()
+    stato, corpo, _ = _chiama(base, 'PUT', f'/api/me/parsers/{slug}/chats',
+                              cookie=cookie, corpo={'chat_ids': [id_chat]})
+    assert stato == 403, (stato, corpo)
+
+    _consegna(base, CANALE_A, MESSAGGIO_VALIDO)
+
+    c = sqlite3.connect(percorso_db)
+    quanti = c.execute('SELECT COUNT(*) FROM signals').fetchone()[0]
+    c.close()
+    assert quanti == 0, (
+        'un utente `registrato` ha scritto nel feed: la verifica della chat sta '
+        'aggirando l-attivazione'
+    )
+
+
+@pytest.mark.parametrize('corpo', ([1, 2], 'stringa', 42, None),
+                         ids=('lista', 'stringa', 'numero', 'null'))
+def test_un_corpo_json_che_non_e_un_oggetto_da_422_e_non_500(servizio, corpo):
+    """Un JSON valido ma non-oggetto non deve diventare un errore del server.
+
+    `dati.get('chat_ids')` su una lista solleva `AttributeError`, cioe' **500** a
+    un utente autenticato per un corpo malformato. Segnalato da CodeRabbit sulla
+    PR #112.
+    """
+    base, percorso_db = servizio
+    cookie, _ = _login_a(base, percorso_db)
+    slug = _crea_parser(base, cookie)
+    stato, risposta, _ = _chiama(base, 'PUT', f'/api/me/parsers/{slug}/chats',
+                                 cookie=cookie, corpo=corpo)
+    assert stato == 422, (stato, risposta)
+
+
 def test_il_codice_non_compare_nei_log_dei_messaggi(servizio):
     """Un codice in `message_logs` sarebbe riusabile da chi legge quel log."""
     base, percorso_db = servizio
-    cookie, _ = _login_a(base)
+    cookie, _ = _login_a(base, percorso_db)
     codice, _ = _verifica(base, cookie, chat=CANALE_A)
 
     c = sqlite3.connect(percorso_db)

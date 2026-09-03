@@ -6786,6 +6786,45 @@ def _vista_chat(riga):
 CAMPI_CHAT = ('id', 'telegram_chat_id', 'title', 'type', 'verified_at')
 
 
+def _accesso_attivo_o_403(utente):
+    """Solo un accesso **attivo** (o l'amministratore) puo' collegare una chat.
+
+    Il cancello non e' `ACCESSI_BLOCCATI`, ed e' la ragione per cui questa funzione
+    esiste invece di riusare `_blocco_della_riga`: quella lista contiene solo
+    `scaduto` e `sospeso`, quindi un utente **`registrato`** — appena entrato col
+    Login Widget, mai approvato da nessuno — non e' bloccato da nessuna parte.
+
+    Prima di questo PR quello stato non aveva conseguenze: un tale utente poteva
+    creare parser, ma i parser senza chat non producono niente, e collegare una
+    chat lo faceva **solo l'amministratore**. La verifica col codice apre quel
+    passaggio a chiunque abbia una sessione — cioe' rende raggiungibile, con
+    questa modifica, la catena «mi registro → creo un parser → verifico un canale
+    → ricevo segnali» senza che nessuno mi abbia attivato.
+
+    Misurato: senza questo cancello, un utente `registrato` scrive nel feed —
+    `assert 1 == 0` in `test_un_utente_REGISTRATO_non_produce_segnali...`.
+    Segnalato da CodeRabbit sulla PR #112, e l'avevo creduto gia' coperto: il
+    primo end-to-end dava zero segnali per un utente `registrato`, ma il motivo
+    era un altro (una config di prova tutta costante, scartata dal motore) e
+    avevo attribuito la misura alla causa sbagliata.
+
+    Il cancello sta **qui e non in `ACCESSI_BLOCCATI`**: aggiungere `registrato`
+    a quella lista cambierebbe `/api/me`, il feed e il dispatch in un colpo solo,
+    e toglierebbe il feed agli utenti legacy migrati con quello stato. La falla
+    e' di questa capacita' nuova, e si chiude dove e' stata aperta.
+
+    **403 e non 404**: la rotta esiste e l'utente e' autenticato, quindi non c'e'
+    niente da nascondere; c'e' invece qualcosa da dirgli, perche' senza il motivo
+    non saprebbe che deve chiedere l'attivazione.
+    """
+    if utente['is_admin']:
+        return
+    stato = stato_effettivo(utente['status'], utente['access_expires_at'])
+    if stato != 'attivo':
+        raise HTTPException(403, 'accesso non attivo: chiedi l\'attivazione'
+                                 ' prima di collegare una chat')
+
+
 def _chat_posseduta(c, user_id, chat_id):
     """La riga della chat se e' di quell'utente, altrimenti **404**.
 
@@ -6832,6 +6871,7 @@ def avvia_verifica_chat(request: Request):
     Meglio non avere la domanda che rispondere con un'euristica.
     """
     utente = _sessione_valida(request)
+    _accesso_attivo_o_403(utente)
     codice = _nuovo_codice_verifica()
     adesso = int(time.time())
     c = db()
@@ -6843,9 +6883,17 @@ def avvia_verifica_chat(request: Request):
         c.commit()
     finally:
         c.close()
+    # `no-store`: questo corpo porta un valore che autorizza qualcosa, e non deve
+    # restare in nessuna cache intermedia. Precedente in questo file: il download
+    # del backup (#56). La POST non e' cacheabile per difetto, quindi e' cintura
+    # oltre alle bretelle — ma su una risposta che porta un segreto la cintura si
+    # mette. Nota: `/api/me/token` ha la stessa forma e NON lo imposta; e' una
+    # rotta fuori da questo PR, e va guardata a parte.
     return _rispondi_con_sessione(
         utente['id'], utente['versione'],
-        {'codice': codice, 'scade_fra_s': TTL_CODICE_VERIFICA_S})
+        risposta=JSONResponse({'codice': codice,
+                               'scade_fra_s': TTL_CODICE_VERIFICA_S},
+                              headers={'Cache-Control': 'no-store'}))
 
 
 @app.get('/api/chats/verify/status')
@@ -6976,6 +7024,13 @@ async def collega_chat_al_parser_mio(slug: str, request: Request):
         dati = await _json_dal_corpo(request)
     except ValueError:
         raise HTTPException(422, 'corpo non valido') from None
+    if not isinstance(dati, dict):
+        # Un JSON valido che non e' un oggetto — una lista, una stringa, un numero,
+        # `null` — arriva fin qui e fa esplodere `.get()` con `AttributeError`,
+        # cioe' **500** a un utente autenticato per un corpo malformato. Segnalato
+        # da CodeRabbit sulla PR #112.
+        raise HTTPException(422, 'corpo non valido')
+    _accesso_attivo_o_403(utente)
     grezzi = dati.get('chat_ids')
     if not isinstance(grezzi, list):
         raise HTTPException(422, 'chat_ids deve essere una lista')
