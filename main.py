@@ -6757,6 +6757,11 @@ ALFABETO_CODICE = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
 PREFISSO_CODICE = 'BETRELAY-'
 LUNGHEZZA_CODICE = 8
 
+# Quanto lungo puo' essere il nome di un canale nella lista della web app. Il
+# valore arriva da Telegram, cioe' da chi controlla quel canale: senza un tetto,
+# una riga di `chats` diventa grande a piacere di un estraneo.
+MAX_TITOLO_CHAT = 96
+
 
 def _nuovo_codice_verifica() -> str:
     """Un codice con un prefisso RICONOSCIBILE, e il prefisso non e' estetica.
@@ -6781,6 +6786,37 @@ def _e_codice_di_verifica(testo: str) -> str | None:
     if len(coda) != LUNGHEZZA_CODICE or not all(ch in ALFABETO_CODICE for ch in coda):
         return None
     return candidato
+
+
+def _nome_visibile_della_chat(chat: dict) -> tuple[str | None, str | None]:
+    """Nome e tipo da mostrare nella lista, presi dalla consegna e **ripuliti**.
+
+    Le colonne `title` e `type` esistono in `chats` dalla prima migrazione e non le
+    scriveva nessuno. Finche' le chat le collegava l'amministratore la cosa non si
+    vedeva — era lui a sapere quale canale fosse quale; da quando le collega il
+    cliente, una lista di interi negativi non e' una schermata.
+
+    Il valore e' **testo di un estraneo**: chi controlla un canale ne sceglie il
+    nome. Quindi si capa in lunghezza e si tolgono i caratteri non stampabili, che
+    nella lista produrrebbero righe spezzate. L'escape dell'HTML lo fa la web app,
+    a valle: questa e' la pulizia del DATO, non della sua resa.
+
+    I due percorsi legacy che creano chat (`_attacca_link_del_profilo` e la
+    migrazione dei profili) non passano di qui e non possono: l'amministratore
+    scrive una lista di id, un titolo non esiste proprio. Per quelle righe la web
+    app mostra l'id, che e' l'unica cosa vera che ha.
+    """
+    grezzo = ''
+    for campo in ('title', 'username', 'first_name'):
+        valore = chat.get(campo)
+        if isinstance(valore, str) and valore.strip():
+            grezzo = valore
+            break
+    pulito = ''.join(ch if ch.isprintable() else ' ' for ch in grezzo)
+    nome = ' '.join(pulito.split())[:MAX_TITOLO_CHAT] or None
+    tipo = chat.get('type')
+    tipo = tipo.strip()[:32] if isinstance(tipo, str) and tipo.strip() else None
+    return nome, tipo
 
 
 def _vista_chat(riga):
@@ -7065,7 +7101,7 @@ async def collega_chat_al_parser_mio(slug: str, request: Request):
                                   {'chat_ids': voluti})
 
 
-def _consuma_codice_di_verifica(chat_id, codice):
+def _consuma_codice_di_verifica(chat_id, codice, titolo=None, tipo=None):
     """Il ramo del webhook: registra la chat se il codice e' buono. **Niente altro.**
 
     Restituisce l'esito per il chiamante, e non solleva: una consegna di Telegram
@@ -7121,12 +7157,18 @@ def _consuma_codice_di_verifica(chat_id, codice):
             # canale e' di un altro, e bruciarglielo lo costringerebbe a
             # ricominciare senza capire.
             return {'ok': True, 'ignored': 'chat_non_disponibile'}
+        # `COALESCE(?, title)`: una riverifica da una chat che non porta il titolo —
+        # una privata, per esempio — non deve CANCELLARE il nome gia' registrato.
+        # Quando il titolo c'e', invece, vince: un canale rinominato non resta col
+        # nome vecchio nella lista.
         if esistente:
-            c.execute('UPDATE chats SET owner_user_id=?, verified_at=? WHERE id=?',
-                      (utente_id, adesso, esistente[0]))
+            c.execute('UPDATE chats SET owner_user_id=?, verified_at=?,'
+                      ' title=COALESCE(?, title), type=COALESCE(?, type)'
+                      ' WHERE id=?', (utente_id, adesso, titolo, tipo, esistente[0]))
         else:
-            c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id, verified_at)'
-                      ' VALUES (?,?,?)', (chat_id, utente_id, adesso))
+            c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id, verified_at,'
+                      ' title, type) VALUES (?,?,?,?,?)',
+                      (chat_id, utente_id, adesso, titolo, tipo))
         registrata = c.execute(
             f'SELECT id FROM chats WHERE telegram_chat_id=? AND {TOPIC_CHAT}=?',
             (chat_id, '')).fetchone()
@@ -8498,7 +8540,12 @@ async def telegram_webhook(request: Request):
     # codice conservato li' sarebbe rileggibile da chi apre la vista dei log.
     codice = _e_codice_di_verifica(text)
     if codice:
-        return await asyncio.to_thread(_consuma_codice_di_verifica, chat_id, codice)
+        # Nome e tipo del canale viaggiano nella STESSA consegna che porta il
+        # codice: e' il solo momento in cui il servizio li sa, e non costa nessuna
+        # chiamata in piu' a Telegram.
+        titolo, tipo = _nome_visibile_della_chat(chat)
+        return await asyncio.to_thread(_consuma_codice_di_verifica, chat_id, codice,
+                                       titolo, tipo)
     # L'elaborazione sta FUORI dall'event loop (asyncio.to_thread): SQLite e il
     # motore di parsing sono sincroni, e sul percorso che riceve OGNI messaggio di
     # OGNI canale un parser lento non deve fermare le altre richieste del servizio

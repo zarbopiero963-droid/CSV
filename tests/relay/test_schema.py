@@ -1750,3 +1750,56 @@ def test_a_PARITA_di_telegram_id_vince_l_id_piu_basso(tmp_path):
     # l'identita- di un utente non si butta perche- la migrazione ha scelto l'altra.
     assert {r[0] for r in c.execute('SELECT id FROM users').fetchall()} >= {primo, secondo}
     assert c.execute('SELECT telegram_id FROM users WHERE id=?', (secondo,)).fetchone()[0] == '222'
+
+
+# ----------------------------- le colonne che il codice SCRIVE devono esistere
+
+# Ogni `INSERT`/`UPDATE` del servizio nomina delle colonne. Se una di quelle non
+# c'e' nel database migrato, l'errore non arriva al deploy ne' ai test del percorso
+# felice su un DB nuovo: arriva alla prima richiesta reale, in produzione, come
+# `OperationalError: no such column`. `CREATE TABLE IF NOT EXISTS` non aggiunge
+# colonne a una tabella che esiste gia', quindi l'unico modo di aggiungerne una a
+# uno schema vivo e' `COLONNE_MULTIUTENTE`.
+#
+# Perche' questo test esiste: rischio manuale segnalato da GPT-5.5 sulla PR #114,
+# sulle colonne `chats.title` / `chats.type` che quel PR ha iniziato a scrivere. Il
+# rischio, misurato, si e' rivelato inesistente — `git log -S` su quel `CREATE TABLE`
+# da' UN solo commit, e quella prima versione le aveva gia', quindi nessun database
+# puo' esistere senza. Ma «l'ho controllato una volta» non e' un vincolo, ed e'
+# esattamente la forma di ragionamento che questo repository ha gia' pagato: il
+# rischio vero e' la PROSSIMA colonna, aggiunta al `CREATE TABLE` da chi non sa che
+# ai database esistenti non arriva.
+COLONNE_SCRITTE_DAL_CODICE = (
+    ('chats', 'title'),
+    ('chats', 'type'),
+    ('chats', 'owner_user_id'),
+    ('chats', 'verified_at'),
+    ('chat_verifications', 'chat_id'),
+    ('chat_verifications', 'consumed_at'),
+)
+
+
+@pytest.mark.parametrize(('tabella', 'colonna'), COLONNE_SCRITTE_DAL_CODICE)
+def test_le_colonne_scritte_dal_codice_esistono_dopo_la_migrazione(
+        tmp_path, tabella, colonna):
+    """Partendo dal formato della PRODUZIONE, non da un database nuovo.
+
+    Su un database vergine passerebbe qualunque cosa: le tabelle nascono col
+    `CREATE TABLE` corrente. Il caso che conta e' quello di Railway, dove le
+    tabelle esistono gia'.
+    """
+    percorso = tmp_path / 'signals.db'
+    c = sqlite3.connect(percorso)
+    for istruzione in SCHEMA_DI_PRODUZIONE:
+        c.execute(istruzione)
+    c.commit()
+    main.migra(c)
+
+    presenti = {r[1] for r in c.execute(f'PRAGMA table_info({tabella})').fetchall()}
+    c.close()
+    assert colonna in presenti, (
+        f'`{tabella}.{colonna}` non esiste dopo la migrazione di un database nel '
+        f'formato di produzione: presenti {sorted(presenti)}. Il codice la scrive, '
+        f'quindi in produzione la prima richiesta darebbe `no such column`. Se e- una '
+        f'colonna nuova, va aggiunta a COLONNE_MULTIUTENTE: il `CREATE TABLE` da solo '
+        f'non la porta ai database che esistono gia-')

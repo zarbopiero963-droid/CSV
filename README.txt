@@ -223,6 +223,12 @@ GET    /api/chats/verify/status          -> {"in_attesa":bool,"scaduto":bool,
                                         un codice scaduto mostrerebbe un canale vecchio
                                         come se fosse l'esito.
 GET    /api/chats                        le chat verificate dall'utente
+                                        -> [{"id":N,"telegram_chat_id":"-100...",
+                                             "titolo":"Canale segnali","tipo":"channel",
+                                             "verified_at":N}, ...]
+                                        `id` e' la chiave del servizio (chats.id), NON
+                                        il numero di Telegram: e' quello che vogliono
+                                        DELETE /api/chats/ID e la PUT qui sotto.
 DELETE /api/chats/ID                     toglie una propria chat E i suoi link
 GET    /api/me/parsers/SLUG/chats        -> {"chat_ids":[...]}
 PUT    /api/me/parsers/SLUG/chats        body {"chat_ids":[1,2]} sostituisce l'insieme
@@ -242,9 +248,38 @@ DELETE /api/chats/ID toglie SOLO i link dei parser di chi chiama: una chat puo'
 portare link altrui, e cancellarli tutti fermerebbe i segnali di un altro utente
 in silenzio. Se ne restano, la riga di `chats` non si cancella (lascerebbe
 orfani) ma viene DISCONOSCIUTA: sparisce dalla lista di chi l'ha tolta.
+NOME E TIPO DEL CANALE (PR 2 del 3.2). `chats.title` e `chats.type` esistevano
+dalla prima migrazione e non li scriveva NESSUN percorso: finche' le chat le
+collegava l'amministratore non si vedeva, era lui a sapere quale canale fosse
+quale. Da quando le collega il cliente la lista e' la sua schermata, e una lista
+di interi negativi non e' una schermata. Ora arrivano dalla STESSA consegna che
+porta il codice (message.chat.title / .type), senza nessuna chiamata in piu' a
+Telegram. Il titolo e' testo di un ESTRANEO — chi controlla il canale ne sceglie
+il nome — quindi e' capato a MAX_TITOLO_CHAT (96 caratteri) e ripulito dei
+caratteri non stampabili. Una riverifica lo AGGIORNA (un canale rinominato non
+resta col nome vecchio); una consegna senza titolo non lo cancella. I due
+percorsi legacy non possono passare di qui: l'amministratore scrive una lista di
+id e un titolo non esiste, quindi per quelle righe la web app mostra il numero.
 LIMITE NOTO, non introdotto qui: i topic dei forum Telegram non sono supportati.
 `message_thread_id` non lo scrive nessun percorso e ogni ricerca usa la chat
 radice, quindi verificare in un topic autorizza il gruppo intero.
+
+SECONDO LIMITE NOTO, e la prova NON e' la stessa per tutte le chat. Il codice
+dimostra che chi lo presenta PUO' SCRIVERE in quella chat. Per un CANALE questo
+coincide col controllarlo (su Telegram in un canale scrivono solo gli
+amministratori); per un GRUPPO no, perche' scrive qualunque membro: un membro
+ordinario con un account BetRelay puo' rivendicare il gruppo, e da quel momento
+nessun altro lo verifica piu' (`chat_non_disponibile`). Non e' un accesso ai
+dati di un altro utente — nessun parser, feed o token diventa leggibile, e chi
+rivendica vedeva gia' quei messaggi da membro — ma e' la possibilita' di soffiare
+la verifica al titolare e di dirottare quel flusso nei propri parser.
+La chiusura vera vuole una PROVA DI RUOLO: `getChatMember` verso Telegram per
+pretendere `creator`/`administrator`. Oggi `getChatMember` NON compare in main.py
+e `_consuma_codice_di_verifica` riceve solo chat_id, codice, titolo, tipo — mai il
+mittente ne' il suo ruolo. Fino ad allora la mitigazione e' DICHIARATA nella
+schermata: in un gruppo la prova e' piu' debole, e il consiglio e' limitare
+l'invio dei messaggi agli amministratori. `[REAL_FINDING]` di OpenRouter Sol al
+gate della PR #114.
 Il ramo del codice nel webhook e' l'UNICA eccezione al filtro delle chat, ed e'
 tutta l'eccezione: registra una riga in `chats` e consuma il codice, non tocca
 `signals`, non cerca parser, non scrive in `message_logs`.

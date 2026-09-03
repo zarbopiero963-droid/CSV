@@ -103,9 +103,12 @@ async function copy(text, label = 'Copiato') {
   toast(label);
 }
 
-function copyRow(value, act) {
+// `id` è opzionale e va sull'elemento che PORTA il valore, non sulla riga: i
+// test lo leggono da lì, e una seconda copia del valore accanto sarebbe una
+// seconda fonte dello stesso segreto (regola 3).
+function copyRow(value, act, id) {
   return `<div class="copy-row">
-    <div class="secret">${esc(value)}</div>
+    <div class="secret"${id ? ` id="${esc(id)}"` : ''}>${esc(value)}</div>
     <button data-act="${act}" data-val="${esc(value)}">Copia</button>
   </div>`;
 }
@@ -1607,9 +1610,9 @@ function viewParser() {
         </div>
       </div>`;
   } else if (route.tab === 'chats') {
-    body = paneProssimamente('Le chat Telegram si assegnano ai parser da qui',
-      'L\'associazione chat → parser arriva con uno dei prossimi aggiornamenti. '
-      + 'Oggi i messaggi delle chat autorizzate vengono valutati da tutti i tuoi parser attivi.');
+    // Il contenuto arriva da due chiamate (le chat dell'utente + quelle già
+    // collegate a QUESTO parser) e `viewParser` è sincrona: si monta dopo.
+    body = '<div class="card stack" id="chat-assegnate"><div class="dim">Caricamento…</div></div>';
   } else {
     body = paneProssimamente('Il registro dei messaggi di questo parser',
       'Qui vedrai ogni messaggio ricevuto e il motivo per cui ha prodotto — o non ha '
@@ -1631,6 +1634,41 @@ function viewParser() {
       ${tab('config', 'Configurazione')}${tab('chats', 'Chat assegnate')}${tab('logs', 'Log')}
     </div>
     ${body}`);
+  if (route.tab === 'chats') montaChatAssegnate(p.slug, generazione);
+}
+
+// Le chat da cui QUESTO parser legge. Il pannello si riempie dopo lo `shell`
+// perché servono due chiamate e `viewParser` è sincrona; la guardia anti-stantio
+// è la stessa delle viste async (vedi `generazione` accanto al router).
+async function montaChatAssegnate(slug, invocazione) {
+  let chats;
+  let collegate;
+  try {
+    chats = await api.listaChat();
+    collegate = await api.chatDelParser(slug);
+  } catch (e) { if (invocazione === generazione) fallita(e); return; }
+  if (invocazione !== generazione) return;
+  const box = document.getElementById('chat-assegnate');
+  if (!box) return;
+  const scelte = new Set(collegate.map(Number));
+  box.innerHTML = `
+    <strong class="small">Chat da cui questo parser legge</strong>
+    ${chats.length ? `
+      <p class="dim small" style="margin:0">
+        Solo i messaggi delle chat spuntate vengono valutati da questo parser. Gli altri
+        tuoi parser hanno la propria scelta, indipendente da questa.
+      </p>
+      ${chats.map(c => `<label class="list-item" style="cursor:pointer">
+        <input type="checkbox" data-chat-id="${esc(c.id)}"${scelte.has(Number(c.id)) ? ' checked' : ''}>
+        <span class="grow"><span class="name">${esc(nomeChat(c))}</span>
+          <span class="dim small mono"> ${esc(c.telegram_chat_id)}</span></span>
+      </label>`).join('')}
+      <div class="row">
+        <button class="primary" data-act="chat-assegna-salva" data-id="${esc(slug)}">Salva</button>
+      </div>`
+    : `<div class="empty">Non hai ancora nessuna chat autorizzata.
+        <a href="#/chats">Collegane una</a>, poi torna qui per assegnarla a questo parser.
+      </div>`}`;
 }
 
 function paneProssimamente(titolo, testo) {
@@ -1683,12 +1721,245 @@ function viewFeed() {
 
 /* --------------------------------------------------- chat e log (globali) */
 
-function viewChats() {
+// Il codice di verifica vive SOLO in memoria, e solo finché la pagina resta
+// aperta. Non in localStorage: è un valore che autorizza qualcosa, e lì
+// sopravviverebbe alla sessione che l'ha chiesto — e a chi usa quel browser
+// dopo. È la stessa regola del token del feed, che non viene mai conservato.
+// Porta anche l'UTENTE, non il solo codice, ed è la lezione della `chiaveCampione`
+// in api.js — dove il messaggio di esempio finiva a un altro account sullo stesso
+// browser (`[REAL_FINDING]` di GPT-5.6 Sol, PR #50). Qui Sol ha alzato lo stesso
+// dubbio sulla PR #114, e misurato NON è raggiungibile: l'unico modo di cambiare
+// utente senza ricaricare la pagina è «Esci», che questa variabile la azzera, e
+// ogni 401 passa da `fallita`, che fa `location.reload()` — il modulo riparte e
+// con esso la variabile. Ma quella difesa è INCIDENTALE: riposa su due
+// comportamenti altrui, e chi un domani facesse mostrare a `fallita` una schermata
+// di login invece di ricaricare aprirebbe il buco senza accorgersene. Legare il
+// codice al suo utente lo chiude per costruzione, che è il modo in cui questo
+// repository ha già deciso di trattare i valori che autorizzano qualcosa.
+let codiceVerifica = null;   // { utente, codice }
+
+// Il codice SOLO se è di chi sta guardando adesso. Un utente diverso — o nessun
+// utente — non lo vede, qualunque cosa sia rimasta in memoria.
+function codiceDellaSessione() {
+  const u = api.me();
+  if (!codiceVerifica || !u || codiceVerifica.utente !== u.utente) return null;
+  return codiceVerifica.codice;
+}
+
+// Il sondaggio mentre l'utente incolla il codice nel canale: si RIchiama da solo
+// finché la vista è quella, e muore appena `render()` incrementa la generazione
+// (cambio pagina, azione, ricaricamento della lista). Nessun `setInterval` da
+// spegnere a mano: un timer che sopravvive alla vista continua a battere sul
+// server in sottofondo, ed è il modo in cui questi cicli diventano eterni.
+// Quanti tentativi andati male DI FILA prima di smettere e dirlo. Il conteggio è
+// consecutivo, non totale: un giro riuscito lo azzera, quindi un singolo intoppo
+// non avvicina la resa. Serve perché la ripresa dopo l'errore, da sola, sposta il
+// difetto invece di chiuderlo — con la rete giù il sondaggio ritenterebbe finché
+// la scheda resta aperta, e la pagina continuerebbe a dire «in attesa» di una
+// cosa che non sta arrivando. Rilievo di GPT-5.5 sulla PR #114, sul commit che
+// aveva appena corretto il difetto opposto.
+const GUASTI_DI_SEGUITO = 5;
+
+function sondaVerifica(invocazione, giro = 0, guasti = 0) {
+  if (invocazione !== generazione) return;
+  // I primi venti giri — circa un minuto — ogni 3 secondi: è la finestra in cui
+  // l'utente sta davvero incollando, e lì la reattività si vede. Dopo, ogni 15:
+  // il codice vive 600 secondi, e una scheda dimenticata aperta per tutto il TTL
+  // farebbe 200 richieste per una cosa che non succederà più.
+  const attesa = giro < 20 ? 3000 : 15000;
+  setTimeout(async () => {
+    if (invocazione !== generazione) return;
+    let st;
+    try { st = await api.statoVerificaChat(); }
+    catch {
+      // Un buco di rete non deve svuotare la pagina — e nemmeno FERMARE il
+      // sondaggio, che è quello che faceva il `return` nudo di prima: una sola
+      // richiesta fallita e la pagina restava «in attesa» per sempre, senza
+      // accorgersi né della verifica né della scadenza, finché l'utente non
+      // ricaricava. Segnalato da CodeRabbit sulla PR #114, e il commento che
+      // stava qui dichiarava proprio l'intenzione che il codice non manteneva.
+      //
+      // Ma la ripresa da sola non basta: un guasto TRANSITORIO si assorbe, uno
+      // PERSISTENTE va detto. Dopo `GUASTI_DI_SEGUITO` tentativi falliti di fila
+      // si smette e si ridisegna — la vista rilegge lo stato e, se il server non
+      // risponde ancora, l'utente vede il motivo invece di un'attesa infinita.
+      if (invocazione !== generazione) return;
+      if (guasti + 1 >= GUASTI_DI_SEGUITO) { render(); return; }
+      sondaVerifica(invocazione, giro + 1, guasti + 1);
+      return;
+    }
+    if (invocazione !== generazione) return;
+    if (st.chat) {
+      codiceVerifica = null;   // consumato: non esiste più niente da mostrare
+      toast('Chat verificata: ' + (st.chat.titolo || st.chat.telegram_chat_id));
+      render();
+      return;
+    }
+    if (!st.in_attesa) { render(); return; }   // scaduto: la vista lo dice
+    const box = document.getElementById('verifica-scadenza');
+    if (box) box.textContent = tempoRimasto(st.scade_fra_s);
+    sondaVerifica(invocazione, giro + 1, 0);   // riuscito: il conteggio riparte
+  }, attesa);
+}
+
+function tempoRimasto(secondi) {
+  const s = Math.max(0, Math.round(secondi || 0));
+  return `${Math.floor(s / 60)} min ${String(s % 60).padStart(2, '0')} s`;
+}
+
+// Una chat senza titolo NON è un difetto: le righe create dal percorso legacy
+// dei profili nascono da una lista di id scritta dall'amministratore, e un nome
+// lì non esiste proprio. Si mostra l'id, che è l'unica cosa vera che si ha.
+function nomeChat(c) {
+  return c.titolo || 'Chat senza nome';
+}
+
+function rigaChat(c) {
+  return `<div class="list-item">
+    <div class="grow">
+      <span class="name">${esc(nomeChat(c))}</span>
+      ${c.tipo ? `<span class="pill">${esc(c.tipo)}</span>` : ''}
+      <div class="dim small mono">${esc(c.telegram_chat_id)}</div>
+    </div>
+    <button class="danger small" data-act="chat-del" data-id="${esc(c.id)}"
+            data-nome="${esc(nomeChat(c))}">Rimuovi</button>
+  </div>`;
+}
+
+// Le tre schermate di questa vista sono UNA sola cosa detta in tre stati:
+// «chiedi il codice» → «incollalo nel canale» → «eccolo qui». La direzione deve
+// essere leggibile da chi non ha mai visto il servizio, perché è il primo
+// passaggio in cui il cliente fa da solo qualcosa che prima faceva il
+// proprietario a mano.
+async function viewChats() {
+  shell('<div class="dim">Caricamento…</div>');
+  const invocazione = generazione;  // guardia anti-stantio: vedi il router
+  let chats;
+  let verifica;
+  try {
+    // Lo STATO prima della lista, e l'ordine non è indifferente: se il codice
+    // viene consumato fra le due chiamate, con la lista letta per prima la chat
+    // nuova non c'è, `in_attesa` è già falso — quindi il sondaggio non riparte —
+    // e il canale appena verificato resta invisibile finché l'utente non
+    // ricarica. Leggendo lo stato per primo, la lista che arriva dopo contiene
+    // comunque la chat. Segnalato da CodeRabbit sulla PR #114.
+    verifica = await api.statoVerificaChat();
+    chats = await api.listaChat();
+  } catch (e) {
+    if (invocazione !== generazione) return;
+    fallita(e);
+    // E poi si SCRIVE sulla pagina, invece di lasciarla su «Caricamento…».
+    // Il toast vive 2,6 secondi: dopo, chi guarda lo schermo trova una vista che
+    // sta caricando qualcosa che non arriverà mai, e nessuna spiegazione. È il
+    // punto in cui il sondaggio si arrende dopo cinque guasti di fila, quindi è
+    // proprio la schermata che l'utente si ritrova davanti. Misurato sullo
+    // screenshot del flusso, dopo il rilievo di GPT-5.5 sulla PR #114.
+    shell(`
+      <div class="head"><div><h1>Chat Telegram</h1></div></div>
+      <div class="card stack">
+        <strong class="small">Non riesco a leggere le tue chat</strong>
+        <p class="muted small" style="margin:0">${esc(e.message || 'il server non risponde')}</p>
+        <div class="row"><button data-act="ricarica">Riprova</button></div>
+      </div>`);
+    return;
+  }
+  if (invocazione !== generazione) return;
+
+  const bot = api.settings() && api.settings().bot_username;
+  let pannello;
+  const codiceDaMostrare = codiceDellaSessione();
+  if (verifica.in_attesa && codiceDaMostrare) {
+    pannello = `
+      <div class="card stack">
+        <strong class="small">Autorizza un canale o un gruppo</strong>
+        <div class="row"><span class="pill">1</span>
+          <span class="small">Copia il codice qui sotto.</span></div>
+        ${copyRow(codiceDaMostrare, 'copy', 'codice-verifica')}
+        <div class="row"><span class="pill">2</span>
+          <span class="small">Incollalo come messaggio <strong>dentro il canale o il
+            gruppo</strong> che vuoi autorizzare.</span></div>
+        <p class="dim small" style="margin:0 0 0 34px">
+          Il bot ${bot ? `<span class="mono">@${esc(bot)}</span>` : 'del servizio'} deve
+          essere già dentro quel canale e poter leggere i messaggi. Per un canale va
+          aggiunto come amministratore.
+        </p>
+        <div class="row"><span class="pill">3</span>
+          <span class="small">Resta su questa pagina: appena arriva, il canale compare
+            qui sotto da solo.</span></div>
+        <div class="banner" style="margin:0" id="verifica-attesa">
+          <span class="small">In attesa del codice…</span>
+          <span class="dim small mono" id="verifica-scadenza">${
+            esc(tempoRimasto(verifica.scade_fra_s))}</span>
+        </div>
+        <p class="dim small" style="margin:0">
+          Incollare il codice lì dentro <strong>è</strong> la prova: può autorizzare
+          quella chat solo chi riesce a scriverci. Il codice vale una volta sola.
+        </p>
+        <div class="banner warn" style="margin:0"><span class="small">
+          In un <strong>canale</strong> scrivono solo gli amministratori, quindi la prova
+          è forte. In un <strong>gruppo</strong> può scrivere qualunque membro: chiunque
+          sia dentro potrebbe rivendicarlo prima di te, e poi non sarebbe più
+          disponibile. Se i tuoi segnali arrivano in un gruppo, su Telegram limita
+          l'invio dei messaggi agli amministratori.
+        </span></div>
+      </div>`;
+  } else if (verifica.in_attesa) {
+    // C'è una verifica viva ma il codice non è più in mano: il server non lo
+    // ripete (esiste in chiaro una volta sola) e questa pagina non lo conserva.
+    // Dirlo è l'unica risposta onesta; mostrare una casella vuota no.
+    pannello = `
+      <div class="card stack" id="verifica-in-corso">
+        <strong class="small">C'è una verifica in corso</strong>
+        <p class="muted small" style="margin:0">
+          Il codice si vede una volta sola, al momento in cui lo chiedi: ricaricando la
+          pagina non ricompare. Se ce l'hai ancora, incollalo nel canale — appena arriva,
+          il canale compare qui sotto. Se l'hai perso, generane uno nuovo: il precedente
+          smette di valere.
+        </p>
+        <div class="banner" style="margin:0">
+          <span class="small">In attesa del codice…</span>
+          <span class="dim small mono" id="verifica-scadenza">${
+            esc(tempoRimasto(verifica.scade_fra_s))}</span>
+        </div>
+        <div class="row"><button data-act="chat-verifica-start">Genera un codice nuovo</button></div>
+      </div>`;
+  } else {
+    pannello = `
+      <div class="card stack">
+        <strong class="small">Autorizza un canale o un gruppo</strong>
+        ${verifica.scaduto ? `<div class="banner warn" style="margin:0"><span class="small">
+          Il codice precedente è scaduto senza essere usato. Generane un altro.
+        </span></div>` : ''}
+        <p class="muted small" style="margin:0">
+          Ricevi un codice, lo incolli <strong>dentro il canale</strong> da cui arrivano i
+          segnali, e il canale compare qui. Nessun passaggio dall'assistenza: incollare il
+          codice lì dentro è ciò che dimostra che puoi scrivere in quella chat.
+        </p>
+        <p class="dim small" style="margin:0">
+          Funziona anche con un <strong>gruppo</strong>, ma lì la prova è più debole:
+          scrivere in un gruppo lo può fare ogni membro, non solo chi lo gestisce.
+        </p>
+        <div class="row">
+          <button class="primary" data-act="chat-verifica-start">Genera il codice</button>
+        </div>
+      </div>`;
+  }
+
   shell(`
-    <div class="head"><div><h1>Chat Telegram</h1></div></div>
-    ${paneProssimamente('Collega qui i tuoi gruppi e canali',
-      'La verifica delle chat con il codice usa-e-getta arriva con uno dei prossimi '
-      + 'aggiornamenti. Oggi le chat autorizzate le collega l\'amministratore.')}`);
+    <div class="head"><div>
+      <h1>Chat Telegram</h1>
+      <p class="muted small">I canali e i gruppi da cui il servizio accetta i tuoi
+        messaggi. Quelli che non sono in questo elenco vengono ignorati.</p>
+    </div></div>
+    <div class="stack">
+      ${pannello}
+      <div class="card stack">
+        <strong class="small">Le tue chat autorizzate</strong>
+        ${chats.length ? chats.map(rigaChat).join('')
+          : '<div class="empty">Nessuna chat autorizzata: finché non ne colleghi una, i tuoi parser non ricevono niente.</div>'}
+      </div>
+    </div>`);
+  if (verifica.in_attesa) sondaVerifica(invocazione);
 }
 
 function viewLogs() {
@@ -1747,6 +2018,9 @@ const actions = {
     try { await api.logout(); } catch { /* il cookie muore comunque col reload */ }
     wiz = null;
     botAccesso = null;
+    // Il codice di verifica è di CHI l'ha chiesto: non deve restare a
+    // disposizione di chi usa questo browser dopo di lui.
+    codiceVerifica = null;
     go('#/');
     render();
   },
@@ -1767,6 +2041,11 @@ const actions = {
   },
 
   copy(el) { copy(el.dataset.val); },
+
+  // «Riprova» dopo un guasto di rete: ridisegna la vista corrente, che rifà le
+  // sue chiamate. Non è `location.reload()` — quello rifarebbe anche il boot e
+  // butterebbe via la sessione in cache per un intoppo passeggero.
+  ricarica() { render(); },
   close() { closeModal(); },
 
   'new-parser'() { modalNewParser(); },
@@ -2286,6 +2565,55 @@ const actions = {
     catch (e) { fallita(e); return; }
     toast('Messaggio di prova inviato al canale.');
   },
+  /* ------------------------------------------ chat Telegram (#32, 3.2) */
+
+  async 'chat-verifica-start'() {
+    // Il codice esiste in chiaro solo in QUESTA risposta: si tiene in memoria
+    // per mostrarlo, e non si scrive da nessuna parte.
+    try {
+      const utente = api.me();
+      codiceVerifica = { utente: utente && utente.utente,
+                         codice: (await api.avviaVerificaChat()).codice };
+    }
+    catch (e) { fallita(e); return; }
+    render();
+  },
+
+  'chat-del'(el) {
+    openModal(`<h2>Rimuovere questa chat?</h2>
+      <p class="muted small">«${esc(el.dataset.nome)}» non sarà più autorizzata: i parser
+        collegati smettono di riceverne i messaggi. Il canale su Telegram non viene
+        toccato, e puoi riautorizzarlo quando vuoi con un codice nuovo.</p>
+      <div class="foot"><button data-act="close">Annulla</button>
+        <button class="danger" data-act="chat-del-ok"
+                data-id="${esc(el.dataset.id)}">Rimuovi</button></div>`);
+  },
+  async 'chat-del-ok'(el) {
+    const id = el.dataset.id;
+    closeModal();
+    try { await api.eliminaChat(id); }
+    catch (e) { fallita(e); return; }
+    toast('Chat rimossa.');
+    render();
+  },
+
+  async 'chat-assegna-salva'(el) {
+    const slug = el.dataset.id;
+    const caselle = [...document.querySelectorAll('#chat-assegnate input[type="checkbox"]')];
+    let salvate;
+    try {
+      salvate = new Set((await api.salvaChatDelParser(
+        slug, caselle.filter(i => i.checked).map(i => Number(i.dataset.chatId)))).map(Number));
+    } catch (e) { fallita(e); return; }
+    // Le caselle si riallineano alla risposta del SERVER, non a quello che
+    // l'utente ha spuntato: se la PUT ha rifiutato qualcosa, la pagina deve
+    // mostrare com'è andata davvero, non com'era stata chiesta.
+    for (const casella of caselle) casella.checked = salvate.has(Number(casella.dataset.chatId));
+    toast(salvate.size
+      ? `Salvato: ${salvate.size} chat collegate a questo parser.`
+      : 'Salvato: nessuna chat collegata, questo parser non riceverà niente.');
+  },
+
   'rimuovi-canale-backup'() {
     openModal(`<h2>Rimuovere il canale di backup?</h2>
       <p class="muted small">I backup automatici non avranno più una destinazione finché

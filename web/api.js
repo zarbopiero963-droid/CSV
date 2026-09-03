@@ -33,6 +33,18 @@ async function http(metodo, percorso, corpo) {
       method: metodo,
       headers: corpo === undefined ? {} : { 'Content-Type': 'application/json' },
       body: corpo === undefined ? undefined : JSON.stringify(corpo),
+      // `no-store` su OGNI chiamata, e qui invece che sulle due rotte segnalate:
+      // il difetto non è delle chat, è di tutte le GET di questo layer. Il server
+      // non manda `Cache-Control` (tranne `verify/start`, che se lo mette da sé),
+      // e senza intestazione un browser PUÒ conservare euristicamente una 200 —
+      // cioè tenere in cache i parser, il profilo e le chat di CHI HA FATTO
+      // L'ACCESSO, su un computer che magari usa qualcun altro dopo. Correggerlo
+      // in `listaChat` e `statoVerificaChat` avrebbe chiuso i due siti segnalati
+      // da CodeRabbit sulla PR #114 e lasciato viva la classe (regola 2), oltre a
+      // essere una regola da ricordare a ogni funzione nuova. Qui è una volta
+      // sola e vale per tutte. Sulle non-GET non cambia niente: non sono
+      // cacheabili comunque.
+      cache: 'no-store',
     });
   } catch {
     throw new Error('il server non risponde: controlla la connessione');
@@ -368,6 +380,54 @@ export function feedUrl() {
 
 export function hasToken() {
   return Boolean(stato.me && stato.me.token_prefix);
+}
+
+/* --------------------------------------------- chat Telegram (#32, 3.2) */
+
+// Le sei rotte della verifica delle chat. Nessuna cache sincrona qui, di
+// proposito: lo stato di una verifica CAMBIA da solo mentre l'utente guarda la
+// pagina (il codice viene incollato in un canale, il TTL scorre), e una cache
+// che le viste leggono senza await mostrerebbe un'istantanea vecchia proprio
+// nel momento in cui l'utente aspetta che cambi.
+
+// Le chat verificate DELLA SESSIONE. Il server non ha nessun modo di
+// restituirne una di un altro utente: `user_id` viene dal cookie.
+export async function listaChat() {
+  return http('GET', '/api/chats');
+}
+
+// Il codice usa-e-getta. **Esiste in chiaro solo in questa risposta**, come il
+// token del feed: si passa al chiamante e non si conserva — ne' qui, ne' in
+// localStorage, dove sopravviverebbe alla sessione che l'ha chiesto.
+export async function avviaVerificaChat() {
+  return http('POST', '/api/chats/verify/start');
+}
+
+// «E' arrivato?»: il sondaggio mentre l'utente incolla. NON ripete il codice —
+// il server non lo rimanda — quindi chi ha ricaricato la pagina non lo rivede,
+// e la vista deve dirlo invece di mostrarne uno vuoto.
+export async function statoVerificaChat() {
+  return http('GET', '/api/chats/verify/status');
+}
+
+// L'id e' quello di `chats.id` (la chiave del servizio), non il numero di
+// Telegram: sono due colonne diverse, e confonderle darebbe 404.
+export async function eliminaChat(id) {
+  await http('DELETE', `/api/chats/${encodeURIComponent(id)}`);
+}
+
+export async function chatDelParser(slug) {
+  const r = await http('GET', `/api/me/parsers/${encodeURIComponent(slug)}/chats`);
+  return r.chat_ids || [];
+}
+
+// La PUT SOSTITUISCE l'insieme: quello che non e' nella lista viene scollegato.
+// Il server verifica la proprieta' di ogni id dentro la transazione, quindi un
+// id altrui e' 404 e non un collegamento riuscito a meta'.
+export async function salvaChatDelParser(slug, chatIds) {
+  const r = await http('PUT', `/api/me/parsers/${encodeURIComponent(slug)}/chats`,
+                       { chat_ids: chatIds });
+  return r.chat_ids || [];
 }
 
 /* -------------------------------------------------- mercati Betfair (#33) */

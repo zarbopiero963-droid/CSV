@@ -1194,6 +1194,13 @@ POST   /telegram/webhook                                  unico bot, dispatch pe
 > `POST /api/parsers/:id/token/rotate` di questo disegno descrivono il modello
 > vecchio: il feed reale è `GET /feed/{slug}.csv?token=xt_…` — uno per utente —
 > e il token si conia con `POST /api/me/token`. Vedi «Token dei feed».
+>
+> **E le rotte delle chat sono realizzate, con nomi diversi da questo schizzo.**
+> Non `{ code, expires_at }` né i quattro stati `none|waiting|verified|expired`
+> di una macchina a stati, ma `{ codice, scade_fra_s }` e i booleani
+> `in_attesa` / `scaduto` più `chat`; il percorso dei parser è
+> `/api/me/parsers/{slug}/chats`, non `/api/parsers/:id/chats`. Le forme vere
+> stanno in «La verifica delle chat» qui sotto, ed è quella la fonte.
 
 ### Cosa esiste DAVVERO: il CRUD dei parser per-utente
 
@@ -1215,6 +1222,12 @@ Il pezzo che mancava davvero a un cliente: fino al 03/09/2026 l'unico modo di
 autorizzare un canale era `POST /api/profiles` con l'admin token — il
 proprietario a mano — e la web app lo dichiarava («arriva con uno dei prossimi
 aggiornamenti»).
+
+Il proprietario ha spezzato il 3.2 in due PR: **PR 1** le rotte qui sotto, **PR 2**
+la vista «Chat Telegram» e il tab «Chat assegnate» che le usano (vedi «Prototipo»).
+Fra le due c'è una differenza che vale la pena tenere a mente leggendo: dopo la PR 1
+il meccanismo era completo e **inaccessibile** — nessuna schermata lo chiamava, e la
+web app continuava a dire all'utente che le chat le collega l'amministratore.
 
 ```text
 POST   /api/chats/verify/start        → { codice, scade_fra_s }
@@ -1288,6 +1301,30 @@ di ogni canale sconosciuto costi una query.
 - verificare una chat **non aggira l'attivazione**: i parser di un utente
   `registrato` restano fermi con `access_registrato`, come prima.
 
+**Il limite noto, e va detto perché la prova non è la stessa per tutte le chat.**
+Il meccanismo dimostra che chi presenta il codice **può scrivere** in quella chat.
+Per un **canale** questo coincide col controllarlo, perché su Telegram in un canale
+scrivono solo gli amministratori. Per un **gruppo** no: può scrivere qualunque
+membro, quindi un membro ordinario con un account BetRelay può rivendicare il
+gruppo, e da quel momento nessun altro lo può più verificare (`chat_non_disponibile`).
+
+Cosa questo **non** è: non è un accesso ai dati di un altro utente — nessun parser,
+feed o token diventa leggibile — e chi rivendica il gruppo vedeva già quei messaggi,
+da membro. Cosa **è**: la possibilità di soffiare la verifica al titolare legittimo
+e di dirottare quel flusso nei propri parser.
+
+La chiusura vera richiede una **prova di ruolo**: `getChatMember` verso Telegram per
+pretendere `creator`/`administrator` sul gruppo. Oggi `getChatMember` **non compare in
+`main.py`** e `_consuma_codice_di_verifica` riceve solo `chat_id`, `codice`, `titolo`,
+`tipo` — mai il mittente né il suo ruolo. È una chiamata in uscita sul percorso della
+verifica, con i suoi modi di fallire, quindi vive in una Issue propria e non nel PR
+della web app. `[REAL_FINDING]` di OpenRouter Sol al gate della PR #114.
+
+Fino ad allora la mitigazione è **dichiarata all'utente nella schermata** (vedi
+«Prototipo» → «Chat Telegram»), non taciuta: in un gruppo la prova è più debole, e
+il consiglio è limitare l'invio dei messaggi agli amministratori. È vincolata da
+`tests/web/chat_flow.py`, che pretende quell'avviso nella card del codice.
+
 **Perché non indebolisce il filtro delle chat**, che è una regola non negoziabile:
 il ramo del codice nel webhook è l'eccezione che quella regola già prevede, ed è
 *tutta* l'eccezione. Registra una riga in `chats` e consuma il codice; non tocca
@@ -1298,6 +1335,25 @@ il ramo del codice nel webhook è l'eccezione che quella regola già prevede, ed
 user_id, expires_at, consumed_at)` e `chats.owner_user_id / verified_at` erano
 nello schema dalla prima migrazione, con zero letture e zero scritture: mancava
 il comportamento, non le tabelle.
+
+**`chats.title` e `chats.type` (PR 2 del 3.2).** Stessa storia, un giro dopo, e
+scritta qui perché è la classe di difetto che questo documento tiene d'occhio: le
+due colonne erano nello schema dalla prima migrazione e **nessun percorso le
+scriveva** — `INSERT INTO chats` in tre siti, tutti senza quei campi. Finché le chat
+le collegava l'amministratore la cosa non si vedeva: era lui a sapere quale canale
+fosse quale. Da quando le collega il cliente, la lista è la sua schermata, e una
+lista di interi negativi non è una schermata — nessuno riconosce i propri canali dal
+numero. Nome e tipo arrivano dalla **stessa consegna** che porta il codice
+(`message.chat.title` / `.type`), cioè senza nessuna chiamata in più a Telegram.
+
+Il titolo è **testo di un estraneo** — chi controlla un canale ne sceglie il nome —
+quindi si capa a `MAX_TITOLO_CHAT` (96) e si tolgono i caratteri non stampabili, che
+nella lista produrrebbero righe spezzate; l'escape dell'HTML lo fa la web app a valle.
+Una riverifica aggiorna il nome (`COALESCE(?, title)`: un canale rinominato non resta
+col nome vecchio) ma una consegna **senza** titolo non lo cancella. I due percorsi
+legacy non passano di qui e non possono: l'amministratore scrive una lista di id, e un
+titolo lì non esiste proprio — per quelle righe la web app mostra «Chat senza nome» più
+il numero, che è l'unica cosa vera che ha.
 
 **Limite noto, e non introdotto qui: i topic dei forum Telegram.** Nessun percorso
 del servizio scrive `message_thread_id`, e ogni ricerca usa `IFNULL(message_thread_id,
@@ -2555,9 +2611,84 @@ La voce e la vista esistono solo con `admin` vero; il server risponde comunque
   prefisso. Rigenerare **è** la revoca, e la vista lo dice prima di farlo. La nota:
   ogni segnale resta 90 secondi, ogni parser ha riga e timer propri, il feed è UTF-8
   con BOM.
-- **Chat Telegram** e **Log messaggi**: dichiarate «prossimamente», con la pillola e
-  la spiegazione di cosa arriverà — non tabelle finte. Le rotte backend non esistono
-  ancora (3.2 / 3.3c).
+- **Chat Telegram** (3.2, PR 2): la vista che ha preso il posto del «prossimamente».
+  Sottotitolo: «I canali e i gruppi da cui il servizio accetta i tuoi messaggi. Quelli
+  che non sono in questo elenco vengono ignorati.» Due card, e la prima ha **tre
+  stati**, perché è una sola cosa detta in tre momenti:
+  - **nessuna verifica in corso** — card «Autorizza un canale o un gruppo», il
+    paragrafo che spiega il meccanismo («incollare il codice lì dentro è ciò che
+    dimostra che quel canale è tuo») e il pulsante **«Genera il codice»**
+    (`POST /api/chats/verify/start`). Se la verifica precedente è scaduta senza essere
+    usata, sopra compare un `banner warn`: «Il codice precedente è scaduto senza essere
+    usato. Generane un altro.»;
+  - **codice in mano** — i **tre passi numerati** con la pillola del numero: «Copia il
+    codice qui sotto.» → la `copy-row` col codice e il pulsante «Copia» → «Incollalo
+    come messaggio **dentro il canale o il gruppo** che vuoi autorizzare.», con la nota
+    che il bot deve già essere lì dentro e, per un canale, va aggiunto come
+    amministratore → «Resta su questa pagina: appena arriva, il canale compare qui sotto
+    da solo.» Sotto, il banner «In attesa del codice…» con il tempo che resta in
+    `min ss`, aggiornato dal sondaggio (`GET /api/chats/verify/status`: ogni 3 s per
+    il primo minuto — la finestra in cui l'utente sta incollando — poi ogni 15, o
+    una scheda dimenticata aperta per i 600 s del TTL farebbe 200 richieste; una
+    richiesta **fallita non ferma il sondaggio**, che riprova al giro successivo:
+    fermarlo lascerebbe la pagina «in attesa» per sempre, cieca sia alla verifica
+    sia alla scadenza, senza che niente lo dica all'utente. Ma un guasto
+    **persistente** si dice invece di nasconderlo: dopo **cinque** tentativi
+    falliti *di fila* la vista smette e ridisegna. Il conteggio è consecutivo, non
+    totale — un giro riuscito lo azzera — perché un intoppo isolato non deve
+    avvicinare la resa. La schermata che ne risulta è una card **«Non riesco a
+    leggere le tue chat»** col motivo del server e il pulsante **«Riprova»**, e non
+    il solo toast: quello vive 2,6 secondi, dopo i quali chi guarda lo schermo
+    troverebbe un «Caricamento…» che non finisce mai e nessuna spiegazione — che è
+    esattamente ciò che si stava correggendo. «Riprova» ridisegna la vista, non
+    ricarica la pagina: un `location.reload()` rifarebbe il boot e butterebbe via
+    la sessione in cache per un intoppo passeggero. La vista chiede lo
+    **stato prima della lista**, o una chat verificata proprio fra le due chiamate
+    resterebbe invisibile fino a un ricaricamento. Entrambe segnalate da CodeRabbit
+    sulla PR #114 e vincolate da `tests/web/chat_flow.py`, che fa fallire una
+    richiesta di proposito e misura l'ordine delle due chiamate d'apertura);
+    e in coda un `banner warn` che **dichiara il limite invece di tacerlo**: «In un
+    **canale** scrivono solo gli amministratori, quindi la prova è forte. In un
+    **gruppo** può scrivere qualunque membro: chiunque sia dentro potrebbe
+    rivendicarlo prima di te, e poi non sarebbe più disponibile. Se i tuoi segnali
+    arrivano in un gruppo, su Telegram limita l'invio dei messaggi agli
+    amministratori.» Lo stato senza verifica in corso porta la stessa cosa in forma
+    breve: «Funziona anche con un **gruppo**, ma lì la prova è più debole: scrivere in
+    un gruppo lo può fare ogni membro, non solo chi lo gestisce.» Vincolato da
+    `tests/web/chat_flow.py`;
+  - **verifica viva ma codice perso** — card «C'è una verifica in corso»: il codice si
+    vede **una volta sola**, ricaricando non ricompare, e il pulsante diventa «Genera un
+    codice nuovo» col suo effetto dichiarato («il precedente smette di valere»). È la
+    resa in UI dell'invariante del server, che non ripete il codice nello `status`:
+    mostrare una casella vuota sarebbe stato l'unico modo di renderla incomprensibile.
+
+  La seconda card è **«Le tue chat autorizzate»**: una riga per chat con nome, pillola
+  del tipo (`channel`, `group`…), il numero Telegram in `mono` e **«Rimuovi»**, che
+  apre la conferma «Rimuovere questa chat?» → «Rimuovi» (`DELETE /api/chats/{id}`). Una
+  chat senza nome — le righe legacy create dall'amministratore da una lista di id, dove
+  un titolo non esiste — si mostra come «Chat senza nome» più il suo numero. A elenco
+  vuoto: «Nessuna chat autorizzata: finché non ne colleghi una, i tuoi parser non
+  ricevono niente.»
+
+  **Il codice non viene mai conservato**: vive in una variabile di modulo finché la
+  pagina resta aperta, e «Esci» la azzera. In `localStorage` sopravviverebbe alla
+  sessione che l'ha chiesto — è la stessa regola del token del feed. La variabile
+  porta **l'utente insieme al codice** (`{utente, codice}`) e la vista lo mostra solo
+  se combacia con la sessione corrente: senza quel legame la difesa sarebbe
+  incidentale — riposerebbe sul `location.reload()` che `fallita` fa sul 401 e sul
+  fatto che «Esci» si ricordi di azzerare — e chi un domani facesse mostrare a
+  `fallita` una schermata di login invece di ricaricare aprirebbe il buco senza
+  accorgersene. È la stessa lezione di `chiaveCampione` in `api.js`.
+- **Chat assegnate** (il tab dentro ogni parser, 3.2 PR 2): «Chat da cui questo parser
+  legge», una casella per ognuna delle proprie chat e **«Salva»**
+  (`PUT /api/me/parsers/{slug}/chats`). La nota dice la cosa che si sbaglia da sola:
+  «Solo i messaggi delle chat spuntate vengono valutati da questo parser. Gli altri tuoi
+  parser hanno la propria scelta, indipendente da questa.» Dopo il salvataggio le caselle
+  si riallineano ai `chat_ids` **della risposta**, non a ciò che l'utente aveva spuntato.
+  Senza nessuna chat: «Non hai ancora nessuna chat autorizzata. Collegane una, poi torna
+  qui per assegnarla a questo parser.», col link a «Chat Telegram».
+- **Log messaggi**: ancora dichiarata «prossimamente», con la pillola e la spiegazione
+  di cosa arriverà — non tabelle finte. La rotta backend non esiste (3.3c).
 - **Impostazioni**: nome, stato, slug, prefisso del token (mai il token), e il link
   `t.me` del bot del servizio.
 

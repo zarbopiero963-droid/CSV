@@ -409,12 +409,26 @@ with sync_playwright() as pw:
     except urllib.error.HTTPError as e:
         assert e.code == 404, f'atteso 404 sul token sbagliato, avuto {e.code}'
 
-    # chat e log: dichiarati «prossimamente», non finti
+    # chat: dal #32 pezzo 3.2 (PR 2) la vista e' VERA, non un segnaposto. Il
+    # percorso completo — codice, canale, collegamento al parser, eliminazione —
+    # sta in `chat_flow.py`; qui si tiene solo il confine: questa pagina non deve
+    # tornare a dichiararsi «prossimamente», e a elenco vuoto deve dire cosa
+    # comporta (i parser non ricevono niente).
     pg.click('nav a[href="#/chats"]')
-    pg.wait_for_selector('.empty')
-    assert 'prossimamente' in pg.inner_text('.main')
+    pg.wait_for_selector('[data-act="chat-verifica-start"]')
+    chat_txt = pg.inner_text('.main')
+    assert 'prossimamente' not in chat_txt.lower(), chat_txt[:300]
+    assert 'Nessuna chat autorizzata' in chat_txt, chat_txt[:300]
+    # log: quello si', ancora «prossimamente» e non finto (3.3c)
     pg.click('nav a[href="#/logs"]')
-    pg.wait_for_selector('.empty')
+    # Si aspetta il TITOLO, non `.empty`: quello ce l'ha anche la pagina da cui
+    # arriviamo (elenco chat vuoto), quindi combaciava subito e l'asserzione qui
+    # sotto leggeva la pagina PRECEDENTE. La race esisteva gia' — anche il vecchio
+    # segnaposto delle chat era un `.empty` — ma era innocua perche' entrambe le
+    # pagine dicevano «prossimamente»: il test passava per caso. Misurata dalla CI
+    # di questo PR (rossa qui, verde in locale: la race la vince la macchina piu'
+    # lenta), che e' il solo posto in cui si e' vista.
+    pg.wait_for_selector('h1:text-is("Log messaggi")')
     assert 'prossimamente' in pg.inner_text('.main')
     shot(pg, '15-prossimamente')
 
