@@ -5584,10 +5584,29 @@ async def conferma_canale_backup(request: Request):
         # significa proprio «questo e' il mio canale di backup»: si toglie. Con dei link,
         # invece, l'utente ci ha configurato qualcosa, e cancellarglielo per una scelta
         # fatta altrove sarebbe distruttivo e silenzioso: si rifiuta e glielo si dice.
+        # Si tocca SOLO una riga PROPRIA e SENZA lavoro sopra. Le due condizioni sono
+        # separate perche' proteggono da due cose diverse:
+        #
+        # - `owner_user_id`: quella chat puo' essere di un CLIENTE, che l'ha collegata
+        #   promuovendoci il bot. Cancellargliela perche' l'amministratore configura un
+        #   backup e' un'azione distruttiva CROSS-UTENTE, e silenziosa. La prima versione
+        #   di questo blocco guardava solo i link e faceva esattamente questo — cioe' il
+        #   contrario di quello che il commento accanto dichiarava. `[REAL_FINDING]`
+        #   convergente di GPT-5.5 e Claude Fable 5.1 sulla PR #117;
+        # - `parser_chats`: anche sulla propria, dei link sono lavoro di configurazione, e
+        #   non si buttano per una scelta fatta altrove.
+        #
+        # Senza nessuna delle due, la riga e' solo l'effetto automatico della promozione di
+        # un minuto prima e confermare significa proprio «questo e' il mio canale di
+        # backup»: si toglie.
         riga_chat = c.execute(
-            f'SELECT id FROM chats WHERE telegram_chat_id=? AND {TOPIC_CHAT}=?',
+            f'SELECT id, owner_user_id FROM chats WHERE telegram_chat_id=? AND {TOPIC_CHAT}=?',
             (candidato['chat_id'], '')).fetchone()
         if riga_chat:
+            if riga_chat[1] != amministratore['id']:
+                raise HTTPException(
+                    409, 'questo canale e- collegato da un altro utente come sorgente di'
+                         ' segnali: non puo- diventare la destinazione dei backup')
             if c.execute('SELECT 1 FROM parser_chats WHERE chat_id=? LIMIT 1',
                          (riga_chat[0],)).fetchone():
                 raise HTTPException(
@@ -7313,21 +7332,24 @@ def _collega_chat_promuovendo_il_bot(payload):
     if not attore:
         return None
     titolo, tipo = _nome_visibile_della_chat(ch)
-    # Il canale di backup CONFIGURATO non si collega mai come sorgente: e' una
-    # DESTINAZIONE, e una riga in `chats` lo iscriverebbe all'instradamento del
-    # webhook — la regola non negoziabile del filtro delle chat, guardata da
-    # `tests/relay/test_canale_backup.py`. L'altro verso lo tiene la conferma nel
-    # pannello, che rifiuta di configurare come backup un canale gia' collegato.
-    c = db()
-    try:
-        if leggi_impostazione(c, CHIAVE_CANALE_BACKUP_ID) == chat_id:
-            return {'ok': True, 'ignored': 'canale_di_backup'}
-    finally:
-        c.close()
     adesso = int(time.time())
     c = db()
     try:
         c.execute('BEGIN IMMEDIATE')
+        # Il canale di backup CONFIGURATO non si collega mai come sorgente: e' una
+        # DESTINAZIONE, e una riga in `chats` lo iscriverebbe all'instradamento del
+        # webhook — la regola non negoziabile del filtro delle chat, guardata da
+        # `tests/relay/test_canale_backup.py`. L'altro verso lo tiene la conferma nel
+        # pannello, che rifiuta di configurare come backup un canale gia' collegato.
+        #
+        # Il controllo sta DENTRO la transazione della scrittura, e la prima versione lo
+        # faceva fuori, su una connessione a parte: fra la lettura e l'INSERT la conferma
+        # nel pannello poteva configurare quel canale come backup, e lo stesso canale
+        # finiva destinazione E sorgente. E' la stessa forma del TOCTOU chiuso sulla
+        # PR #46 e sulla PUT delle chat (#112). Rilievo di GPT-5.5 sulla PR #117.
+        if leggi_impostazione(c, CHIAVE_CANALE_BACKUP_ID) == chat_id:
+            c.rollback()
+            return {'ok': True, 'ignored': 'canale_di_backup'}
         utente = c.execute(
             'SELECT id, status, access_expires_at, is_admin FROM users'
             ' WHERE telegram_id=?', (attore,)).fetchone()

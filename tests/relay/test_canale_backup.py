@@ -766,3 +766,39 @@ def test_confermare_il_backup_toglie_la_chat_collegata_in_automatico(tmp_path, m
                          (str(CANALE),)).fetchone()[0]
     c.close()
     assert in_chats == 0, 'il canale configurato come backup e- rimasto una sorgente'
+
+
+def test_confermare_il_backup_non_cancella_la_chat_di_un_ALTRO_utente(tmp_path, monkeypatch):
+    """La conferma non deve toccare la riga di un cliente. `[REAL_FINDING]` convergente
+    di GPT-5.5 e Claude Fable 5.1 sulla PR #117.
+
+    Il `DELETE` introdotto per il caso normale guardava i link ai parser ma NON il
+    proprietario: se un cliente aveva collegato quel canale e non ci aveva ancora
+    attaccato un parser, la conferma dell'amministratore glielo cancellava in silenzio.
+    Cioe' esattamente cio' che il commento accanto dichiarava di non fare — la classe
+    di difetto in cui il codice smentisce la sua stessa promessa scritta.
+    """
+    percorso, admin_s, _cliente_s, cliente = _admin(tmp_path, monkeypatch, 'altrui.db')
+    _abilita_webhook(monkeypatch)
+    # Il canale e' gia' del CLIENTE, senza link ai parser.
+    c = sqlite3.connect(percorso)
+    c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id) VALUES (?,?)',
+              (str(CANALE), cliente))
+    c.commit()
+    c.close()
+    # L'amministratore promuove il bot li' dentro: la chat NON diventa sua (non
+    # rubabile), ma la proposta di backup si'.
+    _webhook(_promozione(CANALE, 'Canale conteso'))
+    monkeypatch.setattr(main, 'invia_messaggio_telegram',
+                        lambda chat_id, testo, bot_token=None: (True, None))
+
+    with pytest.raises(main.HTTPException) as errore:
+        _conferma(admin_s, CANALE)
+
+    assert errore.value.status_code == 409, errore.value.detail
+    c = sqlite3.connect(percorso)
+    riga = c.execute('SELECT owner_user_id FROM chats WHERE telegram_chat_id=?',
+                     (str(CANALE),)).fetchone()
+    c.close()
+    assert riga and riga[0] == cliente, (
+        f'la chat del cliente e- stata cancellata dalla conferma dell-admin: {riga}')

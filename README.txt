@@ -309,9 +309,11 @@ Un canale pero' non puo' essere destinazione dei backup e sorgente di segnali in
 una riga in `chats` lo iscrive all'instradamento del webhook. L'invariante sta sulla
 CONFIGURAZIONE, non sulla proposta, ed e' tenuta sui due versi:
   - una promozione sul canale GIA' configurato come backup non lo collega;
-  - confermare un candidato che e' anche una chat collegata: con link ai parser → 409
-    col motivo (sono lavoro dell'utente, non si cancellano da soli); senza link, la riga
-    e' solo l'effetto automatico della promozione e si toglie.
+  - confermare un candidato che e' anche una chat collegata: si tocca SOLO una riga
+    PROPRIA e SENZA lavoro sopra. Di un ALTRO utente → 409 (cancellarla sarebbe
+    distruttivo cross-utente e silenzioso); propria ma con link ai parser → 409 (sono
+    lavoro di configurazione); ne' l'una ne' l'altra → la riga e' solo l'effetto
+    automatico della promozione e si toglie.
 Il secondo ramo non e' un dettaglio: col rifiuto secco, configurare un canale di backup
 sarebbe diventato IMPOSSIBILE — la promozione collega, la conferma rifiuta.
 

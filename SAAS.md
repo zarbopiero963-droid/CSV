@@ -1370,11 +1370,23 @@ sui due versi:
 
 - una promozione sul canale **già configurato** come backup non lo collega
   (`ignored: canale_di_backup`);
-- **confermare** un candidato che è anche una chat collegata: se su quella chat ci sono
-  link ai parser → **409** col motivo, perché sono lavoro dell'utente e cancellarli per
-  una scelta fatta altrove sarebbe distruttivo e silenzioso; se non ce ne sono, la riga è
-  solo l'effetto automatico della promozione di un minuto prima e **si toglie**, perché
-  confermare significa proprio «questo è il mio canale di backup».
+- **confermare** un candidato che è anche una chat collegata: si tocca **solo** una riga
+  **propria** e **senza lavoro sopra**. Se è di un **altro utente** → 409, perché
+  cancellarla sarebbe un'azione distruttiva cross-utente e silenziosa; se è propria ma ha
+  **link ai parser** → 409, perché sono lavoro di configurazione; se non è né l'una né
+  l'altra, la riga è solo l'effetto automatico della promozione di un minuto prima e **si
+  toglie**, perché confermare significa proprio «questo è il mio canale di backup».
+
+  Le due condizioni sono separate perché proteggono da cose diverse, e la prima versione
+  di questo blocco guardava **solo** i link: la conferma dell'amministratore cancellava in
+  silenzio la chat di un cliente che l'aveva collegata e non ci aveva ancora attaccato un
+  parser — cioè il contrario di quello che il commento accanto dichiarava. `[REAL_FINDING]`
+  convergente di GPT-5.5 e Claude Fable 5.1 sulla PR #117.
+
+Il controllo «è già il canale di backup?» sta **dentro** la transazione della scrittura, e
+non su una connessione a parte: fra la lettura e l'`INSERT` la conferma nel pannello poteva
+configurare quel canale, e lo stesso canale finiva destinazione **e** sorgente. Stessa forma
+del TOCTOU chiuso sulla PR #46 e sulla PUT delle chat (#112).
 
 Il secondo ramo non è un dettaglio: con un rifiuto secco, configurare un canale di backup
 sarebbe diventato **impossibile** — la promozione lo collega, la conferma lo rifiuta.
