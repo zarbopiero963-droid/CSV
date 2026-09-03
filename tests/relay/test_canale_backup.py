@@ -121,8 +121,18 @@ def _configura(admin_s, monkeypatch, chat_id, titolo='Backup'):
 def test_il_bot_promosso_amministratore_dal_proprietario_diventa_candidato(tmp_path, monkeypatch):
     """`my_chat_member` con status administrator, dall'amministratore → candidato scritto.
 
-    E NON crea una riga in `chats`: il canale di backup e' una destinazione, non una
-    sorgente di segnali."""
+    **L'invariante «non finisce in `chats`» si e' SPOSTATA, non indebolita** (#116). Qui
+    stava scritto che questa promozione non doveva creare una riga in `chats`, perche' il
+    canale di backup e' una destinazione e non una sorgente. Dalla #116 promuovere il bot
+    in un canale privato lo collega anche come chat — e al momento della promozione il
+    servizio non puo' sapere se quel canale sara' una sorgente di segnali o la
+    destinazione dei backup: e' solo una PROPOSTA, che diventa backup soltanto se
+    l'amministratore la conferma nel pannello.
+
+    L'invariante vera vive quindi sulla CONFIGURAZIONE, non sulla proposta, ed e' tenuta
+    dai due test qui sotto, che coprono i due versi:
+    `test_il_canale_di_backup_CONFIGURATO_non_diventa_una_sorgente` e
+    `test_non_si_configura_come_backup_un_canale_gia_collegato_ai_segnali`."""
     percorso, _admin_s, _cliente_s, _cliente = _admin(tmp_path, monkeypatch, 'cattura.db')
     _abilita_webhook(monkeypatch)
 
@@ -132,11 +142,51 @@ def test_il_bot_promosso_amministratore_dal_proprietario_diventa_candidato(tmp_p
     assert _impostazione(percorso, main.CHIAVE_CANALE_CANDIDATO_ID) == str(CANALE)
     assert _impostazione(percorso, main.CHIAVE_CANALE_CANDIDATO_TITOLO) == 'Backup BetRelay'
 
+
+def test_il_canale_di_backup_CONFIGURATO_non_diventa_una_sorgente(tmp_path, monkeypatch):
+    """Primo verso dell'invariante (#116): una promozione sul canale GIA' configurato come
+    backup non lo collega come chat. Una riga in `chats` lo iscriverebbe all'instradamento
+    del webhook, cioe' lo tratterebbe come sorgente di segnali."""
+    percorso, admin_s, _cliente_s, _cliente = _admin(tmp_path, monkeypatch, 'gia-backup.db')
+    _abilita_webhook(monkeypatch)
+    _configura(admin_s, monkeypatch, CANALE, 'Backup BetRelay')
+
+    _webhook(_promozione(CANALE, 'Backup BetRelay'))
+
     c = sqlite3.connect(percorso)
     in_chats = c.execute('SELECT COUNT(*) FROM chats WHERE telegram_chat_id=?',
                          (str(CANALE),)).fetchone()[0]
     c.close()
     assert in_chats == 0, 'il canale di backup e- finito in chats: verrebbe instradato come segnale'
+
+
+def test_non_si_configura_come_backup_un_canale_gia_collegato_ai_segnali(tmp_path, monkeypatch):
+    """Secondo verso (#116): un canale gia' collegato come sorgente non si puo' configurare
+    come destinazione dei backup — 409 col motivo, invece di configurarlo e lasciare la
+    stessa chat su tutti e due i ruoli.
+
+    Si RIFIUTA e non si scollega da soli: i link ai parser sono lavoro di configurazione
+    dell'utente, e cancellarli per una scelta fatta altrove sarebbe distruttivo e silenzioso.
+    """
+    percorso, admin_s, _cliente_s, _cliente = _admin(tmp_path, monkeypatch, 'doppio-ruolo.db')
+    _abilita_webhook(monkeypatch)
+    # La promozione collega il canale come chat E lascia la proposta di backup.
+    _webhook(_promozione(CANALE, 'Segnali'))
+    # E l'utente ci ha collegato un parser: e' il LAVORO che non va cancellato da solo.
+    c = sqlite3.connect(percorso)
+    id_chat = c.execute('SELECT id FROM chats WHERE telegram_chat_id=?',
+                        (str(CANALE),)).fetchone()[0]
+    c.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (?,?)', (999, id_chat))
+    c.commit()
+    c.close()
+    monkeypatch.setattr(main, 'invia_messaggio_telegram',
+                        lambda chat_id, testo, bot_token=None: (True, None))
+
+    with pytest.raises(main.HTTPException) as errore:
+        _conferma(admin_s, CANALE)
+
+    assert errore.value.status_code == 409, errore.value.detail
+    assert 'sorgente di segnali' in errore.value.detail, errore.value.detail
 
 
 def test_un_ESTRANEO_non_puo_proporre_un_canale(tmp_path, monkeypatch):
@@ -691,3 +741,28 @@ def test_un_NON_admin_non_vede_il_canale_di_backup(tmp_path, monkeypatch):
         with pytest.raises(HTTPException) as errore:
             chiamata()
         assert errore.value.status_code == 404, f'{errore.value.status_code} invece di 404'
+
+
+def test_confermare_il_backup_toglie_la_chat_collegata_in_automatico(tmp_path, monkeypatch):
+    """Il caso NORMALE dopo la #116, e il motivo per cui il rifiuto non e' secco.
+
+    L'amministratore promuove il bot nel canale che vuole come backup: la stessa
+    promozione lo collega come chat (#116). Se rifiutassimo sempre, configurare un
+    canale di backup diventerebbe impossibile. Senza link ai parser quella riga e' solo
+    l'effetto automatico di un minuto prima, e confermare significa proprio «questo e' il
+    mio canale di backup»: la riga si toglie e il canale resta una sola cosa.
+    """
+    percorso, admin_s, _cliente_s, _cliente = _admin(tmp_path, monkeypatch, 'toglie.db')
+    _abilita_webhook(monkeypatch)
+    _webhook(_promozione(CANALE, 'Backup BetRelay'))
+    monkeypatch.setattr(main, 'invia_messaggio_telegram',
+                        lambda chat_id, testo, bot_token=None: (True, None))
+
+    _conferma(admin_s, CANALE)
+
+    assert _impostazione(percorso, main.CHIAVE_CANALE_BACKUP_ID) == str(CANALE)
+    c = sqlite3.connect(percorso)
+    in_chats = c.execute('SELECT COUNT(*) FROM chats WHERE telegram_chat_id=?',
+                         (str(CANALE),)).fetchone()[0]
+    c.close()
+    assert in_chats == 0, 'il canale configurato come backup e- rimasto una sorgente'

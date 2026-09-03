@@ -273,16 +273,51 @@ nessun altro lo verifica piu' (`chat_non_disponibile`). Non e' un accesso ai
 dati di un altro utente — nessun parser, feed o token diventa leggibile, e chi
 rivendica vedeva gia' quei messaggi da membro — ma e' la possibilita' di soffiare
 la verifica al titolare e di dirottare quel flusso nei propri parser.
-La chiusura vera vuole una PROVA DI RUOLO: `getChatMember` verso Telegram per
-pretendere `creator`/`administrator`. Oggi `getChatMember` NON compare in main.py
-e `_consuma_codice_di_verifica` riceve solo chat_id, codice, titolo, tipo — mai il
-mittente ne' il suo ruolo. Fino ad allora la mitigazione e' DICHIARATA nella
-schermata: in un gruppo la prova e' piu' debole, e il consiglio e' limitare
-l'invio dei messaggi agli amministratori. `[REAL_FINDING]` di OpenRouter Sol al
-gate della PR #114.
-Il ramo del codice nel webhook e' l'UNICA eccezione al filtro delle chat, ed e'
-tutta l'eccezione: registra una riga in `chats` e consuma il codice, non tocca
-`signals`, non cerca parser, non scrive in `message_logs`.
+CHIUSO dalla #116 per chi usa il percorso principale, e vale la pena dire come:
+NON con `getChatMember`, che era la strada scritta qui prima. Promuovere il bot ad
+amministratore Telegram lo consente solo a chi e' gia' amministratore, e
+`my_chat_member` porta `from`, cioe' chi l'ha fatto, attestato da Telegram: la
+prova di ruolo arriva GRATIS, senza chiamate in uscita e senza i loro modi di
+fallire. Il codice usa-e-getta resta come RIPIEGO, e il ripiego si porta dietro
+la sua prova debole: per questo l'avviso in schermata non va tolto, va spostato
+sul ripiego. `[REAL_FINDING]` di OpenRouter Sol al gate della PR #114.
+
+COLLEGARE UNA CHAT PROMUOVENDO IL BOT (#116). L'utente aggiunge @Betrelay_bot come
+AMMINISTRATORE del canale o del gruppo; Telegram manda un `my_chat_member` con
+`from` = chi l'ha promosso e `new_chat_member.status` = `administrator`/`creator`;
+il servizio registra la chat a nome di quell'utente. Quattro cancelli, ognuno col
+suo test in `tests/relay/test_promozione_bot.py`:
+  - chat PRIVATA: niente, li' il ruolo di amministratore non esiste;
+  - chi promuove dev'essere un utente del servizio (altrimenti non c'e' nessun
+    proprietario da scrivere, e non si inventa);
+  - e dev'essere ATTIVO, o l'amministratore: stesso cancello del codice;
+  - una chat gia' di un ALTRO utente non e' rubabile — e qui il caso e' concreto,
+    perche' due persone possono essere entrambe amministratrici della stessa chat.
+Se il bot viene tolto o retrocesso (`left`/`kicked`/`member`/`restricted`) la riga
+NON si cancella: si aggiorna `chats.bot_stato`. I link ai parser restano, cosi'
+rimettere il bot fa tornare tutto senza riconfigurare. Cancellare butterebbe via
+la configurazione per una retrocessione magari temporanea, o fatta da un altro
+amministratore della chat.
+
+CONFLITTO COL CANALE DI BACKUP (#56), e come e' stato risolto. `_cattura_canale_backup`
+intercetta i `my_chat_member` e si ferma quando chi promuove e' l'amministratore, la
+chat e' un canale PRIVATO e il bot diventa amministratore: cioe' esattamente quando il
+proprietario promuove il bot in un proprio canale di SEGNALI. I due effetti ora NON si
+escludono — il collegamento gira prima, la cattura del backup resta identica — quindi
+la chat si collega E la proposta di backup resta.
+Un canale pero' non puo' essere destinazione dei backup e sorgente di segnali insieme:
+una riga in `chats` lo iscrive all'instradamento del webhook. L'invariante sta sulla
+CONFIGURAZIONE, non sulla proposta, ed e' tenuta sui due versi:
+  - una promozione sul canale GIA' configurato come backup non lo collega;
+  - confermare un candidato che e' anche una chat collegata: con link ai parser → 409
+    col motivo (sono lavoro dell'utente, non si cancellano da soli); senza link, la riga
+    e' solo l'effetto automatico della promozione e si toglie.
+Il secondo ramo non e' un dettaglio: col rifiuto secco, configurare un canale di backup
+sarebbe diventato IMPOSSIBILE — la promozione collega, la conferma rifiuta.
+
+I DUE rami del webhook (il codice e la promozione) sono le UNICHE eccezioni al filtro
+delle chat, e sono tutta l'eccezione: registrano una riga in `chats` e niente altro —
+non toccano `signals`, non cercano parser, non scrivono in `message_logs`.
 
 ATTENZIONE, e vale anche per il percorso legacy: la verifica dimostra che
 l'utente puo' SCRIVERE nel canale, non che il bot possa LEGGERNE i messaggi
