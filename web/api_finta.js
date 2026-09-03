@@ -194,9 +194,25 @@ export async function statoVerificaChat() {
            chat: null };
 }
 
+// Il 404 su una chat che non e' dell'utente e' la risposta del server
+// (`_chat_posseduta`), e qui va riprodotto invece di ignorare l'id in silenzio:
+// un gemello piu' PERMISSIVO dell'originale e' il tipo di divergenza che si
+// scopre in produzione, perche' nella demo il percorso d'errore non esiste mai.
+// Rilievo di GPT-5.5 sulla PR #114.
+function _chatDemo(d, numerico) {
+  const chat = d.chats.find(c => c.id === numerico);
+  if (!chat) {
+    const errore = new Error('chat non trovata');
+    errore.status = 404;
+    throw errore;
+  }
+  return chat;
+}
+
 export async function eliminaChat(id) {
   const d = _statoChat();
   const numerico = Number(id);
+  _chatDemo(d, numerico);
   d.chats = d.chats.filter(c => c.id !== numerico);
   // Come il server, che toglie i link nella STESSA transazione: un link a una
   // chat sparita non sarebbe visibile da nessuna vista e resterebbe li'.
@@ -213,8 +229,10 @@ export async function chatDelParser(slug) {
 
 export async function salvaChatDelParser(slug, chatIds) {
   const d = _statoChat();
-  const esistenti = new Set(d.chats.map(c => c.id));
-  const voluti = chatIds.map(Number).filter(x => esistenti.has(x));
+  // Come il server, che verifica la proprieta' di OGNI id dentro la transazione
+  // e risponde 404: un id sconosciuto non si scarta in silenzio.
+  const voluti = [...new Set(chatIds.map(Number))].sort((a, b) => a - b);
+  for (const id of voluti) _chatDemo(d, id);
   d.parserChats[slug] = voluti;
   salva();
   return voluti.slice();

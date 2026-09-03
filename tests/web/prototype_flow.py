@@ -421,7 +421,14 @@ with sync_playwright() as pw:
     assert 'Nessuna chat autorizzata' in chat_txt, chat_txt[:300]
     # log: quello si', ancora «prossimamente» e non finto (3.3c)
     pg.click('nav a[href="#/logs"]')
-    pg.wait_for_selector('.empty')
+    # Si aspetta il TITOLO, non `.empty`: quello ce l'ha anche la pagina da cui
+    # arriviamo (elenco chat vuoto), quindi combaciava subito e l'asserzione qui
+    # sotto leggeva la pagina PRECEDENTE. La race esisteva gia' — anche il vecchio
+    # segnaposto delle chat era un `.empty` — ma era innocua perche' entrambe le
+    # pagine dicevano «prossimamente»: il test passava per caso. Misurata dalla CI
+    # di questo PR (rossa qui, verde in locale: la race la vince la macchina piu'
+    # lenta), che e' il solo posto in cui si e' vista.
+    pg.wait_for_selector('h1:text-is("Log messaggi")')
     assert 'prossimamente' in pg.inner_text('.main')
     shot(pg, '15-prossimamente')
 

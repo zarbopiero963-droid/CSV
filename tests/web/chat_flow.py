@@ -199,7 +199,10 @@ with sync_playwright() as pw:
     pg.click(f'[data-act="chat-del"][data-id="{id_servizio}"]')
     pg.wait_for_selector('[data-act="chat-del-ok"]')
     pg.click('[data-act="chat-del-ok"]')
-    pg.wait_for_selector('.empty')
+    # Il TESTO dello stato vuoto, non il solo `.empty`: qui non si cambia pagina,
+    # quindi la race di `prototype_flow.py` non c'e' — ma `.empty` da solo e' un
+    # selettore che vive su piu' viste, e un'attesa cosi' e' fragile per costruzione.
+    pg.wait_for_selector('.empty:has-text("Nessuna chat autorizzata")')
     assert 'Canale segnali' not in pg.inner_text('#app'), \
         'la chat eliminata e- ancora nella lista'
     shot(pg, '07-chat-eliminata')
