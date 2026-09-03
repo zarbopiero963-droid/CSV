@@ -743,6 +743,76 @@ def test_un_corpo_json_che_non_e_un_oggetto_da_422_e_non_500(servizio, corpo):
     assert stato == 422, (stato, risposta)
 
 
+def test_un_codice_emesso_da_ATTIVO_non_vale_piu_dopo_la_sospensione(servizio):
+    """Lo stato si ricontrolla al CONSUMO, non solo all'emissione.
+
+    Il cancello su `verify/start` guarda l'accesso nel momento in cui il codice
+    nasce. Ma fra quel momento e l'incollata passano fino a 600 secondi, e in
+    mezzo il proprietario puo' sospendere l'utente: un codice gia' in mano
+    resterebbe spendibile, cioe' aggirerebbe la sospensione per dieci minuti.
+    `[REAL_FINDING]` di OpenRouter Sol al gate della PR #112.
+    """
+    base, percorso_db = servizio
+    cookie, _ = _login_a(base, percorso_db)
+    codice = _codice(base, cookie)
+
+    c = sqlite3.connect(percorso_db)
+    c.execute("UPDATE users SET status='sospeso' WHERE telegram_id=?", (CLIENTE_A,))
+    c.commit()
+    c.close()
+
+    _consegna(base, CANALE_A, codice)
+
+    c = sqlite3.connect(percorso_db)
+    quante = c.execute('SELECT COUNT(*) FROM chats WHERE telegram_chat_id=?',
+                       (CANALE_A,)).fetchone()[0]
+    consumato = c.execute('SELECT consumed_at FROM chat_verifications'
+                          ' WHERE code=?', (codice,)).fetchone()[0]
+    c.close()
+    assert quante == 0, 'un utente sospeso ha registrato una chat con un codice vecchio'
+    assert consumato is None, 'il codice e- stato bruciato per un rifiuto'
+
+
+def test_la_chat_dell_esito_e_correlata_dal_LEGAME_non_dal_secondo(servizio):
+    """La correlazione e' esplicita, non dedotta da due timestamp che coincidono.
+
+    `verified_at` ha la risoluzione del secondo: due chat verificate nello stesso
+    secondo erano indistinguibili, e la scelta fra loro era un'euristica
+    (`ORDER BY id DESC`). Questo test forza proprio quel caso — stesso
+    `verified_at` su due chat dello stesso utente — e pretende la chat GIUSTA,
+    cioe' quella che il codice corrente ha davvero verificato.
+
+    Rilievo ripetuto di OpenRouter Sol e GPT-5.5 sulla PR #112: finche' la
+    correlazione e' un indizio, la risposta e' una scommessa.
+    """
+    base, percorso_db = servizio
+    cookie, _ = _login_a(base, percorso_db)
+    # La sequenza conta, ed e' l'unico modo di distinguere una correlazione vera da
+    # una che indovina: A nasce per prima (id piu' basso), poi B (id piu' alto), poi
+    # si RIVERIFICA A — che aggiorna la riga vecchia invece di crearne una nuova.
+    # La chat giusta e' quindi A, con l'id piu' BASSO, e l'euristica
+    # `ORDER BY id DESC` risponderebbe B. Le prime due stesure di questo test
+    # mettevano la risposta giusta sull'id piu' alto e passavano per fortuna.
+    _verifica(base, cookie, chat=CANALE_A)
+    _verifica(base, cookie, chat=CANALE_B)
+    _verifica(base, cookie, chat=CANALE_A)
+
+    # Le due chat si ritrovano con lo STESSO istante di verifica: e' la collisione
+    # che in produzione capita se due verifiche cadono nello stesso secondo.
+    c = sqlite3.connect(percorso_db)
+    istante = c.execute('SELECT consumed_at FROM chat_verifications').fetchone()[0]
+    c.execute('UPDATE chats SET verified_at=?', (istante,))
+    c.commit()
+    c.close()
+
+    stato, corpo, _ = _chiama(base, 'GET', '/api/chats/verify/status', cookie=cookie)
+    assert stato == 200, corpo
+    esito = json.loads(corpo)
+    assert (esito.get('chat') or {}).get('telegram_chat_id') == CANALE_A, (
+        f'la correlazione ha scelto la chat sbagliata: {esito}'
+    )
+
+
 def test_il_codice_non_compare_nei_log_dei_messaggi(servizio):
     """Un codice in `message_logs` sarebbe riusabile da chi legge quel log."""
     base, percorso_db = servizio

@@ -233,7 +233,10 @@ nemmeno consumato. Vale anche per una chat SENZA proprietario (quelle create dal
 percorso legacy dei profili): non si adotta, perche' puo' portare link ai parser
 di ALTRI utenti. Su chat o parser di un altro la risposta e' 404 (non 403).
 Chiedere un codice e collegare una chat richiedono un accesso ATTIVO: un utente
-solo `registrato` riceve 403. Senza, la verifica sarebbe una porta di servizio
+solo `registrato` riceve 403. Lo stato si ricontrolla anche al CONSUMO del
+codice: chi viene sospeso nei 600 secondi fra la richiesta e l'incollata non
+registra piu' niente (e il codice non viene bruciato, cosi' resta valido se
+l'accesso torna). Senza, la verifica sarebbe una porta di servizio
 verso i segnali senza passare dall'attivazione del proprietario.
 DELETE /api/chats/ID toglie SOLO i link dei parser di chi chiama: una chat puo'
 portare link altrui, e cancellarli tutti fermerebbe i segnali di un altro utente

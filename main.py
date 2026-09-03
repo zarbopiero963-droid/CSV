@@ -1031,6 +1031,12 @@ COLONNE_MULTIUTENTE = (
     # `users` esiste gia' nei database creati dalla PR #22: le colonne che nascono dopo vanno
     # aggiunte con ALTER, o il servizio le cerca e non le trova.
     ('users', 'promemoria_per', 'INTEGER'),
+    # Il LEGAME fra un codice e la chat che ha verificato. Senza, `verify/status`
+    # doveva correlare su `verified_at == consumed_at`, che ha la risoluzione del
+    # secondo: due verifiche ravvicinate erano indistinguibili e la scelta fra loro
+    # un'euristica. Rilievo ripetuto di OpenRouter Sol e GPT-5.5 sulla PR #112 —
+    # finche' la correlazione e' un indizio, la risposta e' una scommessa.
+    ('chat_verifications', 'chat_id', 'INTEGER'),
     ('parsers', 'user_id', 'INTEGER'),
     ('parsers', 'slug', 'TEXT'),
     ('parsers', 'config_json', 'TEXT'),
@@ -6911,25 +6917,24 @@ def stato_verifica_chat(request: Request):
         # L'unica riga dell'utente: `verify/start` cancella le precedenti, quindi
         # questa E' l'ultima verifica — senza dedurlo da un ordinamento.
         riga = c.execute(
-            'SELECT expires_at, consumed_at FROM chat_verifications'
+            'SELECT expires_at, consumed_at, chat_id FROM chat_verifications'
             ' WHERE user_id=?', (utente['id'],)).fetchone()
         chat = None
-        if riga and riga[1]:
+        if riga and riga[1] and riga[2]:
             # La chat verificata DA QUESTO codice, correlata sul momento del
             # consumo: `_consuma_codice_di_verifica` scrive `verified_at` e
             # `consumed_at` con lo stesso valore, nella stessa transazione.
-            #
-            # `ORDER BY id DESC LIMIT 1`: `verified_at` ha la risoluzione del
-            # secondo, quindi due chat verificate dallo stesso utente nello stesso
-            # secondo combaciano entrambe e `fetchone()` ne prenderebbe una a caso
-            # — una risposta che cambia senza che cambi niente. Rischio alzato da
-            # GPT-5.5 sulla PR #112. Fra due candidate la piu' recente e' la
-            # risposta giusta, e in ogni caso e' deterministica.
+            # Il legame ESPLICITO, scritto al consumo nella stessa transazione.
+            # La prima versione correlava su `verified_at == consumed_at`, che ha
+            # la risoluzione del secondo: due verifiche ravvicinate combaciavano
+            # entrambe e la scelta fra loro era un'euristica (`ORDER BY id DESC`),
+            # che sbaglia appena la chat giusta e' una riga vecchia riverificata.
+            # `owner_user_id` resta nella clausola: il legame non deve poter
+            # mostrare la chat di un altro nemmeno se il dato fosse incoerente.
             chat = c.execute(
                 f'SELECT {", ".join(CAMPI_CHAT)} FROM chats'
-                ' WHERE owner_user_id=? AND verified_at=?'
-                ' ORDER BY id DESC LIMIT 1',
-                (utente['id'], riga[1])).fetchone()
+                ' WHERE id=? AND owner_user_id=?',
+                (riga[2], utente['id'])).fetchone()
     finally:
         c.close()
     in_attesa = bool(riga) and not riga[1] and riga[0] > adesso
@@ -7082,13 +7087,23 @@ def _consuma_codice_di_verifica(chat_id, codice):
     c = db()
     try:
         c.execute('BEGIN IMMEDIATE')
+        # Lo stato dell'utente si rilegge QUI, non solo all'emissione: fra il
+        # `verify/start` e l'incollata passano fino a 600 secondi, e in mezzo il
+        # proprietario puo' sospendere o far scadere l'accesso. Un codice gia' in
+        # mano resterebbe altrimenti spendibile per dieci minuti, cioe'
+        # aggirerebbe la sospensione. `[REAL_FINDING]` di OpenRouter Sol, PR #112.
         riga = c.execute(
-            'SELECT user_id FROM chat_verifications'
-            ' WHERE code=? AND consumed_at IS NULL AND expires_at > ?',
+            'SELECT v.user_id, u.status, u.access_expires_at, u.is_admin'
+            ' FROM chat_verifications v JOIN users u ON u.id = v.user_id'
+            ' WHERE v.code=? AND v.consumed_at IS NULL AND v.expires_at > ?',
             (codice, adesso)).fetchone()
         if not riga:
             return {'ok': True, 'ignored': 'codice_non_valido'}
         utente_id = riga[0]
+        if not riga[3] and stato_effettivo(riga[1], riga[2]) != 'attivo':
+            # Il codice NON si consuma: l'accesso puo' tornare, e bruciarlo
+            # costringerebbe a ricominciare chi nel frattempo e' stato riattivato.
+            return {'ok': True, 'ignored': 'accesso_non_attivo'}
         esistente = c.execute(
             f'SELECT id, owner_user_id FROM chats WHERE telegram_chat_id=?'
             f' AND {TOPIC_CHAT}=?', (chat_id, '')).fetchone()
@@ -7112,8 +7127,12 @@ def _consuma_codice_di_verifica(chat_id, codice):
         else:
             c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id, verified_at)'
                       ' VALUES (?,?,?)', (chat_id, utente_id, adesso))
-        c.execute('UPDATE chat_verifications SET consumed_at=? WHERE code=?',
-                  (adesso, codice))
+        registrata = c.execute(
+            f'SELECT id FROM chats WHERE telegram_chat_id=? AND {TOPIC_CHAT}=?',
+            (chat_id, '')).fetchone()
+        c.execute('UPDATE chat_verifications SET consumed_at=?, chat_id=?'
+                  ' WHERE code=?',
+                  (adesso, registrata[0] if registrata else None, codice))
         c.commit()
     finally:
         c.close()

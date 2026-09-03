@@ -1256,10 +1256,17 @@ di ogni canale sconosciuto costi una query.
   restano link altrui la riga di `chats` non si cancella — lascerebbe orfani che
   il dispatch legge ancora — ma viene **disconosciuta**: sparisce dalla lista di
   chi l'ha tolta e torna allo stato legacy;
-- `verify/status` restituisce la chat verificata **da quel codice**, correlata sul
-  momento del consumo (`verified_at == consumed_at`, scritti nella stessa
-  transazione). Restituire «l'ultima chat dell'utente» direbbe «fatto» dopo un
-  codice scaduto, mostrando un canale che con quella verifica non c'entra;
+- `verify/status` restituisce la chat verificata **da quel codice**, e il legame è
+  **esplicito**: `chat_verifications.chat_id`, scritto al consumo nella stessa
+  transazione. La prima versione restituiva «l'ultima chat dell'utente» — cioè
+  diceva «fatto» dopo un codice scaduto, mostrando un canale che con quella
+  verifica non c'entrava; la seconda correlava su `verified_at == consumed_at`,
+  che ha la risoluzione del **secondo** e quindi non distingue due verifiche
+  ravvicinate. Finché la correlazione è un indizio, la risposta è una scommessa;
+- **lo stato dell'utente si ricontrolla al consumo**, non solo all'emissione: fra
+  `verify/start` e l'incollata passano fino a 600 secondi, e in mezzo il
+  proprietario può sospendere l'accesso. Senza, un codice già in mano aggirerebbe
+  la sospensione per dieci minuti;
 - **chiedere un codice e collegare una chat richiedono un accesso `attivo`** (o
   l'amministratore): un utente `registrato` riceve **403**. `ACCESSI_BLOCCATI`
   contiene solo `scaduto` e `sospeso`, quindi prima di questo cancello la catena
