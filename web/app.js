@@ -1824,9 +1824,16 @@ async function viewChats() {
             esc(tempoRimasto(verifica.scade_fra_s))}</span>
         </div>
         <p class="dim small" style="margin:0">
-          Incollare il codice nel canale <strong>è</strong> la prova: solo chi può
-          scrivere lì dentro può autorizzarlo. Il codice vale una volta sola.
+          Incollare il codice lì dentro <strong>è</strong> la prova: può autorizzare
+          quella chat solo chi riesce a scriverci. Il codice vale una volta sola.
         </p>
+        <div class="banner warn" style="margin:0"><span class="small">
+          In un <strong>canale</strong> scrivono solo gli amministratori, quindi la prova
+          è forte. In un <strong>gruppo</strong> può scrivere qualunque membro: chiunque
+          sia dentro potrebbe rivendicarlo prima di te, e poi non sarebbe più
+          disponibile. Se i tuoi segnali arrivano in un gruppo, su Telegram limita
+          l'invio dei messaggi agli amministratori.
+        </span></div>
       </div>`;
   } else if (verifica.in_attesa) {
     // C'è una verifica viva ma il codice non è più in mano: il server non lo
@@ -1858,7 +1865,11 @@ async function viewChats() {
         <p class="muted small" style="margin:0">
           Ricevi un codice, lo incolli <strong>dentro il canale</strong> da cui arrivano i
           segnali, e il canale compare qui. Nessun passaggio dall'assistenza: incollare il
-          codice lì dentro è ciò che dimostra che quel canale è tuo.
+          codice lì dentro è ciò che dimostra che puoi scrivere in quella chat.
+        </p>
+        <p class="dim small" style="margin:0">
+          Funziona anche con un <strong>gruppo</strong>, ma lì la prova è più debole:
+          scrivere in un gruppo lo può fare ogni membro, non solo chi lo gestisce.
         </p>
         <div class="row">
           <button class="primary" data-act="chat-verifica-start">Genera il codice</button>

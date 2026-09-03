@@ -1301,6 +1301,30 @@ di ogni canale sconosciuto costi una query.
 - verificare una chat **non aggira l'attivazione**: i parser di un utente
   `registrato` restano fermi con `access_registrato`, come prima.
 
+**Il limite noto, e va detto perché la prova non è la stessa per tutte le chat.**
+Il meccanismo dimostra che chi presenta il codice **può scrivere** in quella chat.
+Per un **canale** questo coincide col controllarlo, perché su Telegram in un canale
+scrivono solo gli amministratori. Per un **gruppo** no: può scrivere qualunque
+membro, quindi un membro ordinario con un account BetRelay può rivendicare il
+gruppo, e da quel momento nessun altro lo può più verificare (`chat_non_disponibile`).
+
+Cosa questo **non** è: non è un accesso ai dati di un altro utente — nessun parser,
+feed o token diventa leggibile — e chi rivendica il gruppo vedeva già quei messaggi,
+da membro. Cosa **è**: la possibilità di soffiare la verifica al titolare legittimo
+e di dirottare quel flusso nei propri parser.
+
+La chiusura vera richiede una **prova di ruolo**: `getChatMember` verso Telegram per
+pretendere `creator`/`administrator` sul gruppo. Oggi `getChatMember` **non compare in
+`main.py`** e `_consuma_codice_di_verifica` riceve solo `chat_id`, `codice`, `titolo`,
+`tipo` — mai il mittente né il suo ruolo. È una chiamata in uscita sul percorso della
+verifica, con i suoi modi di fallire, quindi vive in una Issue propria e non nel PR
+della web app. `[REAL_FINDING]` di OpenRouter Sol al gate della PR #114.
+
+Fino ad allora la mitigazione è **dichiarata all'utente nella schermata** (vedi
+«Prototipo» → «Chat Telegram»), non taciuta: in un gruppo la prova è più debole, e
+il consiglio è limitare l'invio dei messaggi agli amministratori. È vincolata da
+`tests/web/chat_flow.py`, che pretende quell'avviso nella card del codice.
+
 **Perché non indebolisce il filtro delle chat**, che è una regola non negoziabile:
 il ramo del codice nel webhook è l'eccezione che quella regola già prevede, ed è
 *tutta* l'eccezione. Registra una riga in `chats` e consuma il codice; non tocca
@@ -2606,6 +2630,15 @@ La voce e la vista esistono solo con `admin` vero; il server risponde comunque
     `min ss`, aggiornato dal sondaggio (`GET /api/chats/verify/status`: ogni 3 s per
     il primo minuto — la finestra in cui l'utente sta incollando — poi ogni 15, o
     una scheda dimenticata aperta per i 600 s del TTL farebbe 200 richieste);
+    e in coda un `banner warn` che **dichiara il limite invece di tacerlo**: «In un
+    **canale** scrivono solo gli amministratori, quindi la prova è forte. In un
+    **gruppo** può scrivere qualunque membro: chiunque sia dentro potrebbe
+    rivendicarlo prima di te, e poi non sarebbe più disponibile. Se i tuoi segnali
+    arrivano in un gruppo, su Telegram limita l'invio dei messaggi agli
+    amministratori.» Lo stato senza verifica in corso porta la stessa cosa in forma
+    breve: «Funziona anche con un **gruppo**, ma lì la prova è più debole: scrivere in
+    un gruppo lo può fare ogni membro, non solo chi lo gestisce.» Vincolato da
+    `tests/web/chat_flow.py`;
   - **verifica viva ma codice perso** — card «C'è una verifica in corso»: il codice si
     vede **una volta sola**, ricaricando non ricompare, e il pulsante diventa «Genera un
     codice nuovo» col suo effetto dichiarato («il precedente smette di valere»). È la

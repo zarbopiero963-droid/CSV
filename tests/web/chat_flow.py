@@ -140,6 +140,16 @@ with sync_playwright() as pw:
     for parola in ('copia', 'incolla', 'canale'):
         assert parola in istruzioni, \
             f'le istruzioni non dicono «{parola}»: {istruzioni!r}'
+    # La prova NON e' la stessa per canali e gruppi, e la schermata deve dirlo. In
+    # un canale scrivono solo gli amministratori; in un gruppo scrive ogni membro,
+    # quindi incollare il codice dimostra di poterci scrivere, non di gestirlo.
+    # `[REAL_FINDING]` di OpenRouter Sol al gate della PR #114: il difetto e' del
+    # meccanismo (PR #112), ma una schermata che promette «dimostra che quel canale
+    # e' tuo» lo NASCONDE — e quella schermata e' di questo PR.
+    assert 'gruppo' in istruzioni, f'la card non nomina i gruppi: {istruzioni!r}'
+    assert 'qualunque membro' in istruzioni, (
+        'la card non avverte che in un gruppo puo- scrivere ogni membro: '
+        f'{istruzioni!r}')
     non_sfonda(pg, 'codice mostrato')
     shot(pg, '02-codice')
 

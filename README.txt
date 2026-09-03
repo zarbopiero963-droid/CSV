@@ -263,6 +263,23 @@ id e un titolo non esiste, quindi per quelle righe la web app mostra il numero.
 LIMITE NOTO, non introdotto qui: i topic dei forum Telegram non sono supportati.
 `message_thread_id` non lo scrive nessun percorso e ogni ricerca usa la chat
 radice, quindi verificare in un topic autorizza il gruppo intero.
+
+SECONDO LIMITE NOTO, e la prova NON e' la stessa per tutte le chat. Il codice
+dimostra che chi lo presenta PUO' SCRIVERE in quella chat. Per un CANALE questo
+coincide col controllarlo (su Telegram in un canale scrivono solo gli
+amministratori); per un GRUPPO no, perche' scrive qualunque membro: un membro
+ordinario con un account BetRelay puo' rivendicare il gruppo, e da quel momento
+nessun altro lo verifica piu' (`chat_non_disponibile`). Non e' un accesso ai
+dati di un altro utente — nessun parser, feed o token diventa leggibile, e chi
+rivendica vedeva gia' quei messaggi da membro — ma e' la possibilita' di soffiare
+la verifica al titolare e di dirottare quel flusso nei propri parser.
+La chiusura vera vuole una PROVA DI RUOLO: `getChatMember` verso Telegram per
+pretendere `creator`/`administrator`. Oggi `getChatMember` NON compare in main.py
+e `_consuma_codice_di_verifica` riceve solo chat_id, codice, titolo, tipo — mai il
+mittente ne' il suo ruolo. Fino ad allora la mitigazione e' DICHIARATA nella
+schermata: in un gruppo la prova e' piu' debole, e il consiglio e' limitare
+l'invio dei messaggi agli amministratori. `[REAL_FINDING]` di OpenRouter Sol al
+gate della PR #114.
 Il ramo del codice nel webhook e' l'UNICA eccezione al filtro delle chat, ed e'
 tutta l'eccezione: registra una riga in `chats` e consuma il codice, non tocca
 `signals`, non cerca parser, non scrive in `message_logs`.
