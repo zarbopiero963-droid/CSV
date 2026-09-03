@@ -228,6 +228,17 @@ nemmeno consumato. Su chat o parser di un altro la risposta e' 404 (non 403).
 Il ramo del codice nel webhook e' l'UNICA eccezione al filtro delle chat, ed e'
 tutta l'eccezione: registra una riga in `chats` e consuma il codice, non tocca
 `signals`, non cerca parser, non scrive in `message_logs`.
+
+ATTENZIONE, e vale anche per il percorso legacy: la verifica dimostra che
+l'utente puo' SCRIVERE nel canale, non che il bot possa LEGGERNE i messaggi
+futuri. Sono due cose diverse e la seconda dipende da Telegram:
+  - canale: il bot deve esserne amministratore;
+  - gruppo/supergruppo: con la privacy mode attiva (il default di BotFather) il
+    bot riceve solo i messaggi che lo menzionano o i comandi. Serve
+    /setprivacy Disable, oppure renderlo amministratore del gruppo.
+Il sintomo di questa configurazione mancante e' una chat verificata e collegata
+che non produce nessun segnale, senza errori da nessuna parte: se succede,
+controllare qui prima del parser.
 La config viene validata alla creazione (struttura + dry-run): una config storta da'
 422 col motivo. La prova (/test) e' a secco: non scrive nel feed di nessuno, e dice
 se la condizione ha combaciato e quali colonne obbligatorie mancano.

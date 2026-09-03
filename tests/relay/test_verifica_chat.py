@@ -214,6 +214,43 @@ def test_il_codice_incollato_nel_canale_registra_la_chat(servizio):
     assert chats[0]['verified_at'], 'la chat risulta verificata'
 
 
+def test_riverificare_la_stessa_chat_non_la_duplica_e_non_rompe_i_link(servizio):
+    """Il caso che il vincolo UNIQUE **non** copre da solo, quindi va misurato.
+
+    `chats` ha `UNIQUE (telegram_chat_id, message_thread_id)`, ma la seconda
+    colonna resta NULL — e in SQLite due NULL sono distinti, quindi quel vincolo
+    NON impedisce due righe per lo stesso canale. A tenerlo e' il controllo di
+    esistenza dentro la transazione, che e' codice e non uno schema: senza un
+    test, un domani lo si toglie credendo che il vincolo basti.
+
+    E i link non devono saltare: un utente che riverifica per rinfrescare la
+    scadenza perderebbe altrimenti l'associazione ai propri parser, cioe' i
+    segnali, senza nessun errore. Chiesto da GPT-5.5 sul primo giro di gate.
+    """
+    base, percorso_db = servizio
+    cookie, _ = _login(base)
+    _verifica(base, cookie, chat=CANALE_A)
+    id_chat = _chats(base, cookie)[0]['id']
+    slug = _crea_parser(base, cookie)
+    _chiama(base, 'PUT', f'/api/me/parsers/{slug}/chats', cookie=cookie,
+            corpo={'chat_ids': [id_chat]})
+
+    _verifica(base, cookie, chat=CANALE_A)
+
+    chats = _chats(base, cookie)
+    assert len(chats) == 1, f'la riverifica ha duplicato la chat: {chats}'
+    assert chats[0]['id'] == id_chat, 'la riverifica ha cambiato identita- alla chat'
+
+    c = sqlite3.connect(percorso_db)
+    righe = c.execute('SELECT COUNT(*) FROM chats WHERE telegram_chat_id=?',
+                      (CANALE_A,)).fetchone()[0]
+    link = c.execute('SELECT COUNT(*) FROM parser_chats WHERE chat_id=?',
+                     (id_chat,)).fetchone()[0]
+    c.close()
+    assert righe == 1, f'{righe} righe in `chats` per lo stesso canale'
+    assert link == 1, 'la riverifica ha perso il link al parser'
+
+
 def test_lo_stato_della_verifica_dice_quando_e_arrivata(servizio):
     """La web app deve poter chiedere «e' arrivato?» senza ricaricare tutto.
 
