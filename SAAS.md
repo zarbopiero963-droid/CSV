@@ -2629,7 +2629,14 @@ La voce e la vista esistono solo con `admin` vero; il server risponde comunque
     da solo.» Sotto, il banner «In attesa del codice…» con il tempo che resta in
     `min ss`, aggiornato dal sondaggio (`GET /api/chats/verify/status`: ogni 3 s per
     il primo minuto — la finestra in cui l'utente sta incollando — poi ogni 15, o
-    una scheda dimenticata aperta per i 600 s del TTL farebbe 200 richieste);
+    una scheda dimenticata aperta per i 600 s del TTL farebbe 200 richieste; una
+    richiesta **fallita non ferma il sondaggio**, che riprova al giro successivo:
+    fermarlo lascerebbe la pagina «in attesa» per sempre, cieca sia alla verifica
+    sia alla scadenza, senza che niente lo dica all'utente. La vista chiede lo
+    **stato prima della lista**, o una chat verificata proprio fra le due chiamate
+    resterebbe invisibile fino a un ricaricamento. Entrambe segnalate da CodeRabbit
+    sulla PR #114 e vincolate da `tests/web/chat_flow.py`, che fa fallire una
+    richiesta di proposito e misura l'ordine delle due chiamate d'apertura);
     e in coda un `banner warn` che **dichiara il limite invece di tacerlo**: «In un
     **canale** scrivono solo gli amministratori, quindi la prova è forte. In un
     **gruppo** può scrivere qualunque membro: chiunque sia dentro potrebbe

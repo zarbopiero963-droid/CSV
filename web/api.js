@@ -33,6 +33,18 @@ async function http(metodo, percorso, corpo) {
       method: metodo,
       headers: corpo === undefined ? {} : { 'Content-Type': 'application/json' },
       body: corpo === undefined ? undefined : JSON.stringify(corpo),
+      // `no-store` su OGNI chiamata, e qui invece che sulle due rotte segnalate:
+      // il difetto non è delle chat, è di tutte le GET di questo layer. Il server
+      // non manda `Cache-Control` (tranne `verify/start`, che se lo mette da sé),
+      // e senza intestazione un browser PUÒ conservare euristicamente una 200 —
+      // cioè tenere in cache i parser, il profilo e le chat di CHI HA FATTO
+      // L'ACCESSO, su un computer che magari usa qualcun altro dopo. Correggerlo
+      // in `listaChat` e `statoVerificaChat` avrebbe chiuso i due siti segnalati
+      // da CodeRabbit sulla PR #114 e lasciato viva la classe (regola 2), oltre a
+      // essere una regola da ricordare a ogni funzione nuova. Qui è una volta
+      // sola e vale per tutte. Sulle non-GET non cambia niente: non sono
+      // cacheabili comunque.
+      cache: 'no-store',
     });
   } catch {
     throw new Error('il server non risponde: controlla la connessione');

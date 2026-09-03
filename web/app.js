@@ -1743,7 +1743,16 @@ function sondaVerifica(invocazione, giro = 0) {
     if (invocazione !== generazione) return;
     let st;
     try { st = await api.statoVerificaChat(); }
-    catch { return; }   // un buco di rete non deve svuotare la pagina
+    catch {
+      // Un buco di rete non deve svuotare la pagina — e nemmeno FERMARE il
+      // sondaggio, che è quello che faceva il `return` nudo di prima: una sola
+      // richiesta fallita e la pagina restava «in attesa» per sempre, senza
+      // accorgersi né della verifica né della scadenza, finché l'utente non
+      // ricaricava. Segnalato da CodeRabbit sulla PR #114, e il commento che
+      // stava qui dichiarava proprio l'intenzione che il codice non manteneva.
+      if (invocazione === generazione) sondaVerifica(invocazione, giro + 1);
+      return;
+    }
     if (invocazione !== generazione) return;
     if (st.chat) {
       codiceVerifica = null;   // consumato: non esiste più niente da mostrare
@@ -1793,8 +1802,14 @@ async function viewChats() {
   let chats;
   let verifica;
   try {
-    chats = await api.listaChat();
+    // Lo STATO prima della lista, e l'ordine non è indifferente: se il codice
+    // viene consumato fra le due chiamate, con la lista letta per prima la chat
+    // nuova non c'è, `in_attesa` è già falso — quindi il sondaggio non riparte —
+    // e il canale appena verificato resta invisibile finché l'utente non
+    // ricarica. Leggendo lo stato per primo, la lista che arriva dopo contiene
+    // comunque la chat. Segnalato da CodeRabbit sulla PR #114.
     verifica = await api.statoVerificaChat();
+    chats = await api.listaChat();
   } catch (e) { if (invocazione === generazione) fallita(e); return; }
   if (invocazione !== generazione) return;
 

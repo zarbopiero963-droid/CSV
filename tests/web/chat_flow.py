@@ -60,15 +60,40 @@ errors = []
 # non si limita a ignorare il codice.
 ROTTE_401_ATTESE = ('/api/me',)
 
+# Lo stato del tracciamento delle richieste, per due misure che dal solo DOM non
+# si possono fare: l'ORDINE delle due chiamate d'apertura, e la sopravvivenza del
+# sondaggio a una richiesta fallita. Il guasto e' PROVOCATO da questo script.
+ordine_chiamate = []
+guasto = {'attivo': False, 'fatto': False}
+
 
 def _console(m):
     if m.type != 'error':
         return
-    if 'Failed to load resource' in m.text and '401' in m.text:
+    if 'Failed to load resource' in m.text:
         percorso = (m.location or {}).get('url', '').split('?')[0]
-        if any(percorso.endswith(r) for r in ROTTE_401_ATTESE):
+        if '401' in m.text and any(percorso.endswith(r) for r in ROTTE_401_ATTESE):
+            return
+        # Il fallimento che abbiamo provocato noi su `verify/status`: e' il
+        # contratto che si sta verificando, non un difetto della pagina.
+        if guasto['fatto'] and percorso.endswith('/api/chats/verify/status'):
             return
     errors.append(f'console.{m.type}: {m.text} @ {(m.location or {}).get("url", "")}')
+
+
+def _traccia(route):
+    """Registra l'ordine delle chiamate e, su richiesta, ne fa fallire UNA."""
+    percorso = route.request.url.split('?')[0]
+    if percorso.endswith('/api/chats/verify/status'):
+        ordine_chiamate.append('stato')
+        if guasto['attivo']:
+            guasto['attivo'] = False
+            guasto['fatto'] = True
+            route.abort()
+            return
+    elif percorso.endswith('/api/chats'):
+        ordine_chiamate.append('lista')
+    route.continue_()
 
 
 def shot(page, name):
@@ -108,6 +133,7 @@ with sync_playwright() as pw:
     pg = ctx.new_page()
     pg.on('console', _console)
     pg.on('pageerror', lambda e: errors.append(f'pageerror: {e}'))
+    pg.route('**/api/chats**', _traccia)
 
     # ---- login (porta a password, come gli altri flussi) ------------------
     pg.goto(BASE)
@@ -128,6 +154,13 @@ with sync_playwright() as pw:
     assert 'le collega l' not in testo.lower(), (
         'la vista dice ancora che le chat le collega l-amministratore: '
         f'{testo[:400]!r}')
+    # Lo STATO va chiesto prima della LISTA. Se il codice viene consumato fra le
+    # due chiamate e la lista e' letta per prima, quella chat non c'e', `in_attesa`
+    # e' gia' falso — quindi il sondaggio non riparte — e il canale appena
+    # verificato resta invisibile fino a un ricaricamento. E' una corsa, quindi si
+    # misura l'ORDINE, che e' deterministico. Segnalato da CodeRabbit sulla PR #114.
+    assert ordine_chiamate[:2] == ['stato', 'lista'], (
+        f'la vista chiede la lista prima dello stato: {ordine_chiamate[:4]}')
     non_sfonda(pg, 'chat vuote')
     shot(pg, '01-chat-vuote')
 
@@ -162,9 +195,19 @@ with sync_playwright() as pw:
     shot(pg, '03-codice-non-ripetuto')
 
     # ---- 3) incollato nel canale: la chat compare DA SOLA ----------------
+    # Prima pero' si fa FALLIRE una richiesta del sondaggio. Se una sola richiesta
+    # andata male lo ferma, la pagina resta «in attesa» per sempre — non si accorge
+    # ne' della verifica ne' della scadenza — e l'utente non ha modo di saperlo:
+    # il canale non compare piu' e nessun errore glielo dice. Segnalato da
+    # CodeRabbit sulla PR #114, e il commento nel codice dichiarava proprio
+    # l'intenzione che il codice non manteneva.
+    guasto['attivo'] = True
     stato_webhook, corpo_webhook = consegna(codice)
     assert stato_webhook == 200, (stato_webhook, corpo_webhook)
     pg.wait_for_selector('.list-item:has-text("Canale segnali")', timeout=30000)
+    assert guasto['fatto'], (
+        'il guasto provocato non e- mai stato consegnato: il test non ha '
+        'verificato niente sulla ripresa del sondaggio')
     riga = pg.inner_text('.list-item:has-text("Canale segnali")')
     assert str(CANALE) in riga, f'la riga non mostra l-id della chat: {riga!r}'
     # `chats.id` (la chiave del servizio) NON e' il numero di Telegram: sono due
