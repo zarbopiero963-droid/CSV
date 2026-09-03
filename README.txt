@@ -298,6 +298,21 @@ NON si cancella: si aggiorna `chats.bot_stato`. I link ai parser restano, cosi'
 rimettere il bot fa tornare tutto senza riconfigurare. Cancellare butterebbe via
 la configurazione per una retrocessione magari temporanea, o fatta da un altro
 amministratore della chat.
+`bot_stato` e' un'informazione da MOSTRARE, non un cancello: l'ingestione non lo
+consulta. Cio' che il servizio elabora e' cio' che Telegram gli consegna — se il
+bot non puo' leggere i messaggi non arrivano, se puo' (in un gruppo con
+/setprivacy Disable legge tutto anche da semplice `member`) sono messaggi di una
+chat che l'utente ha autorizzato. Per questo la costante si chiama
+STATI_BOT_NON_AMMINISTRATORE e non «non legge piu'», che sarebbe falso.
+ORDINE DELLE CONSEGNE: un high-water-mark degli `update_id` PER CHAT impedisce
+che una promozione tardiva riscriva `bot_stato` dopo una rimozione piu' recente.
+Stesso meccanismo di `_cattura_canale_backup` (#56), tenuto su una chiave
+separata perche' i due handler vedono lo stesso update.
+LIMITE NOTO e accettato: il segno si alza solo quando si e' AGITO su quella chat,
+quindi una rimozione su una chat mai registrata non lascia traccia e una
+promozione piu' vecchia la collegherebbe comunque. L'alternativa darebbe a
+chiunque il modo di far crescere `impostazioni` senza limite, aggiungendo e
+togliendo il bot da una chat qualsiasi.
 
 CONFLITTO COL CANALE DI BACKUP (#56), e come e' stato risolto. `_cattura_canale_backup`
 intercetta i `my_chat_member` e si ferma quando chi promuove e' l'amministratore, la

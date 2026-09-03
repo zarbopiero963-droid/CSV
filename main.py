@@ -7262,13 +7262,52 @@ def _consuma_codice_di_verifica(chat_id, codice, titolo=None, tipo=None):
 
 # Lo stato del bot in una chat, come Telegram lo riporta in `my_chat_member`.
 # `administrator`/`creator` sono gli unici che PROVANO qualcosa: promuovere un bot ad
-# amministratore Telegram lo consente solo a chi e' gia' amministratore con quel
-# diritto. Gli altri quattro dicono che il servizio non puo' piu' leggere quella chat.
+# amministratore Telegram lo consente solo a chi e' gia' amministratore con quel diritto.
+#
+# Il nome dell'altro gruppo dice «non e' amministratore», e NON «non legge piu'», che e'
+# come l'avevo chiamato prima. Sarebbe stato falso, e il `README.txt` di questo stesso
+# repository lo dice: in un gruppo un bot con `/setprivacy Disable` riceve TUTTI i
+# messaggi anche da semplice `member`. `[REAL_FINDING]` di OpenRouter Sol sulla PR #117,
+# ed era un'affermazione mia che la web app avrebbe ripetuto all'utente.
 STATI_BOT_AMMINISTRATORE = ('administrator', 'creator')
-STATI_BOT_NON_LEGGE = ('left', 'kicked', 'member', 'restricted')
+STATI_BOT_NON_AMMINISTRATORE = ('left', 'kicked', 'member', 'restricted')
+
+# L'high-water-mark degli `update_id` PER CHAT, gemello di `CHIAVE_CANALE_ULTIMO_UPDATE`
+# e tenuto separato da quello: i due handler vedono lo stesso update, e un contatore in
+# comune farebbe scartare all'uno cio' che l'altro ha appena contato.
+CHIAVE_CHAT_ULTIMO_UPDATE = 'chat_collegata_ultimo_update_id'
 
 
-def _segna_stato_del_bot(chat_id, stato):
+def _update_fuori_ordine(c, chat_id, update_id):
+    """`True` se questo update e' piu' VECCHIO dell'ultimo gia' applicato a questa chat.
+
+    Gli `update_id` di Telegram crescono, ma l'elaborazione fuori dall'event loop puo'
+    completarli in ordine diverso, e le riconsegne ripetono un update gia' visto. Senza
+    questo controllo una promozione tardiva riscriverebbe `bot_stato` ad `administrator`
+    dopo una rimozione piu' recente — la chat risulterebbe operativa mentre il bot non
+    c'e' piu'. `[REAL_FINDING]` di OpenRouter Sol sulla PR #117.
+
+    Il precedente esatto e' in questo stesso file: `_cattura_canale_backup` ha
+    l'high-water-mark per canale dalla #56, aggiunto per la stessa ragione. Averlo
+    mancato qui e' regola 2 — il difetto era gia' noto, in un'altra funzione.
+
+    **PER CHAT e non globale**, sempre per il precedente della #56 (bloccante di Claude
+    Fable 5): globale, la promozione di una chat con id alto sopprimerebbe come «fuori
+    ordine» la rimozione LEGITTIMA di un'altra chat con id piu' basso.
+    """
+    ultimo = leggi_impostazione(c, CHIAVE_CHAT_ULTIMO_UPDATE + ':' + chat_id)
+    return update_id.isdigit() and (ultimo or '').isdigit() and int(update_id) <= int(ultimo)
+
+
+def _segna_update_della_chat(c, chat_id, update_id):
+    """Alza l'high-water-mark, nella transazione in corso. Solo quando si e' AGITO su
+    quella chat: un evento di una chat estranea non deve lasciare traccia, o sopprimerebbe
+    eventi legittimi futuri."""
+    if update_id:
+        scrivi_impostazione(c, CHIAVE_CHAT_ULTIMO_UPDATE + ':' + chat_id, update_id)
+
+
+def _segna_stato_del_bot(chat_id, stato, update_id=''):
     """Registra che il bot non e' piu' amministratore di una chat che conosciamo.
 
     **Non cancella niente**, ed e' una decisione del proprietario (Issue #116): la riga
@@ -7276,15 +7315,28 @@ def _segna_stato_del_bot(chat_id, stato):
     riconfigurare. Cancellare butterebbe via il lavoro di configurazione per una
     retrocessione magari temporanea, o fatta da un altro amministratore della chat.
 
+    **`bot_stato` e' un'informazione da MOSTRARE, non un cancello.** L'ingestione non lo
+    consulta, e non e' una dimenticanza: cio' che il servizio elabora e' cio' che Telegram
+    gli consegna. Se il bot non puo' leggere, i messaggi non arrivano e non c'e' niente da
+    filtrare; se puo' — in un gruppo con `/setprivacy Disable` legge tutto anche da
+    semplice `member` — allora sono messaggi di una chat che l'utente ha autorizzato, e
+    scartarli sarebbe un guasto. Gattare l'ingestione su questo campo, per giunta, farebbe
+    perdere segnali veri ogni volta che il valore fosse stantio.
+
     `None` se la chat non e' fra le nostre: non si crea una riga per dire che da
     qualche parte, in una chat che non ci riguarda, il bot non c'e'.
     """
     c = db()
     try:
         c.execute('BEGIN IMMEDIATE')
+        if _update_fuori_ordine(c, chat_id, update_id):
+            c.rollback()
+            return {'ok': True, 'ignored': 'out_of_order'}
         toccate = c.execute(
             f'UPDATE chats SET bot_stato=? WHERE telegram_chat_id=? AND {TOPIC_CHAT}=?',
             (stato, chat_id, '')).rowcount
+        if toccate:
+            _segna_update_della_chat(c, chat_id, update_id)
         c.commit()
     finally:
         c.close()
@@ -7332,8 +7384,9 @@ def _collega_chat_promuovendo_il_bot(payload):
     stato = (aggiornamento.get('new_chat_member') or {}).get('status') or ''
     if not chat_id or (ch.get('type') or '') == 'private':
         return None
-    if stato in STATI_BOT_NON_LEGGE:
-        return _segna_stato_del_bot(chat_id, stato)
+    update_id = str(payload.get('update_id') or '')
+    if stato in STATI_BOT_NON_AMMINISTRATORE:
+        return _segna_stato_del_bot(chat_id, stato, update_id)
     if stato not in STATI_BOT_AMMINISTRATORE:
         return None
     attore = str((aggiornamento.get('from') or {}).get('id') or '')
@@ -7344,6 +7397,9 @@ def _collega_chat_promuovendo_il_bot(payload):
     c = db()
     try:
         c.execute('BEGIN IMMEDIATE')
+        if _update_fuori_ordine(c, chat_id, update_id):
+            c.rollback()
+            return {'ok': True, 'ignored': 'out_of_order'}
         # Il canale di backup CONFIGURATO non si collega mai come sorgente: e' una
         # DESTINAZIONE, e una riga in `chats` lo iscriverebbe all'instradamento del
         # webhook — la regola non negoziabile del filtro delle chat, guardata da
@@ -7371,6 +7427,7 @@ def _collega_chat_promuovendo_il_bot(payload):
                                     titolo, tipo, stato) is None:
             c.rollback()
             return {'ok': True, 'ignored': 'chat_non_disponibile'}
+        _segna_update_della_chat(c, chat_id, update_id)
         c.commit()
     finally:
         c.close()

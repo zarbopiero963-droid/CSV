@@ -359,3 +359,90 @@ def test_il_canale_privato_dell_admin_si_collega_E_resta_candidato_backup(serviz
     c.close()
     assert candidato and candidato[0] == CANALE_A, (
         f'la proposta di canale di backup e- andata persa: {candidato}')
+
+
+# ------------------------------------------------- l'ordine delle consegne
+
+def test_una_riconsegna_vecchia_non_resuscita_il_bot_amministratore(servizio):
+    """Gli `update_id` di Telegram crescono, ma le consegne possono arrivare fuori ordine.
+
+    Senza un ordinamento, una riconsegna tardiva della PROMOZIONE dopo la rimozione
+    riscriverebbe `bot_stato` ad `administrator`: la chat risulterebbe operativa mentre
+    il bot non c'e' piu'. `[REAL_FINDING]` di OpenRouter Sol sulla PR #117 — e il
+    precedente esatto e' in questo stesso file, `_cattura_canale_backup`, dove
+    l'high-water-mark per canale era stato aggiunto per la stessa ragione (#56, Sol B1).
+    Averlo mancato e' regola 2: il difetto era gia' noto, in un'altra funzione.
+    """
+    base, percorso_db = servizio
+    _utente_attivo(base, percorso_db, CLIENTE_A, 'ClienteA')
+    _promozione(base, CANALE_A, CLIENTE_A, update_id=10)
+    _promozione(base, CANALE_A, CLIENTE_A, stato='kicked', update_id=11)
+
+    # La stessa promozione riconsegnata: e' vecchia, non deve tornare indietro.
+    _promozione(base, CANALE_A, CLIENTE_A, update_id=10)
+
+    assert _righe_chat(percorso_db)[0][4] == 'kicked', _righe_chat(percorso_db)
+
+
+def test_una_promozione_tardiva_su_una_chat_GIA_NOSTRA_non_la_ripristina(servizio):
+    """Stessa corsa, sull'altro effetto: dopo la rimozione, una promozione piu' vecchia
+    non deve riportare la chat a operativa."""
+    base, percorso_db = servizio
+    _utente_attivo(base, percorso_db, CLIENTE_A, 'ClienteA')
+    _promozione(base, CANALE_A, CLIENTE_A, update_id=18)
+    _promozione(base, CANALE_A, CLIENTE_A, stato='kicked', update_id=20)
+
+    _promozione(base, CANALE_A, CLIENTE_A, update_id=19)
+
+    assert _righe_chat(percorso_db)[0][4] == 'kicked', _righe_chat(percorso_db)
+
+
+def test_LIMITE_NOTO_una_rimozione_su_una_chat_mai_vista_non_lascia_segno(servizio):
+    """Comportamento noto e accettato, scritto qui per non scoprirlo in produzione.
+
+    L'high-water-mark si alza **solo quando abbiamo agito su quella chat**. Se il bot
+    viene tolto da una chat che non abbiamo mai registrato, non c'e' nessuna riga da
+    marcare e nessun segno resta: una promozione piu' VECCHIA che arrivasse dopo
+    collegherebbe comunque quella chat, con `bot_stato` `administrator` mentre il bot
+    non c'e' piu'.
+
+    **Il baratto, e perche' e' stato scelto cosi'.** L'alternativa e' scrivere il segno
+    anche per le chat che non conosciamo. Ma `my_chat_member` lo puo' provocare
+    CHIUNQUE, aggiungendo e togliendo il bot da una chat qualsiasi: ogni giro
+    lascerebbe una riga in `impostazioni` che non si cancella mai, cioe' una crescita
+    illimitata a comando di un estraneo. Fra una staleness senza conseguenze — la chat
+    non produce niente, perche' il bot non c'e' — e una tabella che chiunque puo' far
+    crescere, si e' scelta la prima.
+
+    Il caso che conta davvero, la chat GIA' registrata, e' invece coperto dai due test
+    qui sopra.
+    """
+    base, percorso_db = servizio
+    _utente_attivo(base, percorso_db, CLIENTE_A, 'ClienteA')
+    _promozione(base, CANALE_A, CLIENTE_A, stato='kicked', update_id=20)
+
+    _promozione(base, CANALE_A, CLIENTE_A, update_id=19)
+
+    righe = _righe_chat(percorso_db)
+    assert len(righe) == 1 and righe[0][4] == 'administrator', (
+        f'il limite noto e- cambiato: rileggere il baratto nel docstring, {righe}')
+
+
+def test_l_ordine_di_una_chat_non_sopprime_gli_eventi_di_un_ALTRA(servizio):
+    """L'high-water-mark e' PER CHAT, non globale.
+
+    Globale, la promozione di un canale con id alto sopprimerebbe come «fuori ordine»
+    la rimozione LEGITTIMA di un altro canale con id piu' basso. E' il bloccante che
+    Claude Fable 5 aveva alzato sul gemello della #56, e vale identico qui.
+    """
+    base, percorso_db = servizio
+    _utente_attivo(base, percorso_db, CLIENTE_A, 'ClienteA')
+    _promozione(base, CANALE_A, CLIENTE_A, update_id=5)
+    _promozione(base, CANALE_B, CLIENTE_A, titolo='Secondo', update_id=50)
+
+    # Rimozione del PRIMO canale, con un id piu' basso di quello del secondo.
+    _promozione(base, CANALE_A, CLIENTE_A, stato='kicked', update_id=6)
+
+    stati = {r[0]: r[4] for r in _righe_chat(percorso_db)}
+    assert stati[CANALE_A] == 'kicked', f'la rimozione legittima e- stata soppressa: {stati}'
+    assert stati[CANALE_B] == 'administrator', stati

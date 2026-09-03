@@ -1351,6 +1351,35 @@ link ai parser restano, così rimettere il bot fa tornare tutto senza riconfigur
 Cancellare butterebbe via la configurazione per una retrocessione magari temporanea, o
 fatta da un altro amministratore della chat. Decisione del proprietario.
 
+**`bot_stato` è un'informazione da mostrare, non un cancello**, e il nome della costante
+lo dice: `STATI_BOT_NON_AMMINISTRATORE`, non «non legge più» — che è come l'avevo chiamata
+e sarebbe stato **falso**, perché in un gruppo un bot con `/setprivacy Disable` riceve
+tutti i messaggi anche da semplice `member` (lo dice il `README.txt` di questo stesso
+repository). `[REAL_FINDING]` di OpenRouter Sol sulla PR #117: era un'affermazione mia che
+la web app avrebbe ripetuto all'utente.
+
+L'ingestione **non** consulta quel campo, e non è una dimenticanza: ciò che il servizio
+elabora è ciò che Telegram gli consegna. Se il bot non può leggere, i messaggi non
+arrivano e non c'è niente da filtrare; se può, sono messaggi di una chat che l'utente ha
+autorizzato. Gattare l'ingestione su un valore che può essere stantio farebbe perdere
+segnali veri.
+
+**L'ordine delle consegne.** Gli `update_id` crescono, ma l'elaborazione fuori
+dall'event loop può completarli in ordine diverso, e le riconsegne ripetono un update già
+visto: senza un high-water-mark **per chat** una promozione tardiva riscriverebbe
+`bot_stato` ad `administrator` dopo una rimozione più recente. Il precedente esatto è in
+questo stesso file — `_cattura_canale_backup` ce l'ha dalla #56, per la stessa ragione — e
+averlo mancato qui è regola 2. Per chat e non globale, sempre per quel precedente: globale,
+la promozione di una chat sopprimerebbe la rimozione legittima di un'altra.
+
+**Limite noto, accettato e testato.** Il segno si alza solo quando si è *agito* su quella
+chat, quindi una rimozione su una chat **mai registrata** non lascia traccia: una
+promozione più vecchia arrivata dopo la collegherebbe comunque. L'alternativa —
+scrivere il segno anche per chat sconosciute — darebbe a **chiunque** il modo di far
+crescere `impostazioni` senza limite, aggiungendo e togliendo il bot da una chat
+qualsiasi. Fra una staleness senza conseguenze (la chat non produce niente, perché il bot
+non c'è) e una tabella che un estraneo può gonfiare, si è scelta la prima.
+
 **Il conflitto col canale di backup (#56), trovato in Phase 0 e non da una review.**
 `_cattura_canale_backup` si ferma quando chi promuove è l'amministratore, la chat è un
 canale **privato** e il bot diventa amministratore — cioè esattamente quando il
