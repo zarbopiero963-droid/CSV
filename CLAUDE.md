@@ -616,13 +616,22 @@ tensione per costruzione. Misurato sulla PR #107: lo stesso falso bloccante prod
 **tre** commit diversi, ogni volta refutato in-thread con `py_compile` invece che con una patch.
 
 Dal 03/09/2026 (Issue #108) il prompt di sistema di **tutti e cinque** i workflow porta in coda un
-blocco `INPUT REDATTO` che dice al modello che il diff è già passato dalla redazione, che i
-marcatori e le stringhe non chiuse che ne risultano sono artefatti del suo input, e che un
-`SyntaxError` dedotto dal solo diff redatto non va segnalato come bloccante. È il gemello del
+blocco `INPUT REDATTO` che dice al modello che il diff è già passato dalla redazione e che i
+marcatori e le stringhe non chiuse che ne risultano sono artefatti del suo input. È il gemello del
 banner «file non inviati / file troncati»: lì si dice cosa **non** ha visto, qui cosa ha visto
 **alterato**. Cinque copie identiche, perché i workflow non fanno checkout; la parità è verificata
 byte per byte da `tests/safety/test_ai_audit_workflows.py`, che estrae il blocco dal
 `system_prompt` reale e non da una costante del test.
+
+**L'avviso ha due metà, e la seconda è arrivata dopo — il che è il pezzo che vale la pena
+leggere.** La prima versione diceva «non segnalare **MAI** come bloccante un `SyntaxError` dedotto
+dal diff redatto». OpenRouter Sol l'ha bloccata al gate della PR #110, e aveva ragione: quel divieto
+assoluto sopprimeva anche gli errori di sintassi **veri**, quelli che nessun marcatore spiega. Un
+avviso nato per togliere rumore stava aprendo un punto cieco in tutti e cinque i gate — cioè lo
+stesso baratto «una protezione che sembra esserci» che questo file censura altrove. Adesso la
+soppressione vale **solo dove c'è evidenza di alterazione** (un marcatore nella riga o vicino), e
+una clausola esplicita dice che senza marcatori l'errore è reale e va segnalato. Quella clausola è
+fra le frasi che la guardia pretende: toglierla fa diventare rosso il test, non solo il buon senso.
 
 Se un reviewer segnala comunque un errore di sintassi su quel file, la refutazione resta la stessa
 e resta misurata: `python -m py_compile tests/safety/test_ai_audit_workflows.py`, esito nel thread,

@@ -1129,6 +1129,13 @@ FRASI_AVVISO_REDAZIONE = (
     '[REDACTED',
     'SyntaxError',
     'tests/safety/test_ai_audit_workflows.py',
+    # La clausola OPPOSTA, e vale quanto le altre quattro messe insieme.
+    # [REAL_FINDING] di OpenRouter Sol al gate finale della PR #110: la prima
+    # versione diceva «non segnalare MAI un SyntaxError dedotto dal diff redatto»,
+    # cioe' sopprimeva anche gli errori di sintassi VERI, che nessun marcatore
+    # spiega. Un avviso nato per togliere rumore diventava un punto cieco in tutti
+    # e cinque i gate. La soppressione vale solo dove c'e' evidenza di alterazione.
+    "l'errore e' reale e va segnalato",
 )
 
 
@@ -1170,8 +1177,13 @@ def test_il_prompt_avverte_che_l_input_e_gia_stato_redatto(path):
     redazione, che deve morderli. Sta nel fatto che nessuno lo diceva al modello.
     """
     avviso = _avviso_redazione(path)
+    # Spazi collassati: le frasi cercate vanno a capo dentro il prompt, e un
+    # confronto letterale le dichiarerebbe assenti a ogni riformattazione. La
+    # parita' fra le cinque copie resta invece sul testo GREZZO, dove una
+    # differenza di spaziatura e' una differenza vera.
+    piatto = ' '.join(avviso.split())
     for frase in FRASI_AVVISO_REDAZIONE:
-        assert frase in avviso, (
+        assert ' '.join(frase.split()) in piatto, (
             f'{path.name}: l-avviso sull-input redatto non nomina {frase!r}. '
             f'Avviso trovato:\n{avviso}'
         )
@@ -1640,6 +1652,20 @@ def test_ogni_default_di_fallback_coincide_con_il_suo_env(path):
             'come default Python. Il giorno che l-env sparisce vince il secondo, '
             'e nessuno se ne accorge.'
         )
+    # Nessun default puo' restare senza il suo env. Il `continue` qui sotto salta
+    # in silenzio la costante che nell'env non c'e', e una costante saltata e' una
+    # costante non misurata — cioe' esattamente il numero scritto e mai verificato
+    # che questa guardia esiste per impedire. Rilievo di Claude Fable 5.1 al gate
+    # finale della PR #110: non bloccante, perche' oggi orfani non ce ne sono, ma
+    # il buco era strutturale e si chiude con una riga.
+    letti_con_default = set(re.findall(
+        r'^\s*([A-Z_]+) = (?:int|float)\(os\.environ\.get\(\s*"\1"', testo, re.M))
+    orfani = sorted(n for n in letti_con_default if n not in ambiente)
+    assert not orfani, (
+        f'{path.name}: {orfani} hanno un default Python ma non sono dichiarati '
+        'nell-env del job. Il confronto qui sotto li salterebbe in silenzio, e il '
+        'valore che governa a runtime sarebbe uno che nessuno ha mai riletto.'
+    )
     for nome in PREZZI_CON_DEFAULT:
         if nome not in ambiente:
             continue

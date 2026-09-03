@@ -1398,13 +1398,18 @@ jobs:
           - I marcatori [REDACTED...] e le stringhe, parentesi o graffe che per
             causa loro risultano non chiuse sono artefatti di quella redazione,
             non codice del repository.
-          - Non segnalare MAI come bloccante un SyntaxError, una stringa non
-            terminata o «la CI non parte» dedotti dal solo diff redatto: sarebbe
-            una conclusione sul tuo input, non sul codice.
-          - Vale in particolare per tests/safety/test_ai_audit_workflows.py, che
-            per mestiere contiene payload finti di segreto e viene quindi redatto
-            sempre: le sue stringhe aperte e mai chiuse sono il risultato atteso
-            della redazione, non un file rotto.
+          - Quando un SyntaxError, una stringa non terminata o «la CI non parte»
+            si spiegano con un marcatore di redazione nella riga o nelle sue
+            vicinanze, NON sono bloccanti: staresti concludendo sul tuo input e
+            non sul codice. Vale in particolare per
+            tests/safety/test_ai_audit_workflows.py, che per mestiere contiene
+            payload finti di segreto e viene quindi redatto sempre: le sue
+            stringhe aperte e mai chiuse sono il risultato atteso della
+            redazione, non un file rotto.
+          - Se invece la riga rotta NON porta marcatori di redazione, l'errore e'
+            reale e va segnalato normalmente. Questo avviso non ti chiede di
+            ignorare gli errori di sintassi: ti chiede di distinguere quelli del
+            repository da quelli che abbiamo introdotto noi nel tuo input.
           """
 
           user_prompt = f"""
