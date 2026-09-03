@@ -286,6 +286,18 @@ with sync_playwright() as pw:
     pg.wait_for_selector('#codice-verifica')
     guasto['perenne'] = True
     pg.wait_for_selector('.toast:has-text("server non risponde")', timeout=60000)
+    # Il toast vive 2,6 secondi. Quello che conta e' cosa resta DOPO: senza una
+    # scritta sulla pagina, chi guarda lo schermo un attimo piu' tardi trova un
+    # «Caricamento…» che non finira' mai e nessuna spiegazione. Si aspetta quindi
+    # che il toast sparisca e si controlla che la pagina parli ancora.
+    pg.wait_for_selector('.toast', state='detached', timeout=15000)
+    testo_guasto = pg.inner_text('#app')
+    assert 'Non riesco a leggere le tue chat' in testo_guasto, (
+        f'sparito il toast, la pagina non spiega piu- niente: {testo_guasto[:300]!r}')
+    assert 'Caricamento' not in testo_guasto, (
+        f'la pagina e- rimasta su «Caricamento…»: {testo_guasto[:300]!r}')
+    assert pg.locator('[data-act="ricarica"]').count() == 1, \
+        'manca il modo di riprovare senza ricaricare tutta la pagina'
     shot(pg, '09-guasto-persistente')
     guasto['perenne'] = False
 

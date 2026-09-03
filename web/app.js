@@ -1826,7 +1826,24 @@ async function viewChats() {
     // comunque la chat. Segnalato da CodeRabbit sulla PR #114.
     verifica = await api.statoVerificaChat();
     chats = await api.listaChat();
-  } catch (e) { if (invocazione === generazione) fallita(e); return; }
+  } catch (e) {
+    if (invocazione !== generazione) return;
+    fallita(e);
+    // E poi si SCRIVE sulla pagina, invece di lasciarla su «Caricamento…».
+    // Il toast vive 2,6 secondi: dopo, chi guarda lo schermo trova una vista che
+    // sta caricando qualcosa che non arriverà mai, e nessuna spiegazione. È il
+    // punto in cui il sondaggio si arrende dopo cinque guasti di fila, quindi è
+    // proprio la schermata che l'utente si ritrova davanti. Misurato sullo
+    // screenshot del flusso, dopo il rilievo di GPT-5.5 sulla PR #114.
+    shell(`
+      <div class="head"><div><h1>Chat Telegram</h1></div></div>
+      <div class="card stack">
+        <strong class="small">Non riesco a leggere le tue chat</strong>
+        <p class="muted small" style="margin:0">${esc(e.message || 'il server non risponde')}</p>
+        <div class="row"><button data-act="ricarica">Riprova</button></div>
+      </div>`);
+    return;
+  }
   if (invocazione !== generazione) return;
 
   const bot = api.settings() && api.settings().bot_username;
@@ -2004,6 +2021,11 @@ const actions = {
   },
 
   copy(el) { copy(el.dataset.val); },
+
+  // «Riprova» dopo un guasto di rete: ridisegna la vista corrente, che rifà le
+  // sue chiamate. Non è `location.reload()` — quello rifarebbe anche il boot e
+  // butterebbe via la sessione in cache per un intoppo passeggero.
+  ricarica() { render(); },
   close() { closeModal(); },
 
   'new-parser'() { modalNewParser(); },

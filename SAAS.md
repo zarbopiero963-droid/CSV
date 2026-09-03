@@ -2634,10 +2634,15 @@ La voce e la vista esistono solo con `admin` vero; il server risponde comunque
     fermarlo lascerebbe la pagina «in attesa» per sempre, cieca sia alla verifica
     sia alla scadenza, senza che niente lo dica all'utente. Ma un guasto
     **persistente** si dice invece di nasconderlo: dopo **cinque** tentativi
-    falliti *di fila* la vista smette e ridisegna, così l'utente vede il motivo
-    («il server non risponde: controlla la connessione») al posto di un'attesa che
-    non finisce. Il conteggio è consecutivo, non totale — un giro riuscito lo
-    azzera — perché un intoppo isolato non deve avvicinare la resa. La vista chiede lo
+    falliti *di fila* la vista smette e ridisegna. Il conteggio è consecutivo, non
+    totale — un giro riuscito lo azzera — perché un intoppo isolato non deve
+    avvicinare la resa. La schermata che ne risulta è una card **«Non riesco a
+    leggere le tue chat»** col motivo del server e il pulsante **«Riprova»**, e non
+    il solo toast: quello vive 2,6 secondi, dopo i quali chi guarda lo schermo
+    troverebbe un «Caricamento…» che non finisce mai e nessuna spiegazione — che è
+    esattamente ciò che si stava correggendo. «Riprova» ridisegna la vista, non
+    ricarica la pagina: un `location.reload()` rifarebbe il boot e butterebbe via
+    la sessione in cache per un intoppo passeggero. La vista chiede lo
     **stato prima della lista**, o una chat verificata proprio fra le due chiamate
     resterebbe invisibile fino a un ricaricamento. Entrambe segnalate da CodeRabbit
     sulla PR #114 e vincolate da `tests/web/chat_flow.py`, che fa fallire una
