@@ -1209,6 +1209,60 @@ DELETE /api/me/parsers/{slug}          elimina il proprio
 POST   /api/me/parsers/{slug}/test     { message } → { matched, missing, complete, diagnosi[], event?, csv? }
 ```
 
+### Le chat verificate dall'utente (#32, pezzo 3.2)
+
+Il pezzo che mancava davvero a un cliente: fino al 03/09/2026 l'unico modo di
+autorizzare un canale era `POST /api/profiles` con l'admin token — il
+proprietario a mano — e la web app lo dichiarava («arriva con uno dei prossimi
+aggiornamenti»).
+
+```text
+POST   /api/chats/verify/start        → { codice, scade_fra_s }
+GET    /api/chats/verify/status       → { in_attesa, scade_fra_s, chat|null }
+GET    /api/chats                       le chat verificate dall'utente
+DELETE /api/chats/{id}                  toglie la chat E i suoi link
+GET    /api/me/parsers/{slug}/chats   → { chat_ids }
+PUT    /api/me/parsers/{slug}/chats     { chat_ids } sostituisce l'insieme
+```
+
+**Il meccanismo, e perché è fatto così.** L'utente chiede un codice; lo **incolla
+nel canale** che vuole autorizzare; il webhook lo riconosce e registra la chat
+come sua. Incollarlo nel canale *è* la prova: chi non può scrivere lì dentro non
+può autorizzarlo, e non esiste altro modo di dimostrare quel controllo senza far
+passare il proprietario.
+
+Il codice ha la forma `BETRELAY-` + 8 caratteri di un alfabeto senza `0/O` e
+`1/I/l` — si trascrive a mano da uno schermo a una chat, e una «O» letta «0»
+produrrebbe un fallimento inspiegabile. Il prefisso non è estetica: permette al
+webhook di decidere sulla **forma**, prima del database, senza che ogni messaggio
+di ogni canale sconosciuto costi una query.
+
+**Le invarianti, tutte vincolate da test:**
+
+- il codice esiste **in chiaro una volta sola**, come il token del feed;
+  `verify/status` non lo ripete a ogni sondaggio;
+- vive 600 secondi ed è **usa-e-getta**: scaduto, consumato o inventato non
+  registra niente;
+- una chat **già di un altro utente non è rubabile** — e in quel caso il codice
+  non viene nemmeno consumato, perché non è colpa di chi l'ha chiesto;
+- `user_id` sempre dalla sessione; su chat o parser di un altro **404**, non 403;
+- eliminare una chat toglie i suoi link nella stessa transazione: una riga di
+  `parser_chats` che riferisce una chat morta non sarebbe visibile da nessuna UI
+  e il dispatch la leggerebbe ancora;
+- verificare una chat **non aggira l'attivazione**: i parser di un utente
+  `registrato` restano fermi con `access_registrato`, come prima.
+
+**Perché non indebolisce il filtro delle chat**, che è una regola non negoziabile:
+il ramo del codice nel webhook è l'eccezione che quella regola già prevede, ed è
+*tutta* l'eccezione. Registra una riga in `chats` e consuma il codice; non tocca
+`signals`, non cerca parser, non guarda `profiles`, non scrive in `message_logs`
+— un codice conservato lì sarebbe rileggibile da chi apre la vista dei log.
+
+**Il modello dati esisteva già e non lo usava nessuno.** `chat_verifications(code,
+user_id, expires_at, consumed_at)` e `chats.owner_user_id / verified_at` erano
+nello schema dalla prima migrazione, con zero letture e zero scritture: mancava
+il comportamento, non le tabelle.
+
 Dal #35 (pezzo 2) la risposta della prova porta anche `righe` — per ogni riga
 generata: `row`, `missing`, `scarti`, `complete` e, dal #25, la sua `diagnosi` —
 con `complete` al livello alto vero se **almeno una** riga è piazzabile e `csv`

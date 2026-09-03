@@ -130,6 +130,22 @@ ROTTE_CON_AUTENTICAZIONE_PROPRIA = {
     ('PUT', '/api/me/parsers/{slug}'): 401,
     ('DELETE', '/api/me/parsers/{slug}'): 401,
     ('POST', '/api/me/parsers/{slug}/test'): 401,
+    # Le chat verificate dall'utente (#32, pezzo 3.2): stessa serratura dei parser —
+    # sessione, non token del feed e non admin token. Il `chat_id` di percorso non
+    # esiste, e la risposta e' comunque **401**: chi non ha sessione non deve
+    # nemmeno sapere se quella chat esista, che e' la stessa ragione per cui le
+    # `/api/admin/*` rispondono 404.
+    #
+    # `PUT /api/me/parsers/{slug}/chats` legge il corpo a mano DOPO il controllo
+    # della sessione, come le altre due rotte col corpo: con un modello Pydantic
+    # FastAPI validerebbe prima e il corpo finto di questo test riceverebbe 422,
+    # cioe' la conferma «questa rotta esiste» a un estraneo.
+    ('GET', '/api/chats'): 401,
+    ('POST', '/api/chats/verify/start'): 401,
+    ('GET', '/api/chats/verify/status'): 401,
+    ('DELETE', '/api/chats/{chat_id}'): 401,
+    ('GET', '/api/me/parsers/{slug}/chats'): 401,
+    ('PUT', '/api/me/parsers/{slug}/chats'): 401,
     # Il feed per utente: la serratura e' il token DELL'UTENTE (hash su `users`),
     # non `CSV_ACCESS_TOKEN`. Ogni fallimento e' **404 uniforme** — slug
     # inesistente, token assente o sbagliato, token altrui — perche' un 401 su

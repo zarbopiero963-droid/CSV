@@ -203,6 +203,31 @@ PUT    /api/me/parsers/SLUG             aggiorna il proprio (lo slug non cambia 
                                         resta incondizionata, come senza "versione".
 DELETE /api/me/parsers/SLUG[?uid=UID]   elimina il proprio (uid = precondizione, #75)
 POST   /api/me/parsers/SLUG/test        body {"message":"..."} -> {matched,missing,scarti,diagnosi,complete,event?,csv?}
+
+CHAT VERIFICATE DALL'UTENTE (#32, pezzo 3.2)
+Fino a qui l'unico modo di autorizzare un canale era POST /api/profiles con
+X-Admin-Token, cioe' il proprietario a mano. Ora il cliente lo fa da solo:
+chiede un codice, lo INCOLLA NEL CANALE, il webhook lo riconosce e registra la
+chat come sua. Incollarlo nel canale e' la prova del controllo: chi non puo'
+scrivere li' dentro non puo' autorizzarlo.
+POST   /api/chats/verify/start          -> {"codice":"BETRELAY-XXXXXXXX","scade_fra_s":600}
+                                        Il codice esiste IN CHIARO UNA VOLTA SOLA,
+                                        come il token del feed. Ogni chiamata invalida
+                                        il codice precedente dello stesso utente.
+GET    /api/chats/verify/status          -> {"in_attesa":bool,"scade_fra_s":N,"chat":{...}|null}
+                                        Per il sondaggio della web app. NON ripete il
+                                        codice: chi l'ha chiesto ce l'ha gia'.
+GET    /api/chats                        le chat verificate dall'utente
+DELETE /api/chats/ID                     toglie una propria chat E i suoi link
+GET    /api/me/parsers/SLUG/chats        -> {"chat_ids":[...]}
+PUT    /api/me/parsers/SLUG/chats        body {"chat_ids":[1,2]} sostituisce l'insieme
+Il codice vive 600 secondi ed e' usa-e-getta (consumato alla prima consegna
+valida). Un codice scaduto, gia' consumato o inventato non registra niente. Una
+chat gia' di un altro utente NON e' rubabile: il codice in quel caso non viene
+nemmeno consumato. Su chat o parser di un altro la risposta e' 404 (non 403).
+Il ramo del codice nel webhook e' l'UNICA eccezione al filtro delle chat, ed e'
+tutta l'eccezione: registra una riga in `chats` e consuma il codice, non tocca
+`signals`, non cerca parser, non scrive in `message_logs`.
 La config viene validata alla creazione (struttura + dry-run): una config storta da'
 422 col motivo. La prova (/test) e' a secco: non scrive nel feed di nessuno, e dice
 se la condizione ha combaciato e quali colonne obbligatorie mancano.
