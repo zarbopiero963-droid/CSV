@@ -386,6 +386,113 @@ def test_una_chat_di_un_altro_utente_non_e_rubabile(servizio):
     )
 
 
+def test_una_chat_SENZA_proprietario_non_si_adotta(servizio):
+    """Le chat del percorso legacy non si prendono con un codice.
+
+    Una riga di `chats` senza `owner_user_id` puo' portare link ai parser di
+    **altri** utenti: `_attacca_link_del_profilo` scrive nei due posti in modo
+    indipendente. Adottarla darebbe al nuovo proprietario una chat che alimenta
+    i parser di qualcun altro, e — con la DELETE — il potere di tagliarne i link.
+    `[REAL_FINDING]` di OpenRouter Sol e rilievo convergente di Claude Fable 5.1
+    al gate della PR #112.
+
+    Nessuna adozione, quindi: non e' un caso da gestire meglio, e' un caso da non
+    avere. Chi ha bisogno di quella chat la fa passare dal proprietario, come
+    oggi.
+    """
+    base, percorso_db = servizio
+    cookie, _ = _login_a(base)
+
+    c = sqlite3.connect(percorso_db)
+    c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id) VALUES (?, NULL)',
+              (CANALE_A,))
+    c.commit()
+    c.close()
+
+    codice = _codice(base, cookie)
+    _consegna(base, CANALE_A, codice)
+
+    assert _chats(base, cookie) == [], (
+        'una chat legacy senza proprietario e- stata adottata con un codice'
+    )
+    c = sqlite3.connect(percorso_db)
+    consumato = c.execute('SELECT consumed_at FROM chat_verifications'
+                          ' WHERE code=?', (codice,)).fetchone()[0]
+    c.close()
+    assert consumato is None, 'il codice e- stato bruciato per un rifiuto'
+
+
+def test_eliminare_una_propria_chat_non_taglia_i_link_di_un_altro(servizio):
+    """La DELETE tocca SOLO i link dei parser di chi chiama.
+
+    Una chat posseduta da A puo' portare link a parser di B: il percorso legacy
+    scrive `chats` e `parser_chats` separatamente, e nulla impone che il
+    proprietario della chat sia il proprietario dei parser collegati. Una DELETE
+    che cancellasse `parser_chats WHERE chat_id=?` senza guardare di chi e' il
+    parser fermerebbe i segnali di B — silenziosamente, e da parte di A.
+    `[REAL_FINDING]` di OpenRouter Sol al gate della PR #112.
+
+    Quando restano link altrui la riga di `chats` non si cancella (lascerebbe
+    orfani che il dispatch legge ancora): il chiamante la **disconosce**, e
+    sparisce dalla sua lista.
+    """
+    base, percorso_db = servizio
+    cookie_a, _ = _login_a(base)
+    _verifica(base, cookie_a, chat=CANALE_A)
+    id_chat = _chats(base, cookie_a)[0]['id']
+
+    cookie_b, _ = _login_b(base)
+    slug_b = _crea_parser(base, cookie_b, 'Parser di B')
+    c = sqlite3.connect(percorso_db)
+    parser_b = c.execute('SELECT id FROM parsers WHERE slug=?', (slug_b,)).fetchone()[0]
+    c.execute('INSERT INTO parser_chats(parser_id, chat_id) VALUES (?,?)',
+              (parser_b, id_chat))
+    c.commit()
+    c.close()
+
+    stato, corpo, _ = _chiama(base, 'DELETE', f'/api/chats/{id_chat}', cookie=cookie_a)
+    assert stato == 200, corpo
+
+    assert _chats(base, cookie_a) == [], 'la chat e- rimasta nella lista di chi l-ha tolta'
+    c = sqlite3.connect(percorso_db)
+    rimasti = c.execute('SELECT parser_id FROM parser_chats WHERE chat_id=?',
+                        (id_chat,)).fetchall()
+    c.close()
+    assert rimasti == [(parser_b,)], (
+        f'il link del parser di un altro utente e- stato tagliato: {rimasti}'
+    )
+
+
+def test_lo_stato_non_spaccia_una_vecchia_chat_per_l_esito_di_un_codice_nuovo(servizio):
+    """Lo stato deve dire l'esito DEL CODICE, non «l'ultima chat che hai».
+
+    Lo scenario: l'utente ha gia' una chat verificata, ne chiede un'altra, e il
+    codice scade senza essere incollato. Uno stato che restituisse l'ultima chat
+    storica direbbe alla web app «fatto», mostrando un canale che con questa
+    verifica non c'entra — un falso positivo che il PR 2 consumerebbe.
+    `[REAL_FINDING]` di OpenRouter Sol al gate della PR #112.
+    """
+    base, percorso_db = servizio
+    cookie, _ = _login_a(base)
+    _verifica(base, cookie, chat=CANALE_A)
+
+    codice_nuovo = _codice(base, cookie)
+    c = sqlite3.connect(percorso_db)
+    c.execute('UPDATE chat_verifications SET expires_at=? WHERE code=?',
+              (int(time.time()) - 1, codice_nuovo))
+    c.commit()
+    c.close()
+
+    stato, corpo, _ = _chiama(base, 'GET', '/api/chats/verify/status', cookie=cookie)
+    assert stato == 200, corpo
+    esito = json.loads(corpo)
+    assert esito['in_attesa'] is False
+    assert esito['scaduto'] is True, esito
+    assert esito.get('chat') is None, (
+        f'lo stato spaccia una vecchia chat per l-esito del codice nuovo: {esito}'
+    )
+
+
 def test_le_chat_elencate_sono_solo_le_proprie(servizio):
     base, _ = servizio
     cookie_a, _ = _login_a(base)

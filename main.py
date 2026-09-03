@@ -6819,10 +6819,17 @@ def lista_chat_mie(request: Request):
 def avvia_verifica_chat(request: Request):
     """Emette un codice usa-e-getta. **In chiaro una volta sola**, come il token del feed.
 
-    Ogni chiamata **invalida il codice precedente** dello stesso utente: cosi' le
-    righe pendenti per utente restano una, e un codice dimenticato in una chat
-    smette di valere appena se ne chiede un altro. Senza, sondare questa rotta
-    accumulerebbe codici tutti spendibili contemporaneamente.
+    Ogni chiamata **cancella ogni riga precedente** dello stesso utente, consumata
+    o no. Due effetti, entrambi voluti: un codice dimenticato in una chat smette
+    di valere appena se ne chiede un altro, e resta **una sola riga per utente** —
+    che e' cio' che rende non ambigua la domanda «com'e' andata l'ultima verifica»
+    in `verify/status`.
+
+    La riga unica non e' un dettaglio implementativo: `chat_verifications` non ha
+    un `created_at`, quindi senza di essa «l'ultimo codice» andrebbe dedotto
+    dall'ordinamento su `expires_at` — che e' monotono con la creazione **solo**
+    finche' nessuno lo riscrive, cioe' una premessa che nessun test puo' tenere.
+    Meglio non avere la domanda che rispondere con un'euristica.
     """
     utente = _sessione_valida(request)
     codice = _nuovo_codice_verifica()
@@ -6830,8 +6837,7 @@ def avvia_verifica_chat(request: Request):
     c = db()
     try:
         c.execute('BEGIN IMMEDIATE')
-        c.execute('DELETE FROM chat_verifications'
-                  ' WHERE user_id=? AND consumed_at IS NULL', (utente['id'],))
+        c.execute('DELETE FROM chat_verifications WHERE user_id=?', (utente['id'],))
         c.execute('INSERT INTO chat_verifications(code, user_id, expires_at)'
                   ' VALUES (?,?,?)', (codice, utente['id'], adesso + TTL_CODICE_VERIFICA_S))
         c.commit()
@@ -6854,31 +6860,52 @@ def stato_verifica_chat(request: Request):
     adesso = int(time.time())
     c = db()
     try:
-        pendente = c.execute(
-            'SELECT expires_at FROM chat_verifications'
-            ' WHERE user_id=? AND consumed_at IS NULL AND expires_at > ?',
-            (utente['id'], adesso)).fetchone()
-        ultima = c.execute(
-            f'SELECT {", ".join(CAMPI_CHAT)} FROM chats WHERE owner_user_id=?'
-            ' ORDER BY verified_at DESC, id DESC LIMIT 1',
-            (utente['id'],)).fetchone()
+        # L'unica riga dell'utente: `verify/start` cancella le precedenti, quindi
+        # questa E' l'ultima verifica — senza dedurlo da un ordinamento.
+        riga = c.execute(
+            'SELECT expires_at, consumed_at FROM chat_verifications'
+            ' WHERE user_id=?', (utente['id'],)).fetchone()
+        chat = None
+        if riga and riga[1]:
+            # La chat verificata DA QUESTO codice, correlata sul momento del
+            # consumo: `_consuma_codice_di_verifica` scrive `verified_at` e
+            # `consumed_at` con lo stesso valore, nella stessa transazione.
+            chat = c.execute(
+                f'SELECT {", ".join(CAMPI_CHAT)} FROM chats'
+                ' WHERE owner_user_id=? AND verified_at=?',
+                (utente['id'], riga[1])).fetchone()
     finally:
         c.close()
+    in_attesa = bool(riga) and not riga[1] and riga[0] > adesso
+    scaduto = bool(riga) and not riga[1] and riga[0] <= adesso
     return _rispondi_con_sessione(
         utente['id'], utente['versione'],
-        {'in_attesa': bool(pendente),
-         'scade_fra_s': max(0, pendente[0] - adesso) if pendente else 0,
-         'chat': _vista_chat(ultima) if ultima else None})
+        {'in_attesa': in_attesa,
+         'scaduto': scaduto,
+         'scade_fra_s': max(0, riga[0] - adesso) if in_attesa else 0,
+         'chat': _vista_chat(chat) if chat else None})
 
 
 @app.delete('/api/chats/{chat_id}')
 def elimina_chat_mia(chat_id: str, request: Request):
-    """Toglie una propria chat **e i suoi link**. 404 se non e' dell'utente.
+    """Toglie una propria chat e **i propri** link. 404 se non e' dell'utente.
 
     I link vanno via nella stessa transazione: una riga di `parser_chats` che
     riferisce una chat cancellata non sarebbe visibile da nessuna UI e il
     dispatch la leggerebbe ancora — la stessa classe del link orfano che la
     PR #4 chiuse sull'altro lato.
+
+    **Ma solo i propri link, e questa e' la parte che si sbaglia facilmente.**
+    Una chat posseduta da A puo' portare link a parser di B: il percorso legacy
+    dei profili scrive `chats` e `parser_chats` separatamente, e nulla impone che
+    il proprietario della chat sia il proprietario dei parser collegati. Un
+    `DELETE FROM parser_chats WHERE chat_id=?` nudo fermerebbe i segnali di B, in
+    silenzio e per mano di A. `[REAL_FINDING]` di OpenRouter Sol sulla PR #112.
+
+    Quando restano link altrui la riga di `chats` **non** si cancella, o quei
+    link diventerebbero orfani: il chiamante la **disconosce** — sparisce dalla
+    sua lista e torna allo stato legacy, senza proprietario. Da li' non e'
+    riadottabile con un codice, per la stessa ragione.
     """
     utente = _sessione_valida(request)
     numerico = _intero_o_404(chat_id, 'chat')
@@ -6886,9 +6913,17 @@ def elimina_chat_mia(chat_id: str, request: Request):
     try:
         c.execute('BEGIN IMMEDIATE')
         _chat_posseduta(c, utente['id'], numerico)
-        c.execute('DELETE FROM parser_chats WHERE chat_id=?', (numerico,))
-        c.execute('DELETE FROM chats WHERE id=? AND owner_user_id=?',
+        c.execute('DELETE FROM parser_chats WHERE chat_id=? AND parser_id IN'
+                  ' (SELECT id FROM parsers WHERE user_id=?)',
                   (numerico, utente['id']))
+        altrui = c.execute('SELECT 1 FROM parser_chats WHERE chat_id=? LIMIT 1',
+                           (numerico,)).fetchone()
+        if altrui:
+            c.execute('UPDATE chats SET owner_user_id=NULL, verified_at=NULL'
+                      ' WHERE id=? AND owner_user_id=?', (numerico, utente['id']))
+        else:
+            c.execute('DELETE FROM chats WHERE id=? AND owner_user_id=?',
+                      (numerico, utente['id']))
         c.commit()
     finally:
         c.close()
@@ -6994,11 +7029,20 @@ def _consuma_codice_di_verifica(chat_id, codice):
         esistente = c.execute(
             f'SELECT id, owner_user_id FROM chats WHERE telegram_chat_id=?'
             f' AND {TOPIC_CHAT}=?', (chat_id, '')).fetchone()
-        if esistente and esistente[1] not in (None, utente_id):
+        if esistente and esistente[1] != utente_id:
+            # Non e' di chi presenta il codice: non si tocca. Vale anche per la
+            # chat SENZA proprietario, e quel caso e' il piu' insidioso dei due —
+            # una riga legacy puo' portare link ai parser di ALTRI utenti, perche'
+            # `_attacca_link_del_profilo` scrive `chats` e `parser_chats` in modo
+            # indipendente e nulla impone che i due proprietari coincidano.
+            # Adottarla darebbe al nuovo proprietario una chat che alimenta i
+            # parser di qualcun altro. `[REAL_FINDING]` di OpenRouter Sol e
+            # rilievo convergente di Claude Fable 5.1 sulla PR #112.
+            #
             # Il codice NON si consuma: non e' colpa di chi l'ha chiesto se il
             # canale e' di un altro, e bruciarglielo lo costringerebbe a
             # ricominciare senza capire.
-            return {'ok': True, 'ignored': 'chat_di_un_altro'}
+            return {'ok': True, 'ignored': 'chat_non_disponibile'}
         if esistente:
             c.execute('UPDATE chats SET owner_user_id=?, verified_at=? WHERE id=?',
                       (utente_id, adesso, esistente[0]))

@@ -214,9 +214,14 @@ POST   /api/chats/verify/start          -> {"codice":"BETRELAY-XXXXXXXX","scade_
                                         Il codice esiste IN CHIARO UNA VOLTA SOLA,
                                         come il token del feed. Ogni chiamata invalida
                                         il codice precedente dello stesso utente.
-GET    /api/chats/verify/status          -> {"in_attesa":bool,"scade_fra_s":N,"chat":{...}|null}
+GET    /api/chats/verify/status          -> {"in_attesa":bool,"scaduto":bool,
+                                            "scade_fra_s":N,"chat":{...}|null}
                                         Per il sondaggio della web app. NON ripete il
                                         codice: chi l'ha chiesto ce l'ha gia'.
+                                        "chat" e' la chat verificata DA QUESTO codice,
+                                        non l'ultima che l'utente possiede: altrimenti
+                                        un codice scaduto mostrerebbe un canale vecchio
+                                        come se fosse l'esito.
 GET    /api/chats                        le chat verificate dall'utente
 DELETE /api/chats/ID                     toglie una propria chat E i suoi link
 GET    /api/me/parsers/SLUG/chats        -> {"chat_ids":[...]}
@@ -224,7 +229,16 @@ PUT    /api/me/parsers/SLUG/chats        body {"chat_ids":[1,2]} sostituisce l'i
 Il codice vive 600 secondi ed e' usa-e-getta (consumato alla prima consegna
 valida). Un codice scaduto, gia' consumato o inventato non registra niente. Una
 chat gia' di un altro utente NON e' rubabile: il codice in quel caso non viene
-nemmeno consumato. Su chat o parser di un altro la risposta e' 404 (non 403).
+nemmeno consumato. Vale anche per una chat SENZA proprietario (quelle create dal
+percorso legacy dei profili): non si adotta, perche' puo' portare link ai parser
+di ALTRI utenti. Su chat o parser di un altro la risposta e' 404 (non 403).
+DELETE /api/chats/ID toglie SOLO i link dei parser di chi chiama: una chat puo'
+portare link altrui, e cancellarli tutti fermerebbe i segnali di un altro utente
+in silenzio. Se ne restano, la riga di `chats` non si cancella (lascerebbe
+orfani) ma viene DISCONOSCIUTA: sparisce dalla lista di chi l'ha tolta.
+LIMITE NOTO, non introdotto qui: i topic dei forum Telegram non sono supportati.
+`message_thread_id` non lo scrive nessun percorso e ogni ricerca usa la chat
+radice, quindi verificare in un topic autorizza il gruppo intero.
 Il ramo del codice nel webhook e' l'UNICA eccezione al filtro delle chat, ed e'
 tutta l'eccezione: registra una riga in `chats` e consuma il codice, non tocca
 `signals`, non cerca parser, non scrive in `message_logs`.

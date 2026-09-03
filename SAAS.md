@@ -1245,6 +1245,27 @@ di ogni canale sconosciuto costi una query.
   registra niente;
 - una chat **già di un altro utente non è rubabile** — e in quel caso il codice
   non viene nemmeno consumato, perché non è colpa di chi l'ha chiesto;
+- **nemmeno una chat senza proprietario si adotta.** È il caso più insidioso dei
+  due: una riga legacy può portare link ai parser di *altri* utenti, perché
+  `_attacca_link_del_profilo` scrive `chats` e `parser_chats` in modo
+  indipendente e nulla impone che i due proprietari coincidano. Adottarla darebbe
+  al nuovo proprietario una chat che alimenta i parser di qualcun altro;
+- `DELETE /api/chats/{id}` toglie **solo i link dei parser di chi chiama**. Una
+  chat posseduta da A può portare link a parser di B, e un `DELETE FROM
+  parser_chats WHERE chat_id=?` nudo fermerebbe i segnali di B in silenzio. Se
+  restano link altrui la riga di `chats` non si cancella — lascerebbe orfani che
+  il dispatch legge ancora — ma viene **disconosciuta**: sparisce dalla lista di
+  chi l'ha tolta e torna allo stato legacy;
+- `verify/status` restituisce la chat verificata **da quel codice**, correlata sul
+  momento del consumo (`verified_at == consumed_at`, scritti nella stessa
+  transazione). Restituire «l'ultima chat dell'utente» direbbe «fatto» dopo un
+  codice scaduto, mostrando un canale che con quella verifica non c'entra;
+- `verify/start` cancella **ogni** riga precedente dell'utente, consumata o no:
+  resta una riga sola, ed è ciò che rende non ambigua la domanda «com'è andata
+  l'ultima verifica». `chat_verifications` non ha un `created_at`, quindi senza
+  quella regola «l'ultimo codice» andrebbe dedotto ordinando per `expires_at` —
+  monotono con la creazione solo finché nessuno lo riscrive, cioè una premessa
+  che nessun test può tenere;
 - `user_id` sempre dalla sessione; su chat o parser di un altro **404**, non 403;
 - eliminare una chat toglie i suoi link nella stessa transazione: una riga di
   `parser_chats` che riferisce una chat morta non sarebbe visibile da nessuna UI
@@ -1262,6 +1283,14 @@ il ramo del codice nel webhook è l'eccezione che quella regola già prevede, ed
 user_id, expires_at, consumed_at)` e `chats.owner_user_id / verified_at` erano
 nello schema dalla prima migrazione, con zero letture e zero scritture: mancava
 il comportamento, non le tabelle.
+
+**Limite noto, e non introdotto qui: i topic dei forum Telegram.** Nessun percorso
+del servizio scrive `message_thread_id`, e ogni ricerca usa `IFNULL(message_thread_id,
+'') = ''`, cioè la chat radice — vale per il dispatch, per il percorso legacy e per
+la verifica. Conseguenza: verificare in un topic autorizza il **gruppo intero**.
+Segnalato da OpenRouter Sol sulla PR #112 e confermato misurando i cinque siti;
+supportare i topic sarebbe una funzione nuova su tutto il modello, non una
+correzione di questo pezzo.
 
 Dal #35 (pezzo 2) la risposta della prova porta anche `righe` — per ogni riga
 generata: `row`, `missing`, `scarti`, `complete` e, dal #25, la sua `diagnosi` —
