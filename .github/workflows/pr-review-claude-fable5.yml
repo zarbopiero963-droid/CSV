@@ -1,6 +1,6 @@
-name: PR Review Claude Fable 5
+name: PR Review Claude Fable 5.1
 
-# Review AI FORTE con Claude Fable 5 (Anthropic Messages API). Costa, quindi
+# Review AI FORTE con Claude Fable 5.1 (Anthropic Messages API). Costa, quindi
 # chiama il modello SOLO quando serve davvero:
 # - automaticamente su un push che tocca file CORE di questo repository (main.py,
 #   web/**, Procfile, railway.json, dipendenze) → analizza il push-range;
@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   review:
-    name: Claude Fable 5 final review
+    name: Claude Fable 5.1 final review
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -45,7 +45,7 @@ jobs:
 
     env:
       BETRELAY_FABLE: ${{ secrets.BETRELAY_FABLE }}
-      ANTHROPIC_MODEL: claude-fable-5
+      ANTHROPIC_MODEL: claude-fable-5-1
       ANTHROPIC_VERSION: "2023-06-01"
 
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -71,7 +71,7 @@ jobs:
       LABEL_EVENTO: ${{ github.event.label.name }}
 
       REVIEW_ID: claude-fable5
-      MODEL_LABEL: Claude Fable 5
+      MODEL_LABEL: Claude Fable 5.1
 
       MAX_PATCH_PER_FILE_CHARS: "5000"
       MAX_TOTAL_PATCH_CHARS: "16000"
@@ -106,13 +106,13 @@ jobs:
 
       PRICE_INPUT_PER_MILLION: "10.00"
       PRICE_CACHE_CREATION_PER_MILLION: "12.50"
-      PRICE_CACHE_READ_PER_MILLION: "1.00"
+      PRICE_CACHE_READ_PER_MILLION: "0.25"
       PRICE_OUTPUT_PER_MILLION: "50.00"
 
       MANUAL_REVIEW_LABEL: manual-review-required
 
     steps:
-      - name: Review pushed commit range with Claude Fable 5
+      - name: Review pushed commit range with Claude Fable 5.1
         shell: bash
         run: |
           set -euo pipefail
@@ -137,7 +137,7 @@ jobs:
               echo "::error::Gate finale armato (label «${FINAL_LABEL}») ma BETRELAY_FABLE assente: review non eseguibile → job fallito (il gate non deve risultare verde)."
               exit 1
             fi
-            echo "::notice::BETRELAY_FABLE non configurato: reviewer Claude Fable 5 saltato (push automatico, nessun check rosso)."
+            echo "::notice::BETRELAY_FABLE non configurato: reviewer Claude Fable 5.1 saltato (push automatico, nessun check rosso)."
             exit 0
           fi
 
@@ -163,7 +163,7 @@ jobs:
           # .strip(): un segreto incollato con newline/spazio finale renderebbe
           # invalido l'header x-api-key (...\n) -> request fallita.
           BETRELAY_FABLE = os.environ["BETRELAY_FABLE"].strip()
-          ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-fable-5")
+          ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-fable-5-1")
           ANTHROPIC_VERSION = os.environ.get("ANTHROPIC_VERSION", "2023-06-01")
           REVIEW_ID = os.environ.get("REVIEW_ID", "claude-fable5")
           MODEL_LABEL = os.environ.get("MODEL_LABEL", ANTHROPIC_MODEL)
@@ -177,7 +177,7 @@ jobs:
 
           PRICE_INPUT_PER_MILLION = float(os.environ.get("PRICE_INPUT_PER_MILLION", "10"))
           PRICE_CACHE_CREATION_PER_MILLION = float(os.environ.get("PRICE_CACHE_CREATION_PER_MILLION", "12.5"))
-          PRICE_CACHE_READ_PER_MILLION = float(os.environ.get("PRICE_CACHE_READ_PER_MILLION", "1"))
+          PRICE_CACHE_READ_PER_MILLION = float(os.environ.get("PRICE_CACHE_READ_PER_MILLION", "0.25"))
           PRICE_OUTPUT_PER_MILLION = float(os.environ.get("PRICE_OUTPUT_PER_MILLION", "50"))
 
           MANUAL_REVIEW_LABEL = os.environ.get("MANUAL_REVIEW_LABEL", "manual-review-required")
@@ -1042,7 +1042,14 @@ jobs:
           # o d'errore (che porta `marker` ma NON `done_marker`) non blocca il retry —
           # fondamentale sul gate a LABEL, dove saltare una review fallita lascerebbe
           # il check verde senza la review forte richiesta (P1 CodeRabbit/Codex).
-          done_marker = f"<!-- {REVIEW_ID}-pr-review-done:xtrader-relay:{range_base[:12]}...{range_head[:12]} -->"
+          # Il MODELLO fa parte della chiave. Senza, un range gia- marcato «fatto»
+          # dal modello precedente faceva uscire il gate VERDE senza chiamare quello
+          # nuovo, e il commento continuava a dichiarare il vecchio: un check verde
+          # che non e- prova di review, dentro il meccanismo che quella regola deve
+          # imporre. Fino al 03/09/2026 la contromisura era una riga di
+          # documentazione — «collauda su un head nuovo». [REAL_FINDING] di
+          # OpenRouter Sol sulla PR #110: una cautela scritta non e- un vincolo.
+          done_marker = f"<!-- {REVIEW_ID}-pr-review-done:xtrader-relay:{ANTHROPIC_MODEL}:{range_base[:12]}...{range_head[:12]} -->"
 
           # Anti-doppia-review a pagamento: se esiste GIÀ una review COMPLETATA per
           # QUESTO range (done_marker), non richiamare il modello — un re-run del
@@ -1150,7 +1157,7 @@ jobs:
 
           if not diff_text.strip():
               published = upsert_comment(marker, f"""{marker}
-          # Claude Fable 5 PR Review
+          # Claude Fable 5.1 PR Review
 
           Nessun patch testuale analizzabile trovato.
 
@@ -1232,6 +1239,31 @@ jobs:
             ognuno max 2 righe. Se non ce ne sono, scrivi esattamente "Nessun bloccante evidente".
           - Niente ripetizione del diff, niente teoria/tutorial/blocchi di codice,
             niente rischi minori, niente miglioramenti opzionali, niente sezioni extra.
+
+          INPUT REDATTO — leggi prima di segnalare un errore di sintassi:
+          - Il diff che ricevi e' gia' passato da una redazione automatica dei
+            segreti, applicata da questo workflow prima di spedirtelo.
+          - I marcatori [REDACTED...] e le stringhe, parentesi o graffe che per
+            causa loro risultano non chiuse sono artefatti di quella redazione,
+            non codice del repository.
+          - Quando un SyntaxError, una stringa non terminata o «la CI non parte»
+            si spiegano con un marcatore di redazione nella riga o nelle sue
+            vicinanze, NON sono bloccanti: staresti concludendo sul tuo input e
+            non sul codice. Vale in particolare per
+            tests/safety/test_ai_audit_workflows.py, che per mestiere contiene
+            payload finti di segreto e viene quindi redatto sempre: le sue
+            stringhe aperte e mai chiuse sono il risultato atteso della
+            redazione, non un file rotto.
+          - Se invece la riga rotta NON porta marcatori di redazione, l'errore e'
+            reale e va segnalato normalmente. Questo avviso non ti chiede di
+            ignorare gli errori di sintassi: ti chiede di distinguere quelli del
+            repository da quelli che abbiamo introdotto noi nel tuo input.
+          - Un marcatore gia' presente nel sorgente e uno inserito dalla redazione
+            si assomigliano, e questo workflow non sa dirti quale dei due stai
+            guardando. Quando il dubbio resta, NON archiviare in silenzio:
+            segnalalo come [INSUFFICIENT_CONTEXT], che non e' un bloccante ma una
+            richiesta di verifica umana. Il silenzio e' l'unica uscita che non
+            lascia traccia.
           """
 
           user_prompt = f"""
@@ -1258,7 +1290,7 @@ jobs:
               review, usage = call_model(system_prompt, user_prompt)
           except Exception as exc:
               review = (
-                  "## Review Claude Fable 5 non completata\n\n"
+                  "## Review Claude Fable 5.1 non completata\n\n"
                   f"Errore sintetico:\n\n```text\n{redact(str(exc))[:3000]}\n```"
               )
               usage = {}
@@ -1283,7 +1315,7 @@ jobs:
           done_line = "" if model_failed else done_marker
 
           body = f"""{marker}{done_line}
-          # Claude Fable 5 PR Review
+          # Claude Fable 5.1 PR Review
 
           **Modalità:** push-range diff via GitHub Compare API
           **Scope:** `{range_scope}`
@@ -1317,7 +1349,7 @@ jobs:
           # resta fail-open: reviewer opzionale che non blocca la PR (Codex P2).
           if model_failed and GATE_FINALE:
               print(
-                  "::error::Gate finale a label: la review Claude Fable 5 non è stata "
+                  "::error::Gate finale a label: la review Claude Fable 5.1 non è stata "
                   "completata (errore provider) → job fallito di proposito."
               )
               sys.exit(1)

@@ -258,9 +258,9 @@ jobs:
           MAX_TOTAL_PATCH_CHARS_ESCALATED = int(os.environ.get("MAX_TOTAL_PATCH_CHARS_ESCALATED", "60000"))
           MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "10000"))
 
-          PRICE_INPUT_PER_MILLION = float(os.environ.get("PRICE_INPUT_PER_MILLION", "0"))
-          PRICE_OUTPUT_PER_MILLION = float(os.environ.get("PRICE_OUTPUT_PER_MILLION", "0"))
-          PRICE_CACHE_READ_PER_MILLION = float(os.environ.get("PRICE_CACHE_READ_PER_MILLION", "0"))
+          PRICE_INPUT_PER_MILLION = float(os.environ.get("PRICE_INPUT_PER_MILLION", "5.00"))
+          PRICE_OUTPUT_PER_MILLION = float(os.environ.get("PRICE_OUTPUT_PER_MILLION", "30.00"))
+          PRICE_CACHE_READ_PER_MILLION = float(os.environ.get("PRICE_CACHE_READ_PER_MILLION", "0.50"))
 
           MANUAL_REVIEW_LABEL = os.environ.get("MANUAL_REVIEW_LABEL", "manual-review-required")
 
@@ -1135,7 +1135,14 @@ jobs:
           # o d'errore (che porta `marker` ma NON `done_marker`) non blocca il retry —
           # fondamentale sul gate a LABEL, dove saltare una review fallita lascerebbe
           # il check verde senza la review forte richiesta (P1 CodeRabbit/Codex).
-          done_marker = f"<!-- {REVIEW_ID}-pr-review-done:xtrader-relay:{range_base[:12]}...{range_head[:12]} -->"
+          # Il MODELLO fa parte della chiave. Senza, un range gia- marcato «fatto»
+          # dal modello precedente faceva uscire il gate VERDE senza chiamare quello
+          # nuovo, e il commento continuava a dichiarare il vecchio: un check verde
+          # che non e- prova di review, dentro il meccanismo che quella regola deve
+          # imporre. Fino al 03/09/2026 la contromisura era una riga di
+          # documentazione — «collauda su un head nuovo». [REAL_FINDING] di
+          # OpenRouter Sol sulla PR #110: una cautela scritta non e- un vincolo.
+          done_marker = f"<!-- {REVIEW_ID}-pr-review-done:xtrader-relay:{MODEL_ID}:{range_base[:12]}...{range_head[:12]} -->"
 
           # Anti-doppia-review a pagamento: se esiste GIÀ una review COMPLETATA per
           # QUESTO range (done_marker), non richiamare il modello — un re-run del
@@ -1325,6 +1332,31 @@ jobs:
             ognuno max 2 righe. Se non ce ne sono, scrivi esattamente "Nessun bloccante evidente".
           - Niente ripetizione del diff, niente teoria/tutorial/blocchi di codice,
             niente rischi minori, niente miglioramenti opzionali, niente sezioni extra.
+
+          INPUT REDATTO — leggi prima di segnalare un errore di sintassi:
+          - Il diff che ricevi e' gia' passato da una redazione automatica dei
+            segreti, applicata da questo workflow prima di spedirtelo.
+          - I marcatori [REDACTED...] e le stringhe, parentesi o graffe che per
+            causa loro risultano non chiuse sono artefatti di quella redazione,
+            non codice del repository.
+          - Quando un SyntaxError, una stringa non terminata o «la CI non parte»
+            si spiegano con un marcatore di redazione nella riga o nelle sue
+            vicinanze, NON sono bloccanti: staresti concludendo sul tuo input e
+            non sul codice. Vale in particolare per
+            tests/safety/test_ai_audit_workflows.py, che per mestiere contiene
+            payload finti di segreto e viene quindi redatto sempre: le sue
+            stringhe aperte e mai chiuse sono il risultato atteso della
+            redazione, non un file rotto.
+          - Se invece la riga rotta NON porta marcatori di redazione, l'errore e'
+            reale e va segnalato normalmente. Questo avviso non ti chiede di
+            ignorare gli errori di sintassi: ti chiede di distinguere quelli del
+            repository da quelli che abbiamo introdotto noi nel tuo input.
+          - Un marcatore gia' presente nel sorgente e uno inserito dalla redazione
+            si assomigliano, e questo workflow non sa dirti quale dei due stai
+            guardando. Quando il dubbio resta, NON archiviare in silenzio:
+            segnalalo come [INSUFFICIENT_CONTEXT], che non e' un bloccante ma una
+            richiesta di verifica umana. Il silenzio e' l'unica uscita che non
+            lascia traccia.
           """
 
           user_prompt = f"""

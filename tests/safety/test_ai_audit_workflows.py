@@ -99,6 +99,17 @@ def _carica(path: Path) -> dict:
     return yaml.safe_load(path.read_text(encoding='utf-8'))
 
 
+def _ambiente(path: Path) -> dict:
+    """L'ambiente effettivo del job `review`: quello del workflow, sovrascritto dal suo.
+
+    Esiste perche' la stessa fusione era ricopiata a mano in piu' test, e un test che
+    guardasse solo `doc['env']` non vedrebbe una variabile ridefinita nel job — cioe'
+    guarderebbe un valore che a runtime non vince.
+    """
+    doc = _carica(path)
+    return {**(doc.get('env') or {}), **(doc['jobs']['review'].get('env') or {})}
+
+
 def _trigger(path: Path) -> dict:
     """La sezione `on:` del workflow.
 
@@ -154,8 +165,41 @@ def test_TUTTI_i_workflow_esistono():
 
 def test_yaml_valido_e_nome_atteso():
     assert _carica(GPT)['name'] == 'PR Review GPT-5.5'
-    assert _carica(FABLE)['name'] == 'PR Review Claude Fable 5'
+    assert _carica(FABLE)['name'] == 'PR Review Claude Fable 5.1'
     assert _carica(SOL)['name'] == 'PR Review GPT-5.6 Sol'
+
+
+# Il nome del JOB e' il nome del CHECK che compare sulla PR: e' quello che si legge
+# nel gate di completamento e quello che si scriverebbe fra i required check. Non
+# era pinnato da niente — si poteva cambiare senza che diventasse rosso nulla, e
+# quindi senza accorgersene. Emerso migrando Fable a 5.1 (Issue #108).
+NOMI_DEI_CHECK = {
+    'pr-review-gpt55.yml': 'GPT-5.5 push-range review',
+    'pr-review-openrouter-gpt55.yml': 'OpenRouter GPT-5.5 push-range review',
+    'pr-review-claude-fable5.yml': 'Claude Fable 5.1 final review',
+    'pr-review-gpt56-sol.yml': 'GPT-5.6 Sol final review',
+    'pr-review-openrouter-sol.yml': 'OpenRouter Sol final review',
+}
+
+
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
+def test_il_nome_del_check_sulla_pr_e_quello_dichiarato(path):
+    """Cambiarlo e- lecito, cambiarlo per sbaglio no.
+
+    Un nome di check che cambia senza che nessuno lo sappia rompe chi lo aspetta:
+    il gate di completamento di `CLAUDE.md` lo nomina, e un required check che si
+    riferisse al nome vecchio lascerebbe il merge appeso a qualcosa che non arriva
+    piu-. Se il cambio e- voluto, si aggiorna questa tabella e la documentazione
+    nello stesso PR — che e' esattamente il punto di avere la guardia.
+    """
+    atteso = NOMI_DEI_CHECK[path.name]
+    reale = _carica(path)['jobs']['review']['name']
+    assert reale == atteso, (
+        f'{path.name}: il check sulla PR si chiama {reale!r}, la tabella dice '
+        f'{atteso!r}. Se il nome nuovo e- voluto, aggiorna la tabella e le '
+        'menzioni in CLAUDE.md; se non lo e-, e- una modifica accidentale che '
+        'nessun altro test avrebbe visto.'
+    )
 
 
 # ------------------------------------------------------------- gate costo
@@ -1073,6 +1117,153 @@ def test_il_preambolo_del_contesto_e_davvero_nel_prompt(path):
     )
 
 
+# --------------------------------------------- avviso «il tuo input e' redatto»
+
+MARCATORE_AVVISO_REDAZIONE = 'INPUT REDATTO'
+
+# Le frasi che l'avviso deve dire, non l'avviso intero: la parita' fra le cinque
+# copie e' gia' verificata byte per byte dal test qui sotto, quindi qui basta
+# impedire che l'avviso venga svuotato in tutte e cinque insieme.
+FRASI_AVVISO_REDAZIONE = (
+    'redazione',
+    '[REDACTED',
+    'SyntaxError',
+    'tests/safety/test_ai_audit_workflows.py',
+    # La clausola OPPOSTA, e vale quanto le altre quattro messe insieme.
+    # [REAL_FINDING] di OpenRouter Sol al gate finale della PR #110: la prima
+    # versione diceva «non segnalare MAI un SyntaxError dedotto dal diff redatto»,
+    # cioe' sopprimeva anche gli errori di sintassi VERI, che nessun marcatore
+    # spiega. Un avviso nato per togliere rumore diventava un punto cieco in tutti
+    # e cinque i gate. La soppressione vale solo dove c'e' evidenza di alterazione.
+    "l'errore e' reale e va segnalato",
+    # La PROVENIENZA del marcatore. Secondo [REAL_FINDING] di OpenRouter Sol sulla
+    # PR #110: un `[REDACTED...]` gia' presente nel sorgente e' indistinguibile da
+    # uno inserito dalla redazione, quindi «riga con marcatore -> non e' un difetto»
+    # puo' occultare un errore vero. Questo file di test ne contiene per mestiere.
+    # Il dubbio non si sopprime in silenzio: si etichetta [INSUFFICIENT_CONTEXT],
+    # lo stesso trattamento gia' previsto per i file troncati.
+    'INSUFFICIENT_CONTEXT',
+)
+
+
+def _system_prompt(path: Path) -> str:
+    """Il testo del prompt di sistema, preso dal workflow reale."""
+    m = re.search(r'^([ \t]*)system_prompt = """\n(.*?)\n\1"""$',
+                  path.read_text(encoding='utf-8'), re.S | re.M)
+    assert m, f'{path.name}: system_prompt non trovato'
+    return textwrap.dedent(m.group(2))
+
+
+def _avviso_redazione(path: Path) -> str:
+    """La coda del prompt di sistema che parla dell'input redatto."""
+    prompt = _system_prompt(path)
+    assert MARCATORE_AVVISO_REDAZIONE in prompt, (
+        f'{path.name}: il prompt di sistema non avverte il modello che il diff che '
+        'riceve e- gia- passato dalla redazione dei segreti. Senza, un file che per '
+        'mestiere contiene payload finti di segreto arriva con stringhe aperte e mai '
+        'chiuse, e il modello conclude — correttamente rispetto a cio- che vede — che '
+        'la CI non parte. Falso bloccante ricorrente, Issue #108.'
+    )
+    return prompt[prompt.index(MARCATORE_AVVISO_REDAZIONE):].rstrip()
+
+
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
+def test_il_prompt_avverte_che_l_input_e_gia_stato_redatto(path):
+    """Il gemello del banner «file non inviati», sull'altro modo di non vedere il codice.
+
+    Li' si dice al modello cosa NON ha visto; qui cosa ha visto ALTERATO. La
+    redazione dei segreti gira sul diff prima di spedirlo, e sul file che contiene
+    i payload di prova della redazione stessa produce righe come
+    `'password=[REDACTED]',` — una stringa Python aperta e mai chiusa.
+
+    Misurato sulla PR #107: lo stesso falso bloccante prodotto da GPT-5.5 su tre
+    commit diversi, ogni volta refutato in-thread con `py_compile` invece che con
+    una patch. Non e' occasionale: si ripresenta a OGNI push che tocca quel file.
+
+    Il difetto non e' ne' nel file di test — deve contenere quei payload — ne' nella
+    redazione, che deve morderli. Sta nel fatto che nessuno lo diceva al modello.
+    """
+    avviso = _avviso_redazione(path)
+    # Spazi collassati: le frasi cercate vanno a capo dentro il prompt, e un
+    # confronto letterale le dichiarerebbe assenti a ogni riformattazione. La
+    # parita' fra le cinque copie resta invece sul testo GREZZO, dove una
+    # differenza di spaziatura e' una differenza vera.
+    piatto = ' '.join(avviso.split())
+    for frase in FRASI_AVVISO_REDAZIONE:
+        assert ' '.join(frase.split()) in piatto, (
+            f'{path.name}: l-avviso sull-input redatto non nomina {frase!r}. '
+            f'Avviso trovato:\n{avviso}'
+        )
+
+
+@pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
+def test_il_marcatore_di_dedup_cambia_col_modello(path):
+    """Cambiare modello deve invalidare la dedup, o il gate mente sul suo esito.
+
+    Il `done_marker` conteneva `REVIEW_ID` e gli SHA del range, e NIENTE del
+    modello. Conseguenza misurata sul codice durante la migrazione a Fable 5.1: su
+    una PR il cui range portava gia' un `done_marker` prodotto dal modello vecchio,
+    il riarmo della label usciva **verde senza chiamare quello nuovo**, e il
+    commento continuava a dichiarare il modello vecchio. Un gate finale che si
+    dichiara superato da una review fatta da un altro modello e' la classe «un
+    check verde non e' prova di review», arrivata dentro il meccanismo che quella
+    regola doveva imporre.
+
+    Fino al 03/09/2026 la contromisura era una riga di documentazione — «collauda
+    su un head nuovo». [REAL_FINDING] di OpenRouter Sol al gate della PR #110: una
+    cautela scritta non e' un vincolo. Ora il modello e' dentro la chiave.
+
+    L'asserzione guarda i CAMPI della f-string, estratti dal parser di formato
+    della libreria standard: se il modello e' fra i segnaposto, il suo valore
+    finisce nella stringa, e un modello diverso produce un marcatore diverso.
+
+    **Senza `eval`, e questa e' una correzione.** La prima versione costruiva il
+    marcatore due volte con `eval` per confrontare i risultati. Piu' diretto e
+    sbagliato: `eval` di una f-string estratta da un file che una PR puo'
+    modificare, con i builtin disponibili, dentro il runner della CI — cioe'
+    esecuzione arbitraria offerta a chiunque apra una PR, con i permessi del job.
+    [REAL_FINDING] di OpenRouter Sol al gate della PR #110, accolto: una guardia
+    non deve creare il buco che nessun'altra parte del repository ha.
+    """
+    import string
+
+    sorgente = _script(path)
+    modello = re.search(r'"model":\s*([A-Z_]+)', sorgente)
+    assert modello, f'{path.name}: variabile del modello non trovata nel payload'
+    riga = re.search(r'^\s*done_marker = f"(.*)"$', sorgente, re.M)
+    assert riga, f'{path.name}: costruzione di done_marker non trovata'
+
+    # `field_name` puo' portare indici o attributi (`range_base[:12]`): conta la
+    # radice, cioe' il nome della variabile interpolata.
+    campi = {
+        campo.split('[')[0].split('.')[0]
+        for _, campo, _, _ in string.Formatter().parse(riga.group(1))
+        if campo
+    }
+    assert modello.group(1) in campi, (
+        f'{path.name}: il done_marker non interpola {modello.group(1)}, quindi non '
+        f'cambia col modello (segnaposto presenti: {sorted(campi)}). Un range gia- '
+        'marcato «fatto» dal modello precedente fa uscire il gate VERDE senza '
+        'chiamare quello nuovo, e il commento continua a dichiarare il vecchio.'
+    )
+
+
+def test_l_avviso_sull_input_redatto_e_identico_nelle_cinque_copie():
+    """Cinque copie perche' i workflow non fanno checkout e non importano un modulo.
+
+    Stessa forma della tabella di redazione e di `PRIORITA_PAYLOAD`: la fonte unica
+    non e' possibile, quindi la parita' va misurata. Un avviso corretto in quattro
+    copie e assente nella quinta e- il caso peggiore, perche- il reviewer che manca
+    e- l'unico che continua a produrre il falso bloccante e nessuno sa perche-.
+    """
+    copie = {p.name: _avviso_redazione(p) for p in TUTTI}
+    distinte = set(copie.values())
+    assert len(distinte) == 1, (
+        'le cinque copie dell-avviso divergono:\n'
+        + '\n'.join(f'--- {n} ---\n{t}' for n, t in copie.items())
+    )
+
+
 @pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
 def test_un_file_TAGLIATO_a_meta_non_si_confonde_con_uno_non_inviato(path):
     """Due stati diversi, e il peggiore dei due era invisibile.
@@ -1480,6 +1671,19 @@ TETTI_CON_DEFAULT = (
     'MAX_OUTPUT_TOKENS',
 )
 
+# I prezzi sono la seconda meta' della stessa nozione, ed erano INVISIBILI al test:
+# la sua regex pretendeva `int(os.environ.get(...))` e i listini usano `float(...)`.
+# Misurato il 03/09/2026 disallineando il prezzo cache fra env e default Python:
+# 460 test passati, nessuno rosso. Un listino sbagliato non rompe niente — riporta
+# un costo falso, che e' esattamente il genere di numero scritto e mai misurato che
+# questo repository ha gia' pagato sul BOM.
+PREZZI_CON_DEFAULT = (
+    'PRICE_INPUT_PER_MILLION',
+    'PRICE_OUTPUT_PER_MILLION',
+    'PRICE_CACHE_READ_PER_MILLION',
+    'PRICE_CACHE_CREATION_PER_MILLION',
+)
+
 
 @pytest.mark.parametrize('path', TUTTI, ids=lambda p: p.name)
 def test_ogni_default_di_fallback_coincide_con_il_suo_env(path):
@@ -1487,10 +1691,20 @@ def test_ogni_default_di_fallback_coincide_con_il_suo_env(path):
 
     Il default Python non e' documentazione: e' il valore che governa davvero il
     giorno in cui l'env sparisce. Se dice altro dall'env, il workflow ha due
-    politiche e quella che vince e' quella che nessuno ha riletto."""
+    politiche e quella che vince e' quella che nessuno ha riletto.
+
+    I prezzi si confrontano per VALORE e non per testo: `"10.00"` nell'env e `"10"`
+    come default sono lo stesso listino, e un confronto fra stringhe li dichiarerebbe
+    diversi rendendo il test rumore invece che guardia."""
     testo = path.read_text(encoding='utf-8')
-    doc = _carica(path)
-    ambiente = doc['jobs']['review'].get('env') or {}
+    # `_ambiente` e non `jobs.review.env`: a runtime valgono ENTRAMBI i livelli, e
+    # guardare solo quello del job dichiarerebbe «orfana» una costante dichiarata
+    # a livello workflow — un rosso falso su una configurazione legittima.
+    # [INSUFFICIENT_CONTEXT] di Claude Fable 5.1 al gate della PR #110, verificato:
+    # oggi nessuno dei cinque ha un env a livello workflow, quindi la CI non era
+    # rossa; ma la guardia usava una nozione piu- stretta di quella vera, e
+    # `_ambiente` — scritto in questo stesso PR — e' la fonte unica delle due.
+    ambiente = _ambiente(path)
     for nome in TETTI_CON_DEFAULT:
         if nome not in ambiente:
             continue
@@ -1502,6 +1716,36 @@ def test_ogni_default_di_fallback_coincide_con_il_suo_env(path):
             f'{path.name}: {nome} vale {ambiente[nome]!r} nell-env e {m.group(1)!r} '
             'come default Python. Il giorno che l-env sparisce vince il secondo, '
             'e nessuno se ne accorge.'
+        )
+    # Nessun default puo' restare senza il suo env. Il `continue` qui sotto salta
+    # in silenzio la costante che nell'env non c'e', e una costante saltata e' una
+    # costante non misurata — cioe' esattamente il numero scritto e mai verificato
+    # che questa guardia esiste per impedire. Rilievo di Claude Fable 5.1 al gate
+    # finale della PR #110: non bloccante, perche' oggi orfani non ce ne sono, ma
+    # il buco era strutturale e si chiude con una riga.
+    letti_con_default = set(re.findall(
+        r'^\s*([A-Z_]+) = (?:int|float)\(os\.environ\.get\(\s*"\1"', testo, re.M))
+    orfani = sorted(n for n in letti_con_default if n not in ambiente)
+    assert not orfani, (
+        f'{path.name}: {orfani} hanno un default Python ma non sono dichiarati '
+        'nell-env del job. Il confronto qui sotto li salterebbe in silenzio, e il '
+        'valore che governa a runtime sarebbe uno che nessuno ha mai riletto.'
+    )
+    for nome in PREZZI_CON_DEFAULT:
+        if nome not in ambiente:
+            continue
+        m = re.search(
+            rf'{nome}\s*=\s*float\(os\.environ\.get\(\s*"{nome}"\s*,\s*"([\d.]+)"',
+            testo)
+        assert m, (
+            f'{path.name}: {nome} e- nell-env ma Python non lo rilegge con un default '
+            'float. Se la forma e- cambiata, aggiorna questa guardia invece di '
+            'lasciarla cieca: cieca era il suo stato precedente.'
+        )
+        assert float(m.group(1)) == float(str(ambiente[nome]).strip()), (
+            f'{path.name}: {nome} vale {ambiente[nome]!r} nell-env e {m.group(1)!r} '
+            'come default Python. Il rendiconto dei costi userebbe il secondo il '
+            'giorno che l-env sparisce, e riporterebbe un numero falso senza errore.'
         )
 
 
@@ -2118,6 +2362,41 @@ def test_il_gate_dichiara_il_modello_e_l_etichetta_separati():
         'il prezzo dei token dalla cache non e- dichiarato'
 
 
+def test_fable_dichiara_il_modello_e_l_etichetta_separati():
+    """Il gemello del test sopra, per l'unico workflow su API Anthropic.
+
+    Mancava, e la sua assenza non era innocua: Fable non appartiene ne' a
+    `SU_V1_RESPONSES` ne' a `SU_CHAT_COMPLETIONS`, quindi era l'unico dei cinque
+    senza NESSUNA guardia sull'id del modello — proprio quello col gate finale piu'
+    caro. Misurato il 03/09/2026 sostituendo `ANTHROPIC_MODEL` con un modello
+    inesistente: 460 test passati, nessuno rosso.
+
+    Qui il listino di Claude Fable 5.1 e' inchiodato in un posto solo. Il prezzo
+    delle letture dalla cache e' 0.25 e non 1.00 come su Fable 5: sono 0,025x
+    l'input base invece di 0,1x, l'unica voce che cambia fra i due modelli.
+
+    La label del gate NON cambia col modello: `final-fable-review` esiste nel repo,
+    e rinominarla senza che il proprietario crei la nuova renderebbe il gate non
+    armabile (404 sull'API). Stesso precedente di Fugu -> Sol.
+    """
+    doc = _carica(FABLE)
+    env = {**(doc.get('env') or {}), **(doc['jobs']['review'].get('env') or {})}
+    assert env.get('ANTHROPIC_MODEL') == 'claude-fable-5-1', \
+        f'modello inatteso: {env.get("ANTHROPIC_MODEL")}'
+    assert env.get('MODEL_LABEL') == 'Claude Fable 5.1', (
+        'l-etichetta mostrata nel commento non nomina il modello che ha davvero '
+        f'revisionato: {env.get("MODEL_LABEL")}'
+    )
+    assert env.get('FINAL_LABEL') == 'final-fable-review', (
+        'la label del gate e- cambiata: se la nuova non esiste nel repository, '
+        'aggiungerla via API da- 404 e il gate finale non e- armabile'
+    )
+    assert float(env.get('PRICE_CACHE_READ_PER_MILLION')) == 0.25, (
+        'il prezzo delle letture dalla cache non e- quello di Fable 5.1 (0.25): '
+        f'{env.get("PRICE_CACHE_READ_PER_MILLION")}'
+    )
+
+
 def _call_model_del_gate(monkeypatch, risposta=None, errore=None, path=SOL):
     """Esegue `call_model` di un workflow su `v1/responses` con una finta `urlopen`.
 
@@ -2687,6 +2966,27 @@ def test_la_premessa_della_whitelist_di_fable_resta_vera(monkeypatch):
         'il payload di Fable ora spedisce `stop_sequences`: `stop_reason=stop_sequence` '
         f'diventa un esito atteso e va aggiunto a `MOTIVI_COMPLETI`. Corpo: {sorted(corpo)}'
     )
+    assert corpo.get('model') == _ambiente(FABLE)['ANTHROPIC_MODEL'], (
+        'il modello spedito ad Anthropic non e- quello dichiarato nell-env del '
+        f'workflow: spedito {corpo.get("model")!r}, dichiarato '
+        f'{_ambiente(FABLE)["ANTHROPIC_MODEL"]!r}. E- la guardia che i quattro '
+        'workflow su OpenAI hanno da sempre e Fable non aveva: senza, cambiare '
+        'l-env non cambia nulla e la migrazione del modello resta a meta-.'
+    )
+    # Le tre modifiche incompatibili di Claude Fable 5.1 riguardano `tools`,
+    # `thinking` e il riuso della cronologia. Le prime due sono gia- coperte qui
+    # sopra e qui sotto; il riuso non e- possibile perche- `messages` ha un solo
+    # elemento costruito ex novo a ogni chiamata.
+    assert 'thinking' not in corpo, (
+        'il payload di Fable ora spedisce `thinking`: su Claude Fable 5.1 sia '
+        '`enabled` sia `disabled` danno 400, e il gate finale sarebbe rosso a ogni '
+        f'armamento. Ometterlo e- la forma ammessa. Corpo: {sorted(corpo)}'
+    )
+    assert [m['role'] for m in corpo['messages']] == ['user'], (
+        'la cronologia spedita a Fable non e- piu- un solo turno utente: su Claude '
+        'Fable 5.1 modificare turni precedenti invalida i blocchi di pensiero. '
+        f'Ruoli: {[m["role"] for m in corpo["messages"]]}'
+    )
 
 
 def _call_model_di_fable(monkeypatch, risposta):
@@ -2723,7 +3023,10 @@ def _call_model_di_fable(monkeypatch, risposta):
 
     monkeypatch.setattr(urllib.request, 'urlopen', finta_urlopen)
     spazio: dict = {
-        'ANTHROPIC_MODEL': 'claude-fable-5',
+        # Letto DAL WORKFLOW, non cablato. Cablarlo rendeva qualunque asserzione sul
+        # modello spedito vera per costruzione: il test avrebbe confermato la propria
+        # costante anche con il workflow che ne dichiara un'altra.
+        'ANTHROPIC_MODEL': _ambiente(FABLE)['ANTHROPIC_MODEL'],
         'ANTHROPIC_VERSION': '2023-06-01',
         'MAX_OUTPUT_TOKENS': 3_000,
         'BETRELAY_FABLE': 'chiave-finta-non-un-segreto',
