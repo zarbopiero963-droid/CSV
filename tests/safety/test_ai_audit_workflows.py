@@ -1689,8 +1689,14 @@ def test_ogni_default_di_fallback_coincide_con_il_suo_env(path):
     come default sono lo stesso listino, e un confronto fra stringhe li dichiarerebbe
     diversi rendendo il test rumore invece che guardia."""
     testo = path.read_text(encoding='utf-8')
-    doc = _carica(path)
-    ambiente = doc['jobs']['review'].get('env') or {}
+    # `_ambiente` e non `jobs.review.env`: a runtime valgono ENTRAMBI i livelli, e
+    # guardare solo quello del job dichiarerebbe «orfana» una costante dichiarata
+    # a livello workflow — un rosso falso su una configurazione legittima.
+    # [INSUFFICIENT_CONTEXT] di Claude Fable 5.1 al gate della PR #110, verificato:
+    # oggi nessuno dei cinque ha un env a livello workflow, quindi la CI non era
+    # rossa; ma la guardia usava una nozione piu- stretta di quella vera, e
+    # `_ambiente` — scritto in questo stesso PR — e' la fonte unica delle due.
+    ambiente = _ambiente(path)
     for nome in TETTI_CON_DEFAULT:
         if nome not in ambiente:
             continue
