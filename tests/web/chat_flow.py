@@ -194,6 +194,24 @@ with sync_playwright() as pw:
         'il codice e- ricomparso dopo il ricaricamento: non e- piu- usa-e-getta'
     shot(pg, '03-codice-non-ripetuto')
 
+    # ---- 2-ter) il codice non sopravvive a un cambio di sessione ---------
+    # Il codice e' legato all'UTENTE, non alla sola pagina: dopo «Esci» non deve
+    # ricomparire nemmeno rientrando. Il percorso misurato qui e' quello
+    # raggiungibile (logout esplicito); il legame `{utente, codice}` chiude anche
+    # quello che oggi non lo e' — un cambio d'utente senza ricaricare — che oggi
+    # e' impedito solo dal `location.reload()` di `fallita` sul 401, cioe' da una
+    # difesa altrui. `[REAL_FINDING]` di OpenRouter Sol sulla PR #114.
+    pg.click('[data-act="logout"]')
+    pg.wait_for_selector('#login-pass')
+    pg.fill('#login-user', UTENTE_PROVA)
+    pg.fill('#login-pass', PASSWORD_PROVA)
+    pg.click('[data-act="login-password"]')
+    pg.wait_for_selector('nav a[href="#/chats"]')
+    pg.click('nav a[href="#/chats"]')
+    pg.wait_for_selector('#verifica-in-corso')
+    assert codice not in pg.inner_text('#app'), \
+        'il codice e- sopravvissuto al logout: non e- legato alla sessione'
+
     # ---- 3) incollato nel canale: la chat compare DA SOLA ----------------
     # Prima pero' si fa FALLIRE una richiesta del sondaggio. Se una sola richiesta
     # andata male lo ferma, la pagina resta «in attesa» per sempre — non si accorge

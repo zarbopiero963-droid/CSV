@@ -2672,7 +2672,13 @@ La voce e la vista esistono solo con `admin` vero; il server risponde comunque
 
   **Il codice non viene mai conservato**: vive in una variabile di modulo finché la
   pagina resta aperta, e «Esci» la azzera. In `localStorage` sopravviverebbe alla
-  sessione che l'ha chiesto — è la stessa regola del token del feed.
+  sessione che l'ha chiesto — è la stessa regola del token del feed. La variabile
+  porta **l'utente insieme al codice** (`{utente, codice}`) e la vista lo mostra solo
+  se combacia con la sessione corrente: senza quel legame la difesa sarebbe
+  incidentale — riposerebbe sul `location.reload()` che `fallita` fa sul 401 e sul
+  fatto che «Esci» si ricordi di azzerare — e chi un domani facesse mostrare a
+  `fallita` una schermata di login invece di ricaricare aprirebbe il buco senza
+  accorgersene. È la stessa lezione di `chiaveCampione` in `api.js`.
 - **Chat assegnate** (il tab dentro ogni parser, 3.2 PR 2): «Chat da cui questo parser
   legge», una casella per ognuna delle proprie chat e **«Salva»**
   (`PUT /api/me/parsers/{slug}/chats`). La nota dice la cosa che si sbaglia da sola:

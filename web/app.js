@@ -1725,7 +1725,26 @@ function viewFeed() {
 // aperta. Non in localStorage: è un valore che autorizza qualcosa, e lì
 // sopravviverebbe alla sessione che l'ha chiesto — e a chi usa quel browser
 // dopo. È la stessa regola del token del feed, che non viene mai conservato.
-let codiceVerifica = null;
+// Porta anche l'UTENTE, non il solo codice, ed è la lezione della `chiaveCampione`
+// in api.js — dove il messaggio di esempio finiva a un altro account sullo stesso
+// browser (`[REAL_FINDING]` di GPT-5.6 Sol, PR #50). Qui Sol ha alzato lo stesso
+// dubbio sulla PR #114, e misurato NON è raggiungibile: l'unico modo di cambiare
+// utente senza ricaricare la pagina è «Esci», che questa variabile la azzera, e
+// ogni 401 passa da `fallita`, che fa `location.reload()` — il modulo riparte e
+// con esso la variabile. Ma quella difesa è INCIDENTALE: riposa su due
+// comportamenti altrui, e chi un domani facesse mostrare a `fallita` una schermata
+// di login invece di ricaricare aprirebbe il buco senza accorgersene. Legare il
+// codice al suo utente lo chiude per costruzione, che è il modo in cui questo
+// repository ha già deciso di trattare i valori che autorizzano qualcosa.
+let codiceVerifica = null;   // { utente, codice }
+
+// Il codice SOLO se è di chi sta guardando adesso. Un utente diverso — o nessun
+// utente — non lo vede, qualunque cosa sia rimasta in memoria.
+function codiceDellaSessione() {
+  const u = api.me();
+  if (!codiceVerifica || !u || codiceVerifica.utente !== u.utente) return null;
+  return codiceVerifica.codice;
+}
 
 // Il sondaggio mentre l'utente incolla il codice nel canale: si RIchiama da solo
 // finché la vista è quella, e muore appena `render()` incrementa la generazione
@@ -1848,13 +1867,14 @@ async function viewChats() {
 
   const bot = api.settings() && api.settings().bot_username;
   let pannello;
-  if (verifica.in_attesa && codiceVerifica) {
+  const codiceDaMostrare = codiceDellaSessione();
+  if (verifica.in_attesa && codiceDaMostrare) {
     pannello = `
       <div class="card stack">
         <strong class="small">Autorizza un canale o un gruppo</strong>
         <div class="row"><span class="pill">1</span>
           <span class="small">Copia il codice qui sotto.</span></div>
-        ${copyRow(codiceVerifica, 'copy', 'codice-verifica')}
+        ${copyRow(codiceDaMostrare, 'copy', 'codice-verifica')}
         <div class="row"><span class="pill">2</span>
           <span class="small">Incollalo come messaggio <strong>dentro il canale o il
             gruppo</strong> che vuoi autorizzare.</span></div>
@@ -2550,7 +2570,11 @@ const actions = {
   async 'chat-verifica-start'() {
     // Il codice esiste in chiaro solo in QUESTA risposta: si tiene in memoria
     // per mostrarlo, e non si scrive da nessuna parte.
-    try { codiceVerifica = (await api.avviaVerificaChat()).codice; }
+    try {
+      const utente = api.me();
+      codiceVerifica = { utente: utente && utente.utente,
+                         codice: (await api.avviaVerificaChat()).codice };
+    }
     catch (e) { fallita(e); return; }
     render();
   },
