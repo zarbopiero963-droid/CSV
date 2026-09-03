@@ -1732,7 +1732,16 @@ let codiceVerifica = null;
 // (cambio pagina, azione, ricaricamento della lista). Nessun `setInterval` da
 // spegnere a mano: un timer che sopravvive alla vista continua a battere sul
 // server in sottofondo, ed è il modo in cui questi cicli diventano eterni.
-function sondaVerifica(invocazione, giro = 0) {
+// Quanti tentativi andati male DI FILA prima di smettere e dirlo. Il conteggio è
+// consecutivo, non totale: un giro riuscito lo azzera, quindi un singolo intoppo
+// non avvicina la resa. Serve perché la ripresa dopo l'errore, da sola, sposta il
+// difetto invece di chiuderlo — con la rete giù il sondaggio ritenterebbe finché
+// la scheda resta aperta, e la pagina continuerebbe a dire «in attesa» di una
+// cosa che non sta arrivando. Rilievo di GPT-5.5 sulla PR #114, sul commit che
+// aveva appena corretto il difetto opposto.
+const GUASTI_DI_SEGUITO = 5;
+
+function sondaVerifica(invocazione, giro = 0, guasti = 0) {
   if (invocazione !== generazione) return;
   // I primi venti giri — circa un minuto — ogni 3 secondi: è la finestra in cui
   // l'utente sta davvero incollando, e lì la reattività si vede. Dopo, ogni 15:
@@ -1750,7 +1759,14 @@ function sondaVerifica(invocazione, giro = 0) {
       // accorgersi né della verifica né della scadenza, finché l'utente non
       // ricaricava. Segnalato da CodeRabbit sulla PR #114, e il commento che
       // stava qui dichiarava proprio l'intenzione che il codice non manteneva.
-      if (invocazione === generazione) sondaVerifica(invocazione, giro + 1);
+      //
+      // Ma la ripresa da sola non basta: un guasto TRANSITORIO si assorbe, uno
+      // PERSISTENTE va detto. Dopo `GUASTI_DI_SEGUITO` tentativi falliti di fila
+      // si smette e si ridisegna — la vista rilegge lo stato e, se il server non
+      // risponde ancora, l'utente vede il motivo invece di un'attesa infinita.
+      if (invocazione !== generazione) return;
+      if (guasti + 1 >= GUASTI_DI_SEGUITO) { render(); return; }
+      sondaVerifica(invocazione, giro + 1, guasti + 1);
       return;
     }
     if (invocazione !== generazione) return;
@@ -1763,7 +1779,7 @@ function sondaVerifica(invocazione, giro = 0) {
     if (!st.in_attesa) { render(); return; }   // scaduto: la vista lo dice
     const box = document.getElementById('verifica-scadenza');
     if (box) box.textContent = tempoRimasto(st.scade_fra_s);
-    sondaVerifica(invocazione, giro + 1);
+    sondaVerifica(invocazione, giro + 1, 0);   // riuscito: il conteggio riparte
   }, attesa);
 }
 

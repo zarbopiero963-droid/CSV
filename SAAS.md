@@ -2632,7 +2632,12 @@ La voce e la vista esistono solo con `admin` vero; il server risponde comunque
     una scheda dimenticata aperta per i 600 s del TTL farebbe 200 richieste; una
     richiesta **fallita non ferma il sondaggio**, che riprova al giro successivo:
     fermarlo lascerebbe la pagina «in attesa» per sempre, cieca sia alla verifica
-    sia alla scadenza, senza che niente lo dica all'utente. La vista chiede lo
+    sia alla scadenza, senza che niente lo dica all'utente. Ma un guasto
+    **persistente** si dice invece di nasconderlo: dopo **cinque** tentativi
+    falliti *di fila* la vista smette e ridisegna, così l'utente vede il motivo
+    («il server non risponde: controlla la connessione») al posto di un'attesa che
+    non finisce. Il conteggio è consecutivo, non totale — un giro riuscito lo
+    azzera — perché un intoppo isolato non deve avvicinare la resa. La vista chiede lo
     **stato prima della lista**, o una chat verificata proprio fra le due chiamate
     resterebbe invisibile fino a un ricaricamento. Entrambe segnalate da CodeRabbit
     sulla PR #114 e vincolate da `tests/web/chat_flow.py`, che fa fallire una

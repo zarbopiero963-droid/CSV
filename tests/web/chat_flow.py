@@ -64,7 +64,7 @@ ROTTE_401_ATTESE = ('/api/me',)
 # si possono fare: l'ORDINE delle due chiamate d'apertura, e la sopravvivenza del
 # sondaggio a una richiesta fallita. Il guasto e' PROVOCATO da questo script.
 ordine_chiamate = []
-guasto = {'attivo': False, 'fatto': False}
+guasto = {'attivo': False, 'fatto': False, 'perenne': False}
 
 
 def _console(m):
@@ -86,7 +86,7 @@ def _traccia(route):
     percorso = route.request.url.split('?')[0]
     if percorso.endswith('/api/chats/verify/status'):
         ordine_chiamate.append('stato')
-        if guasto['attivo']:
+        if guasto['attivo'] or guasto['perenne']:
             guasto['attivo'] = False
             guasto['fatto'] = True
             route.abort()
@@ -272,6 +272,22 @@ with sync_playwright() as pw:
     assert pg.locator(f'#chat-assegnate input[data-chat-id="{id_servizio}"]').count() == 0, \
         'la chat eliminata compare ancora fra quelle assegnabili'
     shot(pg, '08-parser-senza-chat')
+
+    # ---- 6) un guasto PERSISTENTE si dice, non si nasconde ---------------
+    # La ripresa dopo l'errore, da sola, sposta il difetto invece di chiuderlo:
+    # con la rete giu' il sondaggio ritenterebbe finche' la scheda resta aperta,
+    # e la pagina continuerebbe a dire «In attesa del codice…» di una cosa che non
+    # sta arrivando. Dopo cinque tentativi falliti DI FILA deve smettere e mostrare
+    # il motivo. Rilievo di GPT-5.5 sulla PR #114, sul commit che aveva appena
+    # corretto il difetto opposto.
+    pg.click('nav a[href="#/chats"]')
+    pg.wait_for_selector('[data-act="chat-verifica-start"]')
+    pg.click('[data-act="chat-verifica-start"]')
+    pg.wait_for_selector('#codice-verifica')
+    guasto['perenne'] = True
+    pg.wait_for_selector('.toast:has-text("server non risponde")', timeout=60000)
+    shot(pg, '09-guasto-persistente')
+    guasto['perenne'] = False
 
     ctx.close()
     b.close()
