@@ -1213,28 +1213,36 @@ def test_il_marcatore_di_dedup_cambia_col_modello(path):
     su un head nuovo». [REAL_FINDING] di OpenRouter Sol al gate della PR #110: una
     cautela scritta non e' un vincolo. Ora il modello e' dentro la chiave.
 
-    L'asserzione e' COMPORTAMENTALE: si costruisce il marcatore due volte
-    cambiando solo il modello e si guarda se il risultato cambia. Cercare il nome
-    della variabile nel testo sarebbe verde anche con un'interpolazione che non
-    finisce nella stringa.
+    L'asserzione guarda i CAMPI della f-string, estratti dal parser di formato
+    della libreria standard: se il modello e' fra i segnaposto, il suo valore
+    finisce nella stringa, e un modello diverso produce un marcatore diverso.
+
+    **Senza `eval`, e questa e' una correzione.** La prima versione costruiva il
+    marcatore due volte con `eval` per confrontare i risultati. Piu' diretto e
+    sbagliato: `eval` di una f-string estratta da un file che una PR puo'
+    modificare, con i builtin disponibili, dentro il runner della CI — cioe'
+    esecuzione arbitraria offerta a chiunque apra una PR, con i permessi del job.
+    [REAL_FINDING] di OpenRouter Sol al gate della PR #110, accolto: una guardia
+    non deve creare il buco che nessun'altra parte del repository ha.
     """
+    import string
+
     sorgente = _script(path)
     modello = re.search(r'"model":\s*([A-Z_]+)', sorgente)
     assert modello, f'{path.name}: variabile del modello non trovata nel payload'
-    riga = re.search(r'^\s*done_marker = (f".*")$', sorgente, re.M)
+    riga = re.search(r'^\s*done_marker = f"(.*)"$', sorgente, re.M)
     assert riga, f'{path.name}: costruzione di done_marker non trovata'
 
-    def costruisci(valore_modello: str) -> str:
-        spazio = {
-            'REVIEW_ID': 'id-finto',
-            'range_base': 'a' * 40,
-            'range_head': 'b' * 40,
-            modello.group(1): valore_modello,
-        }
-        return eval(riga.group(1), spazio)  # noqa: S307 - sorgente del repo
-
-    assert costruisci('modello-vecchio') != costruisci('modello-nuovo'), (
-        f'{path.name}: il done_marker non cambia col modello. Un range gia- '
+    # `field_name` puo' portare indici o attributi (`range_base[:12]`): conta la
+    # radice, cioe' il nome della variabile interpolata.
+    campi = {
+        campo.split('[')[0].split('.')[0]
+        for _, campo, _, _ in string.Formatter().parse(riga.group(1))
+        if campo
+    }
+    assert modello.group(1) in campi, (
+        f'{path.name}: il done_marker non interpola {modello.group(1)}, quindi non '
+        f'cambia col modello (segnaposto presenti: {sorted(campi)}). Un range gia- '
         'marcato «fatto» dal modello precedente fa uscire il gate VERDE senza '
         'chiamare quello nuovo, e il commento continua a dichiarare il vecchio.'
     )
