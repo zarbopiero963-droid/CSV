@@ -1037,6 +1037,13 @@ COLONNE_MULTIUTENTE = (
     # un'euristica. Rilievo ripetuto di OpenRouter Sol e GPT-5.5 sulla PR #112 —
     # finche' la correlazione e' un indizio, la risposta e' una scommessa.
     ('chat_verifications', 'chat_id', 'INTEGER'),
+    # Lo stato del BOT in quella chat, come l'ha visto l'ultimo `my_chat_member`
+    # (#116). Serve perche' una chat da cui il bot e' stato tolto o retrocesso
+    # resta collegata e con i suoi link ai parser — cancellarla butterebbe via la
+    # configurazione per una retrocessione magari temporanea — ma il servizio non
+    # la legge piu', e senza questa colonna la web app mostrerebbe una chat
+    # «autorizzata» da cui non arriva niente, senza poterlo spiegare.
+    ('chats', 'bot_stato', 'TEXT'),
     ('parsers', 'user_id', 'INTEGER'),
     ('parsers', 'slug', 'TEXT'),
     ('parsers', 'config_json', 'TEXT'),
@@ -5561,6 +5568,59 @@ async def conferma_canale_backup(request: Request):
         # si abbandona con 409 e l'amministratore riconferma. Segnalato da GPT-5.5 e Fable 5.
         if leggi_impostazione(c, CHIAVE_CANALE_CANDIDATO_ID) != candidato['chat_id']:
             raise HTTPException(409, 'il candidato e- cambiato durante la verifica: riprova')
+        # Un canale non puo' essere DESTINAZIONE dei backup e SORGENTE di segnali insieme
+        # (#116): una riga in `chats` lo iscrive all'instradamento del webhook, e quella e'
+        # la regola non negoziabile del filtro delle chat.
+        #
+        # Dalla #116 la promozione del bot collega la chat DA SOLA, quindi arrivare qui con
+        # una riga gia' presente e' il caso NORMALE, non l'eccezione: l'amministratore
+        # promuove il bot nel canale che vuole come backup, e la stessa promozione lo
+        # collega. Rifiutare sempre renderebbe impossibile configurare un canale di backup
+        # — misurato: `test_una_riconsegna_del_canale_gia_configurato_non_lo_ripropone`
+        # diventa rosso con il rifiuto secco.
+        #
+        # La distinzione che conta e' se su quella chat c'e' del LAVORO. Senza link ai
+        # parser la riga e' solo l'effetto automatico di un minuto prima, e confermare
+        # significa proprio «questo e' il mio canale di backup»: si toglie. Con dei link,
+        # invece, l'utente ci ha configurato qualcosa, e cancellarglielo per una scelta
+        # fatta altrove sarebbe distruttivo e silenzioso: si rifiuta e glielo si dice.
+        # Si tocca SOLO una riga PROPRIA e SENZA lavoro sopra. Le due condizioni sono
+        # separate perche' proteggono da due cose diverse:
+        #
+        # - `owner_user_id`: quella chat puo' essere di un CLIENTE, che l'ha collegata
+        #   promuovendoci il bot. Cancellargliela perche' l'amministratore configura un
+        #   backup e' un'azione distruttiva CROSS-UTENTE, e silenziosa. La prima versione
+        #   di questo blocco guardava solo i link e faceva esattamente questo — cioe' il
+        #   contrario di quello che il commento accanto dichiarava. `[REAL_FINDING]`
+        #   convergente di GPT-5.5 e Claude Fable 5.1 sulla PR #117;
+        # - `parser_chats`: anche sulla propria, dei link sono lavoro di configurazione, e
+        #   non si buttano per una scelta fatta altrove.
+        #
+        # Senza nessuna delle due, la riga e' solo l'effetto automatico della promozione di
+        # un minuto prima e confermare significa proprio «questo e' il mio canale di
+        # backup»: si toglie.
+        riga_chat = c.execute(
+            f'SELECT id, owner_user_id FROM chats WHERE telegram_chat_id=? AND {TOPIC_CHAT}=?',
+            (candidato['chat_id'], '')).fetchone()
+        if riga_chat:
+            # `is not None` e non `!=` secco: `owner_user_id` NULL non e' «di un altro
+            # utente», e' di NESSUNO — ed e' un caso reale, non ipotetico, perche'
+            # `elimina_chat_mia` lo mette a NULL quando un utente toglie una chat su cui
+            # restano link di altri. Col confronto secco quella riga dava un messaggio
+            # falso e, peggio, bloccava la configurazione di un canale che non alimenta
+            # niente. Rilievo di Claude Fable 5.1 sulla PR #117. Il caso «senza
+            # proprietario ma con link altrui» resta coperto dal controllo qui sotto,
+            # che e' proprio la ragione per cui quella riga sopravvive alla rimozione.
+            if riga_chat[1] is not None and riga_chat[1] != amministratore['id']:
+                raise HTTPException(
+                    409, 'questo canale e- collegato da un altro utente come sorgente di'
+                         ' segnali: non puo- diventare la destinazione dei backup')
+            if c.execute('SELECT 1 FROM parser_chats WHERE chat_id=? LIMIT 1',
+                         (riga_chat[0],)).fetchone():
+                raise HTTPException(
+                    409, 'questo canale e- collegato ai tuoi parser come sorgente di'
+                         ' segnali: scollegalo prima di usarlo come destinazione dei backup')
+            c.execute('DELETE FROM chats WHERE id=?', (riga_chat[0],))
         scrivi_impostazione(c, CHIAVE_CANALE_BACKUP_ID, candidato['chat_id'])
         scrivi_impostazione(c, CHIAVE_CANALE_BACKUP_TITOLO, candidato['titolo'])
         cancella_impostazione(c, CHIAVE_CANALE_CANDIDATO_ID)
@@ -6822,10 +6882,10 @@ def _nome_visibile_della_chat(chat: dict) -> tuple[str | None, str | None]:
 def _vista_chat(riga):
     """La forma che la web app legge. Nessun campo che non le serva."""
     return {'id': riga[0], 'telegram_chat_id': riga[1], 'titolo': riga[2],
-            'tipo': riga[3], 'verified_at': riga[4]}
+            'tipo': riga[3], 'verified_at': riga[4], 'bot_stato': riga[5]}
 
 
-CAMPI_CHAT = ('id', 'telegram_chat_id', 'title', 'type', 'verified_at')
+CAMPI_CHAT = ('id', 'telegram_chat_id', 'title', 'type', 'verified_at', 'bot_stato')
 
 
 def _accesso_attivo_o_403(utente):
@@ -7101,6 +7161,51 @@ async def collega_chat_al_parser_mio(slug: str, request: Request):
                                   {'chat_ids': voluti})
 
 
+def _registra_chat_posseduta(c, chat_id, utente_id, adesso, titolo=None, tipo=None,
+                             bot_stato=None):
+    """Scrive (o adotta) la riga di `chats` **come di quell'utente**. `None` se non e' sua.
+
+    Fonte unica dei due percorsi che collegano una chat — il codice usa-e-getta
+    (#112) e la promozione del bot (#116) — perche' la regola che li governa e' la
+    stessa e in due copie divergerebbe al primo cambio (regola 3 di `CLAUDE.md`).
+
+    **Una chat gia' di un altro utente non e' rubabile.** Vale anche per la chat
+    SENZA proprietario, e quel caso e' il piu' insidioso dei due: una riga legacy
+    puo' portare link ai parser di ALTRI utenti, perche' `_attacca_link_del_profilo`
+    scrive `chats` e `parser_chats` in modo indipendente e nulla impone che i due
+    proprietari coincidano. Adottarla darebbe al nuovo proprietario una chat che
+    alimenta i parser di qualcun altro. `[REAL_FINDING]` di OpenRouter Sol e rilievo
+    convergente di Claude Fable 5.1 sulla PR #112.
+
+    `COALESCE(?, …)` su titolo, tipo e stato del bot: un aggiornamento che non porta
+    uno di quei valori non deve CANCELLARE quello gia' registrato — una riverifica da
+    una chat senza titolo, per esempio. Quando il valore c'e', invece, vince: un
+    canale rinominato non resta col nome vecchio.
+
+    Va chiamata **dentro** una transazione gia' aperta dal chiamante: la proprieta' si
+    verifica nello stesso `BEGIN IMMEDIATE` della scrittura, o fra il controllo e
+    l'INSERT ci sarebbe una finestra.
+    """
+    esistente = c.execute(
+        f'SELECT id, owner_user_id FROM chats WHERE telegram_chat_id=?'
+        f' AND {TOPIC_CHAT}=?', (chat_id, '')).fetchone()
+    if esistente and esistente[1] != utente_id:
+        return None
+    if esistente:
+        c.execute('UPDATE chats SET owner_user_id=?, verified_at=?,'
+                  ' title=COALESCE(?, title), type=COALESCE(?, type),'
+                  ' bot_stato=COALESCE(?, bot_stato) WHERE id=?',
+                  (utente_id, adesso, titolo, tipo, bot_stato, esistente[0]))
+    else:
+        c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id, verified_at,'
+                  ' title, type, bot_stato) VALUES (?,?,?,?,?,?)',
+                  (chat_id, utente_id, adesso, titolo, tipo, bot_stato))
+    riga = c.execute(
+        f'SELECT id FROM chats WHERE telegram_chat_id=? AND {TOPIC_CHAT}=?',
+        (chat_id, '')).fetchone()
+    return riga[0] if riga else None
+
+
 def _consuma_codice_di_verifica(chat_id, codice, titolo=None, tipo=None):
     """Il ramo del webhook: registra la chat se il codice e' buono. **Niente altro.**
 
@@ -7140,45 +7245,193 @@ def _consuma_codice_di_verifica(chat_id, codice, titolo=None, tipo=None):
             # Il codice NON si consuma: l'accesso puo' tornare, e bruciarlo
             # costringerebbe a ricominciare chi nel frattempo e' stato riattivato.
             return {'ok': True, 'ignored': 'accesso_non_attivo'}
-        esistente = c.execute(
-            f'SELECT id, owner_user_id FROM chats WHERE telegram_chat_id=?'
-            f' AND {TOPIC_CHAT}=?', (chat_id, '')).fetchone()
-        if esistente and esistente[1] != utente_id:
-            # Non e' di chi presenta il codice: non si tocca. Vale anche per la
-            # chat SENZA proprietario, e quel caso e' il piu' insidioso dei due —
-            # una riga legacy puo' portare link ai parser di ALTRI utenti, perche'
-            # `_attacca_link_del_profilo` scrive `chats` e `parser_chats` in modo
-            # indipendente e nulla impone che i due proprietari coincidano.
-            # Adottarla darebbe al nuovo proprietario una chat che alimenta i
-            # parser di qualcun altro. `[REAL_FINDING]` di OpenRouter Sol e
-            # rilievo convergente di Claude Fable 5.1 sulla PR #112.
-            #
-            # Il codice NON si consuma: non e' colpa di chi l'ha chiesto se il
-            # canale e' di un altro, e bruciarglielo lo costringerebbe a
-            # ricominciare senza capire.
+        registrata = _registra_chat_posseduta(c, chat_id, utente_id, adesso,
+                                              titolo, tipo)
+        if registrata is None:
+            # La chat e' di un altro. Il codice NON si consuma: non e' colpa di chi
+            # l'ha chiesto se il canale e' di un altro, e bruciarglielo lo
+            # costringerebbe a ricominciare senza capire.
             return {'ok': True, 'ignored': 'chat_non_disponibile'}
-        # `COALESCE(?, title)`: una riverifica da una chat che non porta il titolo —
-        # una privata, per esempio — non deve CANCELLARE il nome gia' registrato.
-        # Quando il titolo c'e', invece, vince: un canale rinominato non resta col
-        # nome vecchio nella lista.
-        if esistente:
-            c.execute('UPDATE chats SET owner_user_id=?, verified_at=?,'
-                      ' title=COALESCE(?, title), type=COALESCE(?, type)'
-                      ' WHERE id=?', (utente_id, adesso, titolo, tipo, esistente[0]))
-        else:
-            c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id, verified_at,'
-                      ' title, type) VALUES (?,?,?,?,?)',
-                      (chat_id, utente_id, adesso, titolo, tipo))
-        registrata = c.execute(
-            f'SELECT id FROM chats WHERE telegram_chat_id=? AND {TOPIC_CHAT}=?',
-            (chat_id, '')).fetchone()
         c.execute('UPDATE chat_verifications SET consumed_at=?, chat_id=?'
-                  ' WHERE code=?',
-                  (adesso, registrata[0] if registrata else None, codice))
+                  ' WHERE code=?', (adesso, registrata, codice))
         c.commit()
     finally:
         c.close()
     return {'ok': True, 'verified': True}
+
+
+# Lo stato del bot in una chat, come Telegram lo riporta in `my_chat_member`.
+# `administrator`/`creator` sono gli unici che PROVANO qualcosa: promuovere un bot ad
+# amministratore Telegram lo consente solo a chi e' gia' amministratore con quel diritto.
+#
+# Il nome dell'altro gruppo dice «non e' amministratore», e NON «non legge piu'», che e'
+# come l'avevo chiamato prima. Sarebbe stato falso, e il `README.txt` di questo stesso
+# repository lo dice: in un gruppo un bot con `/setprivacy Disable` riceve TUTTI i
+# messaggi anche da semplice `member`. `[REAL_FINDING]` di OpenRouter Sol sulla PR #117,
+# ed era un'affermazione mia che la web app avrebbe ripetuto all'utente.
+STATI_BOT_AMMINISTRATORE = ('administrator', 'creator')
+STATI_BOT_NON_AMMINISTRATORE = ('left', 'kicked', 'member', 'restricted')
+
+# L'high-water-mark degli `update_id` PER CHAT, gemello di `CHIAVE_CANALE_ULTIMO_UPDATE`
+# e tenuto separato da quello: i due handler vedono lo stesso update, e un contatore in
+# comune farebbe scartare all'uno cio' che l'altro ha appena contato.
+CHIAVE_CHAT_ULTIMO_UPDATE = 'chat_collegata_ultimo_update_id'
+
+
+def _update_fuori_ordine(c, chat_id, update_id):
+    """`True` se questo update e' piu' VECCHIO dell'ultimo gia' applicato a questa chat.
+
+    Gli `update_id` di Telegram crescono, ma l'elaborazione fuori dall'event loop puo'
+    completarli in ordine diverso, e le riconsegne ripetono un update gia' visto. Senza
+    questo controllo una promozione tardiva riscriverebbe `bot_stato` ad `administrator`
+    dopo una rimozione piu' recente — la chat risulterebbe operativa mentre il bot non
+    c'e' piu'. `[REAL_FINDING]` di OpenRouter Sol sulla PR #117.
+
+    Il precedente esatto e' in questo stesso file: `_cattura_canale_backup` ha
+    l'high-water-mark per canale dalla #56, aggiunto per la stessa ragione. Averlo
+    mancato qui e' regola 2 — il difetto era gia' noto, in un'altra funzione.
+
+    **PER CHAT e non globale**, sempre per il precedente della #56 (bloccante di Claude
+    Fable 5): globale, la promozione di una chat con id alto sopprimerebbe come «fuori
+    ordine» la rimozione LEGITTIMA di un'altra chat con id piu' basso.
+    """
+    ultimo = leggi_impostazione(c, CHIAVE_CHAT_ULTIMO_UPDATE + ':' + chat_id)
+    return update_id.isdigit() and (ultimo or '').isdigit() and int(update_id) <= int(ultimo)
+
+
+def _segna_update_della_chat(c, chat_id, update_id):
+    """Alza l'high-water-mark, nella transazione in corso. Solo quando si e' AGITO su
+    quella chat: un evento di una chat estranea non deve lasciare traccia, o sopprimerebbe
+    eventi legittimi futuri."""
+    if update_id:
+        scrivi_impostazione(c, CHIAVE_CHAT_ULTIMO_UPDATE + ':' + chat_id, update_id)
+
+
+def _segna_stato_del_bot(chat_id, stato, update_id=''):
+    """Registra che il bot non e' piu' amministratore di una chat che conosciamo.
+
+    **Non cancella niente**, ed e' una decisione del proprietario (Issue #116): la riga
+    e i suoi link ai parser restano, cosi' rimettere il bot fa tornare tutto senza
+    riconfigurare. Cancellare butterebbe via il lavoro di configurazione per una
+    retrocessione magari temporanea, o fatta da un altro amministratore della chat.
+
+    **`bot_stato` e' un'informazione da MOSTRARE, non un cancello.** L'ingestione non lo
+    consulta, e non e' una dimenticanza: cio' che il servizio elabora e' cio' che Telegram
+    gli consegna. Se il bot non puo' leggere, i messaggi non arrivano e non c'e' niente da
+    filtrare; se puo' — in un gruppo con `/setprivacy Disable` legge tutto anche da
+    semplice `member` — allora sono messaggi di una chat che l'utente ha autorizzato, e
+    scartarli sarebbe un guasto. Gattare l'ingestione su questo campo, per giunta, farebbe
+    perdere segnali veri ogni volta che il valore fosse stantio.
+
+    `None` se la chat non e' fra le nostre: non si crea una riga per dire che da
+    qualche parte, in una chat che non ci riguarda, il bot non c'e'.
+    """
+    c = db()
+    try:
+        c.execute('BEGIN IMMEDIATE')
+        if _update_fuori_ordine(c, chat_id, update_id):
+            c.rollback()
+            return {'ok': True, 'ignored': 'out_of_order'}
+        toccate = c.execute(
+            f'UPDATE chats SET bot_stato=? WHERE telegram_chat_id=? AND {TOPIC_CHAT}=?',
+            (stato, chat_id, '')).rowcount
+        if toccate:
+            _segna_update_della_chat(c, chat_id, update_id)
+        c.commit()
+    finally:
+        c.close()
+    return {'ok': True, 'bot_stato': stato} if toccate else None
+
+
+def _collega_chat_promuovendo_il_bot(payload):
+    """La chat si collega **promuovendo il bot ad amministratore** (Issue #116).
+
+    E' il meccanismo che il proprietario aveva progettato per `@Betrelay_bot`, e non e'
+    solo piu' comodo del codice usa-e-getta: e' una **prova di ruolo**. Il codice
+    dimostra che chi lo presenta puo' SCRIVERE in quella chat — in un canale coincide
+    col controllarlo, in un gruppo no, perche' scrive qualunque membro (Issue #115).
+    Promuovere un bot ad amministratore invece Telegram lo consente **solo a chi e' gia'
+    amministratore** con il diritto di nominarne altri, e `my_chat_member` porta `from`,
+    cioe' chi l'ha fatto, attestato da Telegram. Nessuna chiamata in uscita, nessun
+    «e se Telegram non risponde»: l'aggiornamento arriva da solo.
+
+    **Perche' non indebolisce il filtro delle chat**, che e' una regola non negoziabile
+    di `CLAUDE.md`. Questo ramo non e' un percorso di scrittura verso i segnali: registra
+    una riga in `chats` e aggiorna lo stato del bot. Non tocca `signals`, non cerca
+    parser, non guarda `profiles`, non scrive in `message_logs`. E chi forgiasse la
+    consegna non potrebbe: serve il segreto del webhook.
+
+    I quattro cancelli, ognuno col suo test:
+
+    - **chat privata: niente.** Li' il ruolo di amministratore non esiste, quindi non
+      c'e' nessuna prova da raccogliere.
+    - **chi promuove dev'essere un utente del servizio.** Un estraneo che aggiunge il bot
+      a una chat sua non ha nessun `owner_user_id` da scrivere, e non si inventa.
+    - **e dev'essere ATTIVO** (o l'amministratore), come per il codice: senza, la catena
+      «mi registro → creo un parser → collego un canale → ricevo segnali» sarebbe
+      percorribile senza che nessuno mi abbia attivato.
+    - **una chat di un altro non e' rubabile**, per la stessa ragione del codice — e qui
+      il caso e' concreto, perche' due persone possono essere entrambe amministratrici
+      della stessa chat.
+
+    SINCRONA e da chiamare FUORI dall'event loop (`asyncio.to_thread`): prende il lock di
+    scrittura con `BEGIN IMMEDIATE`, e sull'event loop l'attesa sotto contesa fermerebbe
+    tutte le consegne. Restituisce un dict se ha gestito l'update, altrimenti `None`.
+    """
+    aggiornamento = payload.get('my_chat_member') or {}
+    ch = aggiornamento.get('chat') or {}
+    chat_id = str(ch.get('id') or '')
+    stato = (aggiornamento.get('new_chat_member') or {}).get('status') or ''
+    if not chat_id or (ch.get('type') or '') == 'private':
+        return None
+    update_id = str(payload.get('update_id') or '')
+    if stato in STATI_BOT_NON_AMMINISTRATORE:
+        return _segna_stato_del_bot(chat_id, stato, update_id)
+    if stato not in STATI_BOT_AMMINISTRATORE:
+        return None
+    attore = str((aggiornamento.get('from') or {}).get('id') or '')
+    if not attore:
+        return None
+    titolo, tipo = _nome_visibile_della_chat(ch)
+    adesso = int(time.time())
+    c = db()
+    try:
+        c.execute('BEGIN IMMEDIATE')
+        if _update_fuori_ordine(c, chat_id, update_id):
+            c.rollback()
+            return {'ok': True, 'ignored': 'out_of_order'}
+        # Il canale di backup CONFIGURATO non si collega mai come sorgente: e' una
+        # DESTINAZIONE, e una riga in `chats` lo iscriverebbe all'instradamento del
+        # webhook — la regola non negoziabile del filtro delle chat, guardata da
+        # `tests/relay/test_canale_backup.py`. L'altro verso lo tiene la conferma nel
+        # pannello, che rifiuta di configurare come backup un canale gia' collegato.
+        #
+        # Il controllo sta DENTRO la transazione della scrittura, e la prima versione lo
+        # faceva fuori, su una connessione a parte: fra la lettura e l'INSERT la conferma
+        # nel pannello poteva configurare quel canale come backup, e lo stesso canale
+        # finiva destinazione E sorgente. E' la stessa forma del TOCTOU chiuso sulla
+        # PR #46 e sulla PUT delle chat (#112). Rilievo di GPT-5.5 sulla PR #117.
+        if leggi_impostazione(c, CHIAVE_CANALE_BACKUP_ID) == chat_id:
+            c.rollback()
+            return {'ok': True, 'ignored': 'canale_di_backup'}
+        utente = c.execute(
+            'SELECT id, status, access_expires_at, is_admin FROM users'
+            ' WHERE telegram_id=?', (attore,)).fetchone()
+        if not utente:
+            c.rollback()
+            return None
+        if not utente[3] and stato_effettivo(utente[1], utente[2]) != 'attivo':
+            c.rollback()
+            return {'ok': True, 'ignored': 'accesso_non_attivo'}
+        if _registra_chat_posseduta(c, chat_id, utente[0], adesso,
+                                    titolo, tipo, stato) is None:
+            c.rollback()
+            return {'ok': True, 'ignored': 'chat_non_disponibile'}
+        _segna_update_della_chat(c, chat_id, update_id)
+        c.commit()
+    finally:
+        c.close()
+    return {'ok': True, 'collegata': True}
 
 
 # ------------------------------------------------------------------------------
@@ -8485,9 +8738,26 @@ async def telegram_webhook(request: Request):
     # `BEGIN IMMEDIATE`), attenderebbe fino al busy_timeout. Sull'event loop quell'attesa fermerebbe
     # TUTTE le consegne webhook, non solo questa. Bloccante di Claude Fable 5 al gate finale (#56).
     if 'my_chat_member' in payload:
+        # I DUE handler girano entrambi, e l'ordine non e' un dettaglio.
+        #
+        # `_cattura_canale_backup` si ferma — restituendo un dict — quando chi promuove
+        # e' l'amministratore, la chat e' un canale PRIVATO e il bot diventa
+        # amministratore. E' esattamente il caso in cui il proprietario promuove il bot
+        # in un proprio canale di SEGNALI: prima della #116 quel canale sarebbe
+        # diventato solo una proposta di backup, e la chat non si sarebbe collegata —
+        # cioe' il meccanismo nuovo non avrebbe funzionato proprio per l'unico utente
+        # che oggi esiste. Trovato in Phase 0, non da una review.
+        #
+        # Decisione del proprietario: i due effetti non si escludono. La chat si
+        # collega E la proposta di backup resta — che e' solo una proposta, e va
+        # confermata a mano nel pannello prima che un backup parta davvero. Quindi il
+        # collegamento gira PRIMA, e la cattura del backup resta identica a com'era.
+        collegata = await asyncio.to_thread(_collega_chat_promuovendo_il_bot, payload)
         catturato = await asyncio.to_thread(_cattura_canale_backup, payload)
         if catturato is not None:
             return catturato
+        if collegata is not None:
+            return collegata
     msg = payload.get('message') or payload.get('channel_post') or {}
     chat = msg.get('chat') or {}
     chat_id = str(chat.get('id', ''))

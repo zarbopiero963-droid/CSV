@@ -1313,17 +1313,127 @@ feed o token diventa leggibile — e chi rivendica il gruppo vedeva già quei me
 da membro. Cosa **è**: la possibilità di soffiare la verifica al titolare legittimo
 e di dirottare quel flusso nei propri parser.
 
-La chiusura vera richiede una **prova di ruolo**: `getChatMember` verso Telegram per
-pretendere `creator`/`administrator` sul gruppo. Oggi `getChatMember` **non compare in
-`main.py`** e `_consuma_codice_di_verifica` riceve solo `chat_id`, `codice`, `titolo`,
-`tipo` — mai il mittente né il suo ruolo. È una chiamata in uscita sul percorso della
-verifica, con i suoi modi di fallire, quindi vive in una Issue propria e non nel PR
-della web app. `[REAL_FINDING]` di OpenRouter Sol al gate della PR #114.
+**Chiuso dalla #116 sul percorso principale — e non con `getChatMember`**, che era la
+strada scritta qui prima. Promuovere il bot ad amministratore Telegram lo consente solo
+a chi è già amministratore, e `my_chat_member` porta `from`, cioè chi l'ha fatto,
+attestato da Telegram: la prova di ruolo arriva **gratis**, senza chiamate in uscita e
+senza i loro modi di fallire. La domanda giusta non era «come costruiamo una prova di
+ruolo» ma «perché non stiamo usando quella che c'era già». `[REAL_FINDING]` di
+OpenRouter Sol al gate della PR #114.
 
-Fino ad allora la mitigazione è **dichiarata all'utente nella schermata** (vedi
-«Prototipo» → «Chat Telegram»), non taciuta: in un gruppo la prova è più debole, e
-il consiglio è limitare l'invio dei messaggi agli amministratori. È vincolata da
-`tests/web/chat_flow.py`, che pretende quell'avviso nella card del codice.
+**Il codice usa-e-getta resta come ripiego, e il ripiego si porta dietro la sua prova
+debole.** Per questo l'avviso in schermata **non va tolto**: va spostato sul ripiego. È
+vincolato da `tests/web/chat_flow.py`, che pretende quell'avviso nella card del codice.
+
+### Collegare una chat promuovendo il bot (#116)
+
+```
+utente  → aggiunge @Betrelay_bot come AMMINISTRATORE del canale o del gruppo
+Telegram→ my_chat_member { from: chi ha promosso, new_chat_member.status }
+relay   → status administrator/creator → registra la chat a nome di quell'utente
+web     → la chat compare nell'elenco, senza che l'utente faccia altro
+```
+
+I quattro cancelli, ognuno col suo test in `tests/relay/test_promozione_bot.py`:
+
+- **chat privata: niente.** Lì il ruolo di amministratore non esiste, quindi non c'è
+  nessuna prova da raccogliere;
+- **chi promuove dev'essere un utente del servizio** — altrimenti non c'è nessun
+  `owner_user_id` da scrivere, e non si inventa;
+- **e dev'essere `attivo`** (o l'amministratore): stesso cancello del codice, e per la
+  stessa ragione;
+- **una chat già di un altro non è rubabile** — qui il caso è concreto, perché due
+  persone possono essere entrambe amministratrici della stessa chat.
+
+**La retrocessione non cancella niente.** Se il bot viene tolto o retrocesso
+(`left`/`kicked`/`member`/`restricted`) si aggiorna `chats.bot_stato`; la riga e i suoi
+link ai parser restano, così rimettere il bot fa tornare tutto senza riconfigurare.
+Cancellare butterebbe via la configurazione per una retrocessione magari temporanea, o
+fatta da un altro amministratore della chat. Decisione del proprietario.
+
+**`bot_stato` è un'informazione da mostrare, non un cancello**, e il nome della costante
+lo dice: `STATI_BOT_NON_AMMINISTRATORE`, non «non legge più» — che è come l'avevo chiamata
+e sarebbe stato **falso**, perché in un gruppo un bot con `/setprivacy Disable` riceve
+tutti i messaggi anche da semplice `member` (lo dice il `README.txt` di questo stesso
+repository). `[REAL_FINDING]` di OpenRouter Sol sulla PR #117: era un'affermazione mia che
+la web app avrebbe ripetuto all'utente.
+
+L'ingestione **non** consulta quel campo, e non è una dimenticanza: ciò che il servizio
+elabora è ciò che Telegram gli consegna. Se il bot non può leggere, i messaggi non
+arrivano e non c'è niente da filtrare; se può, sono messaggi di una chat che l'utente ha
+autorizzato. Gattare l'ingestione su un valore che può essere stantio farebbe perdere
+segnali veri.
+
+**L'ordine delle consegne.** Gli `update_id` crescono, ma l'elaborazione fuori
+dall'event loop può completarli in ordine diverso, e le riconsegne ripetono un update già
+visto: senza un high-water-mark **per chat** una promozione tardiva riscriverebbe
+`bot_stato` ad `administrator` dopo una rimozione più recente. Il precedente esatto è in
+questo stesso file — `_cattura_canale_backup` ce l'ha dalla #56, per la stessa ragione — e
+averlo mancato qui è regola 2. Per chat e non globale, sempre per quel precedente: globale,
+la promozione di una chat sopprimerebbe la rimozione legittima di un'altra.
+
+**Limite noto, accettato e testato.** Il segno si alza solo quando si è *agito* su quella
+chat, quindi una rimozione su una chat **mai registrata** non lascia traccia: una
+promozione più vecchia arrivata dopo la collegherebbe comunque. L'alternativa —
+scrivere il segno anche per chat sconosciute — darebbe a **chiunque** il modo di far
+crescere `impostazioni` senza limite, aggiungendo e togliendo il bot da una chat
+qualsiasi. Fra una staleness senza conseguenze (la chat non produce niente, perché il bot
+non c'è) e una tabella che un estraneo può gonfiare, si è scelta la prima.
+
+**Il conflitto col canale di backup (#56), trovato in Phase 0 e non da una review.**
+`_cattura_canale_backup` si ferma quando chi promuove è l'amministratore, la chat è un
+canale **privato** e il bot diventa amministratore — cioè esattamente quando il
+proprietario promuove il bot in un proprio canale di **segnali**. I due effetti ora non
+si escludono: il collegamento gira **prima**, la cattura del backup resta identica,
+quindi la chat si collega **e** la proposta di backup resta.
+
+**E qui c'è la parte che una guardia esistente ha dovuto insegnare.** La prima versione
+di questa decisione diceva «nessuno dei due effetti è pericoloso», e non era vero:
+`test_il_bot_promosso_amministratore_dal_proprietario_diventa_candidato` asseriva che il
+canale di backup **non deve finire in `chats`**, perché una riga lì lo iscrive
+all'instradamento del webhook — cioè lo tratta da sorgente di segnali. Il test è
+diventato rosso e aveva ragione.
+
+L'invariante vera non è sulla **proposta** ma sulla **configurazione**, e adesso è tenuta
+sui due versi:
+
+- una promozione sul canale **già configurato** come backup non lo collega
+  (`ignored: canale_di_backup`);
+- **confermare** un candidato che è anche una chat collegata: si tocca **solo** una riga
+  **propria** e **senza lavoro sopra**. Se è di un **altro utente** → 409, perché
+  cancellarla sarebbe un'azione distruttiva cross-utente e silenziosa; se è propria ma ha
+  **link ai parser** → 409, perché sono lavoro di configurazione; se non è né l'una né
+  l'altra, la riga è solo l'effetto automatico della promozione di un minuto prima e **si
+  toglie**, perché confermare significa proprio «questo è il mio canale di backup».
+
+  Le due condizioni sono separate perché proteggono da cose diverse, e la prima versione
+  di questo blocco guardava **solo** i link: la conferma dell'amministratore cancellava in
+  silenzio la chat di un cliente che l'aveva collegata e non ci aveva ancora attaccato un
+  parser — cioè il contrario di quello che il commento accanto dichiarava. `[REAL_FINDING]`
+  convergente di GPT-5.5 e Claude Fable 5.1 sulla PR #117.
+
+  «Di un altro utente» significa `owner_user_id` **non nullo e diverso**: una riga **senza
+  proprietario** non è di un altro, è di **nessuno** — ed è un caso reale, perché
+  `elimina_chat_mia` mette `owner_user_id` a `NULL` quando un utente toglie una chat su cui
+  restano link di altri. Col confronto secco quella riga dava un messaggio falso e, peggio,
+  bloccava la configurazione di un canale che non alimenta niente. Il caso «senza
+  proprietario **ma con link altrui**» resta coperto dal controllo sui link — che è proprio
+  la ragione per cui quella riga sopravvive alla rimozione. Rilievo di Claude Fable 5.1
+  sulla PR #117.
+
+Il controllo «è già il canale di backup?» sta **dentro** la transazione della scrittura, e
+non su una connessione a parte: fra la lettura e l'`INSERT` la conferma nel pannello poteva
+configurare quel canale, e lo stesso canale finiva destinazione **e** sorgente. Stessa forma
+del TOCTOU chiuso sulla PR #46 e sulla PUT delle chat (#112).
+
+Il secondo ramo non è un dettaglio: con un rifiuto secco, configurare un canale di backup
+sarebbe diventato **impossibile** — la promozione lo collega, la conferma lo rifiuta.
+Misurato: `test_una_riconsegna_del_canale_gia_configurato_non_lo_ripropone` diventa rosso.
+
+**Fonte unica.** I due percorsi che collegano una chat — il codice (#112) e la
+promozione (#116) — condividono `_registra_chat_posseduta`, perché la regola che li
+governa (non rubabile, `COALESCE` sui campi assenti) è la stessa e in due copie
+divergerebbe al primo cambio.
 
 **Perché non indebolisce il filtro delle chat**, che è una regola non negoziabile:
 il ramo del codice nel webhook è l'eccezione che quella regola già prevede, ed è
