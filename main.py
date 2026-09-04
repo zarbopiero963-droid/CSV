@@ -302,6 +302,26 @@ _TENTATIVO_DELL_ESITO = 0
 # api.telegram.org fatte da noi.
 ATTESA_FRA_TENTATIVI_S = 60
 
+# La radice dell'API di Telegram, in un posto solo (#115).
+#
+# **Perche' esiste, e non e' una pulizia estetica.** L'indirizzo era ripetuto in
+# QUATTRO punti come stringa letterale — `setWebhook`, `sendMessage`, `getChat`,
+# `sendDocument` — e questo rendeva ogni chiamata in uscita **intestabile sul
+# percorso felice**: i test avviano il relay con `HTTPS_PROXY` su una porta morta,
+# quindi possono misurare solo il fallimento. Una prova di ruolo che si limitasse
+# a fallire non e' una prova (regola 1: il test deve poter distinguere «rifiuta
+# perche' non e' amministratore» da «rifiuta perche' la rete e' giu'»).
+#
+# **La variabile e' allo stesso livello di fiducia del token del bot**, e va detto:
+# chi puo' impostarla puo' dirottare le chiamate — e con esse il token — verso un
+# altro host. Chi puo' impostare le variabili d'ambiente del servizio pero' ha gia'
+# `TELEGRAM_BOT_TOKEN`, quindi non apre una porta nuova. In produzione non si
+# imposta: il default e' l'API vera.
+def url_telegram(token, metodo):
+    """`https://api.telegram.org/bot<token>/<metodo>`, o la radice configurata."""
+    radice = os.getenv('TELEGRAM_API_BASE', 'https://api.telegram.org').rstrip('/')
+    return f'{radice}/bot{token}/{metodo}'
+
 
 def public_url_configurata():
     """L'URL pubblico del servizio, con il default di produzione.
@@ -345,7 +365,7 @@ def _chiama_set_webhook(bot_token, public_url):
         'url': f'{public_url}/telegram/webhook',
         'secret_token': webhook_secret(bot_token),
     }).encode('utf-8')
-    url = f'https://api.telegram.org/bot{bot_token}/setWebhook'
+    url = url_telegram(bot_token, 'setWebhook')
     # Il `Content-Type` e' dichiarato qui, non lasciato al default di `urllib`.
     # Non e' una correzione: `urllib` metterebbe comunque
     # `application/x-www-form-urlencoded` per un `data=` di byte, e l'invio
@@ -1497,7 +1517,7 @@ def invia_messaggio_telegram(chat_id, testo, bot_token=None):
         return False, 'destinatario sconosciuto'
     parametri = urllib.parse.urlencode({'chat_id': chat_id, 'text': testo}).encode('utf-8')
     richiesta = urllib.request.Request(
-        f'https://api.telegram.org/bot{token}/sendMessage', data=parametri, method='POST',
+        url_telegram(token, 'sendMessage'), data=parametri, method='POST',
         headers={'Content-Type': 'application/x-www-form-urlencoded'})
     try:
         with urllib.request.urlopen(richiesta, timeout=10) as risposta:  # noqa: S310
@@ -2203,13 +2223,58 @@ def leggi_chat_telegram(chat_id, bot_token=None):
     query = urllib.parse.urlencode({'chat_id': chat_id})
     try:
         with urllib.request.urlopen(  # noqa: S310
-                f'https://api.telegram.org/bot{token}/getChat?{query}', timeout=10) as risposta:
+                f"{url_telegram(token, 'getChat')}?{query}", timeout=10) as risposta:
             esito = json.loads(risposta.read().decode('utf-8'))
     except Exception as e:
         return False, f'getChat fallito ({type(e).__name__})'
     if not esito.get('ok'):
         return False, 'Telegram ha rifiutato getChat'
     return True, esito.get('result') or {}
+
+
+# I ruoli che PROVANO il controllo di una chat. Stessa lista di
+# `STATI_BOT_AMMINISTRATORE`, e il doppione e' voluto: quella descrive lo stato
+# del BOT come lo riporta `my_chat_member`, questa il ruolo di una PERSONA come lo
+# riporta `getChatMember`. Oggi coincidono perche' Telegram usa lo stesso
+# vocabolario; unirle legherebbe due cose che possono divergere.
+RUOLI_CHE_CONTROLLANO = ('creator', 'administrator')
+
+
+def ruolo_in_chat(chat_id, user_id, bot_token=None):
+    """Il ruolo di una PERSONA in una chat, via `getChatMember`. `(riuscito, ruolo)`.
+
+    Stessa forma di `verifica_privacy_canale`, e per le stesse ragioni: non
+    solleva, e su errore il motivo e' il **TIPO** dell'eccezione — mai il testo,
+    che porterebbe l'URL col token del bot.
+
+    Serve alla verifica col codice (#115). Il codice dimostra che chi lo presenta
+    puo' SCRIVERE in quella chat: in un canale coincide col controllarla, perche'
+    scrivono solo gli amministratori; in un GRUPPO no, e un membro qualunque
+    potrebbe rivendicare il gruppo di un altro. `getChatMember` chiude la
+    differenza chiedendo a Telegram il ruolo di chi ha incollato il codice.
+
+    Il bot deve essere nella chat per poter rispondere: se non c'e', Telegram
+    rifiuta e questa funzione restituisce `False` — che sul percorso della
+    verifica significa «non registro», ed e' il verso giusto.
+    """
+    import urllib.parse
+    import urllib.request
+    token = bot_token or BOT_TOKEN
+    if not token:
+        return False, 'bot non configurato'
+    if not chat_id or not user_id:
+        return False, 'chat o utente sconosciuto'
+    query = urllib.parse.urlencode({'chat_id': chat_id, 'user_id': user_id})
+    try:
+        with urllib.request.urlopen(  # noqa: S310
+                f"{url_telegram(token, 'getChatMember')}?{query}",
+                timeout=10) as risposta:
+            esito = json.loads(risposta.read().decode('utf-8'))
+    except Exception as e:
+        return False, f'getChatMember fallito ({type(e).__name__})'
+    if not esito.get('ok'):
+        return False, 'Telegram ha rifiutato getChatMember'
+    return True, ((esito.get('result') or {}).get('status') or '')
 
 
 def invia_documento_telegram(chat_id, percorso, nome_file, didascalia=None, bot_token=None):
@@ -2257,7 +2322,7 @@ def invia_documento_telegram(chat_id, percorso, nome_file, didascalia=None, bot_
         dimensione = os.path.getsize(corpo_path)
         with open(corpo_path, 'rb') as corpo:
             richiesta = urllib.request.Request(
-                f'https://api.telegram.org/bot{token}/sendDocument', data=corpo, method='POST',
+                url_telegram(token, 'sendDocument'), data=corpo, method='POST',
                 headers={'Content-Type': f'multipart/form-data; boundary={confine}',
                          'Content-Length': str(dimensione)})
             with urllib.request.urlopen(richiesta, timeout=30) as risposta:  # noqa: S310
@@ -7242,7 +7307,69 @@ def _rifiuto_del_codice(c, codice, motivo):
     return {'ok': True, 'ignored': motivo}
 
 
-def _consuma_codice_di_verifica(chat_id, codice, titolo=None, tipo=None):
+# I tipi di chat in cui poter SCRIVERE coincide col controllare la chat.
+#
+# In un canale scrivono solo gli amministratori, quindi incollare il codice li'
+# dentro e' gia' una prova di ruolo. In un gruppo scrive qualunque membro, e
+# `getChatMember` serve a colmare la differenza (#115).
+#
+# **La lista dice cosa SALTA il controllo, non cosa lo richiede**, ed e' il verso
+# che conta: un tipo sconosciuto — assente, nuovo, o una consegna che non lo porta
+# — finisce fra quelli che la prova la devono dare. Il verso opposto («solo i
+# gruppi la richiedono») lascerebbe passare tutto cio' che non riconosciamo, che
+# su un cancello di sicurezza e' l'errore da non fare.
+TIPI_CHAT_CON_PROVA_FORTE = ('channel',)
+
+
+def _prova_di_ruolo_superata(chat_id, tipo, mittente, codice, adesso):
+    """La prova di ruolo per le chat dove saper scrivere non basta (#115).
+
+    Vero quando la chat puo' essere registrata: perche' il tipo rende la prova
+    gia' forte, o perche' Telegram conferma che il mittente la controlla.
+
+    **Sta FUORI dalla transazione, e le due ragioni sono entrambe necessarie.**
+
+    1. *Mai una chiamata di rete tenendo il lock di scrittura.* `BEGIN IMMEDIATE`
+       prende subito il lock su SQLite: tenerlo per i fino a 10 secondi di timeout
+       di `getChatMember` fermerebbe ogni altra scrittura del servizio — comprese
+       le consegne dei segnali, che sono il mestiere.
+    2. *Mai una chiamata per ogni codice spazzatura.* Prima si guarda se il codice
+       e' vivo, con una lettura senza lock; solo allora si chiama Telegram. Senza
+       questo filtro, chiunque possa scrivere in una chat dove il bot e' presente
+       potrebbe farci fare una raffica di chiamate in uscita scrivendo stringhe
+       della forma giusta — la stessa classe di abuso per cui esiste
+       `ATTESA_FRA_TENTATIVI_S` sul percorso della registrazione del webhook.
+
+    La lettura di filtro NON e' la verifica: il codice viene riletto dentro la
+    transazione, insieme allo stato dell'utente e alla proprieta' della chat. Qui
+    si decide solo *se vale la pena chiamare Telegram*, e una corsa fra le due
+    letture puo' al massimo far partire una chiamata di troppo, mai registrare
+    qualcosa che la transazione poi rifiuterebbe.
+    """
+    if (tipo or '') in TIPI_CHAT_CON_PROVA_FORTE:
+        return True
+    if not mittente:
+        # Un canale non porta `message.from`, ma in un canale non arriviamo qui.
+        # Fuori dai canali un mittente assente e' una consegna che non possiamo
+        # attribuire a nessuno: non si registra.
+        return False
+    c = db()
+    try:
+        vivo = c.execute(
+            'SELECT 1 FROM chat_verifications'
+            ' WHERE code=? AND consumed_at IS NULL AND expires_at > ?',
+            (codice, adesso)).fetchone()
+    finally:
+        c.close()
+    if not vivo:
+        # Codice morto: lo dira' la transazione con `codice_non_valido`, senza che
+        # noi si sia chiamato Telegram per un messaggio qualsiasi.
+        return True
+    riuscito, ruolo = ruolo_in_chat(chat_id, mittente)
+    return bool(riuscito) and ruolo in RUOLI_CHE_CONTROLLANO
+
+
+def _consuma_codice_di_verifica(chat_id, codice, titolo=None, tipo=None, mittente=None):
     """Il ramo del webhook: registra la chat se il codice e' buono. **Niente altro.**
 
     Restituisce l'esito per il chiamante, e non solleva: una consegna di Telegram
@@ -7259,8 +7386,27 @@ def _consuma_codice_di_verifica(chat_id, codice, titolo=None, tipo=None):
     passano. Una chat SENZA proprietario (quelle create dal percorso legacy dei
     profili) viene invece adottata: l'utente ha dimostrato di controllare quel
     canale, e i link esistenti non si toccano.
+
+    **La prova di RUOLO, dove la scrittura non basta (#115).** Fuori dai canali il
+    codice dimostra solo che il mittente puo' scrivere: un membro qualunque di un
+    gruppo potrebbe rivendicare il gruppo di un altro, e da quel momento il
+    titolare legittimo non lo puo' piu' collegare. Su quelle chat si chiede a
+    Telegram il ruolo di chi ha incollato il codice, e si registra solo per
+    `creator`/`administrator`.
+
+    **Fail-closed, e va detto perche' e' una scelta e non un default.** Se la
+    chiamata non riesce — rete giu', Telegram lento, risposta inattesa — la chat
+    NON si registra. Il costo e' reale: un guasto di Telegram impedisce di
+    collegare gruppi nuovi. Il verso opposto renderebbe la protezione assente
+    esattamente quando serve, perche' basterebbe far fallire la chiamata. I feed
+    gia' attivi non sono toccati: questo percorso registra, non elabora.
+
+    **Il codice NON si consuma su questo rifiuto**, come per gli altri: chi ha
+    sbagliato chat, o non era ancora amministratore, deve poter riprovare.
     """
     adesso = int(time.time())
+    if not _prova_di_ruolo_superata(chat_id, tipo, mittente, codice, adesso):
+        return {'ok': True, 'ignored': 'ruolo_non_provato'}
     c = db()
     try:
         c.execute('BEGIN IMMEDIATE')
@@ -8874,8 +9020,13 @@ async def telegram_webhook(request: Request):
         # codice: e' il solo momento in cui il servizio li sa, e non costa nessuna
         # chiamata in piu' a Telegram.
         titolo, tipo = _nome_visibile_della_chat(chat)
+        # Il MITTENTE, che serve alla prova di ruolo (#115). Nei canali non c'e' —
+        # i post di canale non portano `from` — ed e' coerente: li' la prova e'
+        # gia' forte e la chiamata non si fa. Viaggia nella stessa consegna del
+        # codice, quindi non costa niente saperlo.
+        mittente = str((msg.get('from') or {}).get('id') or '')
         return await asyncio.to_thread(_consuma_codice_di_verifica, chat_id, codice,
-                                       titolo, tipo)
+                                       titolo, tipo, mittente)
     # L'elaborazione sta FUORI dall'event loop (asyncio.to_thread): SQLite e il
     # motore di parsing sono sincroni, e sul percorso che riceve OGNI messaggio di
     # OGNI canale un parser lento non deve fermare le altre richieste del servizio

@@ -47,6 +47,7 @@ sys.path.insert(0, str(RADICE))
 import main  # noqa: E402 - dopo l'inserimento del percorso
 from tests.ambiente import CHIAVI_PERICOLOSE, TOKEN_DI_PROVA  # noqa: E402
 from tests.servizio import relay_avviato  # noqa: E402
+from tests.telegram_finto import telegram_finto  # noqa: E402
 
 BOT_FINTO = '123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
 ADMIN_FINTO = '987654321'
@@ -181,20 +182,32 @@ def _login_b(base, percorso_db):
     return esito
 
 
-def _consegna(base, chat, testo, titolo=None, tipo=None):
+def _consegna(base, chat, testo, titolo=None, tipo='channel', mittente=None):
     """Una consegna di Telegram autentica: col segreto derivato dal bot.
 
     `titolo`/`tipo` sono i campi che Telegram mette in `message.chat` per gruppi e
-    canali. Restano opzionali perche' la gran parte dei casi qui non li riguarda,
-    ma il percorso della verifica li usa: sono l'unico modo che la web app ha di
-    dire QUALE canale ha appena registrato.
+    canali. Il percorso della verifica li usa: sono l'unico modo che la web app ha
+    di dire QUALE canale ha appena registrato.
+
+    **`tipo` vale `'channel'` per difetto, e non e' una comodita'.** Telegram il
+    tipo lo manda SEMPRE: una consegna senza `type` non esiste, e modellarla
+    significava provare il servizio su un input che non ricevera' mai. Dal #115
+    la differenza pesa — in un canale scrivono solo gli amministratori, quindi la
+    prova e' forte, mentre fuori serve `getChatMember` — e un tipo assente cade
+    fra quelli che la prova la devono dare. I test che vogliono davvero misurare
+    l'assenza passano `tipo=None` esplicito.
+
+    `mittente` e' `message.from.id`: i canali non lo portano, i gruppi si'.
     """
     dati_chat = {'id': int(chat)}
     if titolo is not None:
         dati_chat['title'] = titolo
     if tipo is not None:
         dati_chat['type'] = tipo
-    payload = {'message': {'chat': dati_chat, 'text': testo}}
+    messaggio = {'chat': dati_chat, 'text': testo}
+    if mittente is not None:
+        messaggio['from'] = {'id': int(mittente)}
+    payload = {'message': messaggio}
     req = urllib.request.Request(
         f'{base}/telegram/webhook', data=json.dumps(payload).encode('utf-8'),
         headers={'Content-Type': 'application/json',
@@ -1035,3 +1048,199 @@ def test_riverificare_la_stessa_chat_ne_aggiorna_il_nome(servizio):
 
     chat = _chats(base, cookie)[0]
     assert chat['titolo'] == 'Nome nuovo', f'il nome non si aggiorna: {chat}'
+
+
+# ------------------------------- la prova di RUOLO fuori dai canali (#115)
+#
+# Il codice dimostra che chi lo presenta puo' SCRIVERE nella chat. In un canale
+# coincide col controllarla — scrivono solo gli amministratori — ma in un GRUPPO
+# scrive qualunque membro: il primo che incolla un codice si prende il gruppo di
+# un altro, e il titolare legittimo non lo puo' piu' collegare.
+#
+# Questi test usano un finto `api.telegram.org` sul loopback, perche' sono i primi
+# del repository che devono vedere una chiamata in uscita RIUSCIRE: col solo proxy
+# morto un cancello che si limita a fallire non si distingue da uno che funziona.
+
+GRUPPO = '-1002000000777'
+MEMBRO = '555000999'
+
+
+@pytest.fixture
+def servizio_con_telegram(tmp_path, monkeypatch):
+    """Il relay, piu' un Telegram finto raggiungibile.
+
+    `HTTPS_PROXY` resta sulla porta morta: il finto e' `http://`, quindi non passa
+    dal proxy. Le due cose convivono di proposito — cosi' un test puo' avere
+    `getChatMember` raggiungibile e tutto il resto no.
+    """
+    monkeypatch.setattr(main, 'SEGRETO_SESSIONE', SEGRETO_ATTESO)
+    with telegram_finto() as (base_telegram, finto):
+        ambiente = dict(AMBIENTE_DEL_SERVIZIO, TELEGRAM_API_BASE=base_telegram)
+        with relay_avviato(tmp_path, **ambiente) as base:
+            yield base, tmp_path / 'signals.db', finto
+
+
+def test_in_un_GRUPPO_un_membro_qualunque_non_si_prende_la_chat(servizio_con_telegram):
+    """Il furto della verifica, che e' il difetto per cui la #115 esiste.
+
+    L'utente e' attivo e il codice e' suo e valido: l'unica cosa che manca e' il
+    RUOLO. Telegram dice `member`, quindi la chat non si registra.
+    """
+    base, percorso_db, finto = servizio_con_telegram
+    cookie, _ = _login_a(base, percorso_db)
+    finto.ruolo('member')
+
+    codice = _codice(base, cookie)
+    stato, corpo = _consegna(base, GRUPPO, codice, titolo='Gruppo segnali',
+                             tipo='supergroup', mittente=CLIENTE_A)
+
+    assert stato == 200, corpo
+    assert corpo.get('ignored') == 'ruolo_non_provato', corpo
+    assert _chats(base, cookie) == [], (
+        'un membro qualunque si e- preso il gruppo: e- il furto della verifica')
+
+
+def test_in_un_GRUPPO_un_amministratore_la_collega(servizio_con_telegram):
+    """L'altra meta': col ruolo giusto il percorso funziona come prima.
+
+    Senza questo test il precedente passerebbe anche con un cancello sempre
+    chiuso, che non e' una prova di ruolo ma un blocco.
+    """
+    base, percorso_db, finto = servizio_con_telegram
+    cookie, _ = _login_a(base, percorso_db)
+    finto.ruolo('administrator')
+
+    codice = _codice(base, cookie)
+    stato, corpo = _consegna(base, GRUPPO, codice, titolo='Gruppo segnali',
+                             tipo='supergroup', mittente=CLIENTE_A)
+
+    assert stato == 200, corpo
+    assert corpo.get('verified') is True, corpo
+    assert [c['telegram_chat_id'] for c in _chats(base, cookie)] == [GRUPPO]
+    metodo, parametri = finto.chiamate[-1]
+    assert metodo == 'getChatMember', finto.chiamate
+    assert parametri.get('user_id') == CLIENTE_A, parametri
+    assert parametri.get('chat_id') == GRUPPO, parametri
+
+
+@pytest.mark.parametrize('ruolo', ['member', 'restricted', 'left', 'kicked'])
+def test_nessun_ruolo_senza_controllo_basta(servizio_con_telegram, ruolo):
+    """Solo `creator` e `administrator` provano qualcosa: la lista e' chiusa."""
+    base, percorso_db, finto = servizio_con_telegram
+    cookie, _ = _login_a(base, percorso_db)
+    finto.ruolo(ruolo)
+
+    _consegna(base, GRUPPO, _codice(base, cookie), tipo='supergroup',
+              mittente=CLIENTE_A)
+
+    assert _chats(base, cookie) == [], f'il ruolo «{ruolo}» ha collegato la chat'
+
+
+def test_il_creatore_del_gruppo_la_collega(servizio_con_telegram):
+    base, percorso_db, finto = servizio_con_telegram
+    cookie, _ = _login_a(base, percorso_db)
+    finto.ruolo('creator')
+
+    _consegna(base, GRUPPO, _codice(base, cookie), tipo='supergroup',
+              mittente=CLIENTE_A)
+
+    assert [c['telegram_chat_id'] for c in _chats(base, cookie)] == [GRUPPO]
+
+
+def test_in_un_CANALE_non_si_chiama_Telegram(servizio_con_telegram):
+    """La prova e' gia' forte: chiedere il ruolo sarebbe una chiamata sprecata.
+
+    E non e' solo un risparmio: nei canali `message.from` non esiste, quindi non
+    ci sarebbe nemmeno un utente da chiedere.
+    """
+    base, percorso_db, finto = servizio_con_telegram
+    cookie, _ = _login_a(base, percorso_db)
+    finto.ruolo('member')   # se venisse chiamato, rifiuterebbe
+
+    _consegna(base, CANALE_A, _codice(base, cookie), tipo='channel')
+
+    assert [c['telegram_chat_id'] for c in _chats(base, cookie)] == [CANALE_A]
+    assert finto.quante('getChatMember') == 0, (
+        f'chiamato Telegram per un canale: {finto.chiamate}')
+
+
+def test_un_codice_MORTO_non_fa_chiamare_Telegram(servizio_con_telegram):
+    """Il filtro contro l'abuso, e vale la pena dire cosa protegge.
+
+    Senza, chiunque possa scrivere in una chat dove il bot e' presente potrebbe
+    farci fare una raffica di chiamate in uscita incollando stringhe della forma
+    `BETRELAY-XXXXXXXX`. La lettura di filtro costa una query senza lock.
+    """
+    base, percorso_db, finto = servizio_con_telegram
+    _login_a(base, percorso_db)
+    finto.ruolo('administrator')
+
+    _consegna(base, GRUPPO, 'BETRELAY-INVENTATO', tipo='supergroup',
+              mittente=CLIENTE_A)
+
+    assert finto.quante('getChatMember') == 0, (
+        f'Telegram chiamato per un codice inventato: {finto.chiamate}')
+
+
+def test_se_Telegram_non_risponde_la_chat_NON_si_collega(servizio):
+    """Fail-closed, ed e' una scelta dichiarata, non un default.
+
+    Qui non c'e' nessun Telegram finto: la fixture `servizio` ha il proxy morto,
+    quindi la chiamata fallisce come farebbe un guasto vero. Il costo e' reale —
+    un'interruzione di Telegram impedisce di collegare gruppi nuovi — ma il verso
+    opposto renderebbe la protezione assente proprio quando serve, perche'
+    basterebbe far fallire la chiamata.
+    """
+    base, percorso_db = servizio
+    cookie, _ = _login_a(base, percorso_db)
+
+    stato, corpo = _consegna(base, GRUPPO, _codice(base, cookie),
+                             tipo='supergroup', mittente=CLIENTE_A)
+
+    assert stato == 200, corpo
+    assert corpo.get('ignored') == 'ruolo_non_provato', corpo
+    assert _chats(base, cookie) == []
+
+
+def test_un_TIPO_sconosciuto_deve_dare_la_prova(servizio):
+    """La lista dice cosa SALTA il controllo, non cosa lo richiede.
+
+    Un tipo assente o nuovo cade fra quelli che la prova la devono dare: col
+    verso opposto, tutto cio' che non riconosciamo passerebbe.
+    """
+    base, percorso_db = servizio
+    cookie, _ = _login_a(base, percorso_db)
+
+    _consegna(base, CANALE_A, _codice(base, cookie), tipo=None,
+              mittente=CLIENTE_A)
+
+    assert _chats(base, cookie) == [], 'un tipo sconosciuto ha saltato la prova'
+
+
+def test_senza_mittente_fuori_da_un_canale_non_si_collega(servizio):
+    """Una consegna non attribuibile non registra niente."""
+    base, percorso_db = servizio
+    cookie, _ = _login_a(base, percorso_db)
+
+    _consegna(base, GRUPPO, _codice(base, cookie), tipo='supergroup',
+              mittente=None)
+
+    assert _chats(base, cookie) == []
+
+
+def test_il_rifiuto_per_ruolo_NON_brucia_il_codice(servizio_con_telegram):
+    """Chi non era ancora amministratore deve poter riprovare dopo esserlo
+    diventato, senza chiedere un codice nuovo."""
+    base, percorso_db, finto = servizio_con_telegram
+    cookie, _ = _login_a(base, percorso_db)
+    finto.ruolo('member')
+
+    codice = _codice(base, cookie)
+    _consegna(base, GRUPPO, codice, tipo='supergroup', mittente=CLIENTE_A)
+    assert _chats(base, cookie) == []
+
+    finto.ruolo('administrator')
+    _consegna(base, GRUPPO, codice, tipo='supergroup', mittente=CLIENTE_A)
+
+    assert [c['telegram_chat_id'] for c in _chats(base, cookie)] == [GRUPPO], (
+        'il codice era stato bruciato da un rifiuto per ruolo')

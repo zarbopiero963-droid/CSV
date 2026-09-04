@@ -279,15 +279,29 @@ LIMITE NOTO, non introdotto qui: i topic dei forum Telegram non sono supportati.
 `message_thread_id` non lo scrive nessun percorso e ogni ricerca usa la chat
 radice, quindi verificare in un topic autorizza il gruppo intero.
 
-SECONDO LIMITE NOTO, e la prova NON e' la stessa per tutte le chat. Il codice
-dimostra che chi lo presenta PUO' SCRIVERE in quella chat. Per un CANALE questo
-coincide col controllarlo (su Telegram in un canale scrivono solo gli
-amministratori); per un GRUPPO no, perche' scrive qualunque membro: un membro
-ordinario con un account BetRelay puo' rivendicare il gruppo, e da quel momento
-nessun altro lo verifica piu' (`chat_non_disponibile`). Non e' un accesso ai
-dati di un altro utente — nessun parser, feed o token diventa leggibile, e chi
-rivendica vedeva gia' quei messaggi da membro — ma e' la possibilita' di soffiare
-la verifica al titolare e di dirottare quel flusso nei propri parser.
+LA PROVA DI RUOLO, e perche' la prova NON e' la stessa per tutte le chat. Il
+codice dimostra che chi lo presenta PUO' SCRIVERE in quella chat. Per un CANALE
+questo coincide col controllarlo (su Telegram in un canale scrivono solo gli
+amministratori); per un GRUPPO no, perche' scrive qualunque membro.
+ERA un limite noto: un membro ordinario con un account BetRelay poteva rivendicare
+il gruppo, e da quel momento nessun altro lo verificava piu'. CHIUSO dalla #115.
+Fuori dai canali il servizio chiede a Telegram, con `getChatMember`, il ruolo di
+chi ha incollato il codice, e registra solo per `creator`/`administrator`.
+  - la lista `TIPI_CHAT_CON_PROVA_FORTE` dice cosa SALTA il controllo, non cosa lo
+    richiede: un tipo assente o nuovo cade fra quelli che la prova la devono dare.
+    Il verso opposto lascerebbe passare tutto cio' che non riconosciamo;
+  - FAIL-CLOSED, ed e' una scelta: se la chiamata non riesce — rete giu', Telegram
+    lento, risposta inattesa — la chat NON si registra. Il costo e' reale, un
+    guasto di Telegram impedisce di collegare gruppi nuovi; il verso opposto
+    renderebbe la protezione assente proprio quando serve, perche' basterebbe far
+    fallire la chiamata. I feed gia' attivi non sono toccati: questo percorso
+    registra, non elabora;
+  - il rifiuto per ruolo NON consuma il codice: chi non era ancora amministratore
+    deve poter riprovare dopo esserlo diventato;
+  - la chiamata sta FUORI dalla transazione (mai il lock di scrittura tenuto per i
+    10 s di timeout) e DOPO una lettura di filtro sul codice: senza, chiunque possa
+    scrivere in una chat dove il bot e' presente potrebbe farci fare una raffica di
+    chiamate in uscita incollando stringhe della forma giusta.
 CHIUSO dalla #116 per chi usa il percorso principale, e vale la pena dire come:
 NON con `getChatMember`, che era la strada scritta qui prima. Promuovere il bot ad
 amministratore Telegram lo consente solo a chi e' gia' amministratore, e
@@ -1157,6 +1171,17 @@ TELEGRAM_BOT_USERNAME: lo username del bot, senza @. Serve SOLO per costruire il
   @<nome> su Telegram e premi Start»). Un link costruito con uno username vuoto porta alla
   home di Telegram, e il cliente crede di aver fatto la sua parte mentre il bot continua a
   non poterlo raggiungere.
+TELEGRAM_API_BASE: facoltativa, e in produzione NON si imposta. E' la radice
+  dell'API di Telegram, che per difetto e' https://api.telegram.org e passa da
+  `url_telegram()` — fonte unica delle quattro chiamate in uscita (setWebhook,
+  sendMessage, getChat, getChatMember, sendDocument). Esiste per i TEST: il relay
+  nei test gira con HTTPS_PROXY su una porta morta, quindi senza questa variabile
+  nessuna chiamata in uscita puo' RIUSCIRE, e un cancello che si limita a fallire
+  non e' distinguibile da uno che funziona (#115).
+  ATTENZIONE: e' allo stesso livello di fiducia del token del bot. Chi puo'
+  impostarla puo' dirottare le chiamate — e con esse il token — verso un altro
+  host. Chi puo' impostare le variabili del servizio ha pero' gia'
+  TELEGRAM_BOT_TOKEN, quindi non apre una porta nuova.
 TELEGRAM_ADMIN_RECONCILE: facoltativa, serve una volta sola. E' il CONSENSO ad
   assorbire la riga vuota che possiede TELEGRAM_ADMIN_ID, e il suo valore e'
   l'IDENTIFICATIVO DI QUELLA RIGA — non un 1. Il numero lo trovi nel messaggio di log

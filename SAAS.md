@@ -1361,17 +1361,32 @@ di ogni canale sconosciuto costi una query.
 - verificare una chat **non aggira l'attivazione**: i parser di un utente
   `registrato` restano fermi con `access_registrato`, come prima.
 
-**Il limite noto, e va detto perché la prova non è la stessa per tutte le chat.**
+**La prova di ruolo, e perché la prova non è la stessa per tutte le chat.**
 Il meccanismo dimostra che chi presenta il codice **può scrivere** in quella chat.
 Per un **canale** questo coincide col controllarlo, perché su Telegram in un canale
-scrivono solo gli amministratori. Per un **gruppo** no: può scrivere qualunque
-membro, quindi un membro ordinario con un account BetRelay può rivendicare il
-gruppo, e da quel momento nessun altro lo può più verificare (`chat_non_disponibile`).
+scrivono solo gli amministratori. Per un **gruppo** no: può scrivere qualunque membro.
 
-Cosa questo **non** è: non è un accesso ai dati di un altro utente — nessun parser,
-feed o token diventa leggibile — e chi rivendica il gruppo vedeva già quei messaggi,
-da membro. Cosa **è**: la possibilità di soffiare la verifica al titolare legittimo
-e di dirottare quel flusso nei propri parser.
+**Era un limite noto — un membro ordinario poteva rivendicare il gruppo di un altro —
+ed è chiuso dalla #115.** Fuori dai canali il servizio chiede a Telegram, con
+`getChatMember`, il ruolo di chi ha incollato il codice, e registra solo per
+`creator`/`administrator`. Quattro scelte, tutte con il loro test:
+
+- **`TIPI_CHAT_CON_PROVA_FORTE` dice cosa SALTA il controllo, non cosa lo richiede.**
+  Un tipo assente o nuovo cade fra quelli che la prova la devono dare; il verso
+  opposto lascerebbe passare tutto ciò che non riconosciamo, che su un cancello di
+  sicurezza è l'errore da non fare.
+- **Fail-closed.** Se la chiamata non riesce la chat non si registra. Il costo è
+  reale e dichiarato: un guasto di Telegram impedisce di collegare gruppi nuovi. Il
+  verso opposto renderebbe la protezione assente proprio quando serve, perché
+  basterebbe far fallire la chiamata. I feed già attivi non sono toccati — questo
+  percorso registra, non elabora.
+- **Il rifiuto per ruolo non consuma il codice**: chi non era ancora amministratore
+  deve poter riprovare dopo esserlo diventato.
+- **La chiamata sta fuori dalla transazione e dopo una lettura di filtro.** Mai il
+  lock di scrittura tenuto per i 10 s di timeout; e mai una chiamata per un codice
+  già morto, o chiunque possa scrivere in una chat dove il bot è presente potrebbe
+  farci fare una raffica di chiamate in uscita incollando stringhe della forma
+  giusta.
 
 **Chiuso dalla #116 sul percorso principale — e non con `getChatMember`**, che era la
 strada scritta qui prima. Promuovere il bot ad amministratore Telegram lo consente solo
@@ -2852,18 +2867,24 @@ La voce e la vista esistono solo con `admin` vero; il server risponde comunque
     resterebbe invisibile fino a un ricaricamento. Entrambe segnalate da CodeRabbit
     sulla PR #114 e vincolate da `tests/web/chat_flow.py`, che fa fallire una
     richiesta di proposito e misura l'ordine delle due chiamate d'apertura);
-    e in coda un `banner warn` che **dichiara il limite invece di tacerlo**: «In un
-    **canale** scrivono solo gli amministratori, quindi la prova è forte. In un
-    **gruppo** può scrivere qualunque membro: chiunque sia dentro potrebbe
-    rivendicarlo prima di te, e poi non sarebbe più disponibile. Se i tuoi segnali
-    arrivano in un gruppo, su Telegram limita l'invio dei messaggi agli
-    amministratori.» **Col #116 quell'avviso è rimasto qui e non è stato tolto**, ed è
-    una scelta: il ripiego si porta dietro la sua prova debole, quindi l'avviso vive
-    dove vive il difetto. Nello stato senza verifica in corso è diventato un
-    `banner warn` invece di una riga grigia, e nomina il confronto: «Questa prova è
-    **più debole** della promozione: dimostra che sai scrivere in quella chat, non che
-    la gestisci. […] Se i tuoi segnali arrivano in un gruppo, preferisci la promozione
-    del bot.» Vincolato da `tests/web/chat_flow.py`;
+    e in coda un `banner` che **dice come funziona invece di avvertire di un
+    pericolo**: «In un **gruppo** non basta incollare il codice: il servizio chiede a
+    Telegram se sei **amministratore** di quel gruppo, e collega solo in quel caso. In
+    un **canale** non serve, perché lì scrivono già solo gli amministratori.»
+
+    **Quel testo diceva l'opposto fino alla #115**, e la storia vale più del testo:
+    era un `banner warn` che dichiarava un limite reale — «può scrivere qualunque
+    membro: chiunque sia dentro potrebbe rivendicarlo prima di te» — e tacerlo sarebbe
+    stata una promessa non mantenuta. Chiuso il buco, quella frase è diventata **falsa
+    nel verso opposto**: avvertiva di un furto che il servizio adesso impedisce. Un
+    avviso onesto ieri è disinformazione oggi, e il `warn` è caduto con lui perché non
+    c'è più niente di cui allarmarsi. Lo stato senza verifica in corso porta la stessa
+    cosa più estesa, e aggiunge il costo del fail-closed: «Se Telegram non risponde, il
+    collegamento non avviene: riprova più tardi.»
+
+    Vincolato da `tests/web/chat_flow.py` sui **due versi**: la card deve dire
+    «amministratore», e **non** deve più dire che un membro qualunque potrebbe
+    prendersi il gruppo. Anche quell'asserzione è stata girata, non cancellata;
   - **il codice è arrivato ed è stato rifiutato** — un `banner warn` (id
     `verifica-rifiuto`) in testa alla card, con **un solo** motivo possibile: «Il
     codice è arrivato, ma il tuo accesso non era attivo. Il codice non è stato
