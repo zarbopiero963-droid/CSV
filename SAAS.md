@@ -1419,6 +1419,11 @@ ed è chiuso dalla #115.** Fuori dai canali il servizio chiede a Telegram, con
     scarsa, perché cento membri che colludono useranno comunque quella stessa
     stringa. Chiave per mittente, il tetto sarebbe stato una chiamata per finestra
     **per account**; così è una sola in assoluto.
+  - **«Una per finestra» non è «una in volo».** Col timeout di 10 s e la finestra di
+    5 s, una chiamata appesa può sovrapporsi alla successiva: il massimo di chiamate
+    **concorrenti** per codice è `ceil(10/5)` = **due**, non una. Resta piccolo e fisso
+    — il punto era togliere l'amplificazione illimitata — ma chiamarlo «una sola»
+    sarebbe stato falso. Segnalato da OpenRouter Sol sulla PR #122.
   - **Lo slot si prende con una sola `UPDATE`**, atomica sotto il lock di scrittura
     di SQLite. Con più worker, una coppia lettura+scrittura lo farebbe vincere a due
     richieste in corsa. La scrittura committa **prima** della chiamata: il lock non

@@ -1532,7 +1532,7 @@ def test_il_rifiuto_per_ruolo_NON_brucia_il_codice(servizio_con_telegram):
     'https://api.telegram.org',      # l'API vera
     'https://api.telegram.org/',     # con la barra finale
     'http://127.0.0.1:8081',         # il loopback: non esce dalla macchina
-    'http://localhost:9',
+    'http://[::1]:8081',
 ])
 def test_le_radici_AMMESSE_si_usano(radice, monkeypatch):
     monkeypatch.setenv('TELEGRAM_API_BASE', radice)
@@ -1545,6 +1545,7 @@ def test_le_radici_AMMESSE_si_usano(radice, monkeypatch):
     'https://evil.example.com',
     'https://api.telegram.org.evil.com',  # il suffisso non e' l'host
     'http://10.0.0.1:8080',               # una rete interna resta un altro host
+    'http://localhost:9',                 # un NOME, non un indirizzo: dipende dal DNS
     'ftp://api.telegram.org',
     'non-un-url',
     '   ',

@@ -363,7 +363,14 @@ def risultato_telegram(esito):
 # Qualunque altro valore viene IGNORATO e si usa il default: un errore di
 # configurazione fa funzionare il servizio verso Telegram vero, non lo dirotta.
 HOST_TELEGRAM = 'api.telegram.org'
-HOST_LOOPBACK = ('127.0.0.1', 'localhost', '::1', '[::1]')
+# INDIRIZZI, non nomi. `localhost` era nella lista e ne e' uscito: e' un NOME, quindi
+# la sua risoluzione dipende da `/etc/hosts` e dal DNS, e la garanzia «non esce dalla
+# macchina» diventerebbe una garanzia su come e' configurata la macchina. Chi puo'
+# riscrivere `/etc/hosts` ha gia' vinto, ma una regola che si appoggia alla
+# risoluzione dei nomi non e' la stessa regola che ho scritto sopra — e questo file
+# preferisce che le due coincidano. Segnalato da GPT-5.5 sulla PR #122.
+# Chi prova in locale usa `127.0.0.1`, che e' quello che fanno i test.
+HOST_LOOPBACK = ('127.0.0.1', '::1', '[::1]')
 
 
 def radice_telegram_ammessa(radice):
@@ -7490,6 +7497,15 @@ def _prova_di_ruolo_superata(chat_id, tipo, mittente, codice, adesso):
     # dopo pochi secondi, e chiedere un codice nuovo crea una riga nuova con lo
     # slot pulito — ma e' un fastidio reale, scelto perche' il verso opposto
     # lascia in piedi un'amplificazione che colpisce TUTTI gli utenti.
+    #
+    # **«Una per finestra» non e' «una in volo», e il numero va detto.** Il timeout
+    # di `getChatMember` e' 10 s e la finestra 5 s, quindi una chiamata appesa puo'
+    # sovrapporsi alla successiva: il massimo di chiamate CONCORRENTI per codice e'
+    # `ceil(10 / 5)` = **2**, non 1. Resta un numero piccolo e fisso — il punto era
+    # togliere l'amplificazione illimitata — ma chiamarlo «una sola» sarebbe stato
+    # falso. Chi volesse davvero una sola in volo porta la finestra a >= 10 s, al
+    # prezzo di far aspettare altrettanto chi riprova dopo essere stato promosso.
+    # Segnalato da OpenRouter Sol sulla PR #122.
     #
     # **L'acquisizione dello slot e' UNA sola UPDATE**, quindi atomica sotto il
     # lock di scrittura di SQLite: con piu' worker una coppia lettura+scrittura

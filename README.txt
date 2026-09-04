@@ -321,6 +321,9 @@ chi ha incollato il codice, e registra solo per `creator`/`administrator`.
     del pool per fino a 10 s, e quel pool serve anche i segnali degli altri utenti.
     `ATTESA_FRA_PROVE_DI_RUOLO_S` (5 s) lascia una prova di ruolo per codice per
     finestra: coi 600 s di vita del codice il tetto passa da illimitato a 120.
+    «Una per finestra» NON e' «una in volo»: col timeout di 10 s una chiamata appesa
+    puo' sovrapporsi alla successiva, quindi il massimo di chiamate CONCORRENTI per
+    codice e' ceil(10/5) = DUE. Piccolo e fisso, ma dire «una sola» sarebbe falso.
     Il freno e' sul CODICE e non sul mittente perche' il codice e' la cosa scarsa —
     cento membri che colludono useranno comunque quella stessa stringa, quindi il
     tetto e' UNA chiamata per finestra in assoluto e non una per account.
@@ -1218,8 +1221,10 @@ TELEGRAM_API_BASE: facoltativa, e in produzione NON si imposta. E' la radice
   host sbagliato lo spedirebbe a qualcun altro. La regola e' una frase — il token non
   lascia la macchina se non in HTTPS verso Telegram — quindi si accettano solo:
     - https://api.telegram.org, l'API vera;
-    - il LOOPBACK (127.0.0.1, localhost, ::1) con qualunque schema, perche' quello
+    - il LOOPBACK come INDIRIZZO (127.0.0.1, ::1) con qualunque schema, perche' quello
       che non esce dalla macchina non puo' finire da nessuna parte. E' il caso dei test.
+      `localhost` NON e' ammesso: e' un nome, quindi la garanzia dipenderebbe da
+      /etc/hosts e dal DNS invece che dalla regola scritta qui (GPT-5.5, PR #122).
   Qualunque altro valore viene IGNORATO e si usa il default: un errore di
   configurazione fa funzionare il servizio verso Telegram vero, non lo dirotta.
   STORIA, perche' non si ripeta: qui prima c'era scritto «e' allo stesso livello di
