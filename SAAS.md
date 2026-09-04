@@ -1369,12 +1369,24 @@ scrivono solo gli amministratori. Per un **gruppo** no: può scrivere qualunque 
 **Era un limite noto — un membro ordinario poteva rivendicare il gruppo di un altro —
 ed è chiuso dalla #115.** Fuori dai canali il servizio chiede a Telegram, con
 `getChatMember`, il ruolo di chi ha incollato il codice, e registra solo per
-`creator`/`administrator`. Quattro scelte, tutte con il loro test:
+`creator`/`administrator`. Cinque scelte, tutte con il loro test:
 
 - **`TIPI_CHAT_CON_PROVA_FORTE` dice cosa SALTA il controllo, non cosa lo richiede.**
   Un tipo assente o nuovo cade fra quelli che la prova la devono dare; il verso
   opposto lascerebbe passare tutto ciò che non riconosciamo, che su un cancello di
   sicurezza è l'errore da non fare.
+- **La conversazione privata col bot ha la prova più forte di tutte, e non passa da
+  quella lista.** In privato gli interlocutori sono due, quella persona e il bot:
+  scriverci dentro non prova che «puoi scrivere», prova che **è la tua**. Telegram per
+  una chat privata usa come `chat.id` l'id dell'utente, quindi la prova è
+  `chat_id == from.id`, verificabile in casa e senza chiamate. `getChatMember` non
+  potrebbe confermarla — in privato il ruolo di amministratore non esiste, quindi la
+  risposta non sarebbe mai `creator`/`administrator` e il cancello rifiuterebbe
+  **sempre**. *La prima versione del #115 lo faceva davvero: non era una decisione, era
+  un percorso preesistente che il cancello toglieva senza che nessuno lo vedesse.
+  Segnalato da Claude Fable 5.1 al gate della PR #122.* Il confronto con `from.id` costa
+  una riga ed è vero per costruzione su Telegram; serve lo stesso, perché senza, «tipo
+  privato» da solo autorizzerebbe una chat privata **altrui**.
 - **Fail-closed.** Se la chiamata non riesce la chat non si registra. Il costo è
   reale e dichiarato: un guasto di Telegram impedisce di collegare gruppi nuovi. Il
   verso opposto renderebbe la protezione assente proprio quando serve, perché
@@ -1388,8 +1400,16 @@ ed è chiuso dalla #115.** Fuori dai canali il servizio chiede a Telegram, con
   farci fare una raffica di chiamate in uscita incollando stringhe della forma
   giusta.
 
-**Chiuso dalla #116 sul percorso principale — e non con `getChatMember`**, che era la
-strada scritta qui prima. Promuovere il bot ad amministratore Telegram lo consente solo
+**Chiuso dalla #116 sul percorso principale — e lì senza `getChatMember`.** *Le due
+frasi convivono e vanno lette insieme, perché prese da sole si contraddicono: la #115
+`getChatMember` lo usa, la #116 no, e la differenza non è un ripensamento ma il fatto che
+i due percorsi hanno a disposizione prove diverse.* Nella #116 chi promuove è **attestato
+da Telegram** nella consegna stessa; nel codice usa-e-getta non c'è nessun attore
+attestato, e la prova va chiesta. Segnalato da Claude Fable 5.1 al gate della PR #122,
+dove questo paragrafo diceva ancora «non con `getChatMember`» **diciassette righe dopo**
+averne descritto l'uso.
+
+Promuovere il bot ad amministratore Telegram lo consente solo
 a chi è già amministratore, e `my_chat_member` porta `from`, cioè chi l'ha fatto,
 attestato da Telegram: la prova di ruolo arriva **gratis**, senza chiamate in uscita e
 senza i loro modi di fallire. La domanda giusta non era «come costruiamo una prova di

@@ -7353,6 +7353,27 @@ def _prova_di_ruolo_superata(chat_id, tipo, mittente, codice, adesso):
         # Fuori dai canali un mittente assente e' una consegna che non possiamo
         # attribuire a nessuno: non si registra.
         return False
+    if (tipo or '') == 'private':
+        # La conversazione privata col bot: la prova piu' forte di tutte, e sta
+        # QUI e non in `TIPI_CHAT_CON_PROVA_FORTE` perche' non basta il tipo.
+        #
+        # In privato gli interlocutori sono due, quella persona e il bot: scriverci
+        # dentro non prova che «puoi scrivere», prova che **e' la tua**. E Telegram
+        # per una chat privata usa come `chat.id` l'id dell'utente stesso, quindi la
+        # prova e' verificabile qui, senza chiedere niente a nessuno.
+        #
+        # `getChatMember` non potrebbe confermarla: in privato il ruolo di
+        # amministratore non esiste, quindi la risposta non sara' mai
+        # `creator`/`administrator` e il cancello rifiuterebbe SEMPRE. La prima
+        # versione del #115 lo faceva davvero, e non per scelta: e' un percorso
+        # che esisteva prima e che il cancello toglieva senza che nessuno lo
+        # vedesse. Segnalato da Claude Fable 5.1 al gate della PR #122.
+        #
+        # Il confronto `chat_id == mittente` costa una riga e su Telegram e' vero
+        # per costruzione. Serve lo stesso: senza, «tipo privato» da solo
+        # autorizzerebbe una chat privata **altrui**, che e' il furto della
+        # verifica in un'altra forma.
+        return str(chat_id) == str(mittente)
     c = db()
     try:
         vivo = c.execute(

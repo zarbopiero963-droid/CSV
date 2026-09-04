@@ -1228,6 +1228,54 @@ def test_senza_mittente_fuori_da_un_canale_non_si_collega(servizio):
     assert _chats(base, cookie) == []
 
 
+def test_la_conversazione_PRIVATA_col_bot_resta_collegabile(servizio_con_telegram):
+    """La prova piu' forte di tutte, e questa PR stava per toglierla.
+
+    In una chat privata gli interlocutori sono due: quella persona e il bot.
+    Scriverci dentro non prova che «puoi scrivere», prova che **e' la tua**. La
+    conferma sta nell'identificatore: per una chat privata Telegram usa come
+    `chat.id` l'id dell'utente stesso, quindi `chat_id == from.id` e' verificabile
+    qui, senza chiedere niente a nessuno.
+
+    `getChatMember` non potrebbe confermarla: in una chat privata il ruolo di
+    amministratore non esiste, quindi la risposta non sara' mai
+    `creator`/`administrator` e il cancello del #115 rifiuterebbe **sempre**. Non
+    era una decisione, era una conseguenza non vista: prima del #115 il codice
+    incollato in privato collegava la chat, e nessun test lo teneva fermo.
+
+    Segnalato da Claude Fable 5.1 sulla PR #122 come `[INSUFFICIENT_CONTEXT]`.
+    """
+    base, percorso_db, finto = servizio_con_telegram
+    cookie, _ = _login_a(base, percorso_db)
+    finto.ruolo('member')   # se venisse chiamato, rifiuterebbe
+
+    stato, corpo = _consegna(base, CLIENTE_A, _codice(base, cookie),
+                             tipo='private', mittente=CLIENTE_A)
+
+    assert stato == 200, corpo
+    assert corpo.get('verified') is True, corpo
+    assert [c['telegram_chat_id'] for c in _chats(base, cookie)] == [CLIENTE_A]
+    assert finto.quante('getChatMember') == 0, (
+        f'chiesto a Telegram un ruolo che in privato non esiste: {finto.chiamate}')
+
+
+def test_una_chat_PRIVATA_che_non_e_la_tua_non_si_collega(servizio_con_telegram):
+    """L'altra meta', e costa una riga: la prova e' `chat_id == from.id`.
+
+    Su Telegram le due cose coincidono per costruzione, quindi questo caso non
+    dovrebbe arrivare mai. Proprio per questo il controllo va scritto: se un
+    domani arrivasse, «tipo privato» da solo autorizzerebbe una chat altrui.
+    """
+    base, percorso_db, finto = servizio_con_telegram
+    cookie, _ = _login_a(base, percorso_db)
+    finto.ruolo('administrator')   # nemmeno un si- di Telegram deve bastare
+
+    _consegna(base, CLIENTE_A, _codice(base, cookie), tipo='private',
+              mittente=CLIENTE_B)
+
+    assert _chats(base, cookie) == []
+
+
 def test_un_rifiuto_di_Telegram_con_HTTP_200_resta_un_rifiuto(servizio_con_telegram):
     """`ok: false` dentro una risposta 200 e' un NO, anche se il corpo sembra un SI'.
 
