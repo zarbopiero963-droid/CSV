@@ -205,7 +205,12 @@ def _consegna(base, chat, testo, titolo=None, tipo='channel', mittente=None):
     if tipo is not None:
         dati_chat['type'] = tipo
     messaggio = {'chat': dati_chat, 'text': testo}
-    if mittente is not None:
+    if mittente == '':
+        # `from` c'e' ma non porta un `id`. Il relay lo riduce alla stessa stringa
+        # vuota di una consegna senza `from`, e i due casi vanno provati
+        # entrambi: sono forme diverse dello stesso «non attribuibile».
+        messaggio['from'] = {}
+    elif mittente is not None:
         messaggio['from'] = {'id': int(mittente)}
     payload = {'message': messaggio}
     req = urllib.request.Request(
@@ -1274,6 +1279,29 @@ def test_una_chat_PRIVATA_che_non_e_la_tua_non_si_collega(servizio_con_telegram)
               mittente=CLIENTE_B)
 
     assert _chats(base, cookie) == []
+
+
+@pytest.mark.parametrize('mittente', [None, ''])
+def test_una_chat_PRIVATA_senza_mittente_non_si_collega(servizio_con_telegram, mittente):
+    """Fail-closed anche in privato, e il test serve a fissare l'ORDINE dei rami.
+
+    Oggi il caso e' chiuso due volte: `if not mittente` sta prima, e anche se non
+    ci fosse il confronto `chat_id == mittente` fallirebbe lo stesso. E' proprio
+    per questo che vale scriverlo: la doppia chiusura e' una proprieta' della
+    disposizione attuale del codice, non una garanzia, e spostare il ramo del
+    privato piu' in alto la ridurrebbe a una sola.
+
+    Suggerito da GPT-5.5 sulla PR #122.
+    """
+    base, percorso_db, finto = servizio_con_telegram
+    cookie, _ = _login_a(base, percorso_db)
+    finto.ruolo('administrator')
+
+    _consegna(base, CLIENTE_A, _codice(base, cookie), tipo='private',
+              mittente=mittente)
+
+    assert _chats(base, cookie) == []
+    assert finto.quante('getChatMember') == 0, finto.chiamate
 
 
 def test_un_rifiuto_di_Telegram_con_HTTP_200_resta_un_rifiuto(servizio_con_telegram):
