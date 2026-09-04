@@ -1422,6 +1422,47 @@ def test_il_freno_e_una_FINESTRA_non_un_blocco(servizio_con_telegram):
     assert finto.quante('getChatMember') == 2, finto.chiamate
 
 
+def test_il_rifiuto_per_ruolo_SI_DICE(servizio_con_telegram):
+    """Senza, la schermata contava alla rovescia e poi diceva «scaduto»: falso.
+
+    Il codice non era scaduto, era stato rifiutato. E' la stessa bugia che la #120
+    aveva tolto per `accesso_non_attivo`, rimasta in piedi sul rifiuto piu' comune
+    di questa funzione. Segnalato da CodeRabbit sulla PR #122.
+    """
+    base, percorso_db, finto = servizio_con_telegram
+    cookie, _ = _login_a(base, percorso_db)
+    finto.ruolo('member')
+
+    _consegna(base, GRUPPO, _codice(base, cookie), tipo='supergroup',
+              mittente=CLIENTE_A)
+
+    st = _stato_verifica(base, cookie)
+    assert st.get('esito') == 'ruolo_non_provato', (
+        f'il rifiuto per ruolo non lascia traccia: {st!r}')
+    assert st['in_attesa'] is True, (
+        f'scrivere il motivo ha consumato il codice: {st!r}')
+
+
+def test_il_motivo_scritto_NON_impedisce_di_riprovare(servizio_con_telegram):
+    """L'altra meta': `esito` non e' un cancello.
+
+    La prova di ruolo guarda `consumed_at` e la scadenza, mai `esito` — e questo
+    test e' l'unica cosa che lo tiene fermo.
+    """
+    base, percorso_db, finto = servizio_con_telegram
+    cookie, _ = _login_a(base, percorso_db)
+    finto.ruolo('member')
+
+    codice = _codice(base, cookie)
+    _consegna(base, GRUPPO, codice, tipo='supergroup', mittente=CLIENTE_A)
+    finto.ruolo('administrator')
+    _sblocca_il_freno(percorso_db, codice)
+    _consegna(base, GRUPPO, codice, tipo='supergroup', mittente=CLIENTE_A)
+
+    assert [c['telegram_chat_id'] for c in _chats(base, cookie)] == [GRUPPO], (
+        'il motivo scritto ha reso il codice inservibile')
+
+
 def test_il_freno_non_consuma_il_codice(servizio_con_telegram):
     """Una consegna frenata dev'essere indistinguibile da una rifiutata per ruolo:
     stesso motivo, e il codice resta spendibile."""
@@ -1473,3 +1514,73 @@ def test_il_rifiuto_per_ruolo_NON_brucia_il_codice(servizio_con_telegram):
     assert [c['telegram_chat_id'] for c in _chats(base, cookie)] == [GRUPPO], (
         'il codice era stato bruciato da un rifiuto per ruolo')
 
+
+
+# ------------------------------- la radice dell'API di Telegram (#115)
+#
+# `TELEGRAM_API_BASE` finisce dentro un URL che porta il TOKEN DEL BOT. Non e' una
+# stringa qualunque: un valore `http://` verso un host remoto spedirebbe il token in
+# chiaro, un host sbagliato lo spedirebbe a qualcun altro.
+#
+# Nella prima versione della PR la variabile era solo DOCUMENTATA come «in produzione
+# non si imposta». Tre reviewer di fila l'hanno segnalata — GPT-5.5 come rischio
+# manuale, Fable 5.1 come nota, CodeRabbit come **Major** con CWE-200 — e avevano
+# ragione tutti e tre: una cautela scritta non e' un vincolo, e questo repository ha
+# la frase per nome. Adesso e' un controllo, e questi test sono il controllo.
+
+@pytest.mark.parametrize('radice', [
+    'https://api.telegram.org',      # l'API vera
+    'https://api.telegram.org/',     # con la barra finale
+    'http://127.0.0.1:8081',         # il loopback: non esce dalla macchina
+    'http://localhost:9',
+])
+def test_le_radici_AMMESSE_si_usano(radice, monkeypatch):
+    monkeypatch.setenv('TELEGRAM_API_BASE', radice)
+    url = main.url_telegram('123:abc', 'getChatMember')
+    assert url.startswith(radice.rstrip('/') + '/bot'), url
+
+
+@pytest.mark.parametrize('radice', [
+    'http://api.telegram.org',           # HTTPS o niente: il token non viaggia in chiaro
+    'https://evil.example.com',
+    'https://api.telegram.org.evil.com',  # il suffisso non e' l'host
+    'http://10.0.0.1:8080',               # una rete interna resta un altro host
+    'ftp://api.telegram.org',
+    'non-un-url',
+    '   ',
+])
+def test_una_radice_NON_ammessa_viene_ignorata(radice, monkeypatch):
+    """Si ripiega sull'API vera: un errore di configurazione non dirotta il token.
+
+    Il verso opposto — fidarsi del valore — e' esattamente il difetto: chi sbaglia a
+    scrivere la variabile manderebbe `bot<token>` all'host scritto per sbaglio.
+    """
+    monkeypatch.setenv('TELEGRAM_API_BASE', radice)
+    url = main.url_telegram('123:abc', 'getChatMember')
+    assert url == 'https://api.telegram.org/bot123:abc/getChatMember', url
+
+
+def test_senza_la_variabile_si_usa_l_API_vera(monkeypatch):
+    monkeypatch.delenv('TELEGRAM_API_BASE', raising=False)
+    assert main.url_telegram('123:abc', 'setWebhook') == (
+        'https://api.telegram.org/bot123:abc/setWebhook')
+
+
+# ------------------------------- risposte malformate di Telegram (#115)
+
+@pytest.mark.parametrize('corpo', [[], 'una stringa', None, 42, {'ok': True, 'result': []}])
+def test_una_risposta_MALFORMATA_non_solleva(corpo):
+    """I due lettori promettono nel docstring di non sollevare, e non lo facevano.
+
+    `json.loads` sta DENTRO il `try`, `.get()` fuori: un JSON valido che non e' un
+    oggetto — `[]`, `"x"`, `null`, un numero — passava il primo e moriva sul secondo
+    con un `AttributeError`. Dal webhook quello diventa un HTTP 500 invece di un
+    rifiuto pulito. Segnalato da CodeRabbit sulla PR #122.
+    """
+    assert main.telegram_ha_detto_si(corpo) in (True, False)
+    assert isinstance(main.risultato_telegram(corpo), dict)
+
+
+def test_un_result_non_oggetto_non_diventa_un_ruolo():
+    """`ok: true` con un `result` che non e' un oggetto non deve dare un ruolo."""
+    assert main.risultato_telegram({'ok': True, 'result': ['administrator']}) == {}

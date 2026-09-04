@@ -1,4 +1,5 @@
 import asyncio, base64, binascii, csv, decimal, difflib, hashlib, hmac, io, json, logging, math, os, re, secrets, sqlite3, threading, time
+import urllib.parse  # `radice_telegram_ammessa` gira a livello di modulo: qui, non dentro le funzioni
 from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
@@ -317,9 +318,85 @@ ATTESA_FRA_TENTATIVI_S = 60
 # altro host. Chi puo' impostare le variabili d'ambiente del servizio pero' ha gia'
 # `TELEGRAM_BOT_TOKEN`, quindi non apre una porta nuova. In produzione non si
 # imposta: il default e' l'API vera.
+def telegram_ha_detto_si(esito):
+    """Vero solo se Telegram ha risposto un OGGETTO con `ok: true`. Non solleva.
+
+    Fonte unica dei quattro punti che leggono una risposta dell'API. Tutti
+    facevano `esito.get('ok')` sul risultato di `json.loads`, e tutti promettono
+    nel proprio docstring di **non sollevare**: una risposta che e' JSON valido ma
+    non un oggetto — `[]`, `"x"`, `null`, un numero — passa `json.loads` (che sta
+    dentro il `try`) e muore su `.get` (che sta fuori), con un `AttributeError`
+    che risale fino al webhook e diventa un HTTP 500 invece di un rifiuto pulito.
+
+    Il docstring era quindi falso, ed e' il tipo di promessa scritta che questo
+    repository considera peggiore di un difetto dichiarato. Segnalato da
+    CodeRabbit sulla PR #122 su `ruolo_in_chat`; gli altri tre li ha trovati il
+    grep del pattern, non la segnalazione.
+    """
+    return isinstance(esito, dict) and bool(esito.get('ok'))
+
+
+def risultato_telegram(esito):
+    """Il campo `result` come DIZIONARIO, o uno vuoto. Non solleva.
+
+    Stessa ragione di `telegram_ha_detto_si`: `result` puo' essere presente e non
+    essere un oggetto, e i chiamanti ci fanno `.get()` sopra.
+    """
+    risultato = esito.get('result') if isinstance(esito, dict) else None
+    return risultato if isinstance(risultato, dict) else {}
+
+
+# Gli schemi ammessi per `TELEGRAM_API_BASE`, e il perche' di ciascuno.
+#
+# La radice finisce dentro un URL che porta il token del bot, quindi non e' una
+# stringa qualunque: un valore `http://` verso un host remoto spedirebbe il token
+# in chiaro, e un host sbagliato lo spedirebbe a qualcun altro. Documentarlo non
+# bastava — «una cautela scritta non e' un vincolo» — e tre reviewer di fila
+# (GPT-5.5, Fable 5.1, CodeRabbit come Major) hanno segnalato lo stesso punto
+# sulla PR #122 prima che diventasse un controllo.
+#
+# La regola e' una sola frase: **il token non lascia la macchina se non in HTTPS
+# verso Telegram.** Da cui i due casi ammessi, e nessun altro:
+#   - `https://api.telegram.org`, cioe' l'API vera;
+#   - il LOOPBACK, con qualunque schema, perche' quello che non esce dalla
+#     macchina non puo' finire da nessuna parte. E' il caso dei test.
+# Qualunque altro valore viene IGNORATO e si usa il default: un errore di
+# configurazione fa funzionare il servizio verso Telegram vero, non lo dirotta.
+HOST_TELEGRAM = 'api.telegram.org'
+HOST_LOOPBACK = ('127.0.0.1', 'localhost', '::1', '[::1]')
+
+
+def radice_telegram_ammessa(radice):
+    """Vero se quella radice puo' ospitare un URL che porta il token. Non solleva."""
+    if not radice:
+        return False
+    try:
+        pezzi = urllib.parse.urlsplit(radice)
+        ospite = (pezzi.hostname or '').lower()
+    except ValueError:
+        # SOLO `ValueError`, che e' quello che `urlsplit` e `.hostname` sollevano su
+        # un URL malformato. La prima versione catturava `Exception`, e si e' mangiata
+        # il `NameError` di un `urllib.parse` non importato: la funzione rispondeva
+        # `False` anche su `https://api.telegram.org`. Nessun test sarebbe diventato
+        # rosso — il ripiego e' l'API vera — ma la guardia non guardava piu' niente.
+        # Una `except` larga dentro un controllo di sicurezza nasconde proprio il
+        # guasto che il controllo dovrebbe rendere visibile.
+        return False
+    if pezzi.scheme == 'https' and ospite == HOST_TELEGRAM:
+        return True
+    return pezzi.scheme in ('http', 'https') and ospite in HOST_LOOPBACK
+
+
 def url_telegram(token, metodo):
-    """`https://api.telegram.org/bot<token>/<metodo>`, o la radice configurata."""
-    radice = os.getenv('TELEGRAM_API_BASE', 'https://api.telegram.org').rstrip('/')
+    """`https://api.telegram.org/bot<token>/<metodo>`, o la radice configurata.
+
+    Una `TELEGRAM_API_BASE` non ammessa (vedi `radice_telegram_ammessa`) viene
+    ignorata: si usa l'API vera. Il verso opposto — fidarsi del valore — farebbe
+    uscire il token del bot verso l'host che qualcuno ha scritto per sbaglio.
+    """
+    radice = (os.getenv('TELEGRAM_API_BASE') or '').strip().rstrip('/')
+    if not radice_telegram_ammessa(radice):
+        radice = f'https://{HOST_TELEGRAM}'
     return f'{radice}/bot{token}/{metodo}'
 
 
@@ -383,7 +460,13 @@ def _chiama_set_webhook(bot_token, public_url):
     try:
         with urllib.request.urlopen(richiesta, timeout=10) as r:
             risposta = json.loads(r.read().decode('utf-8'))
-        return risposta.get('ok') is True
+        # Il quinto lettore, e l'unico che era gia' al sicuro — ma per caso, non per
+        # scelta: il `.get()` sta DENTRO il `try`, quindi l'`AttributeError` di una
+        # risposta non-oggetto finiva nell'`except Exception` e usciva come «chiamata
+        # fallita». Passa dalla stessa funzione degli altri quattro perche' la domanda
+        # e' la stessa, e perche' affidarsi a una `except` larga per la correttezza e'
+        # il modo in cui un difetto sopravvive senza che nessuno lo veda.
+        return telegram_ha_detto_si(risposta)
     except Exception as e:
         # Solo il NOME del tipo, mai il messaggio e mai il traceback. Il messaggio
         # di un'eccezione di `urllib` puo' contenere l'URL, e l'URL contiene il token
@@ -1529,7 +1612,7 @@ def invia_messaggio_telegram(chat_id, testo, bot_token=None):
         return False, f'invio fallito ({type(e).__name__})'
     # Come per `setWebhook`: il codice HTTP non basta, Telegram segnala parte dei rifiuti con
     # `200` e `ok: false` — ed e' proprio il caso di «non puo' scrivere per primo».
-    if not corpo.get('ok'):
+    if not telegram_ha_detto_si(corpo):
         return False, 'Telegram ha rifiutato la consegna'
     return True, None
 
@@ -2228,9 +2311,9 @@ def leggi_chat_telegram(chat_id, bot_token=None):
             esito = json.loads(risposta.read().decode('utf-8'))
     except Exception as e:
         return False, f'getChat fallito ({type(e).__name__})'
-    if not esito.get('ok'):
+    if not telegram_ha_detto_si(esito):
         return False, 'Telegram ha rifiutato getChat'
-    return True, esito.get('result') or {}
+    return True, risultato_telegram(esito)
 
 
 # I ruoli che PROVANO il controllo di una chat. Stessa lista di
@@ -2282,9 +2365,10 @@ def ruolo_in_chat(chat_id, user_id, bot_token=None):
             esito = json.loads(risposta.read().decode('utf-8'))
     except Exception as e:
         return False, f'getChatMember fallito ({type(e).__name__})'
-    if not esito.get('ok'):
+    if not telegram_ha_detto_si(esito):
         return False, 'Telegram ha rifiutato getChatMember'
-    return True, ((esito.get('result') or {}).get('status') or '')
+    stato = risultato_telegram(esito).get('status')
+    return True, stato if isinstance(stato, str) else ''
 
 
 def invia_documento_telegram(chat_id, percorso, nome_file, didascalia=None, bot_token=None):
@@ -2344,7 +2428,7 @@ def invia_documento_telegram(chat_id, percorso, nome_file, didascalia=None, bot_
             os.unlink(corpo_path)
         except OSError:
             pass
-    if not esito.get('ok'):
+    if not telegram_ha_detto_si(esito):
         return False, 'Telegram ha rifiutato il documento'
     return True, None
 
@@ -7476,6 +7560,28 @@ def _consuma_codice_di_verifica(chat_id, codice, titolo=None, tipo=None, mittent
     """
     adesso = int(time.time())
     if not _prova_di_ruolo_superata(chat_id, tipo, mittente, codice, adesso):
+        # Il motivo si SCRIVE, e senza questo la schermata mentiva per omissione:
+        # `stato_verifica_chat` rispondeva `in_attesa: true` senza `esito`, quindi
+        # l'utente vedeva solo il conto alla rovescia e poi «scaduto». E' la stessa
+        # bugia che la #120 aveva tolto per `accesso_non_attivo`, lasciata in piedi
+        # sul rifiuto piu' comune di tutta la funzione. Segnalato da CodeRabbit
+        # sulla PR #122.
+        #
+        # `consumed_at` resta NULL: scrivere il motivo non e' consumare, e chi non
+        # era ancora amministratore deve poter riprovare con lo stesso codice —
+        # la prova di ruolo guarda `consumed_at` e la scadenza, mai `esito`.
+        #
+        # **Non e' un oracle fra tenant** come quello congelato nella #121: il
+        # motivo dice «chi ha incollato non ha il ruolo», che e' un fatto sul
+        # MITTENTE, e finisce sulla riga di chi il codice l'ha chiesto. Non rivela
+        # niente su un'altra chat ne' su un altro utente.
+        c = db()
+        try:
+            c.execute("UPDATE chat_verifications SET esito='ruolo_non_provato'"
+                      ' WHERE code=? AND consumed_at IS NULL', (codice,))
+            c.commit()
+        finally:
+            c.close()
         return {'ok': True, 'ignored': 'ruolo_non_provato'}
     c = db()
     try:

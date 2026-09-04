@@ -1265,11 +1265,19 @@ di ogni canale sconosciuto costi una query.
   un messaggio falso è peggio del silenzio perché manda a cercare il problema
   dove non è. `chat_verifications.esito` porta ora l'etichetta dell'ultimo
   rifiuto, `verify/status` la restituisce e la web app ci scrive sopra la frase.
-  **Ma l'etichetta è UNA sola, `accesso_non_attivo`**, e la scelta è il cuore di
-  questa voce: quel motivo parla dell'account di chi legge, quindi non divulga
-  niente. `chat_non_disponibile` parlerebbe invece di una chat di **qualcun
+  **Le etichette sono due, e il criterio che le ammette è uno solo**: un motivo si
+  scrive se parla di chi legge o di chi ha incollato, mai di una chat di qualcun
+  altro. `accesso_non_attivo` (#116) parla dell'account di chi legge;
+  `ruolo_non_provato` (#115) parla del **mittente** — «Telegram non ti dà come
+  amministratore di quella chat» — e non rivela niente né su un'altra chat né su un
+  altro utente. `chat_non_disponibile` parlerebbe invece di una chat di **qualcun
   altro**, e il server non lo registra nemmeno — vedi la voce sull'oracle qui
-  sotto. **`consumed_at` non si
+  sotto.
+  *`ruolo_non_provato` è arrivato dopo, e per una segnalazione:* il #115 aveva
+  introdotto il rifiuto più comune di tutta la funzione lasciandolo **muto**, cioè
+  ricreando esattamente la bugia che questa voce esiste per togliere — conto alla
+  rovescia, poi «scaduto senza essere usato», su un codice che scaduto non era.
+  Segnalato da CodeRabbit sulla PR #122. **`consumed_at` non si
   tocca**: il codice resta spendibile — chi ha incollato nel canale sbagliato lo
   reincolla in quello giusto, chi è stato sospeso a metà lo usa quando l'accesso
   rientra — ed è la metà vincolata da
@@ -2921,17 +2929,36 @@ La voce e la vista esistono solo con `admin` vero; il server risponde comunque
     nel verso opposto**: avvertiva di un furto che il servizio adesso impedisce. Un
     avviso onesto ieri è disinformazione oggi, e il `warn` è caduto con lui perché non
     c'è più niente di cui allarmarsi. Lo stato senza verifica in corso porta la stessa
-    cosa più estesa, e aggiunge il costo del fail-closed: «Se Telegram non risponde, il
-    collegamento non avviene: riprova più tardi.»
+    cosa più estesa, e aggiunge il costo del fail-closed: «Se Telegram non conferma il
+    ruolo, il collegamento non avviene: riprova più tardi.»
 
-    Vincolato da `tests/web/chat_flow.py` sui **due versi**: la card deve dire
-    «amministratore», e **non** deve più dire che un membro qualunque potrebbe
-    prendersi il gruppo. Anche quell'asserzione è stata girata, non cancellata;
+    **E sono DUE pannelli, non uno** — prima della generazione e dopo — con due testi
+    diversi che portavano lo stesso avviso. Riscriverne uno solo ha lasciato l'altro a
+    promettere il furto: il pannello di generazione ha continuato a dire «altrimenti un
+    membro qualunque potrebbe prendersi il gruppo di un altro» per tutta la PR, e la
+    guardia che avrebbe dovuto accorgersene guardava solo il pannello dopo. Trovato da
+    CodeRabbit sulla PR #122, ed è regola 2 applicata a chi scrive: *il sito corretto
+    non è la classe corretta.*
+
+    Vincolato da `tests/web/chat_flow.py` su **entrambi i pannelli** e sui **due
+    versi**: ciascuno deve dire «amministratore», e **nessuno dei due** deve più dire
+    che un membro qualunque potrebbe prendersi il gruppo. Le asserzioni sono state
+    girate, non cancellate;
   - **il codice è arrivato ed è stato rifiutato** — un `banner warn` (id
-    `verifica-rifiuto`) in testa alla card, con **un solo** motivo possibile: «Il
-    codice è arrivato, ma il tuo accesso non era attivo. Il codice non è stato
-    consumato, ma **finché l'accesso non torna attivo verrebbe rifiutato di
-    nuovo**.» La coda dice cosa aspettare, e non «puoi ancora usarlo»: lì il
+    `verifica-rifiuto`) in testa alla card, con **due** motivi possibili.
+    `accesso_non_attivo`: «Il codice è arrivato, ma il tuo accesso non era attivo. Il
+    codice non è stato consumato, ma **finché l'accesso non torna attivo verrebbe
+    rifiutato di nuovo**.» E `ruolo_non_provato` (#115): «Il codice è arrivato, ma
+    Telegram non ti dà come amministratore di quella chat. Il codice non è stato
+    consumato: **diventa amministratore e reincollalo**, oppure incollalo in una chat
+    che amministri.» Le due code sono diverse perché i due cancelli lo sono: sul primo
+    riprovare **non può** riuscire finché l'accesso non torna, sul secondo sì — ed è la
+    stessa distinzione, non una ripetizione.
+    *Il secondo motivo è arrivato dopo:* il #115 aveva introdotto il rifiuto più comune
+    di tutta la funzione lasciandolo **muto**, quindi la schermata contava alla rovescia
+    e poi annunciava «scaduto senza essere usato» su un codice che scaduto non era —
+    ricreando esattamente la bugia che questo banner esiste per togliere. Segnalato da
+    CodeRabbit sulla PR #122. La coda dice cosa aspettare, e non «puoi ancora usarlo»: lì il
     cancello è lo stesso e riprovare non può riuscire — una coda sola per motivi
     diversi mandava l'utente a ritentare una cosa impossibile, che è la stessa
     bugia che l'avviso esiste per togliere, rimessa dentro l'avviso. Rilievo di

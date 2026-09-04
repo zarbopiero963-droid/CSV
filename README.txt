@@ -1213,10 +1213,21 @@ TELEGRAM_API_BASE: facoltativa, e in produzione NON si imposta. E' la radice
   nei test gira con HTTPS_PROXY su una porta morta, quindi senza questa variabile
   nessuna chiamata in uscita puo' RIUSCIRE, e un cancello che si limita a fallire
   non e' distinguibile da uno che funziona (#115).
-  ATTENZIONE: e' allo stesso livello di fiducia del token del bot. Chi puo'
-  impostarla puo' dirottare le chiamate — e con esse il token — verso un altro
-  host. Chi puo' impostare le variabili del servizio ha pero' gia'
-  TELEGRAM_BOT_TOKEN, quindi non apre una porta nuova.
+  E' VALIDATA, e non solo documentata. La radice finisce dentro un URL che porta il
+  TOKEN DEL BOT: un valore http:// verso un host remoto lo spedirebbe in chiaro, un
+  host sbagliato lo spedirebbe a qualcun altro. La regola e' una frase — il token non
+  lascia la macchina se non in HTTPS verso Telegram — quindi si accettano solo:
+    - https://api.telegram.org, l'API vera;
+    - il LOOPBACK (127.0.0.1, localhost, ::1) con qualunque schema, perche' quello
+      che non esce dalla macchina non puo' finire da nessuna parte. E' il caso dei test.
+  Qualunque altro valore viene IGNORATO e si usa il default: un errore di
+  configurazione fa funzionare il servizio verso Telegram vero, non lo dirotta.
+  STORIA, perche' non si ripeta: qui prima c'era scritto «e' allo stesso livello di
+  fiducia del token del bot, chi puo' impostare le variabili ha gia' il token, quindi
+  non apre una porta nuova» — e nient'altro. Tre reviewer di fila l'hanno segnalata
+  (GPT-5.5 come rischio manuale, Fable 5.1 come nota, CodeRabbit come Major con
+  CWE-200) prima che diventasse un controllo. La lezione e' quella che questo
+  repository ha gia' scritto altrove: una cautela scritta non e' un vincolo.
 TELEGRAM_ADMIN_RECONCILE: facoltativa, serve una volta sola. E' il CONSENSO ad
   assorbire la riga vuota che possiede TELEGRAM_ADMIN_ID, e il suo valore e'
   l'IDENTIFICATIVO DI QUELLA RIGA — non un 1. Il numero lo trovi nel messaggio di log

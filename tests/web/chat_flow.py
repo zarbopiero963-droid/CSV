@@ -307,6 +307,18 @@ with sync_playwright() as pw:
     non_sfonda(pg, 'chat vuote')
     shot(pg, '01-chat-vuote')
 
+    # Il pannello PRIMA della generazione, e non e' un doppione di quello dopo.
+    # Sono due schermate diverse con due testi diversi, e l'avviso del #115 stava
+    # in entrambe: riscriverne una sola ha lasciato l'altra a promettere un furto
+    # che il servizio adesso impedisce. Trovato da CodeRabbit sulla PR #122 — io
+    # avevo corretto il sito, non la classe.
+    prima = pg.inner_text('.card:has([data-act="chat-verifica-start"])').lower()
+    assert 'amministratore' in prima, (
+        f'il pannello di generazione non dice cosa serve in un gruppo: {prima!r}')
+    assert 'prendersi il gruppo' not in prima, (
+        'il pannello di generazione avverte ancora di un furto che il servizio '
+        f'adesso impedisce: {prima!r}')
+
     # ---- 2) il codice, e la direzione da seguire -------------------------
     pg.click('[data-act="chat-verifica-start"]')
     pg.wait_for_selector('#codice-verifica')

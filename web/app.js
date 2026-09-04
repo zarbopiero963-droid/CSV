@@ -1896,6 +1896,16 @@ function rigaChat(c) {
 // codice ormai morto sarebbe la stessa frase falsa spostata di dieci minuti —
 // il difetto che CodeRabbit ha trovato in questa PR, un giro prima.
 function motivoDelRifiuto(esito, scaduto) {
+  if (esito === 'ruolo_non_provato') {
+    // Il rifiuto più comune del #115, e prima non lo diceva nessuno: la schermata
+    // contava alla rovescia e poi annunciava «scaduto», che è falso — il codice
+    // non era scaduto, era stato rifiutato. Segnalato da CodeRabbit sulla PR #122.
+    return 'Il codice è arrivato, ma Telegram non ti dà come amministratore di '
+      + 'quella chat. '
+      + (scaduto ? 'Quel codice è poi scaduto: generane un altro.'
+         : 'Il codice non è stato consumato: diventa amministratore e reincollalo, '
+           + 'oppure incollalo in una chat che amministri.');
+  }
   if (esito === 'accesso_non_attivo') {
     return 'Il codice è arrivato, ma il tuo accesso non era attivo. '
       + (scaduto ? 'Quel codice è poi scaduto: generane un altro.'
@@ -2075,13 +2085,12 @@ async function viewChats() {
           qualcun altro — ricevi un codice, lo incolli <strong>dentro il canale</strong>
           da cui arrivano i segnali, e il canale compare qui.
         </p>
-        <div class="banner warn" style="margin:0"><span class="small">
+        <div class="banner" style="margin:0"><span class="small">
           In un <strong>gruppo</strong> il codice da solo non basta: il servizio chiede a
-          Telegram se sei <strong>amministratore</strong>, e collega solo in quel caso —
-          altrimenti un membro qualunque potrebbe prendersi il gruppo di un altro. In un
-          <strong>canale</strong> il controllo non serve, perché lì scrivono già solo gli
-          amministratori. Se Telegram non risponde, il collegamento non avviene: riprova
-          più tardi.
+          Telegram se sei <strong>amministratore</strong>, e collega solo in quel caso. In
+          un <strong>canale</strong> il controllo non serve, perché lì scrivono già solo
+          gli amministratori. Se Telegram non conferma il ruolo, il collegamento non
+          avviene: riprova più tardi.
         </span></div>
         <div class="row">
           <button class="primary" data-act="chat-verifica-start">Genera il codice</button>
