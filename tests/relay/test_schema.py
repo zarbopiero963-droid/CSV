@@ -1776,7 +1776,60 @@ COLONNE_SCRITTE_DAL_CODICE = (
     ('chats', 'verified_at'),
     ('chat_verifications', 'chat_id'),
     ('chat_verifications', 'consumed_at'),
+    # Le due del #116, che la lista NON aveva: e' il difetto che il commento qui
+    # sopra aveva previsto — «il rischio vero e' la PROSSIMA colonna». Sono
+    # arrivate, e nessuno le ha aggiunte, mentre il corpo di quei due PR affermava
+    # che la migrazione era «coperta da questo test». Era falso, e nessuno lo
+    # aveva misurato.
+    ('chats', 'bot_stato'),
+    ('chat_verifications', 'esito'),
+    # E le ALTRE QUINDICI, che la guardia qui sotto ha fatto emergere tutte
+    # insieme: il buco non era il #116, era che la lista non e' mai stata tenuta
+    # al passo di `COLONNE_MULTIUTENTE` da niente.
+    ('parsers', 'active'),
+    ('parsers', 'config_json'),
+    ('parsers', 'created_at'),
+    ('parsers', 'id'),
+    ('parsers', 'ordine'),
+    ('parsers', 'slug'),
+    ('parsers', 'titolo'),
+    ('parsers', 'uid'),
+    ('parsers', 'user_id'),
+    ('parsers', 'versione'),
+    ('signals', 'expires_at'),
+    ('signals', 'profile'),
+    ('signals', 'user_id'),
+    ('users', 'origin_profile'),
+    ('users', 'promemoria_per'),
 )
+
+
+def test_ogni_colonna_migrata_e_anche_VERIFICATA():
+    """La lista qui sopra non deve piu' poter restare indietro in silenzio.
+
+    Il difetto non era la lista incompleta: era che una lista **a mano** e' un
+    vincolo che si stacca senza far rumore. Il commento sopra
+    `COLONNE_SCRITTE_DAL_CODICE` aveva perfino previsto il caso — «il rischio vero
+    e' la prossima colonna» — e quando le prossime colonne sono arrivate nessuno
+    le ha aggiunte, mentre due PR di fila scrivevano che la migrazione era coperta.
+
+    Una colonna che merita un `ALTER` e' per definizione una colonna che il codice
+    scrive o legge: se sta in `COLONNE_MULTIUTENTE`, deve stare anche qui, e quindi
+    passare dalla verifica sul formato di produzione. Questo NON rende circolare il
+    test parametrizzato — che continua a eseguire la migrazione vera e a guardare
+    il `PRAGMA table_info` — ma toglie il modo silenzioso di aggirarlo.
+
+    Il verso opposto non si pretende: una colonna puo' essere verificata qui senza
+    stare in `COLONNE_MULTIUTENTE`, ed e' anzi il caso interessante — significa che
+    il codice la scrive e nessun ALTER la porta ai database esistenti.
+    """
+    migrate = {(t, c) for t, c, _ in main.COLONNE_MULTIUTENTE}
+    verificate = set(COLONNE_SCRITTE_DAL_CODICE)
+    mancanti = sorted(migrate - verificate)
+    assert not mancanti, (
+        f'colonne aggiunte a COLONNE_MULTIUTENTE ma mai verificate: {mancanti}. '
+        'Aggiungile a COLONNE_SCRITTE_DAL_CODICE, o la migrazione di quelle '
+        'colonne non e- vincolata da niente e il prossimo PR potra- dire che lo e-.')
 
 
 @pytest.mark.parametrize(('tabella', 'colonna'), COLONNE_SCRITTE_DAL_CODICE)
