@@ -1265,11 +1265,19 @@ di ogni canale sconosciuto costi una query.
   un messaggio falso è peggio del silenzio perché manda a cercare il problema
   dove non è. `chat_verifications.esito` porta ora l'etichetta dell'ultimo
   rifiuto, `verify/status` la restituisce e la web app ci scrive sopra la frase.
-  **Ma l'etichetta è UNA sola, `accesso_non_attivo`**, e la scelta è il cuore di
-  questa voce: quel motivo parla dell'account di chi legge, quindi non divulga
-  niente. `chat_non_disponibile` parlerebbe invece di una chat di **qualcun
+  **Le etichette sono due, e il criterio che le ammette è uno solo**: un motivo si
+  scrive se parla di chi legge o di chi ha incollato, mai di una chat di qualcun
+  altro. `accesso_non_attivo` (#116) parla dell'account di chi legge;
+  `ruolo_non_provato` (#115) parla del **mittente** — «Telegram non ti dà come
+  amministratore di quella chat» — e non rivela niente né su un'altra chat né su un
+  altro utente. `chat_non_disponibile` parlerebbe invece di una chat di **qualcun
   altro**, e il server non lo registra nemmeno — vedi la voce sull'oracle qui
-  sotto. **`consumed_at` non si
+  sotto.
+  *`ruolo_non_provato` è arrivato dopo, e per una segnalazione:* il #115 aveva
+  introdotto il rifiuto più comune di tutta la funzione lasciandolo **muto**, cioè
+  ricreando esattamente la bugia che questa voce esiste per togliere — conto alla
+  rovescia, poi «scaduto senza essere usato», su un codice che scaduto non era.
+  Segnalato da CodeRabbit sulla PR #122. **`consumed_at` non si
   tocca**: il codice resta spendibile — chi ha incollato nel canale sbagliato lo
   reincolla in quello giusto, chi è stato sospeso a metà lo usa quando l'accesso
   rientra — ed è la metà vincolata da
@@ -1361,20 +1369,82 @@ di ogni canale sconosciuto costi una query.
 - verificare una chat **non aggira l'attivazione**: i parser di un utente
   `registrato` restano fermi con `access_registrato`, come prima.
 
-**Il limite noto, e va detto perché la prova non è la stessa per tutte le chat.**
+**La prova di ruolo, e perché la prova non è la stessa per tutte le chat.**
 Il meccanismo dimostra che chi presenta il codice **può scrivere** in quella chat.
 Per un **canale** questo coincide col controllarlo, perché su Telegram in un canale
-scrivono solo gli amministratori. Per un **gruppo** no: può scrivere qualunque
-membro, quindi un membro ordinario con un account BetRelay può rivendicare il
-gruppo, e da quel momento nessun altro lo può più verificare (`chat_non_disponibile`).
+scrivono solo gli amministratori. Per un **gruppo** no: può scrivere qualunque membro.
 
-Cosa questo **non** è: non è un accesso ai dati di un altro utente — nessun parser,
-feed o token diventa leggibile — e chi rivendica il gruppo vedeva già quei messaggi,
-da membro. Cosa **è**: la possibilità di soffiare la verifica al titolare legittimo
-e di dirottare quel flusso nei propri parser.
+**Era un limite noto — un membro ordinario poteva rivendicare il gruppo di un altro —
+ed è chiuso dalla #115.** Fuori dai canali il servizio chiede a Telegram, con
+`getChatMember`, il ruolo di chi ha incollato il codice, e registra solo per
+`creator`/`administrator`. Cinque scelte, tutte con il loro test:
 
-**Chiuso dalla #116 sul percorso principale — e non con `getChatMember`**, che era la
-strada scritta qui prima. Promuovere il bot ad amministratore Telegram lo consente solo
+- **`TIPI_CHAT_CON_PROVA_FORTE` dice cosa SALTA il controllo, non cosa lo richiede.**
+  Un tipo assente o nuovo cade fra quelli che la prova la devono dare; il verso
+  opposto lascerebbe passare tutto ciò che non riconosciamo, che su un cancello di
+  sicurezza è l'errore da non fare.
+- **La conversazione privata col bot ha la prova più forte di tutte, e non passa da
+  quella lista.** In privato gli interlocutori sono due, quella persona e il bot:
+  scriverci dentro non prova che «puoi scrivere», prova che **è la tua**. Telegram per
+  una chat privata usa come `chat.id` l'id dell'utente, quindi la prova è
+  `chat_id == from.id`, verificabile in casa e senza chiamate. `getChatMember` non
+  potrebbe confermarla — in privato il ruolo di amministratore non esiste, quindi la
+  risposta non sarebbe mai `creator`/`administrator` e il cancello rifiuterebbe
+  **sempre**. *La prima versione del #115 lo faceva davvero: non era una decisione, era
+  un percorso preesistente che il cancello toglieva senza che nessuno lo vedesse.
+  Segnalato da Claude Fable 5.1 al gate della PR #122.* Il confronto con `from.id` costa
+  una riga ed è vero per costruzione su Telegram; serve lo stesso, perché senza, «tipo
+  privato» da solo autorizzerebbe una chat privata **altrui**.
+- **Fail-closed.** Se la chiamata non riesce la chat non si registra. Il costo è
+  reale e dichiarato: un guasto di Telegram impedisce di collegare gruppi nuovi. Il
+  verso opposto renderebbe la protezione assente proprio quando serve, perché
+  basterebbe far fallire la chiamata. I feed già attivi non sono toccati — questo
+  percorso registra, non elabora.
+- **Il rifiuto per ruolo non consuma il codice**: chi non era ancora amministratore
+  deve poter riprovare dopo esserlo diventato.
+- **La chiamata sta fuori dalla transazione e dopo una lettura di filtro.** Mai il
+  lock di scrittura tenuto per i 10 s di timeout; e mai una chiamata per un codice
+  già morto, o chiunque possa scrivere in una chat dove il bot è presente potrebbe
+  farci fare una raffica di chiamate in uscita incollando stringhe della forma
+  giusta.
+- **E un freno, perché quel filtro da solo non bastava.** Ferma i codici
+  *inventati*, non il codice **vivo** — che è incollato nella chat, quindi lo vedono
+  tutti i membri: chiunque poteva ripeterlo e farci fare una chiamata **per
+  messaggio**. *Misurato prima della correzione: 10 consegne, 10 `getChatMember`.*
+  Ogni consegna occupa un thread del pool per fino a 10 s, e quel pool serve anche
+  l'elaborazione dei segnali di tutti gli altri utenti.
+  `ATTESA_FRA_PROVE_DI_RUOLO_S` (5 s) lascia **una** prova di ruolo per codice per
+  finestra; con i 600 s di vita del codice il tetto passa da illimitato a 120.
+  - **Sul codice, non sul mittente**, ed è la scelta che conta: il codice è la cosa
+    scarsa, perché cento membri che colludono useranno comunque quella stessa
+    stringa. Chiave per mittente, il tetto sarebbe stato una chiamata per finestra
+    **per account**; così è una sola in assoluto.
+  - **«Una per finestra» non è «una in volo».** Col timeout di 10 s e la finestra di
+    5 s, una chiamata appesa può sovrapporsi alla successiva: il massimo di chiamate
+    **concorrenti** per codice è `ceil(10/5)` = **due**, non una. Resta piccolo e fisso
+    — il punto era togliere l'amplificazione illimitata — ma chiamarlo «una sola»
+    sarebbe stato falso. Segnalato da OpenRouter Sol sulla PR #122.
+  - **Lo slot si prende con una sola `UPDATE`**, atomica sotto il lock di scrittura
+    di SQLite. Con più worker, una coppia lettura+scrittura lo farebbe vincere a due
+    richieste in corsa. La scrittura committa **prima** della chiamata: il lock non
+    attraversa mai la rete.
+  - **Il baratto, dichiarato.** Un membro ostile che spamma il codice tiene lo slot
+    occupato, e la prova legittima del titolare può cadere nella finestra ed essere
+    rifiutata. Non è un blocco — si riprova dopo pochi secondi, e chiedere un codice
+    nuovo crea una riga nuova con lo slot pulito — ma è un fastidio reale, scelto
+    perché il verso opposto lascia in piedi un'amplificazione che colpisce **tutti**
+    gli utenti. `[REAL_FINDING]` di OpenRouter Sol al gate finale della PR #122.
+
+**Chiuso dalla #116 sul percorso principale — e lì senza `getChatMember`.** *Le due
+frasi convivono e vanno lette insieme, perché prese da sole si contraddicono: la #115
+`getChatMember` lo usa, la #116 no, e la differenza non è un ripensamento ma il fatto che
+i due percorsi hanno a disposizione prove diverse.* Nella #116 chi promuove è **attestato
+da Telegram** nella consegna stessa; nel codice usa-e-getta non c'è nessun attore
+attestato, e la prova va chiesta. Segnalato da Claude Fable 5.1 al gate della PR #122,
+dove questo paragrafo diceva ancora «non con `getChatMember`» **diciassette righe dopo**
+averne descritto l'uso.
+
+Promuovere il bot ad amministratore Telegram lo consente solo
 a chi è già amministratore, e `my_chat_member` porta `from`, cioè chi l'ha fatto,
 attestato da Telegram: la prova di ruolo arriva **gratis**, senza chiamate in uscita e
 senza i loro modi di fallire. La domanda giusta non era «come costruiamo una prova di
@@ -2852,23 +2922,48 @@ La voce e la vista esistono solo con `admin` vero; il server risponde comunque
     resterebbe invisibile fino a un ricaricamento. Entrambe segnalate da CodeRabbit
     sulla PR #114 e vincolate da `tests/web/chat_flow.py`, che fa fallire una
     richiesta di proposito e misura l'ordine delle due chiamate d'apertura);
-    e in coda un `banner warn` che **dichiara il limite invece di tacerlo**: «In un
-    **canale** scrivono solo gli amministratori, quindi la prova è forte. In un
-    **gruppo** può scrivere qualunque membro: chiunque sia dentro potrebbe
-    rivendicarlo prima di te, e poi non sarebbe più disponibile. Se i tuoi segnali
-    arrivano in un gruppo, su Telegram limita l'invio dei messaggi agli
-    amministratori.» **Col #116 quell'avviso è rimasto qui e non è stato tolto**, ed è
-    una scelta: il ripiego si porta dietro la sua prova debole, quindi l'avviso vive
-    dove vive il difetto. Nello stato senza verifica in corso è diventato un
-    `banner warn` invece di una riga grigia, e nomina il confronto: «Questa prova è
-    **più debole** della promozione: dimostra che sai scrivere in quella chat, non che
-    la gestisci. […] Se i tuoi segnali arrivano in un gruppo, preferisci la promozione
-    del bot.» Vincolato da `tests/web/chat_flow.py`;
+    e in coda un `banner` che **dice come funziona invece di avvertire di un
+    pericolo**: «In un **gruppo** non basta incollare il codice: il servizio chiede a
+    Telegram se sei **amministratore** di quel gruppo, e collega solo in quel caso. In
+    un **canale** non serve, perché lì scrivono già solo gli amministratori.»
+
+    **Quel testo diceva l'opposto fino alla #115**, e la storia vale più del testo:
+    era un `banner warn` che dichiarava un limite reale — «può scrivere qualunque
+    membro: chiunque sia dentro potrebbe rivendicarlo prima di te» — e tacerlo sarebbe
+    stata una promessa non mantenuta. Chiuso il buco, quella frase è diventata **falsa
+    nel verso opposto**: avvertiva di un furto che il servizio adesso impedisce. Un
+    avviso onesto ieri è disinformazione oggi, e il `warn` è caduto con lui perché non
+    c'è più niente di cui allarmarsi. Lo stato senza verifica in corso porta la stessa
+    cosa più estesa, e aggiunge il costo del fail-closed: «Se Telegram non conferma il
+    ruolo, il collegamento non avviene: riprova più tardi.»
+
+    **E sono DUE pannelli, non uno** — prima della generazione e dopo — con due testi
+    diversi che portavano lo stesso avviso. Riscriverne uno solo ha lasciato l'altro a
+    promettere il furto: il pannello di generazione ha continuato a dire «altrimenti un
+    membro qualunque potrebbe prendersi il gruppo di un altro» per tutta la PR, e la
+    guardia che avrebbe dovuto accorgersene guardava solo il pannello dopo. Trovato da
+    CodeRabbit sulla PR #122, ed è regola 2 applicata a chi scrive: *il sito corretto
+    non è la classe corretta.*
+
+    Vincolato da `tests/web/chat_flow.py` su **entrambi i pannelli** e sui **due
+    versi**: ciascuno deve dire «amministratore», e **nessuno dei due** deve più dire
+    che un membro qualunque potrebbe prendersi il gruppo. Le asserzioni sono state
+    girate, non cancellate;
   - **il codice è arrivato ed è stato rifiutato** — un `banner warn` (id
-    `verifica-rifiuto`) in testa alla card, con **un solo** motivo possibile: «Il
-    codice è arrivato, ma il tuo accesso non era attivo. Il codice non è stato
-    consumato, ma **finché l'accesso non torna attivo verrebbe rifiutato di
-    nuovo**.» La coda dice cosa aspettare, e non «puoi ancora usarlo»: lì il
+    `verifica-rifiuto`) in testa alla card, con **due** motivi possibili.
+    `accesso_non_attivo`: «Il codice è arrivato, ma il tuo accesso non era attivo. Il
+    codice non è stato consumato, ma **finché l'accesso non torna attivo verrebbe
+    rifiutato di nuovo**.» E `ruolo_non_provato` (#115): «Il codice è arrivato, ma
+    Telegram non ti dà come amministratore di quella chat. Il codice non è stato
+    consumato: **diventa amministratore e reincollalo**, oppure incollalo in una chat
+    che amministri.» Le due code sono diverse perché i due cancelli lo sono: sul primo
+    riprovare **non può** riuscire finché l'accesso non torna, sul secondo sì — ed è la
+    stessa distinzione, non una ripetizione.
+    *Il secondo motivo è arrivato dopo:* il #115 aveva introdotto il rifiuto più comune
+    di tutta la funzione lasciandolo **muto**, quindi la schermata contava alla rovescia
+    e poi annunciava «scaduto senza essere usato» su un codice che scaduto non era —
+    ricreando esattamente la bugia che questo banner esiste per togliere. Segnalato da
+    CodeRabbit sulla PR #122. La coda dice cosa aspettare, e non «puoi ancora usarlo»: lì il
     cancello è lo stesso e riprovare non può riuscire — una coda sola per motivi
     diversi mandava l'utente a ritentare una cosa impossibile, che è la stessa
     bugia che l'avviso esiste per togliere, rimessa dentro l'avviso. Rilievo di

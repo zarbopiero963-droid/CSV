@@ -307,6 +307,18 @@ with sync_playwright() as pw:
     non_sfonda(pg, 'chat vuote')
     shot(pg, '01-chat-vuote')
 
+    # Il pannello PRIMA della generazione, e non e' un doppione di quello dopo.
+    # Sono due schermate diverse con due testi diversi, e l'avviso del #115 stava
+    # in entrambe: riscriverne una sola ha lasciato l'altra a promettere un furto
+    # che il servizio adesso impedisce. Trovato da CodeRabbit sulla PR #122 — io
+    # avevo corretto il sito, non la classe.
+    prima = pg.inner_text('.card:has([data-act="chat-verifica-start"])').lower()
+    assert 'amministratore' in prima, (
+        f'il pannello di generazione non dice cosa serve in un gruppo: {prima!r}')
+    assert 'prendersi il gruppo' not in prima, (
+        'il pannello di generazione avverte ancora di un furto che il servizio '
+        f'adesso impedisce: {prima!r}')
+
     # ---- 2) il codice, e la direzione da seguire -------------------------
     pg.click('[data-act="chat-verifica-start"]')
     pg.wait_for_selector('#codice-verifica')
@@ -316,15 +328,21 @@ with sync_playwright() as pw:
     for parola in ('copia', 'incolla', 'canale'):
         assert parola in istruzioni, \
             f'le istruzioni non dicono «{parola}»: {istruzioni!r}'
-    # La prova NON e' la stessa per canali e gruppi, e la schermata deve dirlo. In
-    # un canale scrivono solo gli amministratori; in un gruppo scrive ogni membro,
-    # quindi incollare il codice dimostra di poterci scrivere, non di gestirlo.
-    # `[REAL_FINDING]` di OpenRouter Sol al gate della PR #114: il difetto e' del
-    # meccanismo (PR #112), ma una schermata che promette «dimostra che quel canale
-    # e' tuo» lo NASCONDE — e quella schermata e' di questo PR.
+    # La schermata deve dire che nei GRUPPI il codice non basta da solo (#115).
+    #
+    # Fino alla #115 questa asserzione pretendeva l'opposto — che la card
+    # AVVERTISSE che «puo- scrivere qualunque membro», perche' allora era vero e
+    # tacerlo sarebbe stata una promessa non mantenuta. Ora il servizio chiede a
+    # Telegram il ruolo di chi incolla, quindi quell'avviso e' diventato FALSO: un
+    # membro qualunque non si prende piu' niente. Il test e' stato girato, non
+    # cancellato — e' la stessa riga che continua a impedire che la schermata dica
+    # una cosa diversa da quella che il servizio fa.
     assert 'gruppo' in istruzioni, f'la card non nomina i gruppi: {istruzioni!r}'
-    assert 'qualunque membro' in istruzioni, (
-        'la card non avverte che in un gruppo puo- scrivere ogni membro: '
+    assert 'amministratore' in istruzioni, (
+        'la card non dice che in un gruppo serve essere amministratore: '
+        f'{istruzioni!r}')
+    assert 'qualunque membro potrebbe' not in istruzioni, (
+        'la card avverte ancora di un furto che il servizio adesso impedisce: '
         f'{istruzioni!r}')
     non_sfonda(pg, 'codice mostrato')
     shot(pg, '02-codice')

@@ -279,18 +279,70 @@ LIMITE NOTO, non introdotto qui: i topic dei forum Telegram non sono supportati.
 `message_thread_id` non lo scrive nessun percorso e ogni ricerca usa la chat
 radice, quindi verificare in un topic autorizza il gruppo intero.
 
-SECONDO LIMITE NOTO, e la prova NON e' la stessa per tutte le chat. Il codice
-dimostra che chi lo presenta PUO' SCRIVERE in quella chat. Per un CANALE questo
-coincide col controllarlo (su Telegram in un canale scrivono solo gli
-amministratori); per un GRUPPO no, perche' scrive qualunque membro: un membro
-ordinario con un account BetRelay puo' rivendicare il gruppo, e da quel momento
-nessun altro lo verifica piu' (`chat_non_disponibile`). Non e' un accesso ai
-dati di un altro utente — nessun parser, feed o token diventa leggibile, e chi
-rivendica vedeva gia' quei messaggi da membro — ma e' la possibilita' di soffiare
-la verifica al titolare e di dirottare quel flusso nei propri parser.
-CHIUSO dalla #116 per chi usa il percorso principale, e vale la pena dire come:
-NON con `getChatMember`, che era la strada scritta qui prima. Promuovere il bot ad
-amministratore Telegram lo consente solo a chi e' gia' amministratore, e
+LA PROVA DI RUOLO, e perche' la prova NON e' la stessa per tutte le chat. Il
+codice dimostra che chi lo presenta PUO' SCRIVERE in quella chat. Per un CANALE
+questo coincide col controllarlo (su Telegram in un canale scrivono solo gli
+amministratori); per un GRUPPO no, perche' scrive qualunque membro.
+ERA un limite noto: un membro ordinario con un account BetRelay poteva rivendicare
+il gruppo, e da quel momento nessun altro lo verificava piu'. CHIUSO dalla #115.
+Fuori dai canali il servizio chiede a Telegram, con `getChatMember`, il ruolo di
+chi ha incollato il codice, e registra solo per `creator`/`administrator`.
+  - la lista `TIPI_CHAT_CON_PROVA_FORTE` dice cosa SALTA il controllo, non cosa lo
+    richiede: un tipo assente o nuovo cade fra quelli che la prova la devono dare.
+    Il verso opposto lascerebbe passare tutto cio' che non riconosciamo;
+  - la conversazione PRIVATA col bot ha la prova piu' forte di tutte, e non passa da
+    quella lista. In privato gli interlocutori sono due, quella persona e il bot:
+    scriverci dentro non prova che «puoi scrivere», prova che E' LA TUA. Telegram per
+    una chat privata usa come `chat.id` l'id dell'utente, quindi la prova e'
+    `chat_id == from.id`, verificabile in casa e senza chiamate. `getChatMember` non
+    potrebbe confermarla: in privato il ruolo di amministratore non esiste, quindi la
+    risposta non sarebbe mai `creator`/`administrator` e il cancello rifiuterebbe
+    SEMPRE. La prima versione del #115 lo faceva davvero — non per scelta: era un
+    percorso che c'era prima e che il cancello toglieva senza che si vedesse
+    (Claude Fable 5.1 al gate della PR #122). Il confronto con `from.id` costa una riga
+    ed e' vero per costruzione; serve lo stesso, o «tipo privato» da solo
+    autorizzerebbe una chat privata ALTRUI;
+  - FAIL-CLOSED, ed e' una scelta: se la chiamata non riesce — rete giu', Telegram
+    lento, risposta inattesa — la chat NON si registra. Il costo e' reale, un
+    guasto di Telegram impedisce di collegare gruppi nuovi; il verso opposto
+    renderebbe la protezione assente proprio quando serve, perche' basterebbe far
+    fallire la chiamata. I feed gia' attivi non sono toccati: questo percorso
+    registra, non elabora;
+  - il rifiuto per ruolo NON consuma il codice: chi non era ancora amministratore
+    deve poter riprovare dopo esserlo diventato;
+  - la chiamata sta FUORI dalla transazione (mai il lock di scrittura tenuto per i
+    10 s di timeout) e DOPO una lettura di filtro sul codice: senza, chiunque possa
+    scrivere in una chat dove il bot e' presente potrebbe farci fare una raffica di
+    chiamate in uscita incollando stringhe della forma giusta;
+  - e c'e' un FRENO, perche' quel filtro da solo non bastava. Ferma i codici
+    INVENTATI, non il codice VIVO — che e' incollato nella chat e quindi lo vedono
+    tutti i membri: chiunque poteva ripeterlo e farci fare una chiamata PER
+    MESSAGGIO. Misurato: 10 consegne, 10 chiamate. Ogni consegna occupa un thread
+    del pool per fino a 10 s, e quel pool serve anche i segnali degli altri utenti.
+    `ATTESA_FRA_PROVE_DI_RUOLO_S` (5 s) lascia una prova di ruolo per codice per
+    finestra: coi 600 s di vita del codice il tetto passa da illimitato a 120.
+    «Una per finestra» NON e' «una in volo»: col timeout di 10 s una chiamata appesa
+    puo' sovrapporsi alla successiva, quindi il massimo di chiamate CONCORRENTI per
+    codice e' ceil(10/5) = DUE. Piccolo e fisso, ma dire «una sola» sarebbe falso.
+    Il freno e' sul CODICE e non sul mittente perche' il codice e' la cosa scarsa —
+    cento membri che colludono useranno comunque quella stessa stringa, quindi il
+    tetto e' UNA chiamata per finestra in assoluto e non una per account.
+    Lo slot si prende con UNA sola UPDATE, atomica sotto il lock di SQLite: con
+    piu' worker una coppia lettura+scrittura lo farebbe vincere a due richieste in
+    corsa. Baratto dichiarato: un membro ostile che spamma il codice tiene lo slot
+    occupato e la prova legittima del titolare puo' cadere nella finestra. Non e'
+    un blocco — si riprova dopo pochi secondi, e un codice nuovo e' una riga nuova
+    con lo slot pulito. `[REAL_FINDING]` di OpenRouter Sol al gate della PR #122.
+CHIUSO dalla #116 per chi usa il percorso principale, e li' SENZA `getChatMember`.
+Le due frasi convivono e vanno lette insieme, perche' prese da sole si contraddicono:
+la #115 `getChatMember` lo usa, la #116 no. Non e' un ripensamento — i due percorsi
+hanno prove diverse a disposizione. Nella #116 chi promuove e' ATTESTATO da Telegram
+nella consegna stessa; nel codice usa-e-getta non c'e' nessun attore attestato, e la
+prova va chiesta. (Segnalato da Claude Fable 5.1 al gate della PR #122, dove questo
+capoverso diceva ancora «non con getChatMember» poche righe dopo averne descritto
+l'uso.)
+Promuovere il bot ad amministratore Telegram lo consente solo a chi e' gia'
+amministratore, e
 `my_chat_member` porta `from`, cioe' chi l'ha fatto, attestato da Telegram: la
 prova di ruolo arriva GRATIS, senza chiamate in uscita e senza i loro modi di
 fallire. Il codice usa-e-getta resta come RIPIEGO, e il ripiego si porta dietro
@@ -1157,6 +1209,30 @@ TELEGRAM_BOT_USERNAME: lo username del bot, senza @. Serve SOLO per costruire il
   @<nome> su Telegram e premi Start»). Un link costruito con uno username vuoto porta alla
   home di Telegram, e il cliente crede di aver fatto la sua parte mentre il bot continua a
   non poterlo raggiungere.
+TELEGRAM_API_BASE: facoltativa, e in produzione NON si imposta. E' la radice
+  dell'API di Telegram, che per difetto e' https://api.telegram.org e passa da
+  `url_telegram()` — fonte unica delle quattro chiamate in uscita (setWebhook,
+  sendMessage, getChat, getChatMember, sendDocument). Esiste per i TEST: il relay
+  nei test gira con HTTPS_PROXY su una porta morta, quindi senza questa variabile
+  nessuna chiamata in uscita puo' RIUSCIRE, e un cancello che si limita a fallire
+  non e' distinguibile da uno che funziona (#115).
+  E' VALIDATA, e non solo documentata. La radice finisce dentro un URL che porta il
+  TOKEN DEL BOT: un valore http:// verso un host remoto lo spedirebbe in chiaro, un
+  host sbagliato lo spedirebbe a qualcun altro. La regola e' una frase — il token non
+  lascia la macchina se non in HTTPS verso Telegram — quindi si accettano solo:
+    - https://api.telegram.org, l'API vera;
+    - il LOOPBACK come INDIRIZZO (127.0.0.1, ::1) con qualunque schema, perche' quello
+      che non esce dalla macchina non puo' finire da nessuna parte. E' il caso dei test.
+      `localhost` NON e' ammesso: e' un nome, quindi la garanzia dipenderebbe da
+      /etc/hosts e dal DNS invece che dalla regola scritta qui (GPT-5.5, PR #122).
+  Qualunque altro valore viene IGNORATO e si usa il default: un errore di
+  configurazione fa funzionare il servizio verso Telegram vero, non lo dirotta.
+  STORIA, perche' non si ripeta: qui prima c'era scritto «e' allo stesso livello di
+  fiducia del token del bot, chi puo' impostare le variabili ha gia' il token, quindi
+  non apre una porta nuova» — e nient'altro. Tre reviewer di fila l'hanno segnalata
+  (GPT-5.5 come rischio manuale, Fable 5.1 come nota, CodeRabbit come Major con
+  CWE-200) prima che diventasse un controllo. La lezione e' quella che questo
+  repository ha gia' scritto altrove: una cautela scritta non e' un vincolo.
 TELEGRAM_ADMIN_RECONCILE: facoltativa, serve una volta sola. E' il CONSENSO ad
   assorbire la riga vuota che possiede TELEGRAM_ADMIN_ID, e il suo valore e'
   l'IDENTIFICATIVO DI QUELLA RIGA — non un 1. Il numero lo trovi nel messaggio di log
