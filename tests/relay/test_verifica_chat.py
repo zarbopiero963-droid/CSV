@@ -206,9 +206,18 @@ def _consegna(base, chat, testo, titolo=None, tipo='channel', mittente=None):
         dati_chat['type'] = tipo
     messaggio = {'chat': dati_chat, 'text': testo}
     if mittente == '':
-        # `from` c'e' ma non porta un `id`. Il relay lo riduce alla stessa stringa
-        # vuota di una consegna senza `from`, e i due casi vanno provati
-        # entrambi: sono forme diverse dello stesso «non attribuibile».
+        # `from` c'e' ma non porta un `id`, e va detto cosa NON e': non e' una
+        # consegna che Telegram manda. Nella Bot API `from` e' opzionale — i post
+        # di canale non l'hanno — ma quando c'e' porta sempre un `id`. Questa
+        # forma prova la NORMALIZZAZIONE difensiva del relay
+        # (`(msg.get('from') or {}).get('id') or ''`), che esiste e va tenuta
+        # ferma, non un input osservabile.
+        #
+        # La distinzione la deve fare chi legge, perche' questo file altrove
+        # rifiuta di modellare input impossibili: `tipo` ha il difetto `'channel'`
+        # proprio perche' Telegram il tipo lo manda sempre. Il caso realistico qui
+        # e' `mittente=None`, cioe' nessun `from`. Segnalato da GPT-5.5 sulla PR
+        # #122, che chiedeva se `from: {}` fosse osservabile: non lo e'.
         messaggio['from'] = {}
     elif mittente is not None:
         messaggio['from'] = {'id': int(mittente)}
@@ -1290,6 +1299,10 @@ def test_una_chat_PRIVATA_senza_mittente_non_si_collega(servizio_con_telegram, m
     per questo che vale scriverlo: la doppia chiusura e' una proprieta' della
     disposizione attuale del codice, non una garanzia, e spostare il ramo del
     privato piu' in alto la ridurrebbe a una sola.
+
+    I due parametri non hanno lo stesso statuto, e vale la pena dirlo: `None` e'
+    una consegna senza `from`, che Telegram manda davvero; `''` e' `from` senza
+    `id`, che non manda mai e che prova la normalizzazione difensiva del relay.
 
     Suggerito da GPT-5.5 sulla PR #122.
     """
