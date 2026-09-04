@@ -157,6 +157,34 @@ def chat_di_un_altro():
         c.close()
 
 
+def sospendi_utente():
+    """Toglie l'accesso all'utente del flusso, DAL DATABASE e senza ricaricare.
+
+    Serve `is_admin=0` oltre allo stato: l'amministratore e' esente dal cancello,
+    sia nel relay (`_consuma_codice_di_verifica`) sia nella web app, quindi
+    sospenderlo soltanto non produrrebbe nessun rifiuto.
+    """
+    c = sqlite3.connect(DB)
+    try:
+        c.execute("UPDATE users SET is_admin=0, status='sospeso'"
+                  " WHERE id=(SELECT MIN(id) FROM users WHERE is_admin=1)")
+        c.commit()
+    finally:
+        c.close()
+
+
+def riattiva_utente():
+    """Rimette l'utente com'era. Sta in un `finally`: se l'asserzione fallisce, i
+    passi successivi non devono ereditare un utente sospeso e sbagliare motivo."""
+    c = sqlite3.connect(DB)
+    try:
+        c.execute("UPDATE users SET is_admin=1, status='attivo'"
+                  " WHERE status='sospeso'")
+        c.commit()
+    finally:
+        c.close()
+
+
 def my_chat_member(stato_nuovo, attore=999000111):
     """Una consegna `my_chat_member` autentica: il bot cambia stato in quel canale.
 
@@ -443,12 +471,43 @@ with sync_playwright() as pw:
         f'l-avviso non dice che la chat e- di un altro account: {avviso!r}')
     # E deve dire che il codice e' ancora buono: e' la differenza fra «riprova
     # altrove» e «ricomincia da capo», e il server non l'ha consumato davvero.
-    assert 'puoi ancora usarlo' in avviso, (
-        f'l-avviso non dice che il codice resta valido: {avviso!r}')
+    assert "un'altra chat" in avviso, (
+        f'l-avviso non dice DOVE il codice resta spendibile: {avviso!r}')
     assert 'Canale di un altro' not in pg.inner_text('#app'), \
         'la chat di un altro utente e- comparsa nella lista'
     non_sfonda(pg, 'codice rifiutato')
     shot(pg, '10-codice-rifiutato')
+
+    # ---- 8) l'ALTRO motivo dice una cosa diversa, perche' LO E' ----------
+    # Rilievo di CodeRabbit sulla PR #120, ed era vero: la coda «il codice non e'
+    # stato consumato: puoi ancora usarlo» e' giusta per la chat occupata — si
+    # reincolla altrove e funziona — e FALSA per l'accesso non attivo, dove lo
+    # stesso codice viene rifiutato di nuovo dallo stesso cancello finche' il
+    # proprietario non riattiva. Un messaggio che manda a riprovare una cosa che
+    # non puo' riuscire e' esattamente la frase falsa che questo avviso esiste
+    # per togliere.
+    #
+    # La schermata e' raggiungibile davvero, e va detto perche' non e' ovvio:
+    # `stato.me` in `api.js` e' in cache dal boot e non si aggiorna a ogni
+    # risposta, quindi chi viene sospeso MENTRE aspetta il codice resta su questa
+    # vista invece di finire sulla schermata «Accesso sospeso». Per questo qui si
+    # tocca solo il database e non si ricarica la pagina.
+    sospendi_utente()
+    try:
+        stato_sosp, corpo_sosp = consegna(codice_rifiutato, chat=CANALE_ALTRUI)
+        assert stato_sosp == 200, (stato_sosp, corpo_sosp)
+        assert corpo_sosp.get('ignored') == 'accesso_non_attivo', corpo_sosp
+        pg.wait_for_selector('#verifica-rifiuto:has-text("accesso")', timeout=30000)
+        avviso_acc = pg.inner_text('#verifica-rifiuto').lower()
+        assert 'finch' in avviso_acc, (
+            f'l-avviso non dice CHE COSA si aspetta prima di riprovare: {avviso_acc!r}')
+        assert "un'altra chat" not in avviso_acc, (
+            'l-avviso manda a riprovare in un-altra chat, ma il cancello e- '
+            f'l-accesso e rifiuterebbe di nuovo: {avviso_acc!r}')
+        non_sfonda(pg, 'accesso non attivo')
+        shot(pg, '11-accesso-non-attivo')
+    finally:
+        riattiva_utente()
 
     ctx.close()
     b.close()

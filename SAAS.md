@@ -1274,9 +1274,12 @@ di ogni canale sconosciuto costi una query.
   un codice appena chiesto con l'errore del tentativo prima;
 - **`esito` è un'etichetta chiusa, non un messaggio.** Il testo lo scrive la web
   app (`motivoDelRifiuto`), così la frase esiste in un posto solo e il server non
-  decide come si parla a una persona. La coda del messaggio cambia con `scaduto`:
-  dire «puoi ancora usarlo» di un codice ormai morto sarebbe la stessa classe di
-  frase falsa che l'avviso è nato per togliere, spostata di dieci minuti;
+  decide come si parla a una persona. La coda del messaggio dipende da **due**
+  cose: `scaduto` — dire «riprova» di un codice ormai morto sarebbe la stessa
+  classe di frase falsa che l'avviso è nato per togliere, spostata di dieci
+  minuti — **e il motivo**, perché «riprova altrove» vale per la chat occupata e
+  non per l'accesso non attivo, dove il cancello è lo stesso e rifiuterebbe di
+  nuovo (vedi «Prototipo»);
 - **la divulgazione è dichiarata:** «questa chat è già collegata a un altro
   account» rivela che qualcun altro usa BetRelay per quella chat. Chi legge quel
   messaggio ha appena dimostrato di poter scrivere lì dentro, quindi non scopre
@@ -2825,9 +2828,17 @@ La voce e la vista esistono solo con `admin` vero; il server risponde comunque
   - **il codice è arrivato ed è stato rifiutato** — un `banner warn` (id
     `verifica-rifiuto`) in testa alla card col motivo: «Il codice è arrivato, ma quella
     chat è già collegata a un altro account BetRelay: una chat ha un solo
-    proprietario.» oppure «…in quel momento il tuo accesso non era attivo.», seguito da
-    «Il codice non è stato consumato: puoi ancora usarlo.» — o, se nel frattempo è
-    scaduto, «Quel codice è poi scaduto: generane un altro.» **L'avviso vince sul
+    proprietario.» oppure «Il codice è arrivato, ma il tuo accesso non era attivo.»
+    **La coda cambia col motivo, e non è cosmesi**: per la chat occupata «Il codice
+    non è stato consumato: puoi usarlo in **un'altra chat**», che è vero — si
+    reincolla in una chat propria e funziona; per l'accesso «Il codice non è stato
+    consumato, ma **finché l'accesso non torna attivo verrebbe rifiutato di
+    nuovo**», perché lì il cancello è lo stesso e riprovare non può riuscire. Una
+    coda sola per due motivi diversi mandava l'utente a ritentare una cosa
+    impossibile — la stessa bugia che l'avviso esiste per togliere, rimessa
+    dentro l'avviso. Rilievo di CodeRabbit sulla PR #120. Se nel frattempo il
+    codice è scaduto, entrambi finiscono con «Quel codice è poi scaduto: generane
+    un altro.» **L'avviso vince sul
     banner della scadenza**, che altrimenti direbbe «scaduto senza essere usato» di un
     codice che è stato usato e respinto. E **compare mentre l'utente guarda**, senza
     ricaricare: il sondaggio confronta l'esito del server con quello disegnato e

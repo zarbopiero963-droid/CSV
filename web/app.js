@@ -1883,21 +1883,32 @@ function rigaChat(c) {
 // questo messaggio ha appena dimostrato di poter scrivere lì dentro, quindi non
 // scopre niente sulla chat — e senza il messaggio l'unica alternativa è lasciarlo
 // davanti a un timer che scade, seguito da una frase falsa.
-// `scaduto` cambia la CODA del messaggio, e non è un dettaglio di stile: il
-// codice rifiutato resta spendibile, ma solo finché non scade. Dire «puoi usarlo
-// in un'altra chat» su un codice ormai morto è la stessa classe di frase falsa
-// che questo avviso è nato per togliere — spostata di dieci minuti.
+// La CODA del messaggio dipende da DUE cose, e sbagliarne una riporta dentro
+// l'avviso la bugia che l'avviso esiste per togliere.
+//
+// `scaduto`: il codice rifiutato resta spendibile, ma solo finché non scade.
+// Dire «riprova» di un codice ormai morto è la stessa frase falsa spostata di
+// dieci minuti.
+//
+// E il MOTIVO, che è la metà che avevo sbagliato — rilievo di CodeRabbit sulla
+// PR #120. «Puoi ancora usarlo» è vero per la chat occupata (si reincolla in una
+// chat propria e funziona) e **falso** per l'accesso non attivo: lì il codice
+// non è stato consumato, ma lo stesso cancello lo rifiuterebbe di nuovo finché
+// il proprietario non riattiva. Una coda sola per due motivi diversi mandava
+// l'utente a riprovare una cosa che non poteva riuscire.
 function motivoDelRifiuto(esito, scaduto) {
-  const coda = scaduto
-    ? 'Quel codice è poi scaduto: generane un altro.'
-    : 'Il codice non è stato consumato: puoi ancora usarlo.';
+  const morto = 'Quel codice è poi scaduto: generane un altro.';
   if (esito === 'chat_non_disponibile') {
     return 'Il codice è arrivato, ma quella chat è già collegata a un altro '
-      + 'account BetRelay: una chat ha un solo proprietario. ' + coda;
+      + 'account BetRelay: una chat ha un solo proprietario. '
+      + (scaduto ? morto
+         : 'Il codice non è stato consumato: puoi usarlo in un\'altra chat.');
   }
   if (esito === 'accesso_non_attivo') {
-    return 'Il codice è arrivato, ma in quel momento il tuo accesso non era '
-      + 'attivo. ' + coda;
+    return 'Il codice è arrivato, ma il tuo accesso non era attivo. '
+      + (scaduto ? morto
+         : 'Il codice non è stato consumato, ma finché l\'accesso non torna '
+           + 'attivo verrebbe rifiutato di nuovo.');
   }
   return '';
 }
