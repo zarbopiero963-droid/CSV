@@ -1228,6 +1228,50 @@ def test_senza_mittente_fuori_da_un_canale_non_si_collega(servizio):
     assert _chats(base, cookie) == []
 
 
+def test_un_rifiuto_di_Telegram_con_HTTP_200_resta_un_rifiuto(servizio_con_telegram):
+    """`ok: false` dentro una risposta 200 e' un NO, anche se il corpo sembra un SI'.
+
+    E' l'unico percorso d'errore che non solleva niente: l'HTTP e' andato a buon
+    fine, `urlopen` non alza, e senza il controllo su `ok` il codice leggerebbe il
+    `result` di una risposta che Telegram ha gia' dichiarato non valida. Qui il
+    finto risponde `ok: false` portando comunque `status: administrator`, che e' la
+    sola forma in cui la differenza fra «leggo il flag» e «leggo lo stato» diventa
+    visibile: se il flag non viene letto, la chat si collega.
+
+    Segnalato da GPT-5.5 sulla PR #122 come copertura mancante — il ramo esisteva
+    in `ruolo_in_chat`, nessun test lo esercitava.
+    """
+    base, percorso_db, finto = servizio_con_telegram
+    cookie, _ = _login_a(base, percorso_db)
+    finto.rispondi('getChatMember', {'status': 'administrator'}, ok=False)
+
+    stato, corpo = _consegna(base, GRUPPO, _codice(base, cookie),
+                             tipo='supergroup', mittente=CLIENTE_A)
+
+    assert stato == 200, corpo
+    assert corpo.get('ignored') == 'ruolo_non_provato', corpo
+    assert _chats(base, cookie) == [], (
+        'un «ok: false» di Telegram ha collegato la chat: letto il result, non il flag')
+    assert finto.quante('getChatMember') == 1, finto.chiamate
+
+
+def test_un_errore_HTTP_di_Telegram_non_collega_la_chat(servizio_con_telegram):
+    """L'altro verso: 403 con un corpo che direbbe `administrator`.
+
+    Qui `urlopen` solleva, quindi il ramo e' quello dell'eccezione; il corpo
+    plausibile serve a rendere il test capace di fallire se un domani qualcuno
+    provasse a leggerlo lo stesso.
+    """
+    base, percorso_db, finto = servizio_con_telegram
+    cookie, _ = _login_a(base, percorso_db)
+    finto.rispondi('getChatMember', {'status': 'administrator'}, ok=False, http=403)
+
+    _consegna(base, GRUPPO, _codice(base, cookie), tipo='supergroup',
+              mittente=CLIENTE_A)
+
+    assert _chats(base, cookie) == []
+
+
 def test_il_rifiuto_per_ruolo_NON_brucia_il_codice(servizio_con_telegram):
     """Chi non era ancora amministratore deve poter riprovare dopo esserlo
     diventato, senza chiedere un codice nuovo."""
