@@ -1280,11 +1280,23 @@ di ogni canale sconosciuto costi una query.
   minuti — **e il motivo**, perché «riprova altrove» vale per la chat occupata e
   non per l'accesso non attivo, dove il cancello è lo stesso e rifiuterebbe di
   nuovo (vedi «Prototipo»);
-- **la divulgazione è dichiarata:** «questa chat è già collegata a un altro
-  account» rivela che qualcun altro usa BetRelay per quella chat. Chi legge quel
-  messaggio ha appena dimostrato di poter scrivere lì dentro, quindi non scopre
-  niente *sulla chat*; e l'alternativa è lasciarlo davanti a un timer che scade
-  seguito da una frase falsa. Non si rivela **chi**;
+- **la divulgazione è tenuta al MINIMO che serve ad agire**, e la storia di questa
+  riga vale più della riga. La prima versione diceva «è già collegata a **un altro
+  account BetRelay**», con la giustificazione: chi legge ha appena dimostrato di
+  poter scrivere lì dentro, quindi non scopre niente. **È vero in un canale** —
+  scrivono solo gli amministratori — **e falso in un gruppo**, dove scrive qualunque
+  membro: la giustificazione era scritta pensando ai canali, cioè la stessa
+  asimmetria che il #116 esiste per correggere, mancata nel ragionamento su sé
+  stessa. `[REAL_FINDING]` di OpenRouter Sol al gate della PR #120; Fable 5.1, sullo
+  stesso head, non la considerava bloccante, e la scelta fra i due è stata del
+  proprietario. Adesso il messaggio dice **che la chat è già collegata**, che è
+  quanto basta per sapere cosa fare, e non asserisce l'esistenza di un altro account
+  sul servizio. Sotto quel pavimento il messaggio smette di essere utile e torna la
+  schermata muta da cui l'avviso è nato, quindi è lì che ci si ferma. Vincolato dai
+  due versi in `tests/web/chat_flow.py`: dice «già collegata», **non** dice
+  «account». Resta diverso il caso della **frase fissa nella card della promozione**
+  («può essere già collegata a un altro account»), che non nomina nessuna chat, non
+  conferma niente e quindi non divulga: non vanno uniformate;
 - **`codice_non_valido` resta muto, e non è una dimenticanza:** non c'è nessuna
   riga su cui scrivere il motivo, e non deve esserci — un codice inventato che
   ricevesse una risposta diversa da un codice scaduto direbbe a chi lo prova
@@ -2837,8 +2849,9 @@ La voce e la vista esistono solo con `admin` vero; il server risponde comunque
     del bot.» Vincolato da `tests/web/chat_flow.py`;
   - **il codice è arrivato ed è stato rifiutato** — un `banner warn` (id
     `verifica-rifiuto`) in testa alla card col motivo: «Il codice è arrivato, ma quella
-    chat è già collegata a un altro account BetRelay: una chat ha un solo
-    proprietario.» oppure «Il codice è arrivato, ma il tuo accesso non era attivo.»
+    chat è già collegata: una chat ha un solo proprietario.» oppure «Il codice è
+    arrivato, ma il tuo accesso non era attivo.» — il primo **non nomina un altro
+    account**, e il perché sta nel contratto sopra, alla voce sulla divulgazione.
     **La coda cambia col motivo, e non è cosmesi**: per la chat occupata «Il codice
     non è stato consumato: puoi usarlo in **un'altra chat**», che è vero — si
     reincolla in una chat propria e funziona; per l'accesso «Il codice non è stato

@@ -1878,11 +1878,22 @@ function rigaChat(c) {
 // il testo lo scrive qui: così la frase esiste in un posto solo, e il server non
 // deve decidere come si parla a una persona.
 //
-// Sul primo motivo c'è una divulgazione da dichiarare: dire «è di un altro
-// account» rivela che qualcun altro usa BetRelay per quella chat. Chi legge
-// questo messaggio ha appena dimostrato di poter scrivere lì dentro, quindi non
-// scopre niente sulla chat — e senza il messaggio l'unica alternativa è lasciarlo
-// davanti a un timer che scade, seguito da una frase falsa.
+// **Sul primo motivo il messaggio dice il MINIMO che serve ad agire, e non di
+// più.** La prima versione diceva «è già collegata a un altro account BetRelay»,
+// e la giustificazione che le avevo scritto accanto era: chi legge ha appena
+// dimostrato di poter scrivere lì dentro, quindi non scopre niente. È vero in un
+// **canale**, dove scrivono solo gli amministratori. In un **gruppo** scrive
+// qualunque membro — cioè la giustificazione era scritta pensando ai canali, la
+// stessa asimmetria che questa vista esiste per correggere, mancata nel
+// ragionamento su me stesso. `[REAL_FINDING]` di OpenRouter Sol al gate della
+// PR #120, e Fable 5.1 sullo stesso head non la considerava bloccante: i due
+// reviewer divergevano, e la scelta è stata del proprietario.
+//
+// Adesso si dice **che la chat è già collegata**, che è quanto basta per sapere
+// cosa fare, senza asserire l'esistenza di un altro account sul servizio. Il
+// contenuto informativo resta vicino — è il pavimento sotto cui il messaggio
+// smette di essere utile e torna la schermata muta da cui questo avviso è nato.
+//
 // La CODA del messaggio dipende da DUE cose, e sbagliarne una riporta dentro
 // l'avviso la bugia che l'avviso esiste per togliere.
 //
@@ -1899,8 +1910,8 @@ function rigaChat(c) {
 function motivoDelRifiuto(esito, scaduto) {
   const morto = 'Quel codice è poi scaduto: generane un altro.';
   if (esito === 'chat_non_disponibile') {
-    return 'Il codice è arrivato, ma quella chat è già collegata a un altro '
-      + 'account BetRelay: una chat ha un solo proprietario. '
+    return 'Il codice è arrivato, ma quella chat è già collegata: una chat ha '
+      + 'un solo proprietario. '
       + (scaduto ? morto
          : 'Il codice non è stato consumato: puoi usarlo in un\'altra chat.');
   }

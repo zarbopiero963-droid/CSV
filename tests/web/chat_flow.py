@@ -505,8 +505,15 @@ with sync_playwright() as pw:
     assert corpo_rif.get('ignored') == 'chat_non_disponibile', corpo_rif
     pg.wait_for_selector('#verifica-rifiuto', timeout=30000)
     avviso = pg.inner_text('#verifica-rifiuto').lower()
-    assert 'un altro account' in avviso, (
-        f'l-avviso non dice che la chat e- di un altro account: {avviso!r}')
+    # Dice CHE la chat e' gia' collegata — quanto basta per sapere cosa fare — e
+    # NON che esiste un altro account BetRelay dietro. In un gruppo questo
+    # messaggio lo puo' leggere qualunque membro, non solo chi lo gestisce:
+    # `[REAL_FINDING]` di OpenRouter Sol alla PR #120, scelta del proprietario.
+    assert 'gia- collegata' in avviso.replace('à', 'a-'), (
+        f'l-avviso non dice che la chat e- gia- collegata: {avviso!r}')
+    assert 'account' not in avviso, (
+        'l-avviso asserisce l-esistenza di un altro account del servizio, che in '
+        f'un gruppo qualunque membro puo- leggere: {avviso!r}')
     # E deve dire che il codice e' ancora buono: e' la differenza fra «riprova
     # altrove» e «ricomincia da capo», e il server non l'ha consumato davvero.
     assert "un'altra chat" in avviso, (
