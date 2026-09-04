@@ -223,17 +223,20 @@ GET    /api/chats/verify/status          -> {"in_attesa":bool,"scaduto":bool,
                                         non l'ultima che l'utente possiede: altrimenti
                                         un codice scaduto mostrerebbe un canale vecchio
                                         come se fosse l'esito.
-                                        "esito" e' il motivo dell'ultimo RIFIUTO di un
-                                        codice arrivato: "chat_non_disponibile" (quella
-                                        chat e' gia' di un altro utente) oppure
-                                        "accesso_non_attivo". E' un'ETICHETTA: la frase
-                                        la scrive la web app. Il codice NON viene
-                                        consumato da un rifiuto, quindi "in_attesa"
-                                        resta vero e resta spendibile altrove; l'esito
-                                        si azzera al successo e a ogni verify/start.
-                                        Un codice INVENTATO non produce esito: non c'e'
-                                        nessuna riga su cui scriverlo, e non deve
-                                        essercene una.
+                                        "esito" e' il motivo dell'ultimo RIFIUTO, e ne
+                                        esiste UNO SOLO: "accesso_non_attivo". E' un
+                                        ETICHETTA: la frase la scrive la web app. Il
+                                        codice NON viene consumato da un rifiuto,
+                                        quindi "in_attesa" resta vero; l'esito si
+                                        azzera al successo e a ogni verify/start.
+                                        Il rifiuto per chat gia' di un ALTRO utente non
+                                        produce esito, ed e' voluto: parlerebbe di una
+                                        chat non tua, e separare "rifiutato" da "mai
+                                        arrivato" e' un oracle fra tenant — in un gruppo
+                                        scrive qualunque membro. Non preesisteva: lo
+                                        aveva introdotto la prima versione del #116
+                                        PR 2, ed e' stato congelato. Stessa ragione per
+                                        cui un codice INVENTATO non produce esito.
 GET    /api/chats                        le chat verificate dall'utente
                                         -> [{"id":N,"telegram_chat_id":"-100...",
                                              "titolo":"Canale segnali","tipo":"channel",
@@ -358,13 +361,23 @@ amministratore («il bot non e' piu' amministratore») o non e' piu' nella chat 
 non e' piu' nella chat»): sono due cose diverse e vanno dette diverse, per la stessa
 ragione per cui la costante non si chiama «non legge piu'».
 
-IL RIFIUTO DEL CODICE SI DICE (#116, PR 2). Il rifiuto era gia' giusto; quello che
-mancava e' che il motivo lo sapeva solo il server. `chat_verifications.esito` porta
-l'etichetta dell'ultimo rifiuto e `verify/status` la restituisce; il codice NON viene
-consumato, quindi resta spendibile in un'altra chat. Prima, chi incollava il codice in
-un canale gia' di un altro utente restava sul conto alla rovescia fino alla scadenza e
-poi leggeva «il codice precedente e' scaduto senza essere usato» — il contrario di
-cio' che era successo.
+UN RIFIUTO DEL CODICE SI DICE, L'ALTRO NO (#116, PR 2). Il rifiuto era gia' giusto;
+quello che mancava e' che il motivo lo sapeva solo il server.
+`chat_verifications.esito` porta l'etichetta e `verify/status` la restituisce; il
+codice NON viene consumato.
+SI DICE "accesso_non_attivo": parla dell'account di chi legge, non divulga niente.
+NON SI DICE la chat gia' di un altro utente: quel motivo parla di una chat non tua, e
+separare «rifiutato» da «mai arrivato» e' un oracle fra tenant — in un GRUPPO scrive
+qualunque membro, quindi chiunque potrebbe incollarci un codice e scoprire se quella
+chat e' sul servizio. L'oracle NON preesisteva: lo introduceva la prima versione di
+questo PR, dove i due casi erano indistinguibili perche' il timer scadeva in entrambi.
+Congelato per decisione del proprietario, portato nella sua Issue insieme alla #115 e
+alla #119. Togliere il solo messaggio dalla web app non sarebbe bastato: `verify/status`
+avrebbe continuato a restituire l'etichetta, e quell'endpoint lo chiama chiunque abbia
+una sessione.
+COSTO DICHIARATO: chi sbaglia chat torna a vedere solo il timer che scade. Per questo il
+banner della scadenza dice «non e' piu' valido» e non «scaduto SENZA ESSERE USATO», che
+sarebbe falso proprio in quel caso.
 Sul percorso della PROMOZIONE lo stesso rifiuto resta senza avviso dinamico, ed e' una
 differenza STRUTTURALE, non una dimenticanza: li' non c'e' nessuna riga come
 `chat_verifications` a cui attaccare un motivo, ne' una pagina che stia sondando. La

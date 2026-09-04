@@ -25,9 +25,10 @@ Dal #116 (PR 2) il flusso copre anche la meta' che il codice usa-e-getta non toc
    dai settings pubblici del servizio e non scritto in pagina;
 7. una retrocessione del bot si VEDE nella riga, e dice la cosa giusta: «non e' piu'
    amministratore» non e' «non legge piu'»;
-8. un codice RIFIUTATO lo dice mentre l'utente guarda, senza ricaricare, e la coda
-   del messaggio cambia col motivo (chat occupata / accesso non attivo) e con la
-   scadenza — tre combinazioni misurate, non dedotte.
+8. un codice rifiutato perche' l'accesso non e' attivo lo DICE mentre l'utente
+   guarda, senza ricaricare, e la coda cambia se nel frattempo il codice scade;
+9. un codice rifiutato perche' la chat e' di un altro TACE, ed e' voluto: dirlo
+   separerebbe «rifiutato» da «mai arrivato», cioe' un oracle fra tenant.
 
 Viewport a 390px per tutta la durata: la pagina non deve sfondare in orizzontale
 (regola 2 di CLAUDE.md). Zero errori in console, come tutti i flussi web di qui.
@@ -503,21 +504,24 @@ with sync_playwright() as pw:
     stato_rif, corpo_rif = consegna(codice_rifiutato, chat=CANALE_ALTRUI)
     assert stato_rif == 200, (stato_rif, corpo_rif)
     assert corpo_rif.get('ignored') == 'chat_non_disponibile', corpo_rif
-    pg.wait_for_selector('#verifica-rifiuto', timeout=30000)
-    avviso = pg.inner_text('#verifica-rifiuto').lower()
-    # Dice CHE la chat e' gia' collegata — quanto basta per sapere cosa fare — e
-    # NON che esiste un altro account BetRelay dietro. In un gruppo questo
-    # messaggio lo puo' leggere qualunque membro, non solo chi lo gestisce:
-    # `[REAL_FINDING]` di OpenRouter Sol alla PR #120, scelta del proprietario.
-    assert 'gia- collegata' in avviso.replace('à', 'a-'), (
-        f'l-avviso non dice che la chat e- gia- collegata: {avviso!r}')
-    assert 'account' not in avviso, (
-        'l-avviso asserisce l-esistenza di un altro account del servizio, che in '
-        f'un gruppo qualunque membro puo- leggere: {avviso!r}')
-    # E deve dire che il codice e' ancora buono: e' la differenza fra «riprova
-    # altrove» e «ricomincia da capo», e il server non l'ha consumato davvero.
-    assert "un'altra chat" in avviso, (
-        f'l-avviso non dice DOVE il codice resta spendibile: {avviso!r}')
+    # E la schermata NON deve dire niente. Il rifiuto e' giusto, ma il motivo
+    # parla di una chat che non e' dell'utente: dirlo separerebbe «rifiutato» da
+    # «mai arrivato» e diventerebbe un oracle fra tenant — in un gruppo scrive
+    # qualunque membro, quindi chiunque potrebbe incollarci un proprio codice e
+    # scoprire se quella chat e' gia' sul servizio.
+    #
+    # L'oracle NON preesisteva: lo introduceva una versione precedente di questo
+    # stesso PR. `[REAL_FINDING]` di OpenRouter Sol, congelato per decisione del
+    # proprietario e portato nella sua Issue insieme alla #115 e alla #119.
+    #
+    # Il silenzio si misura aspettando piu' di un giro di sondaggio: a 3 s l'uno,
+    # otto secondi sono due giri abbondanti. E il passo 8 qui sotto prova che il
+    # banner FUNZIONA per l'altro motivo — senza quello, questa asserzione
+    # passerebbe anche col meccanismo rotto.
+    pg.wait_for_timeout(8000)
+    assert pg.locator('#verifica-rifiuto').count() == 0, (
+        'la schermata distingue un codice rifiutato da uno mai arrivato: '
+        f'{pg.inner_text("#verifica-rifiuto")!r}')
     assert 'Canale di un altro' not in pg.inner_text('#app'), \
         'la chat di un altro utente e- comparsa nella lista'
     non_sfonda(pg, 'codice rifiutato')

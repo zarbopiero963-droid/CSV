@@ -1878,46 +1878,27 @@ function rigaChat(c) {
 // il testo lo scrive qui: così la frase esiste in un posto solo, e il server non
 // deve decidere come si parla a una persona.
 //
-// **Sul primo motivo il messaggio dice il MINIMO che serve ad agire, e non di
-// più.** La prima versione diceva «è già collegata a un altro account BetRelay»,
-// e la giustificazione che le avevo scritto accanto era: chi legge ha appena
-// dimostrato di poter scrivere lì dentro, quindi non scopre niente. È vero in un
-// **canale**, dove scrivono solo gli amministratori. In un **gruppo** scrive
-// qualunque membro — cioè la giustificazione era scritta pensando ai canali, la
-// stessa asimmetria che questa vista esiste per correggere, mancata nel
-// ragionamento su me stesso. `[REAL_FINDING]` di OpenRouter Sol al gate della
-// PR #120, e Fable 5.1 sullo stesso head non la considerava bloccante: i due
-// reviewer divergevano, e la scelta è stata del proprietario.
+// **Un motivo solo, e l'altro è congelato di proposito.** `accesso_non_attivo`
+// parla dell'account di chi legge, quindi non divulga niente a nessuno.
+// `chat_non_disponibile` parlerebbe invece di una chat di QUALCUN ALTRO, e il
+// server non lo manda nemmeno più: in un gruppo scrive qualunque membro, quindi
+// chiunque potrebbe incollarci un proprio codice e scoprire se quella chat è già
+// sul servizio.
 //
-// Adesso si dice **che la chat è già collegata**, che è quanto basta per sapere
-// cosa fare, senza asserire l'esistenza di un altro account sul servizio. Il
-// contenuto informativo resta vicino — è il pavimento sotto cui il messaggio
-// smette di essere utile e torna la schermata muta da cui questo avviso è nato.
+// **Quell'oracle non preesisteva: lo introduceva la prima versione di questo
+// PR** — prima, un codice rifiutato e uno mai arrivato erano indistinguibili, il
+// timer scadeva in entrambi i casi. `[REAL_FINDING]` di OpenRouter Sol, ripetuto
+// su due head; Fable 5.1 non lo bloccava. Decisione del proprietario: congelato
+// e portato nella sua Issue, insieme alla #115 e alla #119.
 //
-// La CODA del messaggio dipende da DUE cose, e sbagliarne una riporta dentro
-// l'avviso la bugia che l'avviso esiste per togliere.
-//
-// `scaduto`: il codice rifiutato resta spendibile, ma solo finché non scade.
-// Dire «riprova» di un codice ormai morto è la stessa frase falsa spostata di
-// dieci minuti.
-//
-// E il MOTIVO, che è la metà che avevo sbagliato — rilievo di CodeRabbit sulla
-// PR #120. «Puoi ancora usarlo» è vero per la chat occupata (si reincolla in una
-// chat propria e funziona) e **falso** per l'accesso non attivo: lì il codice
-// non è stato consumato, ma lo stesso cancello lo rifiuterebbe di nuovo finché
-// il proprietario non riattiva. Una coda sola per due motivi diversi mandava
-// l'utente a riprovare una cosa che non poteva riuscire.
+// La funzione tiene comunque il ramo `scaduto`, e non è ridondanza: il codice
+// rifiutato resta spendibile, ma solo finché non scade. Dire «riprova» di un
+// codice ormai morto sarebbe la stessa frase falsa spostata di dieci minuti —
+// il difetto che CodeRabbit ha trovato in questa PR, un giro prima.
 function motivoDelRifiuto(esito, scaduto) {
-  const morto = 'Quel codice è poi scaduto: generane un altro.';
-  if (esito === 'chat_non_disponibile') {
-    return 'Il codice è arrivato, ma quella chat è già collegata: una chat ha '
-      + 'un solo proprietario. '
-      + (scaduto ? morto
-         : 'Il codice non è stato consumato: puoi usarlo in un\'altra chat.');
-  }
   if (esito === 'accesso_non_attivo') {
     return 'Il codice è arrivato, ma il tuo accesso non era attivo. '
-      + (scaduto ? morto
+      + (scaduto ? 'Quel codice è poi scaduto: generane un altro.'
          : 'Il codice non è stato consumato, ma finché l\'accesso non torna '
            + 'attivo verrebbe rifiutato di nuovo.');
   }
@@ -2078,13 +2059,17 @@ async function viewChats() {
     pannello = `
       <div class="card stack">
         <strong class="small">Oppure autorizza con un codice</strong>
-        ${/* `rifiuto` VINCE sul banner della scadenza, e i due si escludono per
-              forza: quando un codice è stato rifiutato e poi è scaduto, dire «è
-              scaduto senza essere usato» è falso due volte — è stato usato, ed è
-              stato rifiutato per un motivo che sappiamo. È proprio la frase da cui
-              è nato questo avviso. */''}
+        ${/* `rifiuto` vince sul banner della scadenza quando c'è un motivo da
+              dire. Ma il banner generico ha dovuto smettere di dire «scaduto
+              SENZA ESSERE USATO»: da quando il motivo `chat_non_disponibile` è
+              congelato (vedi `motivoDelRifiuto`), quel caso ricade qui — e il
+              codice era stato usato, e respinto. «Non è più valido» è vero in
+              tutti e tre i casi: scaduto e basta, rifiutato e poi scaduto,
+              rifiutato per un motivo che non diciamo. Meno preciso nel caso
+              semplice, mai falso in nessuno — che è il verso giusto in un PR
+              nato per togliere una frase falsa. */''}
         ${rifiuto || (verifica.scaduto ? `<div class="banner warn" style="margin:0"><span class="small">
-          Il codice precedente è scaduto senza essere usato. Generane un altro.
+          Il codice precedente non è più valido. Generane un altro.
         </span></div>` : '')}
         <p class="muted small" style="margin:0">
           Se non puoi promuovere il bot — per esempio in un gruppo che gestisce

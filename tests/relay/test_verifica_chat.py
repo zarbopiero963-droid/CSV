@@ -437,11 +437,26 @@ def _stato_verifica(base, cookie):
     return json.loads(corpo)
 
 
-def test_il_codice_finito_in_una_chat_di_un_ALTRO_lo_dice_a_chi_aspetta(servizio):
-    """B incolla il suo codice nel canale di A: B deve poter sapere PERCHE'.
+def test_la_chat_di_un_altro_NON_si_distingue_da_un_codice_mai_arrivato(servizio):
+    """L'oracle fra tenant che questo PR aveva introdotto, e che e' stato tolto.
 
-    Senza, la sola cosa che B vede e' il conto alla rovescia che finisce, seguito
-    da un messaggio che dice il contrario di quello che e' successo.
+    B incolla il suo codice nel canale di A. Il rifiuto e' giusto, ma il MOTIVO
+    parla di una chat che non e' sua: se lo `status` lo restituisse, chiunque
+    possa scrivere in una chat — e in un GRUPPO scrive qualunque membro —
+    potrebbe incollarci un proprio codice e scoprire se quella chat e' gia' sul
+    servizio.
+
+    **L'oracle non preesisteva**, ed e' la ragione per cui questo test asserisce
+    l'assenza e non la presenza: prima di questo PR un codice rifiutato e uno mai
+    arrivato erano indistinguibili — il timer scadeva in entrambi i casi. Una
+    versione precedente di questo stesso PR li aveva separati.
+    `[REAL_FINDING]` di OpenRouter Sol, ripetuto su due head; Fable 5.1 non lo
+    bloccava. Decisione del proprietario: congelato, e portato nella sua Issue
+    insieme alla #115 e alla #119.
+
+    Il confronto e' con lo stato di un codice MAI CONSEGNATO, non con `None` in
+    astratto: e' l'indistinguibilita' la proprieta' da tenere, e scriverla cosi'
+    la rende vera anche se un domani lo stato guadagnasse altri campi.
     """
     base, percorso_db = servizio
     cookie_a, _ = _login_a(base, percorso_db)
@@ -449,13 +464,21 @@ def test_il_codice_finito_in_una_chat_di_un_ALTRO_lo_dice_a_chi_aspetta(servizio
 
     cookie_b, _ = _login_b(base, percorso_db)
     codice_b = _codice(base, cookie_b)
-    _consegna(base, CANALE_A, codice_b)
+    mai_arrivato = _stato_verifica(base, cookie_b)
 
-    st = _stato_verifica(base, cookie_b)
-    assert st.get('esito') == 'chat_non_disponibile', (
-        f'lo stato non dice perche- il codice e- stato rifiutato: {st!r}')
-    assert st['in_attesa'] is True, (
-        f'il codice risulta consumato da un tentativo rifiutato: {st!r}')
+    _consegna(base, CANALE_A, codice_b)
+    rifiutato = _stato_verifica(base, cookie_b)
+
+    # `scade_fra_s` scorre col tempo: e' l'unico campo che puo' differire senza
+    # dire niente su chi possiede la chat.
+    confronta = {k: v for k, v in rifiutato.items() if k != 'scade_fra_s'}
+    atteso = {k: v for k, v in mai_arrivato.items() if k != 'scade_fra_s'}
+    assert confronta == atteso, (
+        'un codice rifiutato si distingue da uno mai arrivato: e- un oracle fra '
+        f'tenant.\n  mai arrivato: {atteso!r}\n  rifiutato:    {confronta!r}')
+    assert rifiutato['in_attesa'] is True, (
+        f'il codice risulta consumato da un tentativo rifiutato: {rifiutato!r}')
+    assert _chats(base, cookie_b) == [], 'la chat di un altro e- stata registrata'
 
 
 def test_l_esito_non_brucia_il_codice_che_resta_spendibile_altrove(servizio):
@@ -486,15 +509,22 @@ def test_un_codice_NUOVO_non_eredita_l_esito_del_precedente(servizio):
     lei, o la schermata accoglierebbe un codice appena chiesto con l'errore del
     tentativo prima."""
     base, percorso_db = servizio
-    cookie_a, _ = _login_a(base, percorso_db)
-    _verifica(base, cookie_a, chat=CANALE_A)
+    cookie, _ = _login_a(base, percorso_db)
+    codice = _codice(base, cookie)
 
-    cookie_b, _ = _login_b(base, percorso_db)
-    _consegna(base, CANALE_A, _codice(base, cookie_b))
-    assert _stato_verifica(base, cookie_b).get('esito') == 'chat_non_disponibile'
+    c = sqlite3.connect(percorso_db)
+    c.execute("UPDATE users SET status='sospeso' WHERE telegram_id=?", (CLIENTE_A,))
+    c.commit()
+    c.close()
+    _consegna(base, CANALE_A, codice)
+    c = sqlite3.connect(percorso_db)
+    c.execute("UPDATE users SET status='attivo' WHERE telegram_id=?", (CLIENTE_A,))
+    c.commit()
+    c.close()
+    assert _stato_verifica(base, cookie).get('esito') == 'accesso_non_attivo'
 
-    _codice(base, cookie_b)
-    st = _stato_verifica(base, cookie_b)
+    _codice(base, cookie)
+    st = _stato_verifica(base, cookie)
     assert st.get('esito') is None, (
         f'il codice nuovo nasce gia- con l-errore del precedente: {st!r}')
 

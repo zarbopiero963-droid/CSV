@@ -7287,7 +7287,28 @@ def _consuma_codice_di_verifica(chat_id, codice, titolo=None, tipo=None):
             # La chat e' di un altro. Il codice NON si consuma: non e' colpa di chi
             # l'ha chiesto se il canale e' di un altro, e bruciarglielo lo
             # costringerebbe a ricominciare senza capire.
-            return _rifiuto_del_codice(c, codice, 'chat_non_disponibile')
+            #
+            # **E il motivo NON si registra**, a differenza dell'altro rifiuto: qui
+            # il motivo parla di una chat che appartiene a QUALCUN ALTRO, e dirlo
+            # sarebbe un oracle fra tenant. In un gruppo scrive qualunque membro,
+            # quindi chiunque potrebbe incollare un proprio codice li' dentro e
+            # scoprire se quella chat e' gia' sul servizio.
+            #
+            # **L'oracle non preesisteva: lo introduceva la prima versione di
+            # questo PR.** Prima, un codice rifiutato e un codice mai arrivato
+            # erano indistinguibili — il timer scadeva in entrambi i casi. Il
+            # messaggio nuovo era esattamente cio' che li separava.
+            # `[REAL_FINDING]` di OpenRouter Sol al gate della PR #120, ripetuto su
+            # due head; Fable 5.1 non lo bloccava. Decisione del proprietario:
+            # congelare qui e decidere nella Issue dedicata, insieme alla #115
+            # (chi puo' rivendicare un gruppo) e alla #119 (una chat, piu' utenti),
+            # dove la regola «una chat ha un solo proprietario» cambia comunque.
+            #
+            # Togliere il solo messaggio dalla web app NON sarebbe bastato: lo
+            # `status` avrebbe continuato a restituire l'etichetta, e quell'endpoint
+            # lo chiama chiunque abbia una sessione. L'oracle si chiude qui o non si
+            # chiude.
+            return {'ok': True, 'ignored': 'chat_non_disponibile'}
         # L'esito si AZZERA sul successo: un tentativo rifiutato prima non deve
         # restare appiccicato alla riga che nel frattempo ha funzionato, o la
         # schermata mostrerebbe l'errore vecchio sopra la chat appena collegata.

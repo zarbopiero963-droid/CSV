@@ -1258,14 +1258,18 @@ di ogni canale sconosciuto costi una query.
   registra niente;
 - una chat **già di un altro utente non è rubabile** — e in quel caso il codice
   non viene nemmeno consumato, perché non è colpa di chi l'ha chiesto;
-- **e da adesso il rifiuto si dice** (#116, PR 2). Il rifiuto era già giusto;
+- **e da adesso UN rifiuto si dice** (#116, PR 2). Il rifiuto era già giusto;
   quello che mancava è che il *motivo* lo sapeva solo il server. La web app
   restava «in attesa» fino alla scadenza e poi dichiarava «il codice precedente è
   scaduto senza essere usato» — l'esatto contrario di quello che era successo, e
   un messaggio falso è peggio del silenzio perché manda a cercare il problema
   dove non è. `chat_verifications.esito` porta ora l'etichetta dell'ultimo
-  rifiuto (`chat_non_disponibile`, `accesso_non_attivo`), `verify/status` la
-  restituisce e la web app ci scrive sopra la frase. **`consumed_at` non si
+  rifiuto, `verify/status` la restituisce e la web app ci scrive sopra la frase.
+  **Ma l'etichetta è UNA sola, `accesso_non_attivo`**, e la scelta è il cuore di
+  questa voce: quel motivo parla dell'account di chi legge, quindi non divulga
+  niente. `chat_non_disponibile` parlerebbe invece di una chat di **qualcun
+  altro**, e il server non lo registra nemmeno — vedi la voce sull'oracle qui
+  sotto. **`consumed_at` non si
   tocca**: il codice resta spendibile — chi ha incollato nel canale sbagliato lo
   reincolla in quello giusto, chi è stato sospeso a metà lo usa quando l'accesso
   rientra — ed è la metà vincolata da
@@ -1280,23 +1284,36 @@ di ogni canale sconosciuto costi una query.
   minuti — **e il motivo**, perché «riprova altrove» vale per la chat occupata e
   non per l'accesso non attivo, dove il cancello è lo stesso e rifiuterebbe di
   nuovo (vedi «Prototipo»);
-- **la divulgazione è tenuta al MINIMO che serve ad agire**, e la storia di questa
-  riga vale più della riga. La prima versione diceva «è già collegata a **un altro
-  account BetRelay**», con la giustificazione: chi legge ha appena dimostrato di
-  poter scrivere lì dentro, quindi non scopre niente. **È vero in un canale** —
-  scrivono solo gli amministratori — **e falso in un gruppo**, dove scrive qualunque
-  membro: la giustificazione era scritta pensando ai canali, cioè la stessa
+- **l'oracle fra tenant è CHIUSO, e non preesisteva: lo aveva introdotto questo
+  stesso PR.** Prima, un codice rifiutato e un codice mai arrivato erano
+  **indistinguibili** — il timer scadeva in entrambi i casi. Registrare
+  `chat_non_disponibile` era esattamente ciò che li separava: chiunque possa
+  scrivere in una chat — e in un **gruppo** scrive qualunque membro — avrebbe
+  potuto incollarci un proprio codice e scoprire se quella chat è già sul
+  servizio.
+
+  La prima versione lo dichiarava come baratto accettabile, con la
+  giustificazione «chi legge ha appena dimostrato di poter scrivere lì dentro».
+  Vale in un **canale**, dove scrivono solo gli amministratori; **non** in un
+  gruppo — cioè la giustificazione era scritta pensando ai canali, la stessa
   asimmetria che il #116 esiste per correggere, mancata nel ragionamento su sé
-  stessa. `[REAL_FINDING]` di OpenRouter Sol al gate della PR #120; Fable 5.1, sullo
-  stesso head, non la considerava bloccante, e la scelta fra i due è stata del
-  proprietario. Adesso il messaggio dice **che la chat è già collegata**, che è
-  quanto basta per sapere cosa fare, e non asserisce l'esistenza di un altro account
-  sul servizio. Sotto quel pavimento il messaggio smette di essere utile e torna la
-  schermata muta da cui l'avviso è nato, quindi è lì che ci si ferma. Vincolato dai
-  due versi in `tests/web/chat_flow.py`: dice «già collegata», **non** dice
-  «account». Resta diverso il caso della **frase fissa nella card della promozione**
-  («può essere già collegata a un altro account»), che non nomina nessuna chat, non
-  conferma niente e quindi non divulga: non vanno uniformate;
+  stessa. `[REAL_FINDING]` di OpenRouter Sol, ripetuto su due head; Fable 5.1 non
+  lo bloccava. **Decisione del proprietario: congelare**, e decidere nella Issue
+  dedicata insieme alla #115 (chi può rivendicare un gruppo) e alla #119 (una
+  chat, più utenti), dove la regola «una chat ha un solo proprietario» cambia
+  comunque.
+
+  **Togliere il solo messaggio dalla web app non sarebbe bastato**: `verify/status`
+  avrebbe continuato a restituire l'etichetta, e quell'endpoint lo chiama chiunque
+  abbia una sessione. L'oracle si chiude sul server o non si chiude. Vincolato da
+  `test_la_chat_di_un_altro_NON_si_distingue_da_un_codice_mai_arrivato`, che
+  confronta lo stato dopo il rifiuto con quello di un codice **mai consegnato**
+  invece di guardare un campo: è l'indistinguibilità la proprietà da tenere.
+
+  **Il costo è dichiarato:** chi incolla il codice in una chat già di un altro
+  torna a vedere solo il timer che scade. Per questo il banner della scadenza non
+  dice più «scaduto **senza essere usato**» ma «non è più valido»: meno preciso nel
+  caso semplice, mai falso in nessuno.
 - **`codice_non_valido` resta muto, e non è una dimenticanza:** non c'è nessuna
   riga su cui scrivere il motivo, e non deve esserci — un codice inventato che
   ricevesse una risposta diversa da un codice scaduto direbbe a chi lo prova
@@ -2848,22 +2865,29 @@ La voce e la vista esistono solo con `admin` vero; il server risponde comunque
     la gestisci. […] Se i tuoi segnali arrivano in un gruppo, preferisci la promozione
     del bot.» Vincolato da `tests/web/chat_flow.py`;
   - **il codice è arrivato ed è stato rifiutato** — un `banner warn` (id
-    `verifica-rifiuto`) in testa alla card col motivo: «Il codice è arrivato, ma quella
-    chat è già collegata: una chat ha un solo proprietario.» oppure «Il codice è
-    arrivato, ma il tuo accesso non era attivo.» — il primo **non nomina un altro
-    account**, e il perché sta nel contratto sopra, alla voce sulla divulgazione.
-    **La coda cambia col motivo, e non è cosmesi**: per la chat occupata «Il codice
-    non è stato consumato: puoi usarlo in **un'altra chat**», che è vero — si
-    reincolla in una chat propria e funziona; per l'accesso «Il codice non è stato
+    `verifica-rifiuto`) in testa alla card, con **un solo** motivo possibile: «Il
+    codice è arrivato, ma il tuo accesso non era attivo. Il codice non è stato
     consumato, ma **finché l'accesso non torna attivo verrebbe rifiutato di
-    nuovo**», perché lì il cancello è lo stesso e riprovare non può riuscire. Una
-    coda sola per due motivi diversi mandava l'utente a ritentare una cosa
-    impossibile — la stessa bugia che l'avviso esiste per togliere, rimessa
-    dentro l'avviso. Rilievo di CodeRabbit sulla PR #120. Se nel frattempo il
-    codice è scaduto, entrambi finiscono con «Quel codice è poi scaduto: generane
-    un altro.» **L'avviso vince sul
-    banner della scadenza**, che altrimenti direbbe «scaduto senza essere usato» di un
-    codice che è stato usato e respinto. E **compare mentre l'utente guarda**, senza
+    nuovo**.» La coda dice cosa aspettare, e non «puoi ancora usarlo»: lì il
+    cancello è lo stesso e riprovare non può riuscire — una coda sola per motivi
+    diversi mandava l'utente a ritentare una cosa impossibile, che è la stessa
+    bugia che l'avviso esiste per togliere, rimessa dentro l'avviso. Rilievo di
+    CodeRabbit sulla PR #120. Se nel frattempo il codice è scaduto, la coda diventa
+    «Quel codice è poi scaduto: generane un altro.»
+
+    **Il rifiuto per «chat di un altro» invece TACE**, e non è una dimenticanza: è
+    l'oracle fra tenant descritto nel contratto sopra, chiuso sul server. Chi
+    incolla il codice in una chat già collegata vede solo il timer che scade — e
+    per questo il banner della scadenza dice «Il codice precedente **non è più
+    valido**. Generane un altro.» invece di «scaduto senza essere usato», che
+    sarebbe falso proprio in quel caso. Meno preciso nel caso semplice, mai falso
+    in nessuno. Vincolato dai due versi nel flusso browser: il passo 9 misura il
+    **silenzio** aspettando due giri di sondaggio, il passo 8 prova che il banner
+    funziona per l'altro motivo — senza quest'ultimo, l'asserzione di silenzio
+    passerebbe anche col meccanismo rotto.
+
+    **L'avviso vince sul banner della scadenza** quando c'è un motivo da dire, e
+    **compare mentre l'utente guarda**, senza
     ricaricare: il sondaggio confronta l'esito del server con quello disegnato e
     ridisegna quando cambia. Senza quel confronto il banner non sarebbe mai apparso nel
     momento in cui serve — `in_attesa` resta vero, perché il codice non è consumato,
