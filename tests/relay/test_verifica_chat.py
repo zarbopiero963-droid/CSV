@@ -1361,6 +1361,100 @@ def test_un_errore_HTTP_di_Telegram_non_collega_la_chat(servizio_con_telegram):
     assert _chats(base, cookie) == []
 
 
+def _sblocca_il_freno(percorso_db, codice):
+    """Riporta indietro `ruolo_chiesto_at` come farebbe il passare del tempo.
+
+    Il freno del #115 lascia una prova di ruolo ogni `ATTESA_FRA_PROVE_DI_RUOLO_S`
+    secondi. In produzione non si nota — promuovere qualcuno ad amministratore su
+    Telegram richiede molto di piu' — ma in un test le due consegne distano
+    millisecondi. Retrodatare la colonna e' piu' onesto di una `sleep`: misura il
+    comportamento voluto («passata la finestra si richiama Telegram») invece di
+    aspettare un orologio.
+    """
+    c = sqlite3.connect(percorso_db)
+    try:
+        c.execute('UPDATE chat_verifications SET ruolo_chiesto_at=0 WHERE code=?',
+                  (codice,))
+        c.commit()
+    finally:
+        c.close()
+
+
+def test_lo_STESSO_codice_ripetuto_non_moltiplica_le_chiamate(servizio_con_telegram):
+    """Il freno, ed e' un difetto che questa PR aveva introdotto.
+
+    La lettura di filtro ferma i codici INVENTATI. Il codice VIVO no — e quello e'
+    incollato nella chat, quindi lo vedono tutti i membri: chiunque di loro poteva
+    ripeterlo e farci fare una chiamata in uscita **per messaggio**. Misurato prima
+    della correzione: 10 consegne, 10 `getChatMember`.
+
+    Il costo non e' teorico: ogni consegna occupa un thread del pool per fino a 10
+    secondi di timeout, e quel pool serve anche l'elaborazione dei segnali di tutti
+    gli altri utenti.
+
+    `[REAL_FINDING]` di OpenRouter Sol al gate finale della PR #122.
+    """
+    base, percorso_db, finto = servizio_con_telegram
+    cookie, _ = _login_a(base, percorso_db)
+    finto.ruolo('member')
+
+    codice = _codice(base, cookie)
+    for _ in range(10):
+        _consegna(base, GRUPPO, codice, tipo='supergroup', mittente=CLIENTE_A)
+
+    assert finto.quante('getChatMember') == 1, (
+        f'il codice vivo ripetuto moltiplica le chiamate: {finto.quante("getChatMember")}')
+    assert _chats(base, cookie) == [], 'il freno non deve collegare niente'
+
+
+def test_il_freno_e_una_FINESTRA_non_un_blocco(servizio_con_telegram):
+    """Senza questo, il test sopra passerebbe anche con un freno che chiude per
+    sempre dopo la prima prova — che non e' un freno, e' un guasto."""
+    base, percorso_db, finto = servizio_con_telegram
+    cookie, _ = _login_a(base, percorso_db)
+    finto.ruolo('member')
+
+    codice = _codice(base, cookie)
+    _consegna(base, GRUPPO, codice, tipo='supergroup', mittente=CLIENTE_A)
+    _sblocca_il_freno(percorso_db, codice)
+    _consegna(base, GRUPPO, codice, tipo='supergroup', mittente=CLIENTE_A)
+
+    assert finto.quante('getChatMember') == 2, finto.chiamate
+
+
+def test_il_freno_non_consuma_il_codice(servizio_con_telegram):
+    """Una consegna frenata dev'essere indistinguibile da una rifiutata per ruolo:
+    stesso motivo, e il codice resta spendibile."""
+    base, percorso_db, finto = servizio_con_telegram
+    cookie, _ = _login_a(base, percorso_db)
+    finto.ruolo('member')
+
+    codice = _codice(base, cookie)
+    _consegna(base, GRUPPO, codice, tipo='supergroup', mittente=CLIENTE_A)
+    stato, corpo = _consegna(base, GRUPPO, codice, tipo='supergroup',
+                             mittente=CLIENTE_A)
+
+    assert stato == 200, corpo
+    assert corpo.get('ignored') == 'ruolo_non_provato', corpo
+    st = _stato_verifica(base, cookie)
+    assert st['in_attesa'] is True, f'il freno ha bruciato il codice: {st!r}'
+
+
+def test_il_freno_non_tocca_i_CANALI(servizio_con_telegram):
+    """Nei canali non si chiama Telegram, quindi non c'e' niente da frenare: due
+    consegne ravvicinate devono funzionare come prima."""
+    base, percorso_db, finto = servizio_con_telegram
+    cookie_a, _ = _login_a(base, percorso_db)
+
+    _consegna(base, CANALE_A, _codice(base, cookie_a), tipo='channel')
+    cookie_b, _ = _login_b(base, percorso_db)
+    _consegna(base, CANALE_B, _codice(base, cookie_b), tipo='channel')
+
+    assert [c['telegram_chat_id'] for c in _chats(base, cookie_a)] == [CANALE_A]
+    assert [c['telegram_chat_id'] for c in _chats(base, cookie_b)] == [CANALE_B]
+    assert finto.quante('getChatMember') == 0, finto.chiamate
+
+
 def test_il_rifiuto_per_ruolo_NON_brucia_il_codice(servizio_con_telegram):
     """Chi non era ancora amministratore deve poter riprovare dopo esserlo
     diventato, senza chiedere un codice nuovo."""
@@ -1373,7 +1467,9 @@ def test_il_rifiuto_per_ruolo_NON_brucia_il_codice(servizio_con_telegram):
     assert _chats(base, cookie) == []
 
     finto.ruolo('administrator')
+    _sblocca_il_freno(percorso_db, codice)
     _consegna(base, GRUPPO, codice, tipo='supergroup', mittente=CLIENTE_A)
 
     assert [c['telegram_chat_id'] for c in _chats(base, cookie)] == [GRUPPO], (
         'il codice era stato bruciato da un rifiuto per ruolo')
+

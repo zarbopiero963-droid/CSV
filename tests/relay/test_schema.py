@@ -1783,6 +1783,7 @@ COLONNE_SCRITTE_DAL_CODICE = (
     # aveva misurato.
     ('chats', 'bot_stato'),
     ('chat_verifications', 'esito'),
+    ('chat_verifications', 'ruolo_chiesto_at'),
     # E le ALTRE QUINDICI, che la guardia qui sotto ha fatto emergere tutte
     # insieme: il buco non era il #116, era che la lista non e' mai stata tenuta
     # al passo di `COLONNE_MULTIUTENTE` da niente.

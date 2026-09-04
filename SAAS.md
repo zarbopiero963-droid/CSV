@@ -1399,6 +1399,28 @@ ed è chiuso dalla #115.** Fuori dai canali il servizio chiede a Telegram, con
   già morto, o chiunque possa scrivere in una chat dove il bot è presente potrebbe
   farci fare una raffica di chiamate in uscita incollando stringhe della forma
   giusta.
+- **E un freno, perché quel filtro da solo non bastava.** Ferma i codici
+  *inventati*, non il codice **vivo** — che è incollato nella chat, quindi lo vedono
+  tutti i membri: chiunque poteva ripeterlo e farci fare una chiamata **per
+  messaggio**. *Misurato prima della correzione: 10 consegne, 10 `getChatMember`.*
+  Ogni consegna occupa un thread del pool per fino a 10 s, e quel pool serve anche
+  l'elaborazione dei segnali di tutti gli altri utenti.
+  `ATTESA_FRA_PROVE_DI_RUOLO_S` (5 s) lascia **una** prova di ruolo per codice per
+  finestra; con i 600 s di vita del codice il tetto passa da illimitato a 120.
+  - **Sul codice, non sul mittente**, ed è la scelta che conta: il codice è la cosa
+    scarsa, perché cento membri che colludono useranno comunque quella stessa
+    stringa. Chiave per mittente, il tetto sarebbe stato una chiamata per finestra
+    **per account**; così è una sola in assoluto.
+  - **Lo slot si prende con una sola `UPDATE`**, atomica sotto il lock di scrittura
+    di SQLite. Con più worker, una coppia lettura+scrittura lo farebbe vincere a due
+    richieste in corsa. La scrittura committa **prima** della chiamata: il lock non
+    attraversa mai la rete.
+  - **Il baratto, dichiarato.** Un membro ostile che spamma il codice tiene lo slot
+    occupato, e la prova legittima del titolare può cadere nella finestra ed essere
+    rifiutata. Non è un blocco — si riprova dopo pochi secondi, e chiedere un codice
+    nuovo crea una riga nuova con lo slot pulito — ma è un fastidio reale, scelto
+    perché il verso opposto lascia in piedi un'amplificazione che colpisce **tutti**
+    gli utenti. `[REAL_FINDING]` di OpenRouter Sol al gate finale della PR #122.
 
 **Chiuso dalla #116 sul percorso principale — e lì senza `getChatMember`.** *Le due
 frasi convivono e vanno lette insieme, perché prese da sole si contraddicono: la #115

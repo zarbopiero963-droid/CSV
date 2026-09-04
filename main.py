@@ -1063,6 +1063,7 @@ COLONNE_MULTIUTENTE = (
     # app no: restava «in attesa» fino alla scadenza e poi diceva «scaduto senza
     # essere usato», che e' l'esatto contrario di cio' che era successo.
     ('chat_verifications', 'esito', 'TEXT'),
+    ('chat_verifications', 'ruolo_chiesto_at', 'INTEGER'),
     # Lo stato del BOT in quella chat, come l'ha visto l'ultimo `my_chat_member`
     # (#116). Serve perche' una chat da cui il bot e' stato tolto o retrocesso
     # resta collegata e con i suoi link ai parser — cancellarla butterebbe via la
@@ -2238,6 +2239,15 @@ def leggi_chat_telegram(chat_id, bot_token=None):
 # riporta `getChatMember`. Oggi coincidono perche' Telegram usa lo stesso
 # vocabolario; unirle legherebbe due cose che possono divergere.
 RUOLI_CHE_CONTROLLANO = ('creator', 'administrator')
+
+# Quanto deve passare fra due prove di ruolo per lo STESSO codice di verifica.
+#
+# Non e' un numero di comodo: e' il tetto all'amplificazione. Il codice vive
+# `TTL_CODICE_VERIFICA_S` (600 s), quindi 5 s di finestra portano il massimo di
+# chiamate in uscita per codice da illimitato a 120. Alzarlo stringe di piu' ma
+# allunga l'attesa di chi riprova dopo essere stato promosso amministratore;
+# abbassarlo fa il contrario. Vincolato da `tests/relay/test_verifica_chat.py`.
+ATTESA_FRA_PROVE_DI_RUOLO_S = 5
 
 
 def ruolo_in_chat(chat_id, user_id, bot_token=None):
@@ -7374,18 +7384,57 @@ def _prova_di_ruolo_superata(chat_id, tipo, mittente, codice, adesso):
         # autorizzerebbe una chat privata **altrui**, che e' il furto della
         # verifica in un'altra forma.
         return str(chat_id) == str(mittente)
+    # Il FRENO, e perche' il solo filtro sul codice vivo non bastava.
+    #
+    # La lettura di filtro ferma i codici INVENTATI. Il codice VIVO no — e quello
+    # e' incollato nella chat, quindi lo vedono tutti i membri: chiunque di loro
+    # poteva ripeterlo e farci fare una chiamata in uscita PER MESSAGGIO. Misurato
+    # prima della correzione: 10 consegne, 10 `getChatMember`. Ogni consegna
+    # occupa un thread del pool per fino a 10 secondi, e quel pool serve anche
+    # l'elaborazione dei segnali di tutti gli altri utenti.
+    # `[REAL_FINDING]` di OpenRouter Sol al gate finale della PR #122.
+    #
+    # **Il freno e' sul CODICE, non sul mittente**, ed e' la scelta che conta: il
+    # codice e' la cosa scarsa, perche' cento membri che colludono useranno
+    # comunque quella stessa stringa. Chiave per mittente il tetto sarebbe stato
+    # «una chiamata per finestra PER ACCOUNT»; cosi' e' una sola in assoluto. Con
+    # i 600 s di vita del codice il tetto passa da illimitato a 120 chiamate.
+    #
+    # **Il baratto, che va detto e non nascosto**: un membro ostile che spamma il
+    # codice tiene lo slot occupato, e la prova legittima del titolare puo'
+    # cadere nella finestra e venire rifiutata. Non e' un blocco — si riprova
+    # dopo pochi secondi, e chiedere un codice nuovo crea una riga nuova con lo
+    # slot pulito — ma e' un fastidio reale, scelto perche' il verso opposto
+    # lascia in piedi un'amplificazione che colpisce TUTTI gli utenti.
+    #
+    # **L'acquisizione dello slot e' UNA sola UPDATE**, quindi atomica sotto il
+    # lock di scrittura di SQLite: con piu' worker una coppia lettura+scrittura
+    # avrebbe lasciato vincere lo slot a due richieste in corsa. La scrittura
+    # finisce e committa PRIMA della chiamata: il lock non attraversa mai la rete.
     c = db()
     try:
-        vivo = c.execute(
+        preso = c.execute(
+            'UPDATE chat_verifications SET ruolo_chiesto_at=?'
+            ' WHERE code=? AND consumed_at IS NULL AND expires_at > ?'
+            '   AND (ruolo_chiesto_at IS NULL OR ruolo_chiesto_at <= ?)',
+            (adesso, codice, adesso,
+             adesso - ATTESA_FRA_PROVE_DI_RUOLO_S)).rowcount
+        c.commit()
+        vivo = None if preso else c.execute(
             'SELECT 1 FROM chat_verifications'
             ' WHERE code=? AND consumed_at IS NULL AND expires_at > ?',
             (codice, adesso)).fetchone()
     finally:
         c.close()
-    if not vivo:
-        # Codice morto: lo dira' la transazione con `codice_non_valido`, senza che
-        # noi si sia chiamato Telegram per un messaggio qualsiasi.
-        return True
+    if not preso:
+        # Lo slot non e' nostro, e i due motivi vanno distinti.
+        if not vivo:
+            # Codice morto: lo dira' la transazione con `codice_non_valido`, senza
+            # che noi si sia chiamato Telegram per un messaggio qualsiasi.
+            return True
+        # Codice vivo, gia' provato di recente: si rifiuta senza chiamare e senza
+        # consumare, indistinguibile da ogni altro `ruolo_non_provato`.
+        return False
     riuscito, ruolo = ruolo_in_chat(chat_id, mittente)
     return bool(riuscito) and ruolo in RUOLI_CHE_CONTROLLANO
 

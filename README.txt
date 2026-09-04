@@ -313,7 +313,23 @@ chi ha incollato il codice, e registra solo per `creator`/`administrator`.
   - la chiamata sta FUORI dalla transazione (mai il lock di scrittura tenuto per i
     10 s di timeout) e DOPO una lettura di filtro sul codice: senza, chiunque possa
     scrivere in una chat dove il bot e' presente potrebbe farci fare una raffica di
-    chiamate in uscita incollando stringhe della forma giusta.
+    chiamate in uscita incollando stringhe della forma giusta;
+  - e c'e' un FRENO, perche' quel filtro da solo non bastava. Ferma i codici
+    INVENTATI, non il codice VIVO — che e' incollato nella chat e quindi lo vedono
+    tutti i membri: chiunque poteva ripeterlo e farci fare una chiamata PER
+    MESSAGGIO. Misurato: 10 consegne, 10 chiamate. Ogni consegna occupa un thread
+    del pool per fino a 10 s, e quel pool serve anche i segnali degli altri utenti.
+    `ATTESA_FRA_PROVE_DI_RUOLO_S` (5 s) lascia una prova di ruolo per codice per
+    finestra: coi 600 s di vita del codice il tetto passa da illimitato a 120.
+    Il freno e' sul CODICE e non sul mittente perche' il codice e' la cosa scarsa —
+    cento membri che colludono useranno comunque quella stessa stringa, quindi il
+    tetto e' UNA chiamata per finestra in assoluto e non una per account.
+    Lo slot si prende con UNA sola UPDATE, atomica sotto il lock di SQLite: con
+    piu' worker una coppia lettura+scrittura lo farebbe vincere a due richieste in
+    corsa. Baratto dichiarato: un membro ostile che spamma il codice tiene lo slot
+    occupato e la prova legittima del titolare puo' cadere nella finestra. Non e'
+    un blocco — si riprova dopo pochi secondi, e un codice nuovo e' una riga nuova
+    con lo slot pulito. `[REAL_FINDING]` di OpenRouter Sol al gate della PR #122.
 CHIUSO dalla #116 per chi usa il percorso principale, e li' SENZA `getChatMember`.
 Le due frasi convivono e vanno lette insieme, perche' prese da sole si contraddicono:
 la #115 `getChatMember` lo usa, la #116 no. Non e' un ripensamento — i due percorsi
