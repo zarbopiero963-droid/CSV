@@ -19,10 +19,23 @@ Cosa deve dimostrare, in ordine:
    ricaricamento (cioe' e' andata sul server, non in una variabile);
 5. si elimina, con conferma esplicita.
 
+Dal #116 (PR 2) il flusso copre anche la meta' che il codice usa-e-getta non tocca:
+
+6. il percorso CONSIGLIATO e' in schermata — il link del bot da copiare, costruito
+   dai settings pubblici del servizio e non scritto in pagina;
+7. una retrocessione del bot si VEDE nella riga, e dice la cosa giusta: «non e' piu'
+   amministratore» non e' «non legge piu'»;
+8. un codice RIFIUTATO lo dice mentre l'utente guarda, senza ricaricare, e la coda
+   del messaggio cambia col motivo (chat occupata / accesso non attivo) e con la
+   scadenza — tre combinazioni misurate, non dedotte.
+
 Viewport a 390px per tutta la durata: la pagina non deve sfondare in orizzontale
 (regola 2 di CLAUDE.md). Zero errori in console, come tutti i flussi web di qui.
 
-Argomenti: base_url (con /app/), cartella screenshot.
+Argomenti: base_url (con /app/), cartella screenshot, percorso del database.
+Il terzo serve solo per gli stati che dal browser non sono raggiungibili — un
+secondo utente, una sospensione, una scadenza — e mai per cio' che si sta
+verificando, che passa sempre dallo schermo e dal webhook veri.
 """
 
 import json
@@ -163,23 +176,48 @@ def sospendi_utente():
     Serve `is_admin=0` oltre allo stato: l'amministratore e' esente dal cancello,
     sia nel relay (`_consuma_codice_di_verifica`) sia nella web app, quindi
     sospenderlo soltanto non produrrebbe nessun rifiuto.
+
+    Restituisce l'**id** toccato, e `riattiva_utente` ripristina QUELLO. La prima
+    versione ripristinava `WHERE status='sospeso'`, cioe' chiunque fosse sospeso
+    nel database: bastava un altro utente in quello stato — dalla semina o da un
+    passo precedente — perche' il test lo riattivasse per errore, silenziosamente
+    e fuori dal proprio perimetro. Rilievo di GPT-5.5 sulla PR #120.
     """
     c = sqlite3.connect(DB)
     try:
-        c.execute("UPDATE users SET is_admin=0, status='sospeso'"
-                  " WHERE id=(SELECT MIN(id) FROM users WHERE is_admin=1)")
+        riga = c.execute(
+            'SELECT MIN(id) FROM users WHERE is_admin=1').fetchone()
+        assert riga and riga[0] is not None, 'nessun amministratore da sospendere'
+        utente = riga[0]
+        c.execute("UPDATE users SET is_admin=0, status='sospeso' WHERE id=?",
+                  (utente,))
+        c.commit()
+        return utente
+    finally:
+        c.close()
+
+
+def riattiva_utente(utente):
+    """Rimette com'era l'utente sospeso da `sospendi_utente`, e SOLO quello.
+
+    Sta in un `finally`: se l'asserzione fallisce, i passi successivi non devono
+    ereditare un utente sospeso e sbagliare motivo di rifiuto.
+    """
+    c = sqlite3.connect(DB)
+    try:
+        c.execute("UPDATE users SET is_admin=1, status='attivo' WHERE id=?",
+                  (utente,))
         c.commit()
     finally:
         c.close()
 
 
-def riattiva_utente():
-    """Rimette l'utente com'era. Sta in un `finally`: se l'asserzione fallisce, i
-    passi successivi non devono ereditare un utente sospeso e sbagliare motivo."""
+def scadi_il_codice(codice):
+    """Manda a scadenza un codice ancora vivo, senza aspettare i 600 secondi."""
     c = sqlite3.connect(DB)
     try:
-        c.execute("UPDATE users SET is_admin=1, status='attivo'"
-                  " WHERE status='sospeso'")
+        c.execute('UPDATE chat_verifications SET expires_at=1 WHERE code=?',
+                  (codice,))
         c.commit()
     finally:
         c.close()
@@ -492,7 +530,7 @@ with sync_playwright() as pw:
     # risposta, quindi chi viene sospeso MENTRE aspetta il codice resta su questa
     # vista invece di finire sulla schermata «Accesso sospeso». Per questo qui si
     # tocca solo il database e non si ricarica la pagina.
-    sospendi_utente()
+    utente_sospeso = sospendi_utente()
     try:
         stato_sosp, corpo_sosp = consegna(codice_rifiutato, chat=CANALE_ALTRUI)
         assert stato_sosp == 200, (stato_sosp, corpo_sosp)
@@ -507,7 +545,26 @@ with sync_playwright() as pw:
         non_sfonda(pg, 'accesso non attivo')
         shot(pg, '11-accesso-non-attivo')
     finally:
-        riattiva_utente()
+        riattiva_utente(utente_sospeso)
+
+    # ---- 9) motivo E scadenza insieme -----------------------------------
+    # La coda ora si dirama su DUE dimensioni, e questo e' il ramo che nessuno
+    # dei passi precedenti tocca: un codice rifiutato che POI scade. Dire
+    # «riprova» di un codice morto e' la stessa frase falsa dei passi 7 e 8,
+    # spostata di dieci minuti. Rilievo di GPT-5.5 sulla PR #120.
+    #
+    # Si copre UNA delle due combinazioni motivo x scaduto, e lo dico invece di
+    # dichiarare la matrice piena: la coda della scadenza e' una costante sola,
+    # condivisa dai due motivi, quindi provarla su uno prova il ramo.
+    scadi_il_codice(codice_rifiutato)
+    pg.wait_for_selector('#verifica-rifiuto:has-text("scaduto")', timeout=30000)
+    avviso_scad = pg.inner_text('#verifica-rifiuto').lower()
+    assert 'generane un altro' in avviso_scad, (
+        f'l-avviso non dice cosa fare di un codice morto: {avviso_scad!r}')
+    assert "un'altra chat" not in avviso_scad and 'finch' not in avviso_scad, (
+        f'l-avviso manda ancora a riusare un codice scaduto: {avviso_scad!r}')
+    non_sfonda(pg, 'rifiutato e scaduto')
+    shot(pg, '12-rifiutato-e-scaduto')
 
     ctx.close()
     b.close()
