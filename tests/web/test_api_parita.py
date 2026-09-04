@@ -78,3 +78,33 @@ def test_il_bundle_usa_il_layer_finto_e_non_quello_vero():
     assert "'api_finta.js'" in build
     assert re.search(r"WEB\s*/\s*'api\.js'", build) is None, (
         'tools/build_single_file.py legge api.js: la demo non puo\' fare fetch')
+
+
+# --------------------------------------------- la demo non tocca la produzione
+
+def test_la_demo_non_pubblica_un_bot_telegram_vero():
+    """`api_finta.js` non deve portare uno username di bot: nessuno, mai.
+
+    Da questo file nasce `dist/prototipo.html`, cioe' la copia che si CONDIVIDE.
+    Dal #116 la vista «Chat Telegram» costruisce da `settings().bot_username` un
+    link `t.me/<bot>` e ci scrive accanto «promuovilo ad amministratore». Con
+    dentro lo username vero, chi segue quelle istruzioni promuove il bot VERO in
+    un canale VERO, e Telegram consegna `my_chat_member` al webhook di
+    PRODUZIONE: una vetrina che produce effetti sul servizio.
+
+    E' successo davvero, per un giro, su questa PR: l'avevo messo per far vedere
+    anche nella demo il percorso consigliato. `[REAL_FINDING]` di OpenRouter Sol
+    al gate della PR #120. La guardia esiste perche' la tentazione e' ragionevole
+    e il danno non si vede leggendo il diff.
+
+    Il controllo e' sul SORGENTE e non sul valore restituito: `api_finta.js` e'
+    un modulo ES che questi test non eseguono, e la stessa forma statica e' gia'
+    quella su cui si regge la parita' qui sopra.
+    """
+    testo = (WEB / 'api_finta.js').read_text(encoding='utf-8')
+    trovati = re.findall(r"bot_username\s*:\s*'([^']*)'", testo)
+    assert trovati, 'api_finta.js non dichiara piu- bot_username: la guardia e- cieca'
+    assert all(v == '' for v in trovati), (
+        f'la demo pubblica uno username di bot: {trovati!r}. Chi segue le sue '
+        'istruzioni promuoverebbe quel bot in un canale vero, e gli eventi '
+        'arriverebbero al webhook di produzione.')

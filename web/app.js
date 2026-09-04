@@ -1760,7 +1760,19 @@ function codiceDellaSessione() {
 // aveva appena corretto il difetto opposto.
 const GUASTI_DI_SEGUITO = 5;
 
-function sondaVerifica(invocazione, giro = 0, guasti = 0) {
+// `esitoMostrato` è l'etichetta di rifiuto che la vista ha DISEGNATO, e serve a
+// una cosa sola: accorgersi che ne è arrivata una nuova.
+//
+// Senza, il banner del rifiuto (#116) non comparirebbe mai nel momento in cui
+// serve. Un codice rifiutato lascia `in_attesa` vero — giusto, non è stato
+// consumato — quindi il sondaggio cadeva nel ramo che aggiorna il solo conto alla
+// rovescia: l'utente resta a guardare un timer che scorre mentre il server ha già
+// deciso, e scopre il motivo solo ricaricando. Cioè proprio la schermata muta che
+// questo avviso è nato per togliere, spostata di un passo.
+//
+// Il confronto è con ciò che è a schermo, non con `null`: ridisegnare a ogni giro
+// perché «c'è un esito» ricomincerebbe il sondaggio ogni 3 secondi per sempre.
+function sondaVerifica(invocazione, giro = 0, guasti = 0, esitoMostrato = null) {
   if (invocazione !== generazione) return;
   // I primi venti giri — circa un minuto — ogni 3 secondi: è la finestra in cui
   // l'utente sta davvero incollando, e lì la reattività si vede. Dopo, ogni 15:
@@ -1785,7 +1797,7 @@ function sondaVerifica(invocazione, giro = 0, guasti = 0) {
       // risponde ancora, l'utente vede il motivo invece di un'attesa infinita.
       if (invocazione !== generazione) return;
       if (guasti + 1 >= GUASTI_DI_SEGUITO) { render(); return; }
-      sondaVerifica(invocazione, giro + 1, guasti + 1);
+      sondaVerifica(invocazione, giro + 1, guasti + 1, esitoMostrato);
       return;
     }
     if (invocazione !== generazione) return;
@@ -1796,9 +1808,14 @@ function sondaVerifica(invocazione, giro = 0, guasti = 0) {
       return;
     }
     if (!st.in_attesa) { render(); return; }   // scaduto: la vista lo dice
+    // Il codice E' arrivato ed e' stato rifiutato: `in_attesa` resta vero perche'
+    // non e' stato consumato, ma il motivo c'e' e va messo in schermata SUBITO —
+    // e' l'unico istante in cui l'utente sta ancora guardando questa pagina.
+    if ((st.esito || null) !== esitoMostrato) { render(); return; }
     const box = document.getElementById('verifica-scadenza');
     if (box) box.textContent = tempoRimasto(st.scade_fra_s);
-    sondaVerifica(invocazione, giro + 1, 0);   // riuscito: il conteggio riparte
+    // riuscito: il conteggio dei guasti riparte, l'esito mostrato resta quello
+    sondaVerifica(invocazione, giro + 1, 0, esitoMostrato);
   }, attesa);
 }
 
@@ -1814,16 +1831,78 @@ function nomeChat(c) {
   return c.titolo || 'Chat senza nome';
 }
 
+// Lo stato del bot in quella chat, detto per quello che è (#116).
+//
+// La distinzione fra i due gruppi NON è un dettaglio di stile. `left` e `kicked`
+// significano che il bot è fuori: da lì non arriva più niente, punto. `member` e
+// `restricted` significano solo che non è più amministratore — e in un GRUPPO un
+// bot con la privacy mode disattivata continua a leggere tutti i messaggi anche
+// da semplice membro. Dire «il bot non legge più» su un `member` sarebbe falso,
+// ed è l'errore che OpenRouter Sol ha fermato sul nome della costante nel PR 1:
+// qui sarebbe arrivato fino allo schermo dell'utente.
+//
+// `administrator`/`creator` non producono nessuna pillola: è lo stato normale, e
+// una pillola che dice «tutto bene» su ogni riga è rumore. Nemmeno una chat senza
+// `bot_stato` ne ha una: sono le righe collegate col codice o dal percorso legacy,
+// dove nessun `my_chat_member` è mai passato, e inventare uno stato che non
+// conosciamo sarebbe peggio che tacere.
+const STATI_BOT_FUORI = ['left', 'kicked'];
+const STATI_BOT_NON_AMMINISTRATORE = ['member', 'restricted'];
+
+function pillaBot(stato) {
+  if (STATI_BOT_FUORI.includes(stato)) {
+    return '<span class="pill no">il bot non è più nella chat</span>';
+  }
+  if (STATI_BOT_NON_AMMINISTRATORE.includes(stato)) {
+    return '<span class="pill warn">il bot non è più amministratore</span>';
+  }
+  return '';
+}
+
 function rigaChat(c) {
   return `<div class="list-item">
     <div class="grow">
       <span class="name">${esc(nomeChat(c))}</span>
       ${c.tipo ? `<span class="pill">${esc(c.tipo)}</span>` : ''}
+      ${pillaBot(c.bot_stato)}
       <div class="dim small mono">${esc(c.telegram_chat_id)}</div>
     </div>
     <button class="danger small" data-act="chat-del" data-id="${esc(c.id)}"
             data-nome="${esc(nomeChat(c))}">Rimuovi</button>
   </div>`;
+}
+
+// Il motivo per cui un codice arrivato è stato rifiutato, detto all'utente.
+//
+// Il server manda un'ETICHETTA (`chat_non_disponibile`, `accesso_non_attivo`) e
+// il testo lo scrive qui: così la frase esiste in un posto solo, e il server non
+// deve decidere come si parla a una persona.
+//
+// **Un motivo solo, e l'altro è congelato di proposito.** `accesso_non_attivo`
+// parla dell'account di chi legge, quindi non divulga niente a nessuno.
+// `chat_non_disponibile` parlerebbe invece di una chat di QUALCUN ALTRO, e il
+// server non lo manda nemmeno più: in un gruppo scrive qualunque membro, quindi
+// chiunque potrebbe incollarci un proprio codice e scoprire se quella chat è già
+// sul servizio.
+//
+// **Quell'oracle non preesisteva: lo introduceva la prima versione di questo
+// PR** — prima, un codice rifiutato e uno mai arrivato erano indistinguibili, il
+// timer scadeva in entrambi i casi. `[REAL_FINDING]` di OpenRouter Sol, ripetuto
+// su due head; Fable 5.1 non lo bloccava. Decisione del proprietario: congelato
+// e portato nella sua Issue, insieme alla #115 e alla #119.
+//
+// La funzione tiene comunque il ramo `scaduto`, e non è ridondanza: il codice
+// rifiutato resta spendibile, ma solo finché non scade. Dire «riprova» di un
+// codice ormai morto sarebbe la stessa frase falsa spostata di dieci minuti —
+// il difetto che CodeRabbit ha trovato in questa PR, un giro prima.
+function motivoDelRifiuto(esito, scaduto) {
+  if (esito === 'accesso_non_attivo') {
+    return 'Il codice è arrivato, ma il tuo accesso non era attivo. '
+      + (scaduto ? 'Quel codice è poi scaduto: generane un altro.'
+         : 'Il codice non è stato consumato, ma finché l\'accesso non torna '
+           + 'attivo verrebbe rifiutato di nuovo.');
+  }
+  return '';
 }
 
 // Le tre schermate di questa vista sono UNA sola cosa detta in tre stati:
@@ -1866,12 +1945,64 @@ async function viewChats() {
   if (invocazione !== generazione) return;
 
   const bot = api.settings() && api.settings().bot_username;
+
+  // Il percorso PRINCIPALE (#116): aggiungere il bot e promuoverlo. Sta in cima
+  // perché è quello che il proprietario aveva progettato per `@Betrelay_bot`, ed
+  // è l'unico dei due che dimostra il RUOLO: Telegram lascia promuovere un bot
+  // ad amministratore solo a chi è già amministratore con quel diritto, quindi
+  // la promozione stessa è la prova. Il codice dimostra solo che sai scrivere lì
+  // dentro — in un canale coincide, in un gruppo no.
+  //
+  // Non c'è nessun sondaggio su questo percorso, e il pulsante lo dice invece di
+  // fingere: `my_chat_member` non ha una riga da interrogare come il codice, e
+  // sondare la lista delle chat all'infinito costerebbe una richiesta ogni pochi
+  // secondi a ogni scheda aperta, per un evento che l'utente sa di aver appena
+  // fatto. «Ho aggiunto il bot» ridisegna la vista, che è esattamente quello che
+  // serve — e non ricarica la pagina, o butterebbe via la sessione in cache.
+  const promozione = `
+    <div class="card stack">
+      <strong class="small">Aggiungi il bot al canale — il modo consigliato</strong>
+      ${bot ? `
+        <div class="row"><span class="pill">1</span>
+          <span class="small">Copia il link del bot e aprilo su Telegram.</span></div>
+        ${copyRow(`https://t.me/${bot}`, 'copy', 'link-bot')}
+        <div class="row"><span class="pill">2</span>
+          <span class="small">Aggiungilo al <strong>canale o gruppo</strong> da cui
+            arrivano i segnali.</span></div>
+        <div class="row"><span class="pill">3</span>
+          <span class="small">Promuovilo ad <strong>amministratore</strong>: la chat
+            compare qui da sola.</span></div>
+        <div class="row">
+          <button class="primary" data-act="ricarica">Ho aggiunto il bot</button>
+        </div>
+        <p class="dim small" style="margin:0">
+          Promuovere un bot ad amministratore Telegram lo permette solo a chi già lo
+          è: è la promozione stessa a dimostrare che quella chat è tua. Non serve
+          nessun codice e non serve scrivere niente nel canale.
+        </p>
+        <p class="dim small" style="margin:0">
+          Se la chat non compare, può essere già collegata a un altro account: una
+          chat ha un solo proprietario, e vince chi la collega per primo.
+        </p>`
+        : `<p class="muted small" style="margin:0">
+             Nessun bot configurato sul servizio: per ora usa il codice qui sotto.
+           </p>`}
+    </div>`;
+
+  // Il motivo dell'ultimo rifiuto, quando c'è. Va sopra il ripiego perché è lì
+  // che l'utente stava guardando: senza, la schermata lo lascia sul conto alla
+  // rovescia e poi gli dice «scaduto senza essere usato», che è falso.
+  const rifiuto = verifica.esito ? `
+    <div class="banner warn" style="margin:0" id="verifica-rifiuto"><span class="small">${
+      esc(motivoDelRifiuto(verifica.esito, verifica.scaduto))}</span></div>` : '';
+
   let pannello;
   const codiceDaMostrare = codiceDellaSessione();
   if (verifica.in_attesa && codiceDaMostrare) {
     pannello = `
       <div class="card stack">
-        <strong class="small">Autorizza un canale o un gruppo</strong>
+        <strong class="small">Oppure autorizza con un codice</strong>
+        ${rifiuto}
         <div class="row"><span class="pill">1</span>
           <span class="small">Copia il codice qui sotto.</span></div>
         ${copyRow(codiceDaMostrare, 'copy', 'codice-verifica')}
@@ -1910,6 +2041,7 @@ async function viewChats() {
     pannello = `
       <div class="card stack" id="verifica-in-corso">
         <strong class="small">C'è una verifica in corso</strong>
+        ${rifiuto}
         <p class="muted small" style="margin:0">
           Il codice si vede una volta sola, al momento in cui lo chiedi: ricaricando la
           pagina non ricompare. Se ce l'hai ancora, incollalo nel canale — appena arriva,
@@ -1926,19 +2058,32 @@ async function viewChats() {
   } else {
     pannello = `
       <div class="card stack">
-        <strong class="small">Autorizza un canale o un gruppo</strong>
-        ${verifica.scaduto ? `<div class="banner warn" style="margin:0"><span class="small">
-          Il codice precedente è scaduto senza essere usato. Generane un altro.
-        </span></div>` : ''}
+        <strong class="small">Oppure autorizza con un codice</strong>
+        ${/* `rifiuto` vince sul banner della scadenza quando c'è un motivo da
+              dire. Ma il banner generico ha dovuto smettere di dire «scaduto
+              SENZA ESSERE USATO»: da quando il motivo `chat_non_disponibile` è
+              congelato (vedi `motivoDelRifiuto`), quel caso ricade qui — e il
+              codice era stato usato, e respinto. «Non è più valido» è vero in
+              tutti e tre i casi: scaduto e basta, rifiutato e poi scaduto,
+              rifiutato per un motivo che non diciamo. Meno preciso nel caso
+              semplice, mai falso in nessuno — che è il verso giusto in un PR
+              nato per togliere una frase falsa. */''}
+        ${rifiuto || (verifica.scaduto ? `<div class="banner warn" style="margin:0"><span class="small">
+          Il codice precedente non è più valido. Generane un altro.
+        </span></div>` : '')}
         <p class="muted small" style="margin:0">
-          Ricevi un codice, lo incolli <strong>dentro il canale</strong> da cui arrivano i
-          segnali, e il canale compare qui. Nessun passaggio dall'assistenza: incollare il
-          codice lì dentro è ciò che dimostra che puoi scrivere in quella chat.
+          Se non puoi promuovere il bot — per esempio in un gruppo che gestisce
+          qualcun altro — ricevi un codice, lo incolli <strong>dentro il canale</strong>
+          da cui arrivano i segnali, e il canale compare qui.
         </p>
-        <p class="dim small" style="margin:0">
-          Funziona anche con un <strong>gruppo</strong>, ma lì la prova è più debole:
-          scrivere in un gruppo lo può fare ogni membro, non solo chi lo gestisce.
-        </p>
+        <div class="banner warn" style="margin:0"><span class="small">
+          Questa prova è <strong>più debole</strong> della promozione: dimostra che sai
+          scrivere in quella chat, non che la gestisci. In un <strong>canale</strong>
+          scrivono solo gli amministratori, quindi coincide. In un
+          <strong>gruppo</strong> scrive qualunque membro: chiunque sia dentro potrebbe
+          rivendicarlo prima di te, e poi non sarebbe più disponibile. Se i tuoi segnali
+          arrivano in un gruppo, preferisci la promozione del bot.
+        </span></div>
         <div class="row">
           <button class="primary" data-act="chat-verifica-start">Genera il codice</button>
         </div>
@@ -1952,6 +2097,7 @@ async function viewChats() {
         messaggi. Quelli che non sono in questo elenco vengono ignorati.</p>
     </div></div>
     <div class="stack">
+      ${promozione}
       ${pannello}
       <div class="card stack">
         <strong class="small">Le tue chat autorizzate</strong>
@@ -1959,7 +2105,7 @@ async function viewChats() {
           : '<div class="empty">Nessuna chat autorizzata: finché non ne colleghi una, i tuoi parser non ricevono niente.</div>'}
       </div>
     </div>`);
-  if (verifica.in_attesa) sondaVerifica(invocazione);
+  if (verifica.in_attesa) sondaVerifica(invocazione, 0, 0, verifica.esito || null);
 }
 
 function viewLogs() {

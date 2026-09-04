@@ -29,17 +29,32 @@ esigi_browser()
 
 @pytest.fixture(scope='module')
 def base_url(tmp_path_factory):
+    """L'URL della web app, piu' il percorso del database accanto.
+
+    Il database serve per UNA cosa sola, dichiarata qui perche' non sembri una
+    scorciatoia: il flusso deve provocare un rifiuto del codice, e l'unico modo e'
+    che esista una chat di un ALTRO utente. Un secondo utente non e' raggiungibile
+    dal browser — la fixture ha una sola porta a password — quindi la riga si
+    scrive direttamente, come fanno i test di `tests/relay/`.
+    """
+    # `TELEGRAM_BOT_USERNAME` serve dal #116: la vista costruisce il link da
+    # copiare per aggiungere il bot al canale, e senza username mostrerebbe il
+    # ripiego «Nessun bot configurato» — cioe' il percorso principale non
+    # sarebbe misurato da nessuna parte.
     ambiente = dict(TELEGRAM_BOT_TOKEN='123456789:AAFinto',
+                    TELEGRAM_BOT_USERNAME='BetrelayProvaBot',
                     ADMIN_PASSWORD_HASH=main.hash_password(PASSWORD_PROVA))
-    with relay_avviato(tmp_path_factory.mktemp('chat-web'), **ambiente) as base:
-        yield base + '/app/'
+    cartella = tmp_path_factory.mktemp('chat-web')
+    with relay_avviato(cartella, **ambiente) as base:
+        yield base + '/app/', str(cartella / 'signals.db')
 
 
 def test_dal_codice_alla_chat_collegata_al_parser(base_url, tmp_path):
     """Codice → incollato nel canale → chat verificata → collegata → eliminata."""
+    url, percorso_db = base_url
     proc = subprocess.run(  # noqa: S603 - comando fisso, nessun input esterno
         [sys.executable, str(Path(__file__).with_name('chat_flow.py')),
-         base_url, str(tmp_path)],
+         url, str(tmp_path), percorso_db],
         cwd=RADICE, capture_output=True, text=True, timeout=300,
         env=ambiente_di_supporto(PYTHONUNBUFFERED='1'),
     )

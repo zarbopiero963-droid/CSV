@@ -215,13 +215,28 @@ POST   /api/chats/verify/start          -> {"codice":"BETRELAY-XXXXXXXX","scade_
                                         come il token del feed. Ogni chiamata invalida
                                         il codice precedente dello stesso utente.
 GET    /api/chats/verify/status          -> {"in_attesa":bool,"scaduto":bool,
-                                            "scade_fra_s":N,"chat":{...}|null}
+                                            "scade_fra_s":N,"esito":str|null,
+                                            "chat":{...}|null}
                                         Per il sondaggio della web app. NON ripete il
                                         codice: chi l'ha chiesto ce l'ha gia'.
                                         "chat" e' la chat verificata DA QUESTO codice,
                                         non l'ultima che l'utente possiede: altrimenti
                                         un codice scaduto mostrerebbe un canale vecchio
                                         come se fosse l'esito.
+                                        "esito" e' il motivo dell'ultimo RIFIUTO, e ne
+                                        esiste UNO SOLO: "accesso_non_attivo". E' un
+                                        ETICHETTA: la frase la scrive la web app. Il
+                                        codice NON viene consumato da un rifiuto,
+                                        quindi "in_attesa" resta vero; l'esito si
+                                        azzera al successo e a ogni verify/start.
+                                        Il rifiuto per chat gia' di un ALTRO utente non
+                                        produce esito, ed e' voluto: parlerebbe di una
+                                        chat non tua, e separare "rifiutato" da "mai
+                                        arrivato" e' un oracle fra tenant — in un gruppo
+                                        scrive qualunque membro. Non preesisteva: lo
+                                        aveva introdotto la prima versione del #116
+                                        PR 2, ed e' stato congelato. Stessa ragione per
+                                        cui un codice INVENTATO non produce esito.
 GET    /api/chats                        le chat verificate dall'utente
                                         -> [{"id":N,"telegram_chat_id":"-100...",
                                              "titolo":"Canale segnali","tipo":"channel",
@@ -335,6 +350,39 @@ sarebbe diventato IMPOSSIBILE — la promozione collega, la conferma rifiuta.
 I DUE rami del webhook (il codice e la promozione) sono le UNICHE eccezioni al filtro
 delle chat, e sono tutta l'eccezione: registrano una riga in `chats` e niente altro —
 non toccano `signals`, non cercano parser, non scrivono in `message_logs`.
+
+LA VISTA (#116, PR 2). Fino alla PR 1 il meccanismo esisteva nel relay e nessuna
+schermata lo chiamava: la web app offriva SOLO il codice usa-e-getta. Adesso la vista
+«Chat Telegram» mette la promozione in cima come percorso consigliato — link del bot
+da copiare, costruito dai settings pubblici e non scritto in pagina — e il codice
+scende a ripiego, portandosi dietro il suo avviso sui gruppi, perche' e' li' che vive
+la prova debole. Le chat elencate mostrano una pillola quando il bot non e' piu'
+amministratore («il bot non e' piu' amministratore») o non e' piu' nella chat («il bot
+non e' piu' nella chat»): sono due cose diverse e vanno dette diverse, per la stessa
+ragione per cui la costante non si chiama «non legge piu'».
+
+UN RIFIUTO DEL CODICE SI DICE, L'ALTRO NO (#116, PR 2). Il rifiuto era gia' giusto;
+quello che mancava e' che il motivo lo sapeva solo il server.
+`chat_verifications.esito` porta l'etichetta e `verify/status` la restituisce; il
+codice NON viene consumato.
+SI DICE "accesso_non_attivo": parla dell'account di chi legge, non divulga niente.
+NON SI DICE la chat gia' di un altro utente: quel motivo parla di una chat non tua, e
+separare «rifiutato» da «mai arrivato» e' un oracle fra tenant — in un GRUPPO scrive
+qualunque membro, quindi chiunque potrebbe incollarci un codice e scoprire se quella
+chat e' sul servizio. L'oracle NON preesisteva: lo introduceva la prima versione di
+questo PR, dove i due casi erano indistinguibili perche' il timer scadeva in entrambi.
+Congelato per decisione del proprietario, portato nella sua Issue insieme alla #115 e
+alla #119. Togliere il solo messaggio dalla web app non sarebbe bastato: `verify/status`
+avrebbe continuato a restituire l'etichetta, e quell'endpoint lo chiama chiunque abbia
+una sessione.
+COSTO DICHIARATO: chi sbaglia chat torna a vedere solo il timer che scade. Per questo il
+banner della scadenza dice «non e' piu' valido» e non «scaduto SENZA ESSERE USATO», che
+sarebbe falso proprio in quel caso.
+Sul percorso della PROMOZIONE lo stesso rifiuto resta senza avviso dinamico, ed e' una
+differenza STRUTTURALE, non una dimenticanza: li' non c'e' nessuna riga come
+`chat_verifications` a cui attaccare un motivo, ne' una pagina che stia sondando. La
+card lo dice in forma fissa: se la chat non compare, puo' essere gia' collegata a un
+altro account.
 
 ATTENZIONE, e vale anche per il percorso legacy: la verifica dimostra che
 l'utente puo' SCRIVERE nel canale, non che il bot possa LEGGERNE i messaggi

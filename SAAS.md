@@ -1231,7 +1231,7 @@ web app continuava a dire all'utente che le chat le collega l'amministratore.
 
 ```text
 POST   /api/chats/verify/start        → { codice, scade_fra_s }
-GET    /api/chats/verify/status       → { in_attesa, scade_fra_s, chat|null }
+GET    /api/chats/verify/status       → { in_attesa, scaduto, scade_fra_s, esito|null, chat|null }
 GET    /api/chats                       le chat verificate dall'utente
 DELETE /api/chats/{id}                  toglie la chat E i suoi link
 GET    /api/me/parsers/{slug}/chats   → { chat_ids }
@@ -1258,6 +1258,66 @@ di ogni canale sconosciuto costi una query.
   registra niente;
 - una chat **già di un altro utente non è rubabile** — e in quel caso il codice
   non viene nemmeno consumato, perché non è colpa di chi l'ha chiesto;
+- **e da adesso UN rifiuto si dice** (#116, PR 2). Il rifiuto era già giusto;
+  quello che mancava è che il *motivo* lo sapeva solo il server. La web app
+  restava «in attesa» fino alla scadenza e poi dichiarava «il codice precedente è
+  scaduto senza essere usato» — l'esatto contrario di quello che era successo, e
+  un messaggio falso è peggio del silenzio perché manda a cercare il problema
+  dove non è. `chat_verifications.esito` porta ora l'etichetta dell'ultimo
+  rifiuto, `verify/status` la restituisce e la web app ci scrive sopra la frase.
+  **Ma l'etichetta è UNA sola, `accesso_non_attivo`**, e la scelta è il cuore di
+  questa voce: quel motivo parla dell'account di chi legge, quindi non divulga
+  niente. `chat_non_disponibile` parlerebbe invece di una chat di **qualcun
+  altro**, e il server non lo registra nemmeno — vedi la voce sull'oracle qui
+  sotto. **`consumed_at` non si
+  tocca**: il codice resta spendibile — chi ha incollato nel canale sbagliato lo
+  reincolla in quello giusto, chi è stato sospeso a metà lo usa quando l'accesso
+  rientra — ed è la metà vincolata da
+  `test_l_esito_non_brucia_il_codice_che_resta_spendibile_altrove`. L'esito si
+  azzera al successo e con ogni `verify/start` nuovo, o una schermata accoglierebbe
+  un codice appena chiesto con l'errore del tentativo prima;
+- **`esito` è un'etichetta chiusa, non un messaggio.** Il testo lo scrive la web
+  app (`motivoDelRifiuto`), così la frase esiste in un posto solo e il server non
+  decide come si parla a una persona. La coda del messaggio dipende da **due**
+  cose: `scaduto` — dire «riprova» di un codice ormai morto sarebbe la stessa
+  classe di frase falsa che l'avviso è nato per togliere, spostata di dieci
+  minuti — **e il motivo**, perché «riprova altrove» vale per la chat occupata e
+  non per l'accesso non attivo, dove il cancello è lo stesso e rifiuterebbe di
+  nuovo (vedi «Prototipo»);
+- **l'oracle fra tenant è CHIUSO, e non preesisteva: lo aveva introdotto questo
+  stesso PR.** Prima, un codice rifiutato e un codice mai arrivato erano
+  **indistinguibili** — il timer scadeva in entrambi i casi. Registrare
+  `chat_non_disponibile` era esattamente ciò che li separava: chiunque possa
+  scrivere in una chat — e in un **gruppo** scrive qualunque membro — avrebbe
+  potuto incollarci un proprio codice e scoprire se quella chat è già sul
+  servizio.
+
+  La prima versione lo dichiarava come baratto accettabile, con la
+  giustificazione «chi legge ha appena dimostrato di poter scrivere lì dentro».
+  Vale in un **canale**, dove scrivono solo gli amministratori; **non** in un
+  gruppo — cioè la giustificazione era scritta pensando ai canali, la stessa
+  asimmetria che il #116 esiste per correggere, mancata nel ragionamento su sé
+  stessa. `[REAL_FINDING]` di OpenRouter Sol, ripetuto su due head; Fable 5.1 non
+  lo bloccava. **Decisione del proprietario: congelare**, e decidere nella Issue
+  dedicata insieme alla #115 (chi può rivendicare un gruppo) e alla #119 (una
+  chat, più utenti), dove la regola «una chat ha un solo proprietario» cambia
+  comunque.
+
+  **Togliere il solo messaggio dalla web app non sarebbe bastato**: `verify/status`
+  avrebbe continuato a restituire l'etichetta, e quell'endpoint lo chiama chiunque
+  abbia una sessione. L'oracle si chiude sul server o non si chiude. Vincolato da
+  `test_la_chat_di_un_altro_NON_si_distingue_da_un_codice_mai_arrivato`, che
+  confronta lo stato dopo il rifiuto con quello di un codice **mai consegnato**
+  invece di guardare un campo: è l'indistinguibilità la proprietà da tenere.
+
+  **Il costo è dichiarato:** chi incolla il codice in una chat già di un altro
+  torna a vedere solo il timer che scade. Per questo il banner della scadenza non
+  dice più «scaduto **senza essere usato**» ma «non è più valido»: meno preciso nel
+  caso semplice, mai falso in nessuno.
+- **`codice_non_valido` resta muto, e non è una dimenticanza:** non c'è nessuna
+  riga su cui scrivere il motivo, e non deve esserci — un codice inventato che
+  ricevesse una risposta diversa da un codice scaduto direbbe a chi lo prova
+  qualcosa che non deve sapere;
 - **nemmeno una chat senza proprietario si adotta.** È il caso più insidioso dei
   due: una riga legacy può portare link ai parser di *altri* utenti, perché
   `_attacca_link_del_profilo` scrive `chats` e `parser_chats` in modo
@@ -2721,10 +2781,45 @@ La voce e la vista esistono solo con `admin` vero; il server risponde comunque
   prefisso. Rigenerare **è** la revoca, e la vista lo dice prima di farlo. La nota:
   ogni segnale resta 90 secondi, ogni parser ha riga e timer propri, il feed è UTF-8
   con BOM.
-- **Chat Telegram** (3.2, PR 2): la vista che ha preso il posto del «prossimamente».
+- **Chat Telegram** (3.2, PR 2; rifatta dal #116, PR 2): la vista che ha preso il
+  posto del «prossimamente».
   Sottotitolo: «I canali e i gruppi da cui il servizio accetta i tuoi messaggi. Quelli
-  che non sono in questo elenco vengono ignorati.» Due card, e la prima ha **tre
-  stati**, perché è una sola cosa detta in tre momenti:
+  che non sono in questo elenco vengono ignorati.» **Tre card**: il percorso
+  consigliato, il ripiego col codice, e l'elenco.
+
+  La prima è **«Aggiungi il bot al canale — il modo consigliato»** (#116), e sta in
+  cima perché è l'unico dei due percorsi che dimostra il **ruolo**. Tre passi
+  numerati: «Copia il link del bot e aprilo su Telegram.» → la `copy-row` col link
+  `https://t.me/<bot>` (id `link-bot`), **costruito dai settings pubblici del
+  servizio** e non scritto in pagina, o cambiare bot lascerebbe in schermata
+  l'indirizzo di quello vecchio → «Aggiungilo al **canale o gruppo** da cui arrivano
+  i segnali.» → «Promuovilo ad **amministratore**: la chat compare qui da sola.»
+  Sotto, il pulsante **«Ho aggiunto il bot»**, e due note: «Promuovere un bot ad
+  amministratore Telegram lo permette solo a chi già lo è: è la promozione stessa a
+  dimostrare che quella chat è tua. Non serve nessun codice e non serve scrivere
+  niente nel canale.» e «Se la chat non compare, può essere già collegata a un altro
+  account: una chat ha un solo proprietario, e vince chi la collega per primo.»
+
+  **Nella demo a file unico questa card mostra il ripiego, ed è voluto.**
+  `web/api_finta.js` restituisce `bot_username` **vuoto**, quindi la copia
+  condivisibile dice «Nessun bot configurato sul servizio: per ora usa il codice
+  qui sotto». Per un giro ci avevo messo lo username vero, per far vedere il
+  percorso consigliato anche in demo: è un errore, perché chi segue quelle
+  istruzioni promuove il bot **vero** in un canale **vero** e Telegram consegna
+  `my_chat_member` al webhook di **produzione** — una vetrina che produce effetti
+  sul servizio. `[REAL_FINDING]` di OpenRouter Sol al gate della PR #120, e ora
+  vincolato da `test_la_demo_non_pubblica_un_bot_telegram_vero`.
+
+  **Il pulsante ridisegna, non sonda, e la differenza è dichiarata.** Il percorso
+  della promozione non ha nessuna riga da interrogare come ce l'ha il codice
+  (`chat_verifications`), e sondare la lista delle chat all'infinito costerebbe una
+  richiesta ogni pochi secondi a ogni scheda aperta, per un evento che l'utente sa di
+  aver appena fatto. Se il servizio non ha un bot configurato la card dice «Nessun bot
+  configurato sul servizio: per ora usa il codice qui sotto.» invece di mostrare un
+  link vuoto.
+
+  La seconda card è il **ripiego col codice**, intitolata «Oppure autorizza con un
+  codice», e ha **tre stati**, perché è una sola cosa detta in tre momenti:
   - **nessuna verifica in corso** — card «Autorizza un canale o un gruppo», il
     paragrafo che spiega il meccanismo («incollare il codice lì dentro è ciò che
     dimostra che quel canale è tuo») e il pulsante **«Genera il codice»**
@@ -2762,23 +2857,68 @@ La voce e la vista esistono solo con `admin` vero; il server risponde comunque
     **gruppo** può scrivere qualunque membro: chiunque sia dentro potrebbe
     rivendicarlo prima di te, e poi non sarebbe più disponibile. Se i tuoi segnali
     arrivano in un gruppo, su Telegram limita l'invio dei messaggi agli
-    amministratori.» Lo stato senza verifica in corso porta la stessa cosa in forma
-    breve: «Funziona anche con un **gruppo**, ma lì la prova è più debole: scrivere in
-    un gruppo lo può fare ogni membro, non solo chi lo gestisce.» Vincolato da
-    `tests/web/chat_flow.py`;
+    amministratori.» **Col #116 quell'avviso è rimasto qui e non è stato tolto**, ed è
+    una scelta: il ripiego si porta dietro la sua prova debole, quindi l'avviso vive
+    dove vive il difetto. Nello stato senza verifica in corso è diventato un
+    `banner warn` invece di una riga grigia, e nomina il confronto: «Questa prova è
+    **più debole** della promozione: dimostra che sai scrivere in quella chat, non che
+    la gestisci. […] Se i tuoi segnali arrivano in un gruppo, preferisci la promozione
+    del bot.» Vincolato da `tests/web/chat_flow.py`;
+  - **il codice è arrivato ed è stato rifiutato** — un `banner warn` (id
+    `verifica-rifiuto`) in testa alla card, con **un solo** motivo possibile: «Il
+    codice è arrivato, ma il tuo accesso non era attivo. Il codice non è stato
+    consumato, ma **finché l'accesso non torna attivo verrebbe rifiutato di
+    nuovo**.» La coda dice cosa aspettare, e non «puoi ancora usarlo»: lì il
+    cancello è lo stesso e riprovare non può riuscire — una coda sola per motivi
+    diversi mandava l'utente a ritentare una cosa impossibile, che è la stessa
+    bugia che l'avviso esiste per togliere, rimessa dentro l'avviso. Rilievo di
+    CodeRabbit sulla PR #120. Se nel frattempo il codice è scaduto, la coda diventa
+    «Quel codice è poi scaduto: generane un altro.»
+
+    **Il rifiuto per «chat di un altro» invece TACE**, e non è una dimenticanza: è
+    l'oracle fra tenant descritto nel contratto sopra, chiuso sul server. Chi
+    incolla il codice in una chat già collegata vede solo il timer che scade — e
+    per questo il banner della scadenza dice «Il codice precedente **non è più
+    valido**. Generane un altro.» invece di «scaduto senza essere usato», che
+    sarebbe falso proprio in quel caso. Meno preciso nel caso semplice, mai falso
+    in nessuno. Vincolato dai due versi nel flusso browser: il passo 9 misura il
+    **silenzio** aspettando due giri di sondaggio, il passo 8 prova che il banner
+    funziona per l'altro motivo — senza quest'ultimo, l'asserzione di silenzio
+    passerebbe anche col meccanismo rotto.
+
+    **L'avviso vince sul banner della scadenza** quando c'è un motivo da dire, e
+    **compare mentre l'utente guarda**, senza
+    ricaricare: il sondaggio confronta l'esito del server con quello disegnato e
+    ridisegna quando cambia. Senza quel confronto il banner non sarebbe mai apparso nel
+    momento in cui serve — `in_attesa` resta vero, perché il codice non è consumato,
+    quindi il sondaggio cadeva nel ramo che aggiorna il solo conto alla rovescia.
+    Misurato rosso togliendo quella riga: `#verifica-rifiuto` non compare mai;
   - **verifica viva ma codice perso** — card «C'è una verifica in corso»: il codice si
     vede **una volta sola**, ricaricando non ricompare, e il pulsante diventa «Genera un
     codice nuovo» col suo effetto dichiarato («il precedente smette di valere»). È la
     resa in UI dell'invariante del server, che non ripete il codice nello `status`:
     mostrare una casella vuota sarebbe stato l'unico modo di renderla incomprensibile.
 
-  La seconda card è **«Le tue chat autorizzate»**: una riga per chat con nome, pillola
-  del tipo (`channel`, `group`…), il numero Telegram in `mono` e **«Rimuovi»**, che
+  La terza card è **«Le tue chat autorizzate»**: una riga per chat con nome, pillola
+  del tipo (`channel`, `group`…), **la pillola dello stato del bot quando c'è da dirlo**
+  (#116), il numero Telegram in `mono` e **«Rimuovi»**, che
   apre la conferma «Rimuovere questa chat?» → «Rimuovi» (`DELETE /api/chats/{id}`). Una
   chat senza nome — le righe legacy create dall'amministratore da una lista di id, dove
   un titolo non esiste — si mostra come «Chat senza nome» più il suo numero. A elenco
   vuoto: «Nessuna chat autorizzata: finché non ne colleghi una, i tuoi parser non
   ricevono niente.»
+
+  **La pillola dello stato del bot dice due cose diverse, e la distinzione non è di
+  stile.** `left`/`kicked` → `pill no` «il bot non è più nella chat»: da lì non arriva
+  più niente. `member`/`restricted` → `pill warn` «il bot non è più amministratore», e
+  **non** «non legge più», che sarebbe falso: in un gruppo un bot con la privacy mode
+  disattivata riceve tutti i messaggi anche da semplice membro. È la stessa
+  affermazione che OpenRouter Sol ha fermato sul nome della costante nel PR 1 del #116;
+  qui sarebbe arrivata sullo schermo del cliente. `administrator`/`creator` **non
+  producono nessuna pillola** — è lo stato normale, e una pillola che dice «tutto bene»
+  su ogni riga è rumore — e nemmeno una chat **senza** `bot_stato`, cioè quelle
+  collegate col codice o dal percorso legacy, dove nessun `my_chat_member` è mai
+  passato: inventare uno stato che non conosciamo sarebbe peggio che tacere.
 
   **Il codice non viene mai conservato**: vive in una variabile di modulo finché la
   pagina resta aperta, e «Esci» la azzera. In `localStorage` sopravviverebbe alla

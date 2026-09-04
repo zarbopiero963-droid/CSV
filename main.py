@@ -1037,6 +1037,12 @@ COLONNE_MULTIUTENTE = (
     # un'euristica. Rilievo ripetuto di OpenRouter Sol e GPT-5.5 sulla PR #112 —
     # finche' la correlazione e' un indizio, la risposta e' una scommessa.
     ('chat_verifications', 'chat_id', 'INTEGER'),
+    # Il MOTIVO per cui un codice arrivato e' stato rifiutato (#116, PR 2). Il
+    # rifiuto era gia' corretto; quello che mancava e' dirlo. Il server sa perche'
+    # — la chat e' di un altro, l'accesso e' stato sospeso nel frattempo — e la web
+    # app no: restava «in attesa» fino alla scadenza e poi diceva «scaduto senza
+    # essere usato», che e' l'esatto contrario di cio' che era successo.
+    ('chat_verifications', 'esito', 'TEXT'),
     # Lo stato del BOT in quella chat, come l'ha visto l'ultimo `my_chat_member`
     # (#116). Serve perche' una chat da cui il bot e' stato tolto o retrocesso
     # resta collegata e con i suoi link ai parser — cancellarla butterebbe via la
@@ -7013,7 +7019,7 @@ def stato_verifica_chat(request: Request):
         # L'unica riga dell'utente: `verify/start` cancella le precedenti, quindi
         # questa E' l'ultima verifica — senza dedurlo da un ordinamento.
         riga = c.execute(
-            'SELECT expires_at, consumed_at, chat_id FROM chat_verifications'
+            'SELECT expires_at, consumed_at, chat_id, esito FROM chat_verifications'
             ' WHERE user_id=?', (utente['id'],)).fetchone()
         chat = None
         if riga and riga[1] and riga[2]:
@@ -7040,6 +7046,11 @@ def stato_verifica_chat(request: Request):
         {'in_attesa': in_attesa,
          'scaduto': scaduto,
          'scade_fra_s': max(0, riga[0] - adesso) if in_attesa else 0,
+         # Il motivo dell'ultimo rifiuto, quando il codice e' arrivato ed e' stato
+         # respinto (#116, PR 2). E' un'ETICHETTA CHIUSA, non un messaggio: il
+         # testo lo scrive la web app, cosi' il server non deve decidere come si
+         # dice una cosa all'utente e non finisce per dirla in due posti diversi.
+         'esito': riga[3] if riga else None,
          'chat': _vista_chat(chat) if chat else None})
 
 
@@ -7206,6 +7217,31 @@ def _registra_chat_posseduta(c, chat_id, utente_id, adesso, titolo=None, tipo=No
     return riga[0] if riga else None
 
 
+def _rifiuto_del_codice(c, codice, motivo):
+    """Registra PERCHE' un codice arrivato e' stato rifiutato, senza consumarlo.
+
+    Il rifiuto era gia' giusto; quello che mancava e' dirlo. Il server e' l'unico a
+    sapere il motivo, e senza questa riga la web app resta «in attesa» fino alla
+    scadenza e poi dichiara «il codice precedente e' scaduto senza essere usato» —
+    l'esatto contrario di quello che e' successo. Un messaggio falso e' peggio del
+    silenzio, perche' manda l'utente a cercare il problema dove non e'.
+
+    **`consumed_at` non si tocca**, ed e' la meta' che si sbaglia da sola: il
+    codice deve restare spendibile: chi ha incollato nel canale sbagliato lo
+    reincolla in quello giusto, e chi e' stato sospeso a meta' verifica lo usa
+    quando l'accesso rientra. Vincolato da
+    `test_l_esito_non_brucia_il_codice_che_resta_spendibile_altrove`.
+
+    Il commit e' qui perche' il chiamante ha aperto `BEGIN IMMEDIATE` e su questi
+    rami esce senza committare: nessuno dei due ha scritto niente prima
+    (`_registra_chat_posseduta` torna `None` senza toccare nulla), quindi l'unica
+    cosa che entra nel commit e' il motivo.
+    """
+    c.execute('UPDATE chat_verifications SET esito=? WHERE code=?', (motivo, codice))
+    c.commit()
+    return {'ok': True, 'ignored': motivo}
+
+
 def _consuma_codice_di_verifica(chat_id, codice, titolo=None, tipo=None):
     """Il ramo del webhook: registra la chat se il codice e' buono. **Niente altro.**
 
@@ -7244,16 +7280,40 @@ def _consuma_codice_di_verifica(chat_id, codice, titolo=None, tipo=None):
         if not riga[3] and stato_effettivo(riga[1], riga[2]) != 'attivo':
             # Il codice NON si consuma: l'accesso puo' tornare, e bruciarlo
             # costringerebbe a ricominciare chi nel frattempo e' stato riattivato.
-            return {'ok': True, 'ignored': 'accesso_non_attivo'}
+            return _rifiuto_del_codice(c, codice, 'accesso_non_attivo')
         registrata = _registra_chat_posseduta(c, chat_id, utente_id, adesso,
                                               titolo, tipo)
         if registrata is None:
             # La chat e' di un altro. Il codice NON si consuma: non e' colpa di chi
             # l'ha chiesto se il canale e' di un altro, e bruciarglielo lo
             # costringerebbe a ricominciare senza capire.
+            #
+            # **E il motivo NON si registra**, a differenza dell'altro rifiuto: qui
+            # il motivo parla di una chat che appartiene a QUALCUN ALTRO, e dirlo
+            # sarebbe un oracle fra tenant. In un gruppo scrive qualunque membro,
+            # quindi chiunque potrebbe incollare un proprio codice li' dentro e
+            # scoprire se quella chat e' gia' sul servizio.
+            #
+            # **L'oracle non preesisteva: lo introduceva la prima versione di
+            # questo PR.** Prima, un codice rifiutato e un codice mai arrivato
+            # erano indistinguibili — il timer scadeva in entrambi i casi. Il
+            # messaggio nuovo era esattamente cio' che li separava.
+            # `[REAL_FINDING]` di OpenRouter Sol al gate della PR #120, ripetuto su
+            # due head; Fable 5.1 non lo bloccava. Decisione del proprietario:
+            # congelare qui e decidere nella Issue dedicata, insieme alla #115
+            # (chi puo' rivendicare un gruppo) e alla #119 (una chat, piu' utenti),
+            # dove la regola «una chat ha un solo proprietario» cambia comunque.
+            #
+            # Togliere il solo messaggio dalla web app NON sarebbe bastato: lo
+            # `status` avrebbe continuato a restituire l'etichetta, e quell'endpoint
+            # lo chiama chiunque abbia una sessione. L'oracle si chiude qui o non si
+            # chiude.
             return {'ok': True, 'ignored': 'chat_non_disponibile'}
-        c.execute('UPDATE chat_verifications SET consumed_at=?, chat_id=?'
-                  ' WHERE code=?', (adesso, registrata, codice))
+        # L'esito si AZZERA sul successo: un tentativo rifiutato prima non deve
+        # restare appiccicato alla riga che nel frattempo ha funzionato, o la
+        # schermata mostrerebbe l'errore vecchio sopra la chat appena collegata.
+        c.execute('UPDATE chat_verifications SET consumed_at=?, chat_id=?,'
+                  ' esito=NULL WHERE code=?', (adesso, registrata, codice))
         c.commit()
     finally:
         c.close()
