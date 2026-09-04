@@ -2771,6 +2771,16 @@ La voce e la vista esistono solo con `admin` vero; il server risponde comunque
   niente nel canale.» e «Se la chat non compare, può essere già collegata a un altro
   account: una chat ha un solo proprietario, e vince chi la collega per primo.»
 
+  **Nella demo a file unico questa card mostra il ripiego, ed è voluto.**
+  `web/api_finta.js` restituisce `bot_username` **vuoto**, quindi la copia
+  condivisibile dice «Nessun bot configurato sul servizio: per ora usa il codice
+  qui sotto». Per un giro ci avevo messo lo username vero, per far vedere il
+  percorso consigliato anche in demo: è un errore, perché chi segue quelle
+  istruzioni promuove il bot **vero** in un canale **vero** e Telegram consegna
+  `my_chat_member` al webhook di **produzione** — una vetrina che produce effetti
+  sul servizio. `[REAL_FINDING]` di OpenRouter Sol al gate della PR #120, e ora
+  vincolato da `test_la_demo_non_pubblica_un_bot_telegram_vero`.
+
   **Il pulsante ridisegna, non sonda, e la differenza è dichiarata.** Il percorso
   della promozione non ha nessuna riga da interrogare come ce l'ha il codice
   (`chat_verifications`), e sondare la lista delle chat all'infinito costerebbe una

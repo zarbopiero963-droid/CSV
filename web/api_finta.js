@@ -69,11 +69,20 @@ export function settings() {
   // login mostra la sola porta a password — che nella demo accetta qualunque
   // coppia non vuota, perche' e' una vetrina, non una serratura.
   //
-  // Lo USERNAME invece c'e', ed e' quello vero: da esso la vista «Chat Telegram»
-  // costruisce il link da copiare per aggiungere il bot al canale, cioe' il
-  // percorso principale del #116. Lasciarlo vuoto avrebbe mostrato «Nessun bot
-  // configurato» proprio nella schermata che la demo serve a far vedere.
-  return { bot_username: 'Betrelay_bot', bot_id: null, base_url: '' };
+  // **Lo username resta VUOTO, e qui ci va scritto perche'.** Per un giro ci avevo
+  // messo quello vero, per far vedere anche nella demo il percorso principale del
+  // #116. E' un errore: da questo file nasce `dist/prototipo.html`, cioe' la copia
+  // che si CONDIVIDE, e la vista ne costruisce un link `t.me/<bot>` accanto
+  // all'istruzione «promuovilo ad amministratore». Chi la segue promuove il bot
+  // VERO in un canale VERO, e Telegram consegna `my_chat_member` al webhook di
+  // PRODUZIONE: la demo smette di essere una vetrina inerte e produce effetti sul
+  // servizio. `[REAL_FINDING]` di OpenRouter Sol al gate della PR #120.
+  //
+  // Il baratto e' dichiarato: nella demo la card mostra «Nessun bot configurato sul
+  // servizio: per ora usa il codice qui sotto», e il percorso consigliato non si
+  // vede. Meglio una vetrina che mostra meno di una vetrina che tocca la
+  // produzione — e la stessa regola vale per chiunque sia tentato di rimetterlo.
+  return { bot_username: '', bot_id: null, base_url: '' };
 }
 
 export async function loginPassword(username, password) {
