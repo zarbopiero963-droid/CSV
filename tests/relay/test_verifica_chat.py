@@ -421,6 +421,113 @@ def test_una_chat_di_un_altro_utente_non_e_rubabile(servizio):
     )
 
 
+# ------------------------------- il rifiuto si DICE a chi sta aspettando (#116)
+#
+# Il codice arriva, il server lo rifiuta, e fin qui e' giusto. Ma il motivo lo sa
+# solo il server: la web app resta «in attesa» finche' il TTL scade, e poi dice
+# «Il codice precedente e' scaduto senza essere usato» — che e' FALSO, perche' il
+# codice e' stato usato ed e' stato rifiutato. L'esito chiude quella bugia.
+#
+# `esito` NON consuma il codice, e i due test qui sotto tengono i due versi: si
+# scrive il motivo, e il codice resta spendibile altrove.
+
+def _stato_verifica(base, cookie):
+    stato, corpo, _ = _chiama(base, 'GET', '/api/chats/verify/status', cookie=cookie)
+    assert stato == 200, corpo
+    return json.loads(corpo)
+
+
+def test_il_codice_finito_in_una_chat_di_un_ALTRO_lo_dice_a_chi_aspetta(servizio):
+    """B incolla il suo codice nel canale di A: B deve poter sapere PERCHE'.
+
+    Senza, la sola cosa che B vede e' il conto alla rovescia che finisce, seguito
+    da un messaggio che dice il contrario di quello che e' successo.
+    """
+    base, percorso_db = servizio
+    cookie_a, _ = _login_a(base, percorso_db)
+    _verifica(base, cookie_a, chat=CANALE_A)
+
+    cookie_b, _ = _login_b(base, percorso_db)
+    codice_b = _codice(base, cookie_b)
+    _consegna(base, CANALE_A, codice_b)
+
+    st = _stato_verifica(base, cookie_b)
+    assert st.get('esito') == 'chat_non_disponibile', (
+        f'lo stato non dice perche- il codice e- stato rifiutato: {st!r}')
+    assert st['in_attesa'] is True, (
+        f'il codice risulta consumato da un tentativo rifiutato: {st!r}')
+
+
+def test_l_esito_non_brucia_il_codice_che_resta_spendibile_altrove(servizio):
+    """L'altra meta', e senza di essa il primo test sarebbe una trappola.
+
+    Registrare il motivo non deve trasformare il rifiuto in un consumo: chi ha
+    sbagliato canale deve poter incollare **lo stesso** codice in un canale suo.
+    """
+    base, percorso_db = servizio
+    cookie_a, _ = _login_a(base, percorso_db)
+    _verifica(base, cookie_a, chat=CANALE_A)
+
+    cookie_b, _ = _login_b(base, percorso_db)
+    codice_b = _codice(base, cookie_b)
+    _consegna(base, CANALE_A, codice_b)          # rifiutato
+    _consegna(base, CANALE_B, codice_b)          # lo stesso codice, canale suo
+
+    assert [c['telegram_chat_id'] for c in _chats(base, cookie_b)] == [CANALE_B], (
+        'il codice rifiutato una volta non vale piu- nemmeno nel canale giusto')
+    st = _stato_verifica(base, cookie_b)
+    assert st['in_attesa'] is False, f'il codice non risulta consumato: {st!r}'
+    assert st.get('esito') is None, (
+        f'l-esito del tentativo rifiutato sopravvive al successo: {st!r}')
+
+
+def test_un_codice_NUOVO_non_eredita_l_esito_del_precedente(servizio):
+    """`verify/start` cancella la riga vecchia: il motivo vecchio deve sparire con
+    lei, o la schermata accoglierebbe un codice appena chiesto con l'errore del
+    tentativo prima."""
+    base, percorso_db = servizio
+    cookie_a, _ = _login_a(base, percorso_db)
+    _verifica(base, cookie_a, chat=CANALE_A)
+
+    cookie_b, _ = _login_b(base, percorso_db)
+    _consegna(base, CANALE_A, _codice(base, cookie_b))
+    assert _stato_verifica(base, cookie_b).get('esito') == 'chat_non_disponibile'
+
+    _codice(base, cookie_b)
+    st = _stato_verifica(base, cookie_b)
+    assert st.get('esito') is None, (
+        f'il codice nuovo nasce gia- con l-errore del precedente: {st!r}')
+
+
+def test_un_accesso_sospeso_a_meta_verifica_lo_dice_invece_di_tacere(servizio):
+    """L'altro motivo di rifiuto che il server conosce e l'utente no.
+
+    Fra il `verify/start` e l'incollata passano fino a 600 s, e in mezzo il
+    proprietario puo' sospendere l'accesso. Il codice non si consuma (giusto: la
+    sospensione puo' rientrare), ma tacere lascia l'utente a fissare un timer.
+    """
+    base, percorso_db = servizio
+    cookie, _ = _login_a(base, percorso_db)
+    codice = _codice(base, cookie)
+
+    c = sqlite3.connect(percorso_db)
+    c.execute("UPDATE users SET status='sospeso' WHERE telegram_id=?", (CLIENTE_A,))
+    c.commit()
+    c.close()
+
+    _consegna(base, CANALE_A, codice)
+
+    c = sqlite3.connect(percorso_db)
+    c.execute("UPDATE users SET status='attivo' WHERE telegram_id=?", (CLIENTE_A,))
+    c.commit()
+    c.close()
+
+    st = _stato_verifica(base, cookie)
+    assert st.get('esito') == 'accesso_non_attivo', (
+        f'lo stato non dice che il rifiuto veniva dall-accesso: {st!r}')
+    assert st['in_attesa'] is True, f'il codice e- stato bruciato: {st!r}'
+
+
 def test_una_chat_SENZA_proprietario_non_si_adotta(servizio):
     """Le chat del percorso legacy non si prendono con un codice.
 

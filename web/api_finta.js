@@ -64,9 +64,16 @@ export function me() {
 }
 
 export function settings() {
-  // Nessun bot: la pagina di login mostra la sola porta a password, che nella
-  // demo accetta qualunque coppia non vuota — e' una vetrina, non una serratura.
-  return { bot_username: '', bot_id: null, base_url: '' };
+  // `bot_id` resta NULL, ed e' quello che conta per la porta d'accesso: e' il
+  // campo su cui `loginTelegramUrl` si chiude (`api.js`), quindi la pagina di
+  // login mostra la sola porta a password — che nella demo accetta qualunque
+  // coppia non vuota, perche' e' una vetrina, non una serratura.
+  //
+  // Lo USERNAME invece c'e', ed e' quello vero: da esso la vista «Chat Telegram»
+  // costruisce il link da copiare per aggiungere il bot al canale, cioe' il
+  // percorso principale del #116. Lasciarlo vuoto avrebbe mostrato «Nessun bot
+  // configurato» proprio nella schermata che la demo serve a far vedere.
+  return { bot_username: 'Betrelay_bot', bot_id: null, base_url: '' };
 }
 
 export async function loginPassword(username, password) {
@@ -167,31 +174,38 @@ export async function avviaVerificaChat() {
   return { codice, scade_fra_s: Math.round(TTL_VERIFICA_MS / 1000) };
 }
 
+// `esito` c'e' in ogni ritorno, sempre `null`: nella demo un codice non viene mai
+// rifiutato — non esistono altri utenti a cui una chat possa gia' appartenere, ne'
+// un accesso da sospendere — ma la FORMA deve combaciare con quella del server, o
+// il gemello sarebbe piu' povero dell'originale su un campo che la vista legge, e
+// `bot_stato` sulle chat vale lo stesso: le chat della demo nascono da una
+// promozione, quindi `administrator`, che e' lo stato che non produce pillole.
 export async function statoVerificaChat() {
   const d = _statoChat();
   const v = d.verifica;
-  if (!v) return { in_attesa: false, scaduto: false, scade_fra_s: 0, chat: null };
+  if (!v) return { in_attesa: false, scaduto: false, scade_fra_s: 0, esito: null, chat: null };
   if (v.consumata) {
-    return { in_attesa: false, scaduto: false, scade_fra_s: 0,
+    return { in_attesa: false, scaduto: false, scade_fra_s: 0, esito: null,
              chat: d.chats.find(c => c.id === v.chatId) || null };
   }
   if (Date.now() > v.scade) {
-    return { in_attesa: false, scaduto: true, scade_fra_s: 0, chat: null };
+    return { in_attesa: false, scaduto: true, scade_fra_s: 0, esito: null, chat: null };
   }
   if (Date.now() - v.chiestaIl >= RITARDO_VERIFICA_MS) {
     const id = (d.chats.reduce((m, c) => Math.max(m, c.id), 0) || 0) + 1;
     const chat = { id, telegram_chat_id: String(-1002000000000 - id),
                    titolo: 'Canale di prova ' + id, tipo: 'channel',
-                   verified_at: Math.floor(Date.now() / 1000) };
+                   verified_at: Math.floor(Date.now() / 1000),
+                   bot_stato: 'administrator' };
     d.chats.push(chat);
     v.consumata = true;
     v.chatId = id;
     salva();
-    return { in_attesa: false, scaduto: false, scade_fra_s: 0, chat };
+    return { in_attesa: false, scaduto: false, scade_fra_s: 0, esito: null, chat };
   }
   return { in_attesa: true, scaduto: false,
            scade_fra_s: Math.max(0, Math.round((v.scade - Date.now()) / 1000)),
-           chat: null };
+           esito: null, chat: null };
 }
 
 // Il 404 su una chat che non e' dell'utente e' la risposta del server

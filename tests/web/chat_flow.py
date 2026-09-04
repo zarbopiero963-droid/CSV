@@ -27,6 +27,7 @@ Argomenti: base_url (con /app/), cartella screenshot.
 
 import json
 import pathlib
+import sqlite3
 import sys
 import tempfile
 import urllib.request
@@ -42,9 +43,16 @@ from tests.web.credenziali_prova import PASSWORD_PROVA, UTENTE_PROVA  # noqa: E4
 BASE = sys.argv[1]
 OUT = pathlib.Path(sys.argv[2]) if len(sys.argv) > 2 else pathlib.Path(tempfile.mkdtemp())
 OUT.mkdir(parents=True, exist_ok=True)
+DB = sys.argv[3] if len(sys.argv) > 3 else None
+
+# Il canale che appartiene a QUALCUN ALTRO, per provocare il rifiuto del codice.
+CANALE_ALTRUI = -1002000000909
 
 # Deve combaciare con l'ambiente della fixture: il segreto del webhook ne deriva.
 BOT = '123456789:AAFinto'
+# Deve combaciare con `TELEGRAM_BOT_USERNAME` dell'ambiente della fixture: la
+# vista costruisce il link da copiare dai settings pubblici del servizio.
+BOT_USERNAME = 'BetrelayProvaBot'
 CANALE = -1002000000101
 
 pezzi = urlsplit(BASE)
@@ -107,16 +115,60 @@ def non_sfonda(page, dove):
         f'la pagina sfonda in orizzontale su schermo stretto: {dove}'
 
 
-def consegna(testo):
+def consegna(testo, chat=CANALE):
     """Una consegna di Telegram autentica, col segreto derivato dal bot.
 
     E' il pezzo che rende questo flusso un end-to-end vero: il codice fa lo stesso
     giro che fara' in produzione — schermo, canale, webhook — invece di essere
     scritto a mano nel database o inventato da uno stub.
     """
-    payload = {'message': {'chat': {'id': CANALE, 'title': 'Canale segnali',
+    titolo = 'Canale segnali' if chat == CANALE else 'Canale di un altro'
+    payload = {'message': {'chat': {'id': chat, 'title': titolo,
                                     'type': 'channel'},
                            'text': testo}}
+    req = urllib.request.Request(
+        f'{RADICE_SERVIZIO}/telegram/webhook',
+        data=json.dumps(payload).encode('utf-8'),
+        headers={'Content-Type': 'application/json',
+                 'X-Telegram-Bot-Api-Secret-Token': main.webhook_secret(BOT)},
+        method='POST')
+    with urllib.request.urlopen(req, timeout=10) as r:  # noqa: S310 - loopback
+        return r.status, json.loads(r.read())
+
+
+def chat_di_un_altro():
+    """Un secondo utente con una chat sua: e' l'unico modo di far RIFIUTARE un codice.
+
+    Si scrive nel database perche' dal browser un secondo utente non esiste — la
+    fixture ha una sola porta a password. E' lo stesso mezzo che usano i test di
+    `tests/relay/`, e la parte che conta resta reale: il codice esce dallo schermo,
+    passa dal webhook col segreto vero, e il rifiuto lo decide `main.py`.
+    """
+    c = sqlite3.connect(DB)
+    try:
+        c.execute("INSERT INTO users(telegram_id, status) VALUES ('777000333','attivo')")
+        altro = c.execute(
+            "SELECT id FROM users WHERE telegram_id='777000333'").fetchone()[0]
+        c.execute('INSERT INTO chats(telegram_chat_id, owner_user_id, verified_at,'
+                  ' title, type) VALUES (?,?,?,?,?)',
+                  (str(CANALE_ALTRUI), altro, 1, 'Canale di un altro', 'channel'))
+        c.commit()
+    finally:
+        c.close()
+
+
+def my_chat_member(stato_nuovo, attore=999000111):
+    """Una consegna `my_chat_member` autentica: il bot cambia stato in quel canale.
+
+    Serve per la meta' del #116 che il codice usa-e-getta non tocca: la riga resta
+    elencata quando il bot viene retrocesso, e la vista deve dirlo.
+    """
+    payload = {'update_id': 500100,
+               'my_chat_member': {
+                   'chat': {'id': CANALE, 'title': 'Canale segnali',
+                            'type': 'channel'},
+                   'from': {'id': attore},
+                   'new_chat_member': {'status': stato_nuovo}}}
     req = urllib.request.Request(
         f'{RADICE_SERVIZIO}/telegram/webhook',
         data=json.dumps(payload).encode('utf-8'),
@@ -149,6 +201,30 @@ with sync_playwright() as pw:
     testo = pg.inner_text('#app')
     assert 'prossimamente' not in testo.lower(), \
         'la vista Chat Telegram e- ancora il segnaposto'
+
+    # ---- 1-bis) il percorso PRINCIPALE: aggiungere il bot (#116) ----------
+    # La PR 1 ha portato il meccanismo nel relay; se la vista non lo dice, quel
+    # meccanismo esiste e nessuno lo usa. Il link va COSTRUITO dai settings
+    # pubblici, non scritto a mano: e' l'unico modo perche' cambiare bot non
+    # lasci in schermata l'indirizzo di quello vecchio.
+    assert pg.locator('#link-bot').count() == 1, (
+        'la vista non offre il link del bot da copiare: il percorso principale '
+        'del #116 non e- raggiungibile dalla schermata')
+    link = pg.inner_text('#link-bot').strip()
+    assert link == f'https://t.me/{BOT_USERNAME}', (
+        f'il link del bot non viene dai settings del servizio: {link!r}')
+    principale = pg.inner_text('.card:has(#link-bot)').lower()
+    assert 'amministratore' in principale, (
+        f'la card principale non dice di promuovere il bot: {principale!r}')
+    # La promozione e' una PROVA, non una scorciatoia, e la schermata deve dire
+    # perche': e' l'unica differenza sostanziale col codice usa-e-getta.
+    assert 'solo a chi' in principale, (
+        f'la card non spiega perche- la promozione dimostra qualcosa: {principale!r}')
+    # L'avviso approvato dal proprietario: due amministratori della stessa chat,
+    # e vince chi la collega per primo. Senza, il secondo vede solo una chat che
+    # non compare e nessuna spiegazione.
+    assert 'gia- collegata a un altro account' in principale.replace('à', 'a-'), (
+        f'la card non avverte del caso «gia- collegata da un altro»: {principale!r}')
     # La frase del segnaposto, non la parola: la vista NUOVA deve poter dire che
     # per un canale il bot va aggiunto come amministratore — e' vero e serve.
     assert 'le collega l' not in testo.lower(), (
@@ -238,6 +314,28 @@ with sync_playwright() as pw:
     non_sfonda(pg, 'chat verificata')
     shot(pg, '04-chat-verificata')
 
+    # ---- 3-bis) il bot retrocesso si VEDE nella riga (#116) ---------------
+    # La PR 1 registra `chats.bot_stato` e non cancella la riga: la chat resta
+    # elencata coi suoi link. Senza una pillola, l'utente ha in schermata una
+    # chat «autorizzata» da cui non arriva piu' niente e nessuna spiegazione —
+    # che e' il difetto che la colonna era nata per rendere dicibile.
+    stato_bot, corpo_bot = my_chat_member('member')
+    assert stato_bot == 200, (stato_bot, corpo_bot)
+    pg.click('[data-act="ricarica"]')
+    riga_ok = '.list-item:has-text("Canale segnali")'
+    pg.wait_for_selector(f'{riga_ok} .pill.warn')
+    pillola = pg.inner_text(f'{riga_ok} .pill.warn')
+    assert 'amministratore' in pillola.lower(), (
+        f'la pillola non dice cosa e- successo al bot: {pillola!r}')
+    # E NON deve dire «non legge piu-»: in un gruppo un bot con la privacy mode
+    # disattivata continua a leggere tutto anche da semplice `member`. E- la
+    # stessa affermazione falsa che OpenRouter Sol ha fermato sul nome della
+    # costante nel PR 1; qui sarebbe arrivata sullo schermo del cliente.
+    assert 'legge' not in pillola.lower(), (
+        f'la pillola afferma qualcosa che non sappiamo: {pillola!r}')
+    non_sfonda(pg, 'bot retrocesso')
+    shot(pg, '04b-bot-retrocesso')
+
     # ---- 4) il collegamento al parser, e la sua persistenza --------------
     pg.click('nav a[href="#/parsers"]')
     pg.wait_for_selector('[data-act="new-parser"]')
@@ -318,6 +416,39 @@ with sync_playwright() as pw:
         'manca il modo di riprovare senza ricaricare tutta la pagina'
     shot(pg, '09-guasto-persistente')
     guasto['perenne'] = False
+
+    # ---- 7) il codice rifiutato lo DICE, senza ricaricare (#116) ----------
+    # Il caso: due amministratori della stessa chat, e uno l'ha gia' collegata.
+    # Il server rifiuta — giusto — ma `in_attesa` resta vero, perche' il codice
+    # NON si consuma. Senza questo passo la pagina resterebbe sul conto alla
+    # rovescia fino alla scadenza e poi direbbe «scaduto senza essere usato»,
+    # cioe' il contrario di quello che e' successo.
+    #
+    # Non si ricarica NIENTE qui dentro, ed e' il punto: l'avviso deve arrivare
+    # mentre l'utente sta guardando, o non serve a niente.
+    assert DB, 'il flusso non ha ricevuto il percorso del database'
+    chat_di_un_altro()
+    # «Riprova» ridisegna, e il codice chiesto al passo 6 e' ancora in memoria:
+    # non se ne genera un altro, o si perderebbe proprio lo stato da misurare.
+    pg.click('[data-act="ricarica"]')
+    pg.wait_for_selector('#codice-verifica')
+    codice_rifiutato = pg.inner_text('#codice-verifica').strip()
+    assert codice_rifiutato.startswith('BETRELAY-'), codice_rifiutato
+    stato_rif, corpo_rif = consegna(codice_rifiutato, chat=CANALE_ALTRUI)
+    assert stato_rif == 200, (stato_rif, corpo_rif)
+    assert corpo_rif.get('ignored') == 'chat_non_disponibile', corpo_rif
+    pg.wait_for_selector('#verifica-rifiuto', timeout=30000)
+    avviso = pg.inner_text('#verifica-rifiuto').lower()
+    assert 'un altro account' in avviso, (
+        f'l-avviso non dice che la chat e- di un altro account: {avviso!r}')
+    # E deve dire che il codice e' ancora buono: e' la differenza fra «riprova
+    # altrove» e «ricomincia da capo», e il server non l'ha consumato davvero.
+    assert 'puoi ancora usarlo' in avviso, (
+        f'l-avviso non dice che il codice resta valido: {avviso!r}')
+    assert 'Canale di un altro' not in pg.inner_text('#app'), \
+        'la chat di un altro utente e- comparsa nella lista'
+    non_sfonda(pg, 'codice rifiutato')
+    shot(pg, '10-codice-rifiutato')
 
     ctx.close()
     b.close()
